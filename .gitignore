@@ -1,0 +1,28 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Xcode
+ios/**/xcuserdata/
+ios/**/*.xcscmblueprint
+ios/**/DerivedData/
+ios/**/*.moved-aside
+ios/**/*.pbxuser
+ios/**/*.perspectivev3
+ios/**/xcshareddata/WorkspaceSettings.xcsettings
+
+# Swift Package Manager
+ios/Packages/.build/
+ios/.swiftpm/
+
+# Backend
+backend/node_modules/
+backend/dist/
+backend/.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*~
