@@ -1,61 +1,43 @@
-//
-//  ContentView.swift
-//  Kiki
-//
-//  Created by Donald Pinkus on 3/8/26.
-//
-
 import SwiftUI
-import SwiftData
+import CanvasModule
+import ResultModule
 
 struct ContentView: View {
-    @Environment(\.modelContext) private var modelContext
-    @Query private var items: [Item]
+
+    @Environment(AppCoordinator.self) private var coordinator
 
     var body: some View {
-        NavigationSplitView {
-            List {
-                ForEach(items) { item in
-                    NavigationLink {
-                        Text("Item at \(item.timestamp, format: Date.FormatStyle(date: .numeric, time: .standard))")
-                    } label: {
-                        Text(item.timestamp, format: Date.FormatStyle(date: .numeric, time: .standard))
-                    }
-                }
-                .onDelete(perform: deleteItems)
+        GeometryReader { geometry in
+            HStack(spacing: 0) {
+                canvasPane
+                    .frame(width: geometry.size.width * 0.55)
+
+                Divider()
+
+                resultPane
+                    .frame(width: geometry.size.width * 0.45)
             }
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    EditButton()
-                }
-                ToolbarItem {
-                    Button(action: addItem) {
-                        Label("Add Item", systemImage: "plus")
-                    }
-                }
-            }
-        } detail: {
-            Text("Select an item")
+        }
+        .ignoresSafeArea(.keyboard)
+        .statusBarHidden()
+    }
+
+    // MARK: - Subviews
+
+    private var canvasPane: some View {
+        ZStack {
+            CanvasView(viewModel: coordinator.canvasViewModel)
+
+            FloatingToolbar(viewModel: coordinator.canvasViewModel)
         }
     }
 
-    private func addItem() {
-        withAnimation {
-            let newItem = Item(timestamp: Date())
-            modelContext.insert(newItem)
-        }
-    }
-
-    private func deleteItems(offsets: IndexSet) {
-        withAnimation {
-            for index in offsets {
-                modelContext.delete(items[index])
-            }
-        }
+    private var resultPane: some View {
+        ResultView(viewModel: coordinator.resultViewModel)
     }
 }
 
 #Preview {
     ContentView()
-        .modelContainer(for: Item.self, inMemory: true)
+        .environment(AppCoordinator())
 }
