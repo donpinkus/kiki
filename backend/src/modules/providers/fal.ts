@@ -8,12 +8,13 @@ import type {
 
 const FAL_BASE = 'https://fal.run';
 const FAL_QUEUE_BASE = 'https://queue.fal.run';
-const FAL_MODEL = 'fal-ai/fast-sdxl/image-to-image';
+const FAL_STORAGE_BASE = 'https://rest.alpha.fal.ai';
+const FAL_MODEL = 'fal-ai/scribble';
 
-interface FalSyncResponse {
-  images: Array<{ url: string; width: number; height: number }>;
+interface FalScribbleResponse {
+  image: { url: string; width: number; height: number };
+  control_image?: { url: string };
   seed: number;
-  has_nsfw_concepts?: boolean[];
 }
 
 function authHeaders(): Record<string, string> {
@@ -23,23 +24,62 @@ function authHeaders(): Record<string, string> {
   };
 }
 
+/**
+ * Uploads a base64-encoded JPEG to fal.ai storage and returns a hosted URL.
+ * ControlNet models require hosted URLs (data URIs return 422).
+ */
+async function uploadToFalStorage(base64: string): Promise<string> {
+  // Step 1: Initiate upload
+  const initResponse = await fetch(`${FAL_STORAGE_BASE}/storage/upload/initiate`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify({
+      content_type: 'image/jpeg',
+      file_name: 'sketch.jpg',
+    }),
+  });
+
+  if (!initResponse.ok) {
+    const body = await initResponse.text();
+    throw new ProviderError('fal', `Storage initiate failed ${initResponse.status}: ${body}`);
+  }
+
+  const { file_url, upload_url } = (await initResponse.json()) as {
+    file_url: string;
+    upload_url: string;
+  };
+
+  // Step 2: Upload raw bytes
+  const buffer = Buffer.from(base64, 'base64');
+  const putResponse = await fetch(upload_url, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'image/jpeg' },
+    body: buffer,
+  });
+
+  if (!putResponse.ok) {
+    const body = await putResponse.text();
+    throw new ProviderError('fal', `Storage upload failed ${putResponse.status}: ${body}`);
+  }
+
+  return file_url;
+}
+
 export class FalAdapter implements ProviderAdapter {
   readonly name = 'fal';
 
   async generate(request: ProviderRequest): Promise<ProviderResponse> {
     const startTime = Date.now();
 
+    // Upload sketch to fal storage (ControlNet models require hosted URLs)
+    const imageUrl = await uploadToFalStorage(request.sketchImageBase64);
+
     const input: Record<string, unknown> = {
-      image_url: `data:image/jpeg;base64,${request.sketchImageBase64}`,
-      prompt: `${request.prompt}, colorful, light background, masterpiece`,
-      negative_prompt: `${request.negativePrompt}, white, blank, sketch, line art, monochrome, dark`,
-      strength: 0.97,
-      guidance_scale: 14,
+      image_url: imageUrl,
+      prompt: `${request.prompt}, colorful, vibrant, detailed`,
+      negative_prompt: `${request.negativePrompt}, blurry, low quality`,
+      guidance_scale: request.mode === 'preview' ? 7.5 : 10,
       num_inference_steps: request.mode === 'preview' ? 25 : 35,
-      image_size: {
-        width: request.width,
-        height: request.height,
-      },
       enable_safety_checker: true,
     };
 
@@ -63,16 +103,16 @@ export class FalAdapter implements ProviderAdapter {
       );
     }
 
-    const result = (await response.json()) as FalSyncResponse;
+    const result = (await response.json()) as FalScribbleResponse;
 
-    if (!result.images || result.images.length === 0) {
-      throw new ProviderError('fal', 'No images returned from provider');
+    if (!result.image || !result.image.url) {
+      throw new ProviderError('fal', 'No image returned from provider');
     }
 
     const latencyMs = Date.now() - startTime;
 
     return {
-      imageUrl: result.images[0]!.url,
+      imageUrl: result.image.url,
       seed: result.seed,
       latencyMs,
     };
