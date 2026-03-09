@@ -12,11 +12,10 @@ const configSchema = z.object({
 
 export type Config = z.infer<typeof configSchema>;
 
-function loadConfig(): Config {
-  const result = configSchema.safeParse(process.env);
+export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
+  const result = configSchema.safeParse(env);
   if (!result.success) {
-    console.error('Invalid configuration:', result.error.format());
-    process.exit(1);
+    throw new Error(`Invalid configuration: ${JSON.stringify(result.error.format())}`);
   }
   return result.data;
 }

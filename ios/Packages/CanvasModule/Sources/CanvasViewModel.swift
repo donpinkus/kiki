@@ -1,6 +1,12 @@
 import SwiftUI
 import PencilKit
 
+/// Tool types available in the canvas toolbar.
+public enum CanvasTool: Sendable {
+    case pen
+    case eraser
+}
+
 @Observable
 public final class CanvasViewModel {
 
@@ -9,6 +15,17 @@ public final class CanvasViewModel {
     public private(set) var drawing = PKDrawing()
     public private(set) var canUndo = false
     public private(set) var canRedo = false
+    public var selectedTool: CanvasTool = .pen
+
+    /// The PencilKit tool corresponding to the current selection.
+    public var currentTool: PKTool {
+        switch selectedTool {
+        case .pen:
+            PKInkingTool(.pen, color: .black, width: 5)
+        case .eraser:
+            PKEraserTool(.bitmap)
+        }
+    }
 
     private var undoManager: UndoManager?
     private let continuation: AsyncStream<SketchSnapshot>.Continuation
@@ -38,13 +55,13 @@ public final class CanvasViewModel {
         self.drawing = drawing
         updateUndoState()
 
+        let scale = canvasView.window?.screen.scale ?? 2.0
         let image = canvasView.drawing.image(
             from: canvasView.bounds,
-            scale: UIScreen.main.scale
+            scale: scale
         )
         let snapshot = SketchSnapshot(
             image: image,
-            drawing: drawing,
             strokeCount: drawing.strokes.count
         )
         continuation.yield(snapshot)

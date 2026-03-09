@@ -6,7 +6,6 @@ import CoreImage.CIFilterBuiltins
 public struct SketchPreprocessor: Sendable {
 
     private static let targetSize = CGSize(width: 512, height: 512)
-    private static let contentPadding: CGFloat = 0.10
 
     public init() {}
 
@@ -15,8 +14,7 @@ public struct SketchPreprocessor: Sendable {
     /// Process a UIImage from the canvas into a generation-ready image.
     public func process(_ image: UIImage) async throws -> ProcessedSketch {
         let monochromed = monochromeFlattened(image)
-        let cropped = cropToContent(monochromed)
-        let resized = resize(cropped, to: Self.targetSize)
+        let resized = resize(monochromed, to: Self.targetSize)
 
         guard let jpegData = resized.jpegData(compressionQuality: 0.85) else {
             throw PreprocessorError.encodingFailed
@@ -50,28 +48,6 @@ public struct SketchPreprocessor: Sendable {
         }
 
         return UIImage(cgImage: cgImage)
-    }
-
-    private func cropToContent(_ image: UIImage) -> UIImage {
-        guard let cgImage = image.cgImage else { return image }
-
-        let width = cgImage.width
-        let height = cgImage.height
-
-        // For now, return the full image — content-aware cropping
-        // requires pixel analysis which will be refined in Week 2
-        let paddingX = Int(CGFloat(width) * Self.contentPadding)
-        let paddingY = Int(CGFloat(height) * Self.contentPadding)
-
-        let cropRect = CGRect(
-            x: max(0, paddingX),
-            y: max(0, paddingY),
-            width: max(1, width - 2 * paddingX),
-            height: max(1, height - 2 * paddingY)
-        )
-
-        guard let cropped = cgImage.cropping(to: cropRect) else { return image }
-        return UIImage(cgImage: cropped)
     }
 
     private func resize(_ image: UIImage, to targetSize: CGSize) -> UIImage {

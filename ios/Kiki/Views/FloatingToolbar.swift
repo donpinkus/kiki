@@ -3,7 +3,7 @@ import CanvasModule
 
 struct FloatingToolbar: View {
 
-    let viewModel: CanvasViewModel
+    @Bindable var viewModel: CanvasViewModel
     @State private var isVisible = true
     @State private var hideTask: Task<Void, Never>?
 
@@ -27,11 +27,21 @@ struct FloatingToolbar: View {
 
     private var toolbar: some View {
         HStack(spacing: 16) {
-            toolbarButton(icon: "paintbrush.pointed", label: "Brush") {
+            toolbarButton(
+                icon: "paintbrush.pointed",
+                label: "Brush",
+                isSelected: viewModel.selectedTool == .pen
+            ) {
+                viewModel.selectedTool = .pen
                 showAndScheduleHide()
             }
 
-            toolbarButton(icon: "eraser", label: "Eraser") {
+            toolbarButton(
+                icon: "eraser",
+                label: "Eraser",
+                isSelected: viewModel.selectedTool == .eraser
+            ) {
+                viewModel.selectedTool = .eraser
                 showAndScheduleHide()
             }
 
@@ -60,12 +70,12 @@ struct FloatingToolbar: View {
         .padding(.vertical, 12)
         .background(.ultraThinMaterial, in: Capsule())
         .shadow(color: .black.opacity(0.15), radius: 8, y: 4)
-        .onTapGesture { showAndScheduleHide() }
     }
 
     private func toolbarButton(
         icon: String,
         label: String,
+        isSelected: Bool = false,
         disabled: Bool = false,
         action: @escaping () -> Void
     ) -> some View {
@@ -73,6 +83,7 @@ struct FloatingToolbar: View {
             Image(systemName: icon)
                 .font(.system(size: 18, weight: .medium))
                 .frame(width: 36, height: 36)
+                .background(isSelected ? Color.accentColor.opacity(0.15) : Color.clear, in: Circle())
                 .contentShape(Rectangle())
         }
         .disabled(disabled)

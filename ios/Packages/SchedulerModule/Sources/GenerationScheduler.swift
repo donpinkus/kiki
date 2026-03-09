@@ -1,6 +1,13 @@
 import Foundation
 import NetworkModule
 
+/// Result emitted by the scheduler when a generation completes.
+public struct SchedulerResult: Sendable {
+    public let requestId: String
+    public let mode: GenerationMode
+    public let response: GenerateResponse
+}
+
 /// Manages debounce timers and request lifecycle for image generation.
 ///
 /// Implemented as an actor for thread-safe state management.
@@ -14,8 +21,8 @@ public actor GenerationScheduler {
 
     private var previewTimerTask: Task<Void, Never>?
     private var refineTimerTask: Task<Void, Never>?
-    private var activePreviewTask: Task<GenerateResponse, Error>?
-    private var activeRefineTask: Task<GenerateResponse, Error>?
+    private var activePreviewTask: Task<Void, Never>?
+    private var activeRefineTask: Task<Void, Never>?
 
     private var latestPreviewRequestId: String?
     private var latestRefineRequestId: String?
@@ -25,11 +32,24 @@ public actor GenerationScheduler {
 
     public private(set) var state: SchedulerState = .idle
 
+    private let resultContinuation: AsyncStream<SchedulerResult>.Continuation
+
+    /// Stream of generation results for downstream consumers (AppCoordinator).
+    public let results: AsyncStream<SchedulerResult>
+
     // MARK: - Lifecycle
 
     public init(apiClient: APIClient, sessionId: String = UUID().uuidString) {
         self.apiClient = apiClient
         self.sessionId = sessionId
+
+        var cont: AsyncStream<SchedulerResult>.Continuation!
+        results = AsyncStream { cont = $0 }
+        resultContinuation = cont
+    }
+
+    deinit {
+        resultContinuation.finish()
     }
 
     // MARK: - Public API
@@ -39,18 +59,16 @@ public actor GenerationScheduler {
         cancelAll()
         state = .debouncing
 
-        previewTimerTask = Task { [weak self] in
-            guard let self else { return }
+        previewTimerTask = Task {
             try? await Task.sleep(nanoseconds: previewDebounceNs)
             guard !Task.isCancelled else { return }
-            await self.firePreview(base64Image: base64Image, prompt: prompt, stylePreset: stylePreset)
+            await firePreview(base64Image: base64Image, prompt: prompt, stylePreset: stylePreset)
         }
 
-        refineTimerTask = Task { [weak self] in
-            guard let self else { return }
+        refineTimerTask = Task {
             try? await Task.sleep(nanoseconds: refineDebounceNs)
             guard !Task.isCancelled else { return }
-            await self.fireRefine(base64Image: base64Image, prompt: prompt, stylePreset: stylePreset)
+            await fireRefine(base64Image: base64Image, prompt: prompt, stylePreset: stylePreset)
         }
     }
 
@@ -88,19 +106,22 @@ public actor GenerationScheduler {
             prompt: prompt,
             stylePreset: stylePreset
         )
-        latestPreviewRequestId = request.id
-        state = .generatingPreview(requestId: request.id)
+        let requestId = request.id
+        latestPreviewRequestId = requestId
+        state = .generatingPreview(requestId: requestId)
 
         activePreviewTask = Task {
             let networkRequest = NetworkModule.GenerateRequest(
                 sessionId: sessionId,
-                requestId: request.id,
+                requestId: requestId,
                 mode: .preview,
                 prompt: prompt,
                 stylePreset: stylePreset,
                 sketchImageBase64: base64Image
             )
-            return try await apiClient.generate(networkRequest)
+            let response = try await apiClient.generate(networkRequest)
+            guard !Task.isCancelled, await isLatest(requestId: requestId, mode: .preview) else { return }
+            resultContinuation.yield(SchedulerResult(requestId: requestId, mode: .preview, response: response))
         }
     }
 
@@ -111,19 +132,22 @@ public actor GenerationScheduler {
             prompt: prompt,
             stylePreset: stylePreset
         )
-        latestRefineRequestId = request.id
-        state = .generatingRefine(requestId: request.id)
+        let requestId = request.id
+        latestRefineRequestId = requestId
+        state = .generatingRefine(requestId: requestId)
 
         activeRefineTask = Task {
             let networkRequest = NetworkModule.GenerateRequest(
                 sessionId: sessionId,
-                requestId: request.id,
+                requestId: requestId,
                 mode: .refine,
                 prompt: prompt,
                 stylePreset: stylePreset,
                 sketchImageBase64: base64Image
             )
-            return try await apiClient.generate(networkRequest)
+            let response = try await apiClient.generate(networkRequest)
+            guard !Task.isCancelled, await isLatest(requestId: requestId, mode: .refine) else { return }
+            resultContinuation.yield(SchedulerResult(requestId: requestId, mode: .refine, response: response))
         }
     }
 }
