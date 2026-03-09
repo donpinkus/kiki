@@ -1,0 +1,23 @@
+{
+  "": {
+    "swift-dependencies": "/Users/donald/Desktop/kiki_root/ios/Packages/CanvasModule/.build/arm64-apple-macosx/debug/CanvasModule.build/master.swiftdeps"
+  },
+  "/Users/donald/Desktop/kiki_root/ios/Packages/CanvasModule/Sources/CanvasModule/CanvasView.swift": {
+    "dependencies": "/Users/donald/Desktop/kiki_root/ios/Packages/CanvasModule/.build/arm64-apple-macosx/debug/CanvasModule.build/CanvasView.d",
+    "object": "/Users/donald/Desktop/kiki_root/ios/Packages/CanvasModule/.build/arm64-apple-macosx/debug/CanvasModule.build/CanvasView.swift.o",
+    "swiftmodule": "/Users/donald/Desktop/kiki_root/ios/Packages/CanvasModule/.build/arm64-apple-macosx/debug/CanvasModule.build/CanvasView~partial.swiftmodule",
+    "swift-dependencies": "/Users/donald/Desktop/kiki_root/ios/Packages/CanvasModule/.build/arm64-apple-macosx/debug/CanvasModule.build/CanvasView.swiftdeps"
+  },
+  "/Users/donald/Desktop/kiki_root/ios/Packages/CanvasModule/Sources/CanvasModule/CanvasViewModel.swift": {
+    "dependencies": "/Users/donald/Desktop/kiki_root/ios/Packages/CanvasModule/.build/arm64-apple-macosx/debug/CanvasModule.build/CanvasViewModel.d",
+    "object": "/Users/donald/Desktop/kiki_root/ios/Packages/CanvasModule/.build/arm64-apple-macosx/debug/CanvasModule.build/CanvasViewModel.swift.o",
+    "swiftmodule": "/Users/donald/Desktop/kiki_root/ios/Packages/CanvasModule/.build/arm64-apple-macosx/debug/CanvasModule.build/CanvasViewModel~partial.swiftmodule",
+    "swift-dependencies": "/Users/donald/Desktop/kiki_root/ios/Packages/CanvasModule/.build/arm64-apple-macosx/debug/CanvasModule.build/CanvasViewModel.swiftdeps"
+  },
+  "/Users/donald/Desktop/kiki_root/ios/Packages/CanvasModule/Sources/CanvasModule/SketchSnapshot.swift": {
+    "dependencies": "/Users/donald/Desktop/kiki_root/ios/Packages/CanvasModule/.build/arm64-apple-macosx/debug/CanvasModule.build/SketchSnapshot.d",
+    "object": "/Users/donald/Desktop/kiki_root/ios/Packages/CanvasModule/.build/arm64-apple-macosx/debug/CanvasModule.build/SketchSnapshot.swift.o",
+    "swiftmodule": "/Users/donald/Desktop/kiki_root/ios/Packages/CanvasModule/.build/arm64-apple-macosx/debug/CanvasModule.build/SketchSnapshot~partial.swiftmodule",
+    "swift-dependencies": "/Users/donald/Desktop/kiki_root/ios/Packages/CanvasModule/.build/arm64-apple-macosx/debug/CanvasModule.build/SketchSnapshot.swiftdeps"
+  }
+}
