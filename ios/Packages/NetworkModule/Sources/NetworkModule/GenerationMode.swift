@@ -1,6 +1,6 @@
 import Foundation
 
-public enum GenerationMode: String, Sendable {
+public enum GenerationMode: String, Codable, Sendable {
     case preview
     case refine
 }

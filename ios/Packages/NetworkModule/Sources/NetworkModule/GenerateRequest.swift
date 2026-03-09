@@ -1,17 +1,29 @@
 import Foundation
 
-public struct GenerateRequest: Sendable {
+public struct GenerateRequest: Codable, Sendable {
+    public let sessionId: UUID
     public let requestId: UUID
-    public let imageData: Data
-    public let prompt: String
-    public let style: String
     public let mode: GenerationMode
+    public let prompt: String?
+    public let stylePreset: String
+    public let adherence: Double
+    public let sketchImageBase64: String
 
-    public init(requestId: UUID, imageData: Data, prompt: String, style: String, mode: GenerationMode) {
+    public init(
+        sessionId: UUID,
+        requestId: UUID,
+        mode: GenerationMode,
+        prompt: String? = nil,
+        stylePreset: String,
+        adherence: Double = 0.7,
+        sketchImageBase64: String
+    ) {
+        self.sessionId = sessionId
         self.requestId = requestId
-        self.imageData = imageData
-        self.prompt = prompt
-        self.style = style
         self.mode = mode
+        self.prompt = prompt
+        self.stylePreset = stylePreset
+        self.adherence = adherence
+        self.sketchImageBase64 = sketchImageBase64
     }
 }
