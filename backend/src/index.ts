@@ -6,7 +6,6 @@ import { AppError, RateLimitedError } from './errors.js';
 import { healthRoute } from './routes/health.js';
 import { generateRoute } from './routes/generate.js';
 import { authPlugin } from './modules/auth/index.js';
-import { orchestratorPlugin } from './modules/orchestrator/index.js';
 
 const app = Fastify({
   logger: {
@@ -32,7 +31,6 @@ await app.register(sensible);
 
 // --- Application modules ---
 await app.register(authPlugin);
-await app.register(orchestratorPlugin);
 
 // --- Routes ---
 await app.register(healthRoute);

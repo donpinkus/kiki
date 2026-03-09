@@ -1,4 +1,5 @@
 import SwiftUI
+import ResultModule
 
 struct FloatingToolbar: View {
     @Environment(AppCoordinator.self) private var coordinator
@@ -31,6 +32,11 @@ struct FloatingToolbar: View {
                 action: coordinator.clear,
                 disabled: coordinator.canvasViewModel.isEmpty
             )
+
+            Divider()
+                .frame(height: 24)
+
+            generateButton
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -50,6 +56,24 @@ struct FloatingToolbar: View {
                 .foregroundStyle(coordinator.currentTool == tool ? Color.accentColor : .secondary)
                 .frame(width: 36, height: 36)
         }
+    }
+
+    private var isGenerating: Bool {
+        if case .generating = coordinator.resultState { return true }
+        return false
+    }
+
+    private var generateButton: some View {
+        Button {
+            coordinator.generate()
+            onInteraction()
+        } label: {
+            Image(systemName: isGenerating ? "hourglass" : "sparkles")
+                .font(.system(size: 18, weight: .medium))
+                .foregroundStyle(coordinator.canvasViewModel.isEmpty || isGenerating ? AnyShapeStyle(.tertiary) : AnyShapeStyle(Color.accentColor))
+                .frame(width: 36, height: 36)
+        }
+        .disabled(coordinator.canvasViewModel.isEmpty || isGenerating)
     }
 
     private func actionButton(icon: String, action: @escaping () -> Void, disabled: Bool) -> some View {

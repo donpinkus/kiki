@@ -16,18 +16,18 @@ class ConfigValidationError extends Error {
 function validateConfig(): AppConfig {
   const missing: string[] = [];
 
-  const falApiKey = process.env['FAL_API_KEY'];
-  if (!falApiKey) {
+  const nodeEnv = (process.env['NODE_ENV'] ?? 'development') as AppConfig['NODE_ENV'];
+  if (!['development', 'production', 'test'].includes(nodeEnv)) {
+    throw new Error(`Invalid NODE_ENV: ${nodeEnv}`);
+  }
+
+  const falApiKey = process.env['FAL_API_KEY'] ?? '';
+  if (!falApiKey && nodeEnv === 'production') {
     missing.push('FAL_API_KEY');
   }
 
   if (missing.length > 0) {
     throw new ConfigValidationError(missing);
-  }
-
-  const nodeEnv = (process.env['NODE_ENV'] ?? 'development') as AppConfig['NODE_ENV'];
-  if (!['development', 'production', 'test'].includes(nodeEnv)) {
-    throw new Error(`Invalid NODE_ENV: ${nodeEnv}`);
   }
 
   const logLevel = (process.env['LOG_LEVEL'] ?? 'info') as AppConfig['LOG_LEVEL'];
@@ -43,7 +43,7 @@ function validateConfig(): AppConfig {
   return {
     PORT: port,
     HOST: process.env['HOST'] ?? '0.0.0.0',
-    FAL_API_KEY: falApiKey!,
+    FAL_API_KEY: falApiKey,
     NODE_ENV: nodeEnv,
     LOG_LEVEL: logLevel,
   };

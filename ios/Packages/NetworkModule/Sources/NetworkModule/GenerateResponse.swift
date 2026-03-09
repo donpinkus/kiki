@@ -4,7 +4,7 @@ public struct GenerateResponse: Sendable {
     public let requestId: UUID
     public let status: ResponseStatus
     public let imageURL: URL?
-    public let seed: Int?
+    public let seed: UInt64?
     public let provider: String?
     public let latencyMs: Int?
     public let mode: GenerationMode
@@ -13,7 +13,7 @@ public struct GenerateResponse: Sendable {
         requestId: UUID,
         status: ResponseStatus,
         imageURL: URL? = nil,
-        seed: Int? = nil,
+        seed: UInt64? = nil,
         provider: String? = nil,
         latencyMs: Int? = nil,
         mode: GenerationMode

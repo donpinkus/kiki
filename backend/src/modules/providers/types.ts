@@ -14,7 +14,7 @@ export interface ProviderResponse {
   imageUrl: string;
   seed: number;
   latencyMs: number;
-  jobId: string;
+  jobId?: string;
 }
 
 export interface ProviderAdapter {

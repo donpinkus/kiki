@@ -17,7 +17,7 @@ struct ContentView: View {
                     .fill(Color(.separator))
                     .frame(width: 1)
 
-                ResultView()
+                ResultView(state: coordinator.resultState)
             }
         }
         .ignoresSafeArea(.keyboard)

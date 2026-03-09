@@ -1,5 +1,6 @@
 import type { FastifyPluginAsync } from 'fastify';
-import type { GenerateRequest } from '../modules/orchestrator/index.js';
+import { FalAdapter } from '../modules/providers/fal.js';
+import type { ProviderAdapter, ProviderRequest } from '../modules/providers/types.js';
 
 const STYLE_PRESETS = [
   'photoreal',
@@ -11,55 +12,38 @@ const STYLE_PRESETS = [
   'neon',
 ] as const;
 
+const STYLE_PROMPTS: Record<string, string> = {
+  photoreal: 'photorealistic, high detail, professional photography',
+  anime: 'anime style, cel shaded, vibrant colors',
+  watercolor: 'watercolor painting, soft edges, artistic',
+  storybook: "children's storybook illustration, whimsical, colorful",
+  fantasy: 'fantasy art, epic, magical, detailed',
+  ink: 'ink drawing, black and white, detailed linework',
+  neon: 'neon glow, cyberpunk, vibrant neon colors, dark background',
+};
+
+const DEFAULT_NEGATIVE_PROMPT =
+  'blurry, low quality, distorted, deformed, ugly, bad anatomy';
+
+function buildPrompt(userPrompt: string | null, stylePreset: string): string {
+  const styleModifier = STYLE_PROMPTS[stylePreset] ?? '';
+  const base = userPrompt?.trim() || 'A detailed illustration';
+  return styleModifier ? `${base}, ${styleModifier}` : base;
+}
+
 const generateBodySchema = {
   type: 'object',
   required: ['sessionId', 'requestId', 'mode', 'stylePreset', 'sketchImageBase64'],
   properties: {
-    sessionId: {
-      type: 'string',
-      format: 'uuid',
-    },
-    requestId: {
-      type: 'string',
-      format: 'uuid',
-    },
-    mode: {
-      type: 'string',
-      enum: ['preview', 'refine'],
-    },
-    prompt: {
-      type: ['string', 'null'],
-      maxLength: 500,
-    },
-    stylePreset: {
-      type: 'string',
-      enum: [...STYLE_PRESETS],
-    },
-    adherence: {
-      type: 'number',
-      minimum: 0,
-      maximum: 1,
-      default: 0.7,
-    },
-    sketchImageBase64: {
-      type: 'string',
-      minLength: 1,
-    },
+    sessionId: { type: 'string', format: 'uuid' },
+    requestId: { type: 'string', format: 'uuid' },
+    mode: { type: 'string', enum: ['preview', 'refine'] },
+    prompt: { type: ['string', 'null'], maxLength: 500 },
+    stylePreset: { type: 'string', enum: [...STYLE_PRESETS] },
+    adherence: { type: 'number', minimum: 0, maximum: 1, default: 0.7 },
+    sketchImageBase64: { type: 'string', minLength: 1 },
   },
   additionalProperties: false,
-} as const;
-
-const generateResponseSchema = {
-  type: 'object',
-  properties: {
-    requestId: { type: 'string' },
-    status: { type: 'string', enum: ['completed', 'filtered', 'error'] },
-    imageUrl: { type: ['string', 'null'] },
-    seed: { type: 'number' },
-    provider: { type: 'string' },
-    latencyMs: { type: 'number' },
-    mode: { type: 'string', enum: ['preview', 'refine'] },
-  },
 } as const;
 
 interface GenerateBody {
@@ -72,14 +56,11 @@ interface GenerateBody {
   sketchImageBase64: string;
 }
 
+const provider: ProviderAdapter = new FalAdapter();
+
 export const generateRoute: FastifyPluginAsync = async (fastify) => {
   fastify.post<{ Body: GenerateBody }>('/v1/generate', {
-    schema: {
-      body: generateBodySchema,
-      response: {
-        200: generateResponseSchema,
-      },
-    },
+    schema: { body: generateBodySchema },
     handler: async (request, reply) => {
       const {
         sessionId,
@@ -91,24 +72,60 @@ export const generateRoute: FastifyPluginAsync = async (fastify) => {
         sketchImageBase64,
       } = request.body;
 
+      const startTime = Date.now();
+
       request.log.info(
         { sessionId, requestId, mode, stylePreset },
         'Received generate request',
       );
 
-      const orchestratorRequest: GenerateRequest = {
-        sessionId,
-        requestId,
-        mode,
-        prompt: prompt ?? null,
-        stylePreset,
-        adherence,
+      const providerRequest: ProviderRequest = {
         sketchImageBase64,
+        prompt: buildPrompt(prompt, stylePreset),
+        negativePrompt: DEFAULT_NEGATIVE_PROMPT,
+        mode,
+        adherence,
+        creativity: 0.85,
+        width: mode === 'preview' ? 512 : 1024,
+        height: mode === 'preview' ? 512 : 1024,
       };
 
-      const result = await fastify.orchestrator.generate(orchestratorRequest);
+      try {
+        const result = await provider.generate(providerRequest);
+        const latencyMs = Date.now() - startTime;
 
-      return reply.status(200).send(result);
+        request.log.info(
+          { sessionId, requestId, mode, provider: provider.name, latencyMs },
+          'Generation completed',
+        );
+
+        return reply.status(200).send({
+          requestId,
+          status: 'completed',
+          imageUrl: result.imageUrl,
+          seed: result.seed,
+          provider: provider.name,
+          latencyMs,
+          mode,
+        });
+      } catch (err: unknown) {
+        const latencyMs = Date.now() - startTime;
+
+        request.log.error(
+          { sessionId, requestId, mode, provider: provider.name, latencyMs, err },
+          'Generation failed',
+        );
+
+        return reply.status(200).send({
+          requestId,
+          status: 'error',
+          imageUrl: null,
+          seed: 0,
+          provider: provider.name,
+          latencyMs,
+          mode,
+        });
+      }
     },
   });
 };

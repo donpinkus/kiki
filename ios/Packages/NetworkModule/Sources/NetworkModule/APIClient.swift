@@ -120,7 +120,7 @@ public final class APIClient: Sendable {
             let requestId: String
             let status: String
             let imageUrl: String?
-            let seed: Int?
+            let seed: UInt64?
             let provider: String?
             let latencyMs: Int?
             let mode: String
@@ -131,6 +131,8 @@ public final class APIClient: Sendable {
             let decoder = JSONDecoder()
             decoded = try decoder.decode(APIResponse.self, from: data)
         } catch {
+            print("[APIClient] Decoding failed: \(error)")
+            print("[APIClient] Raw response: \(String(data: data, encoding: .utf8) ?? "non-utf8")")
             throw GenerationError.decodingError
         }
 
