@@ -3,6 +3,8 @@ import { ProviderError } from '../errors.js';
 import type { GenerateParams, GenerateResult } from '../orchestrator/index.js';
 
 const FAL_QUEUE_URL = 'https://queue.fal.run/fal-ai/lcm-sd15-i2i';
+const FETCH_TIMEOUT_MS = 30_000;
+const POLL_TIMEOUT_MS = 10_000;
 
 interface FalQueueResponse {
   request_id: string;
@@ -11,6 +13,14 @@ interface FalQueueResponse {
 
 interface FalResultResponse {
   images: Array<{ url: string; seed: number }>;
+}
+
+function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(url, { ...init, signal: controller.signal }).finally(() =>
+    clearTimeout(timeoutId),
+  );
 }
 
 export async function generateWithFal(params: GenerateParams): Promise<GenerateResult> {
@@ -28,21 +38,25 @@ export async function generateWithFal(params: GenerateParams): Promise<GenerateR
 
   try {
     // Submit to fal.ai queue
-    const submitResponse = await fetch(FAL_QUEUE_URL, {
-      method: 'POST',
-      headers: {
-        Authorization: `Key ${apiKey}`,
-        'Content-Type': 'application/json',
+    const submitResponse = await fetchWithTimeout(
+      FAL_QUEUE_URL,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Key ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          prompt: params.prompt || 'a sketch',
+          image_url: `data:image/jpeg;base64,${params.sketchImageBase64}`,
+          strength: 1 - params.adherence,
+          num_inference_steps: 4,
+          guidance_scale: 1.5,
+          seed: null,
+        }),
       },
-      body: JSON.stringify({
-        prompt: params.prompt || 'a sketch',
-        image_url: `data:image/jpeg;base64,${params.sketchImageBase64}`,
-        strength: 1 - params.adherence,
-        num_inference_steps: 4,
-        guidance_scale: 1.5,
-        seed: null,
-      }),
-    });
+      FETCH_TIMEOUT_MS,
+    );
 
     if (!submitResponse.ok) {
       throw new ProviderError('fal', `Submit failed: ${submitResponse.status}`);
@@ -58,18 +72,22 @@ export async function generateWithFal(params: GenerateParams): Promise<GenerateR
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       await new Promise((resolve) => setTimeout(resolve, 200));
 
-      const statusResponse = await fetch(`${resultUrl}/status`, {
-        headers: { Authorization: `Key ${apiKey}` },
-      });
+      const statusResponse = await fetchWithTimeout(
+        `${resultUrl}/status`,
+        { headers: { Authorization: `Key ${apiKey}` } },
+        POLL_TIMEOUT_MS,
+      );
 
       if (!statusResponse.ok) continue;
 
       const statusResult = (await statusResponse.json()) as FalQueueResponse;
 
       if (statusResult.status === 'COMPLETED') {
-        const resultResponse = await fetch(resultUrl, {
-          headers: { Authorization: `Key ${apiKey}` },
-        });
+        const resultResponse = await fetchWithTimeout(
+          resultUrl,
+          { headers: { Authorization: `Key ${apiKey}` } },
+          POLL_TIMEOUT_MS,
+        );
 
         if (!resultResponse.ok) {
           throw new ProviderError('fal', `Result fetch failed: ${resultResponse.status}`);

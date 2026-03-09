@@ -111,17 +111,23 @@ public actor GenerationScheduler {
         state = .generatingPreview(requestId: requestId)
 
         activePreviewTask = Task {
-            let networkRequest = NetworkModule.GenerateRequest(
-                sessionId: sessionId,
-                requestId: requestId,
-                mode: .preview,
-                prompt: prompt,
-                stylePreset: stylePreset,
-                sketchImageBase64: base64Image
-            )
-            let response = try await apiClient.generate(networkRequest)
-            guard !Task.isCancelled, await isLatest(requestId: requestId, mode: .preview) else { return }
-            resultContinuation.yield(SchedulerResult(requestId: requestId, mode: .preview, response: response))
+            do {
+                let networkRequest = NetworkModule.GenerateRequest(
+                    sessionId: sessionId,
+                    requestId: requestId,
+                    mode: .preview,
+                    prompt: prompt,
+                    stylePreset: stylePreset,
+                    sketchImageBase64: base64Image
+                )
+                let response = try await apiClient.generate(networkRequest)
+                guard !Task.isCancelled, await isLatest(requestId: requestId, mode: .preview) else { return }
+                resultContinuation.yield(SchedulerResult(requestId: requestId, mode: .preview, response: response))
+            } catch {
+                guard !Task.isCancelled else { return }
+                let errorResponse = GenerateResponse(requestId: requestId, status: .error, imageUrl: nil, seed: nil, provider: nil, latencyMs: nil)
+                resultContinuation.yield(SchedulerResult(requestId: requestId, mode: .preview, response: errorResponse))
+            }
         }
     }
 
@@ -137,17 +143,23 @@ public actor GenerationScheduler {
         state = .generatingRefine(requestId: requestId)
 
         activeRefineTask = Task {
-            let networkRequest = NetworkModule.GenerateRequest(
-                sessionId: sessionId,
-                requestId: requestId,
-                mode: .refine,
-                prompt: prompt,
-                stylePreset: stylePreset,
-                sketchImageBase64: base64Image
-            )
-            let response = try await apiClient.generate(networkRequest)
-            guard !Task.isCancelled, await isLatest(requestId: requestId, mode: .refine) else { return }
-            resultContinuation.yield(SchedulerResult(requestId: requestId, mode: .refine, response: response))
+            do {
+                let networkRequest = NetworkModule.GenerateRequest(
+                    sessionId: sessionId,
+                    requestId: requestId,
+                    mode: .refine,
+                    prompt: prompt,
+                    stylePreset: stylePreset,
+                    sketchImageBase64: base64Image
+                )
+                let response = try await apiClient.generate(networkRequest)
+                guard !Task.isCancelled, await isLatest(requestId: requestId, mode: .refine) else { return }
+                resultContinuation.yield(SchedulerResult(requestId: requestId, mode: .refine, response: response))
+            } catch {
+                guard !Task.isCancelled else { return }
+                let errorResponse = GenerateResponse(requestId: requestId, status: .error, imageUrl: nil, seed: nil, provider: nil, latencyMs: nil)
+                resultContinuation.yield(SchedulerResult(requestId: requestId, mode: .refine, response: errorResponse))
+            }
         }
     }
 }
