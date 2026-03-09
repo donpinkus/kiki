@@ -35,10 +35,11 @@ export function buildApp() {
     }
 
     // Fastify validation errors have statusCode set
-    if (error.statusCode && error.statusCode < 500) {
-      reply.status(error.statusCode).send({
+    const fastifyError = error as { statusCode?: number; message?: string };
+    if (fastifyError.statusCode && fastifyError.statusCode < 500) {
+      reply.status(fastifyError.statusCode).send({
         error: 'VALIDATION_ERROR',
-        message: error.message,
+        message: fastifyError.message ?? 'Validation error',
       });
       return;
     }
