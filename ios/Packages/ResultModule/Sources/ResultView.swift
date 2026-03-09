@@ -25,8 +25,12 @@ public struct ResultView: View {
             if viewModel.isLoading {
                 loadingOverlay
             }
+
+            if let errorMessage = viewModel.errorMessage {
+                errorBanner(errorMessage)
+            }
         }
-        .animation(.easeInOut(duration: 0.2), value: viewModel.displayImage != nil)
+        .animation(.easeInOut(duration: 0.2), value: viewModel.isLoading)
     }
 
     // MARK: - Subviews
@@ -39,6 +43,19 @@ public struct ResultView: View {
             Text("Start drawing to generate")
                 .font(.headline)
                 .foregroundStyle(.secondary)
+        }
+    }
+
+    private func errorBanner(_ message: String) -> some View {
+        VStack {
+            Spacer()
+            Text(message)
+                .font(.subheadline)
+                .foregroundStyle(.white)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(.red.opacity(0.85), in: Capsule())
+                .padding(.bottom, 24)
         }
     }
 

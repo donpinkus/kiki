@@ -7,6 +7,7 @@ import { AppError } from './modules/errors.js';
 
 export function buildApp() {
   const app = Fastify({
+    bodyLimit: 10 * 1024 * 1024, // 10MB — base64 sketch images can be several MB
     logger: {
       level: config.LOG_LEVEL,
       transport:

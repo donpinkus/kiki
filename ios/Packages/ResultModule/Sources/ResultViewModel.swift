@@ -25,6 +25,13 @@ public final class ResultViewModel {
         }
     }
 
+    public var errorMessage: String? {
+        if case .error(let message) = state {
+            return message
+        }
+        return nil
+    }
+
     // MARK: - Lifecycle
 
     public init() {}

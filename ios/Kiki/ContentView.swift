@@ -1,5 +1,6 @@
 import SwiftUI
 import CanvasModule
+import NetworkModule
 import ResultModule
 
 struct ContentView: View {
@@ -20,6 +21,11 @@ struct ContentView: View {
         }
         .ignoresSafeArea(.keyboard)
         .statusBarHidden()
+        .onAppear {
+            let baseURL = URL(string: "http://localhost:3000")!
+            let apiClient = APIClient(baseURL: baseURL)
+            coordinator.start(apiClient: apiClient)
+        }
     }
 
     // MARK: - Subviews
