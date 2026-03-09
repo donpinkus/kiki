@@ -1,4 +1,0 @@
-module CanvasModule {
-    header "/Users/donald/Desktop/kiki_root/ios/Packages/CanvasModule/.build/arm64-apple-macosx/debug/CanvasModule.build/CanvasModule-Swift.h"
-    requires objc
-}

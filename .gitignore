@@ -13,7 +13,7 @@ ios/**/*.perspectivev3
 ios/**/xcshareddata/WorkspaceSettings.xcsettings
 
 # Swift Package Manager
-ios/Packages/.build/
+ios/Packages/**/.build/
 ios/.swiftpm/
 
 # Backend
