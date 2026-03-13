@@ -4,76 +4,65 @@ import ResultModule
 
 struct ContentView: View {
     @Environment(AppCoordinator.self) private var coordinator
-    @State private var toolbarVisible = true
-    @State private var hideTask: Task<Void, Never>?
 
     var body: some View {
+        @Bindable var coordinator = coordinator
+
         GeometryReader { geometry in
             HStack(spacing: 0) {
                 CanvasView(viewModel: coordinator.canvasViewModel)
                     .frame(width: geometry.size.width * coordinator.dividerPosition)
+                    .ignoresSafeArea(.keyboard)
 
                 Rectangle()
                     .fill(Color(.separator))
                     .frame(width: 1)
 
-                ResultView(state: coordinator.resultState)
+                VStack(spacing: 0) {
+                    ResultView(state: coordinator.resultState)
+
+                    promptBar(promptText: $coordinator.promptText)
+                }
             }
         }
-        .ignoresSafeArea(.keyboard)
         .overlay(alignment: .bottomLeading) {
-            toolbarOverlay
+            FloatingToolbar()
                 .padding(16)
-        }
-        .onChange(of: coordinator.canvasViewModel.canUndo) {
-            showAndScheduleHide()
-        }
-        .onChange(of: coordinator.canvasViewModel.isEmpty) {
-            showAndScheduleHide()
-        }
-        .onAppear {
-            scheduleHide()
         }
     }
 
     // MARK: - Private
 
-    @ViewBuilder
-    private var toolbarOverlay: some View {
-        if toolbarVisible {
-            FloatingToolbar(onInteraction: showAndScheduleHide)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
-        } else {
+    private var isGenerating: Bool {
+        if case .generating = coordinator.resultState { return true }
+        return false
+    }
+
+    private func promptBar(promptText: Binding<String>) -> some View {
+        HStack(spacing: 12) {
+            TextField("Describe what you want…", text: promptText)
+                .textFieldStyle(.plain)
+                .font(.subheadline)
+
             Button {
-                showAndScheduleHide()
+                coordinator.generate()
             } label: {
-                Image(systemName: "pencil.and.outline")
-                    .font(.system(size: 16, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 40, height: 40)
-                    .background(.ultraThinMaterial, in: Circle())
-                    .shadow(color: .black.opacity(0.1), radius: 4, y: 2)
+                Image(systemName: isGenerating ? "hourglass" : "sparkles")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 36, height: 36)
+                    .background(
+                        coordinator.canvasViewModel.isEmpty || isGenerating
+                            ? Color.accentColor.opacity(0.4)
+                            : Color.accentColor,
+                        in: Circle()
+                    )
             }
-            .transition(.scale.combined(with: .opacity))
+            .disabled(coordinator.canvasViewModel.isEmpty || isGenerating)
         }
-    }
-
-    private func showAndScheduleHide() {
-        withAnimation(.easeIn(duration: 0.2)) {
-            toolbarVisible = true
-        }
-        scheduleHide()
-    }
-
-    private func scheduleHide() {
-        hideTask?.cancel()
-        hideTask = Task {
-            try? await Task.sleep(for: .seconds(3))
-            guard !Task.isCancelled else { return }
-            withAnimation(.easeOut(duration: 0.3)) {
-                toolbarVisible = false
-            }
-        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.bar)
     }
 }
 

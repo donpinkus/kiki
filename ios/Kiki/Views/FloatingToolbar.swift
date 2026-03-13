@@ -1,9 +1,7 @@
 import SwiftUI
-import ResultModule
 
 struct FloatingToolbar: View {
     @Environment(AppCoordinator.self) private var coordinator
-    var onInteraction: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
@@ -32,11 +30,6 @@ struct FloatingToolbar: View {
                 action: coordinator.clear,
                 disabled: coordinator.canvasViewModel.isEmpty
             )
-
-            Divider()
-                .frame(height: 24)
-
-            generateButton
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -49,7 +42,6 @@ struct FloatingToolbar: View {
     private func toolButton(icon: String, tool: DrawingTool) -> some View {
         Button {
             coordinator.currentTool = tool
-            onInteraction()
         } label: {
             Image(systemName: icon)
                 .font(.system(size: 18, weight: .medium))
@@ -58,28 +50,9 @@ struct FloatingToolbar: View {
         }
     }
 
-    private var isGenerating: Bool {
-        if case .generating = coordinator.resultState { return true }
-        return false
-    }
-
-    private var generateButton: some View {
-        Button {
-            coordinator.generate()
-            onInteraction()
-        } label: {
-            Image(systemName: isGenerating ? "hourglass" : "sparkles")
-                .font(.system(size: 18, weight: .medium))
-                .foregroundStyle(coordinator.canvasViewModel.isEmpty || isGenerating ? AnyShapeStyle(.tertiary) : AnyShapeStyle(Color.accentColor))
-                .frame(width: 36, height: 36)
-        }
-        .disabled(coordinator.canvasViewModel.isEmpty || isGenerating)
-    }
-
     private func actionButton(icon: String, action: @escaping () -> Void, disabled: Bool) -> some View {
         Button {
             action()
-            onInteraction()
         } label: {
             Image(systemName: icon)
                 .font(.system(size: 18, weight: .medium))
