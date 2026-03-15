@@ -1,6 +1,6 @@
 # Kiki — iPad Sketch-to-Image App
 
-iPad-native drawing app. User sketches on left pane, AI-generated image appears on right pane. PencilKit + fal.ai.
+iPad-native drawing app. User sketches on left pane, AI-generated image appears on right pane. PencilKit + ComfyUI (Qwen-Image on RunPod).
 - **Target:** iPadOS 17+, landscape only (v1)
 - **Current Phase:** Phase 1 — Prototype (Weeks 1-4)
 - **Source docs:** `PRD.md`, `TECHNICAL_ARCHITECTURE.md`
@@ -77,7 +77,7 @@ Data flows one direction: Canvas → Preprocessor → Scheduler → Network → 
 1. **Canvas responsiveness is sacred.** PencilKit rendering NEVER depends on network/generation state. Target <16ms stroke latency. Any synchronous generation-related work on main thread = P0 bug.
 2. **Latest-request-wins.** Only the newest generation result may update the UI. Every response checked against current latest request ID before display.
 3. **Never clear the right pane.** Always keep last successful image visible. Never show blank after first successful generation.
-4. **No secrets on client.** Provider API keys (fal.ai, Replicate) backend only. Client uses JWT. Client NEVER calls inference providers directly.
+4. **No secrets on client.** Provider API keys and URLs (ComfyUI, fal.ai) backend only. Client uses JWT. Client NEVER calls inference providers directly.
 5. **Content safety before external testing.** NSFW output filter + prompt input filter must be operational before any external TestFlight build.
 6. **Privacy by design.** Sketch data is ephemeral on server — deleted after generation response. Not stored, not trained on, not shared. Exception: flagged content in content_filter_log.
 7. **App Store compliance.** Must include: first-launch AI disclosure consent (guideline 5.1.2(i)), age gate (1.2.1(a)), content filtering, "Report this image" button.
@@ -116,10 +116,10 @@ Data flows one direction: Canvas → Preprocessor → Scheduler → Network → 
 - [ ] NetworkModule REST client
 - [ ] Backend Fastify project scaffold
 - [ ] POST /v1/generate endpoint
-- [ ] fal.ai provider adapter (LCM preview)
+- [x] ~~fal.ai provider adapter~~ → ComfyUI adapter (Qwen-Image + InstantX ControlNet)
 - [ ] POST /v1/cancel endpoint
 - [ ] Stale job tracking (Redis)
-- [ ] Refine mode (SDXL ControlNet via fal.ai)
+- [x] ~~Refine mode (SDXL ControlNet via fal.ai)~~ → Qwen-Image 20B via ComfyUI on RunPod
 - [ ] Prompt input field + style preset chips
 - [ ] Prompt template system
 - [ ] End-to-end: draw → preview → refine loop
