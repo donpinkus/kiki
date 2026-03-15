@@ -1,6 +1,3 @@
-import { readFileSync } from 'node:fs';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { config } from '../../config/index.js';
 import { ProviderError } from '../../errors.js';
 import type {
@@ -8,8 +5,7 @@ import type {
   ProviderRequest,
   ProviderResponse,
 } from './types.js';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
+import workflowTemplate from './comfyui-workflow-api.json' with { type: 'json' };
 
 // Node IDs in the API-format workflow (subgraph nodes prefixed with "111:")
 const LOAD_IMAGE_NODE_ID = '71';
@@ -26,24 +22,8 @@ type WorkflowNode = {
 };
 type Workflow = Record<string, WorkflowNode>;
 
-function loadWorkflowTemplate(): Workflow {
-  const path = join(__dirname, 'comfyui-workflow-api.json');
-  const raw = readFileSync(path, 'utf-8');
-  return JSON.parse(raw) as Workflow;
-}
-
-let cachedWorkflow: Workflow | null = null;
-
 function getWorkflow(): Workflow {
-  if (!cachedWorkflow) {
-    cachedWorkflow = loadWorkflowTemplate();
-  }
-  return structuredClone(cachedWorkflow);
-}
-
-/** Reload workflow template from disk (call when the file is updated). */
-export function reloadWorkflow(): void {
-  cachedWorkflow = null;
+  return structuredClone(workflowTemplate) as Workflow;
 }
 
 export class ComfyUIAdapter implements ProviderAdapter {
