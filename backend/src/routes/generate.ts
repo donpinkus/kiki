@@ -1,5 +1,5 @@
 import type { FastifyPluginAsync } from 'fastify';
-import { FalAdapter } from '../modules/providers/fal.js';
+import { ComfyUIAdapter } from '../modules/providers/comfyui.js';
 import type { ProviderAdapter, ProviderRequest } from '../modules/providers/types.js';
 
 const STYLE_PRESETS = [
@@ -56,7 +56,7 @@ interface GenerateBody {
   sketchImageBase64: string;
 }
 
-const provider: ProviderAdapter = new FalAdapter();
+const provider: ProviderAdapter = new ComfyUIAdapter();
 
 export const generateRoute: FastifyPluginAsync = async (fastify) => {
   fastify.post<{ Body: GenerateBody }>('/v1/generate', {
