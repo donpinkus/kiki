@@ -72,13 +72,17 @@ public final class CanvasViewModel {
         let drawing = canvasView.drawing
         guard !drawing.strokes.isEmpty else { return nil }
 
-        let bounds = drawing.bounds
-        let image = drawing.image(from: bounds, scale: 2.0)
+        // Render the canvas view as-is (white background + strokes), rather than
+        // extracting the drawing separately which loses strokes during compositing.
+        let renderer = UIGraphicsImageRenderer(bounds: canvasView.bounds)
+        let image = renderer.image { _ in
+            canvasView.drawHierarchy(in: canvasView.bounds, afterScreenUpdates: true)
+        }
 
         return SketchSnapshot(
             image: image,
             strokeCount: drawing.strokes.count,
-            bounds: bounds
+            bounds: drawing.bounds
         )
     }
 

@@ -33,11 +33,6 @@ struct ContentView: View {
 
     // MARK: - Private
 
-    private var isGenerating: Bool {
-        if case .generating = coordinator.resultState { return true }
-        return false
-    }
-
     private func promptBar(promptText: Binding<String>) -> some View {
         HStack(spacing: 12) {
             TextField("Describe what you want…", text: promptText)
@@ -47,18 +42,18 @@ struct ContentView: View {
             Button {
                 coordinator.generate()
             } label: {
-                Image(systemName: isGenerating ? "hourglass" : "sparkles")
+                Image(systemName: coordinator.isGenerating ? "hourglass" : "arrow.trianglehead.2.clockwise")
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(.white)
                     .frame(width: 36, height: 36)
                     .background(
-                        coordinator.canvasViewModel.isEmpty || isGenerating
+                        coordinator.canvasViewModel.isEmpty || coordinator.isGenerating
                             ? Color.accentColor.opacity(0.4)
                             : Color.accentColor,
                         in: Circle()
                     )
             }
-            .disabled(coordinator.canvasViewModel.isEmpty || isGenerating)
+            .disabled(coordinator.canvasViewModel.isEmpty || coordinator.isGenerating)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)

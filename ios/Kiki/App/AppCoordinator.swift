@@ -48,12 +48,17 @@ final class AppCoordinator {
     private var currentRequestId: UUID?
     private var lastSuccessfulImageURL: URL?
     private var generationTask: Task<Void, Never>?
+    private var isCanvasDirty = false
+    private(set) var isGenerating = false
+    private var debounceTask: Task<Void, Never>?
+    private var canvasObservationTask: Task<Void, Never>?
 
     // MARK: - Lifecycle
 
     init(backendURL: URL = URL(string: "https://kiki-backend-production-eb81.up.railway.app")!) {
         self.apiClient = APIClient(baseURL: backendURL)
         applyTool()
+        startObservingCanvas()
     }
 
     // MARK: - Actions
@@ -68,6 +73,7 @@ final class AppCoordinator {
 
     func clear() {
         canvasViewModel.clear()
+        isCanvasDirty = false
     }
 
     /// Triggers a preview generation from the current canvas state.
@@ -77,8 +83,12 @@ final class AppCoordinator {
 
         let requestId = UUID()
         currentRequestId = requestId
+        isCanvasDirty = false
+        isGenerating = true
 
         generationTask = Task {
+            defer { isGenerating = false }
+
             // 1. Capture snapshot
             guard let snapshot = canvasViewModel.captureSnapshot(),
                   !snapshot.isEmpty else {
@@ -94,11 +104,8 @@ final class AppCoordinator {
             // Show loading state
             resultState = .generating(previousImageURL: lastSuccessfulImageURL)
 
-            // 2. Render onto white background (PencilKit uses transparent bg)
-            let opaqueImage = Self.renderOnWhite(img)
-
-            // Convert directly to JPEG, skip preprocessor for now
-            guard let jpegData = opaqueImage.jpegData(compressionQuality: 0.85) else {
+            // Convert directly to JPEG (canvas capture already includes white background)
+            guard let jpegData = img.jpegData(compressionQuality: 0.85) else {
                 print("[Generate] JPEG conversion failed")
                 resultState = .error(
                     message: "Failed to process sketch",
@@ -106,7 +113,7 @@ final class AppCoordinator {
                 )
                 return
             }
-            print("[Generate] JPEG: \(jpegData.count) bytes, image: \(opaqueImage.size)")
+            print("[Generate] JPEG: \(jpegData.count) bytes, image: \(img.size)")
 
             // Check for cancellation / staleness
             guard !Task.isCancelled, currentRequestId == requestId else {
@@ -163,21 +170,40 @@ final class AppCoordinator {
                     previousImageURL: lastSuccessfulImageURL
                 )
             }
+
+            // Auto-retrigger if canvas changed during generation
+            if isCanvasDirty, !Task.isCancelled {
+                print("[Generate] Canvas dirty, auto-retriggering")
+                generate()
+            }
+        }
+    }
+
+    // MARK: - Canvas Observation
+
+    private func startObservingCanvas() {
+        canvasObservationTask = Task { [weak self] in
+            guard let self else { return }
+            for await _ in canvasViewModel.canvasChanges {
+                guard !Task.isCancelled else { return }
+                isCanvasDirty = true
+
+                // Cancel previous debounce timer
+                debounceTask?.cancel()
+
+                // Start new debounce — generate after 1.5s of no drawing
+                debounceTask = Task { [weak self] in
+                    try? await Task.sleep(for: .seconds(1.5))
+                    guard !Task.isCancelled, let self else { return }
+                    if !isGenerating, !canvasViewModel.isEmpty {
+                        generate()
+                    }
+                }
+            }
         }
     }
 
     // MARK: - Private
-
-    /// Renders a UIImage (potentially with transparent background) onto a white background.
-    private static func renderOnWhite(_ image: UIImage) -> UIImage {
-        let size = image.size
-        let renderer = UIGraphicsImageRenderer(size: size)
-        return renderer.image { context in
-            UIColor.white.setFill()
-            context.fill(CGRect(origin: .zero, size: size))
-            image.draw(at: .zero)
-        }
-    }
 
     private func applyTool() {
         switch currentTool {

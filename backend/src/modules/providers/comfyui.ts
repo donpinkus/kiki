@@ -11,6 +11,7 @@ import workflowTemplate from './comfyui-workflow-api.json' with { type: 'json' }
 const LOAD_IMAGE_NODE_ID = '71';
 const POSITIVE_PROMPT_NODE_ID = '111:6';
 const SAVE_IMAGE_NODE_ID = '60';
+const KSAMPLER_NODE_ID = '111:3';
 
 const POLL_INTERVAL_MS = 2000;
 const POLL_TIMEOUT_MS = 120_000;
@@ -57,13 +58,18 @@ export class ComfyUIAdapter implements ProviderAdapter {
       throw new ProviderError('comfyui', `CLIPTextEncode node ${POSITIVE_PROMPT_NODE_ID} not found in workflow`);
     }
 
-    // 5. Submit to ComfyUI queue
+    // 5. Randomize the seed so each generation produces a different result
+    if (workflow[KSAMPLER_NODE_ID]) {
+      workflow[KSAMPLER_NODE_ID].inputs['seed'] = Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
+    }
+
+    // 6. Submit to ComfyUI queue
     const promptId = await this.submitPrompt(baseUrl, workflow);
 
-    // 6. Poll for completion
+    // 7. Poll for completion
     const output = await this.pollForResult(baseUrl, promptId);
 
-    // 7. Construct image URL
+    // 8. Construct image URL
     const imageUrl = `${baseUrl}/view?filename=${encodeURIComponent(output.filename)}&subfolder=${encodeURIComponent(output.subfolder)}&type=${encodeURIComponent(output.type)}`;
 
     return {
