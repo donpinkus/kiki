@@ -1,0 +1,137 @@
+name: Deploy RunPod
+
+on:
+  workflow_dispatch:
+    inputs:
+      region:
+        description: 'Region (must match your network volume)'
+        required: true
+        default: 'eu'
+        type: choice
+        options:
+          - eu
+          - us
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create RunPod pod
+        id: create
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [ "${{ inputs.region }}" = "eu" ]; then
+            DATACENTER="EU-NL-1"
+          else
+            DATACENTER="US-GA-2"
+          fi
+
+          API_URL="https://api.runpod.io/graphql?api_key=${RUNPOD_API_KEY}"
+
+          # Find network volume
+          echo "::group::Finding network volumes"
+          VOLUMES=$(curl -sf "$API_URL" \
+            -H 'Content-Type: application/json' \
+            -d '{"query": "query { myself { networkVolumes { id name dataCenterId size } } }"}')
+
+          VOLUME_ID=$(echo "$VOLUMES" | jq -r ".data.myself.networkVolumes[] | select(.dataCenterId == \"$DATACENTER\") | .id" | head -1)
+
+          if [ -z "$VOLUME_ID" ] || [ "$VOLUME_ID" = "null" ]; then
+            echo "::error::No network volume found in $DATACENTER"
+            echo "$VOLUMES" | jq '.data.myself.networkVolumes'
+            exit 1
+          fi
+          echo "Found volume: $VOLUME_ID"
+          echo "::endgroup::"
+
+          # Try GPU types in order of preference
+          for GPU in "NVIDIA H100 80GB HBM3" "NVIDIA H100 PCIe" "NVIDIA A100 80GB PCIe"; do
+            echo "::group::Trying $GPU"
+            RESPONSE=$(curl -sf "$API_URL" \
+              -H 'Content-Type: application/json' \
+              -d "{
+                \"query\": \"mutation { podFindAndDeployOnDemand(input: { name: \\\"kiki-comfyui\\\", imageName: \\\"runpod/comfyui:latest\\\", gpuTypeId: \\\"${GPU}\\\", gpuCount: 1, volumeInGb: 0, containerDiskInGb: 20, networkVolumeId: \\\"${VOLUME_ID}\\\", ports: \\\"8188/http,22/tcp\\\", dataCenterId: \\\"${DATACENTER}\\\", startSsh: true }) { id machineId imageName desiredStatus } }\"
+              }" || true)
+
+            POD_ID=$(echo "$RESPONSE" | jq -r '.data.podFindAndDeployOnDemand.id // empty')
+            echo "::endgroup::"
+
+            if [ -n "$POD_ID" ]; then
+              echo "Created pod $POD_ID with $GPU"
+              break
+            fi
+            echo "::warning::$GPU not available, trying next..."
+          done
+
+          if [ -z "${POD_ID:-}" ]; then
+            echo "::error::No GPU available in $DATACENTER"
+            exit 1
+          fi
+
+          echo "pod_id=$POD_ID" >> "$GITHUB_OUTPUT"
+          echo "proxy_url=https://${POD_ID}-8188.proxy.runpod.net" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for pod to boot
+        run: |
+          echo "Waiting for pod to start..."
+          for i in $(seq 1 60); do
+            STATUS=$(curl -sf "https://api.runpod.io/graphql?api_key=${{ secrets.RUNPOD_API_KEY }}" \
+              -H 'Content-Type: application/json' \
+              -d '{"query": "query { pod(input: { podId: \"${{ steps.create.outputs.pod_id }}\" }) { runtime { uptimeInSeconds } } }"}')
+
+            UPTIME=$(echo "$STATUS" | jq -r '.data.pod.runtime.uptimeInSeconds // 0')
+            if [ "$UPTIME" -gt 0 ] 2>/dev/null; then
+              echo "Pod is running (uptime: ${UPTIME}s)"
+              break
+            fi
+            echo "  Waiting... (${i}/60)"
+            sleep 5
+          done
+
+      - name: Wait for ComfyUI to respond
+        run: |
+          PROXY_URL="${{ steps.create.outputs.proxy_url }}"
+          echo "Polling $PROXY_URL/system_stats ..."
+          for i in $(seq 1 60); do
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "${PROXY_URL}/system_stats" 2>/dev/null || echo "000")
+            if [ "$CODE" = "200" ]; then
+              echo "ComfyUI is live!"
+              curl -s "${PROXY_URL}/system_stats" | jq .
+              break
+            fi
+            echo "  Attempt ${i}/60 (HTTP $CODE)"
+            sleep 10
+          done
+
+      - name: Update Railway COMFYUI_URL
+        if: ${{ secrets.RAILWAY_TOKEN != '' }}
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          npm install -g @railway/cli
+          railway variables set COMFYUI_URL=${{ steps.create.outputs.proxy_url }}
+          echo "Railway updated with new ComfyUI URL"
+
+      - name: Summary
+        run: |
+          POD_ID="${{ steps.create.outputs.pod_id }}"
+          PROXY_URL="${{ steps.create.outputs.proxy_url }}"
+          echo "## Pod Deployed" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| | |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Pod ID** | \`$POD_ID\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **ComfyUI URL** | $PROXY_URL |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Web UI** | $PROXY_URL |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [ -z "${{ secrets.RAILWAY_TOKEN }}" ]; then
+            echo "> **Manual step:** Update Railway with the new URL:" >> "$GITHUB_STEP_SUMMARY"
+            echo '> ```' >> "$GITHUB_STEP_SUMMARY"
+            echo "> railway vars set COMFYUI_URL=$PROXY_URL" >> "$GITHUB_STEP_SUMMARY"
+            echo '> ```' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Railway COMFYUI_URL updated automatically." >> "$GITHUB_STEP_SUMMARY"
+          fi
