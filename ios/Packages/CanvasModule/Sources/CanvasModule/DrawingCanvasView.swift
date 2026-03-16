@@ -22,7 +22,7 @@ struct ToolConfig {
 
 // MARK: - DrawingCanvasView
 
-final class DrawingCanvasView: UIView {
+public final class DrawingCanvasView: UIView {
 
     // MARK: - Public Properties
 
@@ -58,7 +58,7 @@ final class DrawingCanvasView: UIView {
         backgroundColor = .white
         isOpaque = true
         isMultipleTouchEnabled = false
-        contentMode = .redrawing
+        contentMode = .redraw
     }
 
     @available(*, unavailable)
@@ -174,8 +174,19 @@ final class DrawingCanvasView: UIView {
         }
 
         // Draw in-progress stroke
+        // For eraser: draw white with normal blend mode on screen (not .clear,
+        // which would punch through the white background to transparent/black).
         if !currentPoints.isEmpty {
-            drawStrokePoints(currentPoints, tool: currentTool, in: context)
+            if currentTool.isEraser {
+                let screenEraserTool = ToolConfig(
+                    lineWidth: currentTool.lineWidth,
+                    color: .white,
+                    isEraser: false
+                )
+                drawStrokePoints(currentPoints, tool: screenEraserTool, in: context)
+            } else {
+                drawStrokePoints(currentPoints, tool: currentTool, in: context)
+            }
         }
     }
 
