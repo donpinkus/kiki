@@ -10,63 +10,154 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Create RunPod pod
+      - name: Find or create pod
         id: create
         env:
           RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
         run: |
           set -euo pipefail
           API_URL="https://api.runpod.io/graphql?api_key=${RUNPOD_API_KEY}"
+          GPU_TYPES=("NVIDIA H100 80GB HBM3" "NVIDIA H100 PCIe" "NVIDIA A100 80GB PCIe")
+          MAX_VOLUMES=10
 
-          # Get all network volumes
+          # ── Phase 1: Discover existing network volumes ──
           echo "::group::Finding network volumes"
           VOLUMES=$(curl -sf "$API_URL" \
             -H 'Content-Type: application/json' \
             -d '{"query": "query { myself { networkVolumes { id name dataCenterId size } } }"}')
           echo "$VOLUMES" | jq '.data.myself.networkVolumes'
+          VOLUME_COUNT=$(echo "$VOLUMES" | jq '.data.myself.networkVolumes | length')
+          echo "Found $VOLUME_COUNT volume(s)"
           echo "::endgroup::"
 
-          # Try each datacenter that has a network volume, in order of preference
-          DATACENTERS=$(echo "$VOLUMES" | jq -r '.data.myself.networkVolumes[] | .dataCenterId' | sort -u)
+          EXISTING_DCS=$(echo "$VOLUMES" | jq -r '.data.myself.networkVolumes[] | .dataCenterId' | sort -u)
+          POD_ID=""
+          USED_DC=""
+          NEW_VOLUME_CREATED=false
 
-          if [ -z "$DATACENTERS" ]; then
-            echo "::error::No network volumes found"
-            exit 1
+          # ── Phase 2: Try existing volumes ──
+          if [ -n "$EXISTING_DCS" ]; then
+            echo "::group::Trying existing datacenters"
+            for DATACENTER in $EXISTING_DCS; do
+              VOLUME_ID=$(echo "$VOLUMES" | jq -r ".data.myself.networkVolumes[] | select(.dataCenterId == \"$DATACENTER\") | .id" | head -1)
+              echo "Trying $DATACENTER (volume: $VOLUME_ID)..."
+
+              for GPU in "${GPU_TYPES[@]}"; do
+                RESPONSE=$(curl -sf "$API_URL" \
+                  -H 'Content-Type: application/json' \
+                  -d "{
+                    \"query\": \"mutation { podFindAndDeployOnDemand(input: { name: \\\"kiki-comfyui\\\", imageName: \\\"runpod/comfyui:latest\\\", gpuTypeId: \\\"${GPU}\\\", gpuCount: 1, volumeInGb: 0, containerDiskInGb: 20, networkVolumeId: \\\"${VOLUME_ID}\\\", ports: \\\"8188/http,22/tcp\\\", dataCenterId: \\\"${DATACENTER}\\\", startSsh: true }) { id } }\"
+                  }" || true)
+
+                POD_ID=$(echo "$RESPONSE" | jq -r '.data.podFindAndDeployOnDemand.id // empty')
+                if [ -n "$POD_ID" ]; then
+                  echo "✓ Created pod $POD_ID with $GPU in $DATACENTER (existing volume)"
+                  USED_DC="$DATACENTER"
+                  break 2
+                fi
+              done
+              echo "  No GPU available in $DATACENTER"
+            done
+            echo "::endgroup::"
           fi
 
-          GPU_TYPES=("NVIDIA H100 80GB HBM3" "NVIDIA H100 PCIe" "NVIDIA A100 80GB PCIe")
-          POD_ID=""
-
-          for DATACENTER in $DATACENTERS; do
-            VOLUME_ID=$(echo "$VOLUMES" | jq -r ".data.myself.networkVolumes[] | select(.dataCenterId == \"$DATACENTER\") | .id" | head -1)
-            echo "Trying datacenter $DATACENTER (volume: $VOLUME_ID)..."
-
-            for GPU in "${GPU_TYPES[@]}"; do
-              echo "::group::Trying $GPU in $DATACENTER"
-              RESPONSE=$(curl -sf "$API_URL" \
-                -H 'Content-Type: application/json' \
-                -d "{
-                  \"query\": \"mutation { podFindAndDeployOnDemand(input: { name: \\\"kiki-comfyui\\\", imageName: \\\"runpod/comfyui:latest\\\", gpuTypeId: \\\"${GPU}\\\", gpuCount: 1, volumeInGb: 0, containerDiskInGb: 20, networkVolumeId: \\\"${VOLUME_ID}\\\", ports: \\\"8188/http,22/tcp\\\", dataCenterId: \\\"${DATACENTER}\\\", startSsh: true }) { id machineId imageName desiredStatus } }\"
-                }" || true)
-
-              POD_ID=$(echo "$RESPONSE" | jq -r '.data.podFindAndDeployOnDemand.id // empty')
-              echo "::endgroup::"
-
-              if [ -n "$POD_ID" ]; then
-                echo "Created pod $POD_ID with $GPU in $DATACENTER"
-                break 2
-              fi
-              echo "::warning::$GPU not available in $DATACENTER"
-            done
-          done
-
+          # ── Phase 3: No existing DC worked — find a new one ──
           if [ -z "$POD_ID" ]; then
-            echo "::error::No GPU available in any datacenter with a network volume"
-            exit 1
+            echo ""
+            echo "⚠️  No GPU available in existing datacenters ($EXISTING_DCS)"
+            echo ""
+
+            if [ "$VOLUME_COUNT" -ge "$MAX_VOLUMES" ]; then
+              echo "::error::Cannot create new volume — already at $VOLUME_COUNT/$MAX_VOLUMES limit"
+              exit 1
+            fi
+
+            CANDIDATE_DCS=("CA-MTL-1" "US-TX-3" "US-OR-1" "EU-SE-1" "EU-RO-1" "NO-01")
+            FOUND_DC=""
+            FOUND_GPU=""
+
+            echo "::group::Searching other datacenters for GPU availability"
+            for DC in "${CANDIDATE_DCS[@]}"; do
+              # Skip DCs we already have volumes in (already tried above)
+              if echo "$EXISTING_DCS" | grep -q "$DC"; then
+                continue
+              fi
+
+              for GPU in "${GPU_TYPES[@]}"; do
+                # Create a minimal test pod to check availability
+                TEST_RESP=$(curl -sf "$API_URL" \
+                  -H 'Content-Type: application/json' \
+                  -d "{
+                    \"query\": \"mutation { podFindAndDeployOnDemand(input: { name: \\\"kiki-gpu-test\\\", imageName: \\\"runpod/comfyui:latest\\\", gpuTypeId: \\\"${GPU}\\\", gpuCount: 1, volumeInGb: 0, containerDiskInGb: 5, dataCenterId: \\\"${DC}\\\", startSsh: true }) { id } }\"
+                  }" || true)
+
+                TEST_POD=$(echo "$TEST_RESP" | jq -r '.data.podFindAndDeployOnDemand.id // empty')
+                if [ -n "$TEST_POD" ]; then
+                  echo "✓ Found $GPU available in $DC"
+                  # Terminate test pod immediately
+                  curl -sf "$API_URL" \
+                    -H 'Content-Type: application/json' \
+                    -d "{\"query\": \"mutation { podTerminate(input: { podId: \\\"${TEST_POD}\\\" }) }\"}" > /dev/null 2>&1
+                  FOUND_DC="$DC"
+                  FOUND_GPU="$GPU"
+                  break 2
+                fi
+              done
+              echo "  No GPU in $DC"
+            done
+            echo "::endgroup::"
+
+            if [ -z "$FOUND_DC" ]; then
+              echo "::error::No GPU available in any datacenter"
+              exit 1
+            fi
+
+            # ── Phase 4: Create new volume in the available datacenter ──
+            echo ""
+            echo "📦 Creating new network volume in $FOUND_DC..."
+            echo "   (This will incur ~\$2/month storage cost)"
+            echo "   Total volumes after creation: $((VOLUME_COUNT + 1)) of $MAX_VOLUMES max"
+
+            VOL_RESP=$(curl -sf "$API_URL" \
+              -H 'Content-Type: application/json' \
+              -d "{
+                \"query\": \"mutation { createNetworkVolume(input: { name: \\\"kiki-${FOUND_DC,,}\\\", dataCenterId: \\\"${FOUND_DC}\\\", size: 30 }) { id name dataCenterId } }\"
+              }")
+
+            VOLUME_ID=$(echo "$VOL_RESP" | jq -r '.data.createNetworkVolume.id // empty')
+            if [ -z "$VOLUME_ID" ]; then
+              echo "::error::Failed to create network volume in $FOUND_DC"
+              echo "$VOL_RESP" | jq .
+              exit 1
+            fi
+            echo "✓ Created volume $VOLUME_ID in $FOUND_DC"
+            NEW_VOLUME_CREATED=true
+
+            # Small delay for volume to be ready
+            sleep 5
+
+            # ── Phase 5: Create pod with the new volume ──
+            echo "Creating pod with $FOUND_GPU in $FOUND_DC..."
+            RESPONSE=$(curl -sf "$API_URL" \
+              -H 'Content-Type: application/json' \
+              -d "{
+                \"query\": \"mutation { podFindAndDeployOnDemand(input: { name: \\\"kiki-comfyui\\\", imageName: \\\"runpod/comfyui:latest\\\", gpuTypeId: \\\"${FOUND_GPU}\\\", gpuCount: 1, volumeInGb: 0, containerDiskInGb: 20, networkVolumeId: \\\"${VOLUME_ID}\\\", ports: \\\"8188/http,22/tcp\\\", dataCenterId: \\\"${FOUND_DC}\\\", startSsh: true }) { id } }\"
+              }" || true)
+
+            POD_ID=$(echo "$RESPONSE" | jq -r '.data.podFindAndDeployOnDemand.id // empty')
+            USED_DC="$FOUND_DC"
+
+            if [ -z "$POD_ID" ]; then
+              echo "::error::GPU became unavailable in $FOUND_DC between test and creation"
+              exit 1
+            fi
+            echo "✓ Created pod $POD_ID with $FOUND_GPU in $FOUND_DC (new volume)"
           fi
 
           echo "pod_id=$POD_ID" >> "$GITHUB_OUTPUT"
           echo "proxy_url=https://${POD_ID}-8188.proxy.runpod.net" >> "$GITHUB_OUTPUT"
+          echo "datacenter=$USED_DC" >> "$GITHUB_OUTPUT"
+          echo "new_volume=$NEW_VOLUME_CREATED" >> "$GITHUB_OUTPUT"
 
       - name: Wait for pod to boot and get SSH info
         id: ssh_info
@@ -87,8 +178,6 @@ jobs:
             UPTIME=$(echo "$STATUS" | jq -r '.data.pod.runtime.uptimeInSeconds // 0')
             if [ "$UPTIME" -gt 5 ] 2>/dev/null; then
               echo "Pod is running (uptime: ${UPTIME}s)"
-
-              # Extract SSH connection details (port 22 mapped to a public port)
               SSH_IP=$(echo "$STATUS" | jq -r '.data.pod.runtime.ports[] | select(.privatePort == 22) | .ip')
               SSH_PORT=$(echo "$STATUS" | jq -r '.data.pod.runtime.ports[] | select(.privatePort == 22) | .publicPort')
 
@@ -117,14 +206,12 @@ jobs:
           SSH_IP="${{ steps.ssh_info.outputs.ssh_ip }}"
           SSH_PORT="${{ steps.ssh_info.outputs.ssh_port }}"
 
-          # Write SSH key
           mkdir -p ~/.ssh
           echo "$SSH_PRIVATE_KEY" > ~/.ssh/runpod_key
           chmod 600 ~/.ssh/runpod_key
 
           SSH_CMD="ssh -i ~/.ssh/runpod_key -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p $SSH_PORT root@$SSH_IP"
 
-          # Wait for SSH to be ready
           echo "Waiting for SSH..."
           SSH_CONNECTED=false
           for i in $(seq 1 12); do
@@ -142,7 +229,6 @@ jobs:
             exit 1
           fi
 
-          # Copy and run setup script
           scp -i ~/.ssh/runpod_key -o StrictHostKeyChecking=no -P "$SSH_PORT" \
             scripts/setup-pod.sh root@"$SSH_IP":/tmp/setup-pod.sh
 
@@ -167,8 +253,6 @@ jobs:
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
-          # Use Railway GraphQL API directly (CLI requires interactive linking)
-          # These IDs are from the kiki-backend Railway project
           PROJECT_ID="c651eed9-55bb-464b-98f3-6d8369565740"
           ENVIRONMENT_ID="4d26f403-75b1-4177-a198-282cccc311b4"
           SERVICE_ID="bbf5c42d-7020-41a1-924b-a9c24ac49a88"
@@ -180,8 +264,6 @@ jobs:
             -d "{
               \"query\": \"mutation { variableUpsert(input: { projectId: \\\"${PROJECT_ID}\\\", environmentId: \\\"${ENVIRONMENT_ID}\\\", serviceId: \\\"${SERVICE_ID}\\\", name: \\\"COMFYUI_URL\\\", value: \\\"${COMFYUI_URL}\\\" }) }\"
             }")
-
-          echo "Railway API response: $RESPONSE"
           echo "Railway COMFYUI_URL updated to $COMFYUI_URL"
 
       - name: Summary
@@ -189,10 +271,17 @@ jobs:
         run: |
           POD_ID="${{ steps.create.outputs.pod_id }}"
           PROXY_URL="${{ steps.create.outputs.proxy_url }}"
+          DATACENTER="${{ steps.create.outputs.datacenter }}"
+          NEW_VOL="${{ steps.create.outputs.new_volume }}"
+
           echo "## Pod Deployed" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "| | |" >> "$GITHUB_STEP_SUMMARY"
           echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
           echo "| **Pod ID** | \`$POD_ID\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Datacenter** | $DATACENTER |" >> "$GITHUB_STEP_SUMMARY"
           echo "| **ComfyUI URL** | $PROXY_URL |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| **Web UI** | $PROXY_URL |" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$NEW_VOL" = "true" ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "> **Note:** A new network volume was created in $DATACENTER because no GPU was available in existing datacenters. This adds ~\$2/month storage cost." >> "$GITHUB_STEP_SUMMARY"
+          fi
