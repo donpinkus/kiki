@@ -77,7 +77,7 @@ public final class CanvasViewModel {
 
         return SketchSnapshot(
             image: image,
-            strokeCount: 0,
+            strokeCount: canvasView.strokeCount,
             bounds: canvasView.bounds
         )
     }

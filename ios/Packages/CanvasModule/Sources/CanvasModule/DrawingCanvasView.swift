@@ -39,6 +39,7 @@ final class DrawingCanvasView: UIView {
     var canUndo: Bool { !undoStack.isEmpty }
     var canRedo: Bool { !redoStack.isEmpty }
     var isEmpty: Bool { completedStrokes.isEmpty && currentPoints.isEmpty }
+    var strokeCount: Int { completedStrokes.count }
 
     // MARK: - Private Properties
 
@@ -207,11 +208,15 @@ final class DrawingCanvasView: UIView {
             return
         }
 
-        let renderer = UIGraphicsImageRenderer(bounds: bounds)
+        // Use transparent background so eraser (.clear blend mode) can punch holes.
+        // The white background is drawn separately in draw(_:) underneath.
+        let format = UIGraphicsImageRendererFormat()
+        format.opaque = false
+        let renderer = UIGraphicsImageRenderer(bounds: bounds, format: format)
         frozenImage = renderer.image { rendererContext in
             let context = rendererContext.cgContext
 
-            // White background
+            // Fill white first so non-erased areas are opaque white
             context.setFillColor(UIColor.white.cgColor)
             context.fill(bounds)
 
