@@ -46,7 +46,7 @@ jobs:
                 RESPONSE=$(curl -sf "$API_URL" \
                   -H 'Content-Type: application/json' \
                   -d "{
-                    \"query\": \"mutation { podFindAndDeployOnDemand(input: { name: \\\"kiki-comfyui\\\", imageName: \\\"runpod/comfyui:latest\\\", gpuTypeId: \\\"${GPU}\\\", gpuCount: 1, volumeInGb: 0, containerDiskInGb: 20, networkVolumeId: \\\"${VOLUME_ID}\\\", ports: \\\"8188/http,22/tcp\\\", dataCenterId: \\\"${DATACENTER}\\\", startSsh: true }) { id } }\"
+                    \"query\": \"mutation { podFindAndDeployOnDemand(input: { name: \\\"kiki-comfyui\\\", imageName: \\\"runpod/comfyui:latest\\\", gpuTypeId: \\\"${GPU}\\\", gpuCount: 1, volumeInGb: 0, containerDiskInGb: 20, networkVolumeId: \\\"${VOLUME_ID}\\\", volumeMountPath: \\\"/workspace\\\", ports: \\\"8188/http,22/tcp\\\", dataCenterId: \\\"${DATACENTER}\\\", startSsh: true }) { id } }\"
                   }" || true)
 
                 POD_ID=$(echo "$RESPONSE" | jq -r '.data.podFindAndDeployOnDemand.id // empty')
@@ -141,7 +141,7 @@ jobs:
             RESPONSE=$(curl -sf "$API_URL" \
               -H 'Content-Type: application/json' \
               -d "{
-                \"query\": \"mutation { podFindAndDeployOnDemand(input: { name: \\\"kiki-comfyui\\\", imageName: \\\"runpod/comfyui:latest\\\", gpuTypeId: \\\"${FOUND_GPU}\\\", gpuCount: 1, volumeInGb: 0, containerDiskInGb: 20, networkVolumeId: \\\"${VOLUME_ID}\\\", ports: \\\"8188/http,22/tcp\\\", dataCenterId: \\\"${FOUND_DC}\\\", startSsh: true }) { id } }\"
+                \"query\": \"mutation { podFindAndDeployOnDemand(input: { name: \\\"kiki-comfyui\\\", imageName: \\\"runpod/comfyui:latest\\\", gpuTypeId: \\\"${FOUND_GPU}\\\", gpuCount: 1, volumeInGb: 0, containerDiskInGb: 20, networkVolumeId: \\\"${VOLUME_ID}\\\", volumeMountPath: \\\"/workspace\\\", ports: \\\"8188/http,22/tcp\\\", dataCenterId: \\\"${FOUND_DC}\\\", startSsh: true }) { id } }\"
               }" || true)
 
             POD_ID=$(echo "$RESPONSE" | jq -r '.data.podFindAndDeployOnDemand.id // empty')
