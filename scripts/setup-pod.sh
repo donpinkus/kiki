@@ -59,6 +59,11 @@ fi
 
 echo ""
 echo "==> Installing custom node dependencies..."
+if [ ! -d "${COMFYUI_DIR}/custom_nodes/comfyui_controlnet_aux" ]; then
+  echo "  Cloning comfyui_controlnet_aux..."
+  git clone https://github.com/Fannovel16/comfyui_controlnet_aux.git \
+    "${COMFYUI_DIR}/custom_nodes/comfyui_controlnet_aux"
+fi
 cd "${COMFYUI_DIR}/custom_nodes/comfyui_controlnet_aux"
 "${COMFYUI_DIR}/.venv/bin/pip" install -r requirements.txt
 
@@ -76,7 +81,7 @@ for i in $(seq 1 30); do
   if curl -s -o /dev/null -w "" http://localhost:8188/system_stats 2>/dev/null; then
     echo "ComfyUI is running on port 8188!"
     echo ""
-    curl -s http://localhost:8188/system_stats | python -m json.tool 2>/dev/null || true
+    curl -s http://localhost:8188/system_stats | python3 -m json.tool 2>/dev/null || true
     echo ""
     echo "Setup complete!"
     exit 0

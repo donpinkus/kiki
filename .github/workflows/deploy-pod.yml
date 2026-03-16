@@ -112,7 +112,7 @@ jobs:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
           npm install -g @railway/cli
-          railway variables set COMFYUI_URL=${{ steps.create.outputs.proxy_url }}
+          railway vars set COMFYUI_URL=${{ steps.create.outputs.proxy_url }}
           echo "Railway updated with new ComfyUI URL"
 
       - name: Summary
