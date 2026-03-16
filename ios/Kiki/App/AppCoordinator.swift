@@ -31,6 +31,9 @@ final class AppCoordinator {
     var currentTool: DrawingTool = .brush {
         didSet { applyTool() }
     }
+    var toolSize: CGFloat = 5.0 {
+        didSet { applyTool() }
+    }
     var promptText = ""
     var selectedStylePreset: StylePreset = .photoreal
     var resultState: ResultState = .empty
@@ -208,9 +211,9 @@ final class AppCoordinator {
     private func applyTool() {
         switch currentTool {
         case .brush:
-            canvasViewModel.selectBrush()
+            canvasViewModel.selectBrush(width: toolSize)
         case .eraser:
-            canvasViewModel.selectEraser()
+            canvasViewModel.selectEraser(width: toolSize)
         }
     }
 }

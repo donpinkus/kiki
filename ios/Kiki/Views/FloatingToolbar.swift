@@ -4,9 +4,23 @@ struct FloatingToolbar: View {
     @Environment(AppCoordinator.self) private var coordinator
 
     var body: some View {
+        @Bindable var coordinator = coordinator
+
         HStack(spacing: 12) {
             toolButton(icon: "pencil.tip", tool: .brush)
             toolButton(icon: "eraser", tool: .eraser)
+
+            Divider()
+                .frame(height: 24)
+
+            Slider(value: $coordinator.toolSize, in: 1...20, step: 1)
+                .frame(width: 120)
+
+            Text("\(Int(coordinator.toolSize))")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .frame(width: 20, alignment: .trailing)
 
             Divider()
                 .frame(height: 24)
