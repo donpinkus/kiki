@@ -8,20 +8,26 @@ public struct CanvasView: UIViewRepresentable {
         self.viewModel = viewModel
     }
 
-    public func makeUIView(context: Context) -> PKCanvasView {
-        let canvasView = PKCanvasView()
-        viewModel.attach(canvasView)
+    public func makeUIView(context: Context) -> RotatableCanvasContainer {
+        let container = RotatableCanvasContainer()
+        let canvasView = container.canvasView
+        viewModel.attach(canvasView, container: container)
         canvasView.delegate = context.coordinator
-        return canvasView
+        container.onTransformChanged = { [weak viewModel] in
+            Task { @MainActor in
+                viewModel?.handleTransformChanged()
+            }
+        }
+        return container
     }
 
-    public func updateUIView(_ uiView: PKCanvasView, context: Context) {}
+    public func updateUIView(_ uiView: RotatableCanvasContainer, context: Context) {}
 
     public func makeCoordinator() -> Coordinator {
         Coordinator(viewModel: viewModel)
     }
 
-    public final class Coordinator: NSObject, PKCanvasViewDelegate {
+    public final class Coordinator: NSObject, PKCanvasViewDelegate, UIScrollViewDelegate {
         private let viewModel: CanvasViewModel
 
         init(viewModel: CanvasViewModel) {
@@ -31,6 +37,12 @@ public struct CanvasView: UIViewRepresentable {
         public func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
             Task { @MainActor in
                 viewModel.handleDrawingChanged()
+            }
+        }
+
+        public func scrollViewDidZoom(_ scrollView: UIScrollView) {
+            Task { @MainActor in
+                viewModel.handleTransformChanged()
             }
         }
     }

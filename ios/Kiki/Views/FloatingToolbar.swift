@@ -44,6 +44,17 @@ struct FloatingToolbar: View {
                 action: coordinator.clear,
                 disabled: coordinator.canvasViewModel.isEmpty
             )
+
+            if !coordinator.canvasViewModel.isDefaultTransform {
+                Divider()
+                    .frame(height: 24)
+
+                actionButton(
+                    icon: "arrow.counterclockwise",
+                    action: coordinator.canvasViewModel.resetViewTransform,
+                    disabled: false
+                )
+            }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
