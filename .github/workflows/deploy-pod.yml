@@ -16,6 +16,9 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
       - name: Create RunPod pod
         id: create
         env:
@@ -74,24 +77,73 @@ jobs:
           echo "pod_id=$POD_ID" >> "$GITHUB_OUTPUT"
           echo "proxy_url=https://${POD_ID}-8188.proxy.runpod.net" >> "$GITHUB_OUTPUT"
 
-      - name: Wait for pod to boot
+      - name: Wait for pod to boot and get SSH info
+        id: ssh_info
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
         run: |
+          set -euo pipefail
+          POD_ID="${{ steps.create.outputs.pod_id }}"
+          API_URL="https://api.runpod.io/graphql?api_key=${RUNPOD_API_KEY}"
+
           echo "Waiting for pod to start..."
           for i in $(seq 1 60); do
-            STATUS=$(curl -sf "https://api.runpod.io/graphql?api_key=${{ secrets.RUNPOD_API_KEY }}" \
+            STATUS=$(curl -sf "$API_URL" \
               -H 'Content-Type: application/json' \
-              -d '{"query": "query { pod(input: { podId: \"${{ steps.create.outputs.pod_id }}\" }) { runtime { uptimeInSeconds } } }"}')
+              -d "{\"query\": \"query { pod(input: { podId: \\\"${POD_ID}\\\" }) { runtime { uptimeInSeconds ports { ip isIpPublic privatePort publicPort type } } } }\"}")
 
             UPTIME=$(echo "$STATUS" | jq -r '.data.pod.runtime.uptimeInSeconds // 0')
-            if [ "$UPTIME" -gt 0 ] 2>/dev/null; then
+            if [ "$UPTIME" -gt 5 ] 2>/dev/null; then
               echo "Pod is running (uptime: ${UPTIME}s)"
-              break
+
+              # Extract SSH connection details (port 22 mapped to a public port)
+              SSH_IP=$(echo "$STATUS" | jq -r '.data.pod.runtime.ports[] | select(.privatePort == 22) | .ip')
+              SSH_PORT=$(echo "$STATUS" | jq -r '.data.pod.runtime.ports[] | select(.privatePort == 22) | .publicPort')
+
+              if [ -n "$SSH_IP" ] && [ "$SSH_IP" != "null" ]; then
+                echo "SSH: $SSH_IP:$SSH_PORT"
+                echo "ssh_ip=$SSH_IP" >> "$GITHUB_OUTPUT"
+                echo "ssh_port=$SSH_PORT" >> "$GITHUB_OUTPUT"
+                break
+              fi
             fi
             echo "  Waiting... (${i}/60)"
             sleep 5
           done
 
-      - name: Wait for ComfyUI to respond
+      - name: Set up models and custom nodes via SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.RUNPOD_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          SSH_IP="${{ steps.ssh_info.outputs.ssh_ip }}"
+          SSH_PORT="${{ steps.ssh_info.outputs.ssh_port }}"
+
+          # Write SSH key
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/runpod_key
+          chmod 600 ~/.ssh/runpod_key
+
+          SSH_CMD="ssh -i ~/.ssh/runpod_key -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p $SSH_PORT root@$SSH_IP"
+
+          # Wait for SSH to be ready
+          echo "Waiting for SSH..."
+          for i in $(seq 1 30); do
+            if $SSH_CMD "echo ok" 2>/dev/null; then
+              echo "SSH connected!"
+              break
+            fi
+            echo "  SSH attempt ${i}/30..."
+            sleep 5
+          done
+
+          # Copy and run setup script
+          scp -i ~/.ssh/runpod_key -o StrictHostKeyChecking=no -P "$SSH_PORT" \
+            scripts/setup-pod.sh root@"$SSH_IP":/tmp/setup-pod.sh
+
+          $SSH_CMD "chmod +x /tmp/setup-pod.sh && /tmp/setup-pod.sh"
+
+      - name: Wait for ComfyUI with models loaded
         run: |
           PROXY_URL="${{ steps.create.outputs.proxy_url }}"
           echo "Polling $PROXY_URL/system_stats ..."
@@ -107,15 +159,15 @@ jobs:
           done
 
       - name: Update Railway COMFYUI_URL
-        if: ${{ secrets.RAILWAY_TOKEN != '' }}
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
-          npm install -g @railway/cli
+          npm install -g @railway/cli 2>&1 | tail -1
           railway vars set COMFYUI_URL=${{ steps.create.outputs.proxy_url }}
           echo "Railway updated with new ComfyUI URL"
 
       - name: Summary
+        if: always()
         run: |
           POD_ID="${{ steps.create.outputs.pod_id }}"
           PROXY_URL="${{ steps.create.outputs.proxy_url }}"
@@ -126,12 +178,3 @@ jobs:
           echo "| **Pod ID** | \`$POD_ID\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| **ComfyUI URL** | $PROXY_URL |" >> "$GITHUB_STEP_SUMMARY"
           echo "| **Web UI** | $PROXY_URL |" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          if [ -z "${{ secrets.RAILWAY_TOKEN }}" ]; then
-            echo "> **Manual step:** Update Railway with the new URL:" >> "$GITHUB_STEP_SUMMARY"
-            echo '> ```' >> "$GITHUB_STEP_SUMMARY"
-            echo "> railway vars set COMFYUI_URL=$PROXY_URL" >> "$GITHUB_STEP_SUMMARY"
-            echo '> ```' >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "Railway COMFYUI_URL updated automatically." >> "$GITHUB_STEP_SUMMARY"
-          fi
