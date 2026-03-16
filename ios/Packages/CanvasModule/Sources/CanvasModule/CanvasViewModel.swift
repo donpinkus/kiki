@@ -39,12 +39,12 @@ public final class CanvasViewModel {
         canvasView.tool = PKInkingTool(.pen, color: .black, width: 5)
     }
 
-    public func selectBrush() {
-        canvasView?.tool = PKInkingTool(.pen, color: .black, width: 5)
+    public func selectBrush(width: CGFloat = 5) {
+        canvasView?.tool = PKInkingTool(.pen, color: .black, width: width)
     }
 
-    public func selectEraser() {
-        canvasView?.tool = PKEraserTool(.bitmap)
+    public func selectEraser(width: CGFloat = 5) {
+        canvasView?.tool = PKEraserTool(.bitmap, width: width)
     }
 
     public func undo() {
