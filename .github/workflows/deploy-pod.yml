@@ -127,18 +127,18 @@ jobs:
           # Wait for SSH to be ready
           echo "Waiting for SSH..."
           SSH_CONNECTED=false
-          for i in $(seq 1 30); do
+          for i in $(seq 1 12); do
             if $SSH_CMD "echo ok" 2>/dev/null; then
               echo "SSH connected!"
               SSH_CONNECTED=true
               break
             fi
-            echo "  SSH attempt ${i}/30..."
+            echo "  SSH attempt ${i}/12..."
             sleep 5
           done
 
           if [ "$SSH_CONNECTED" != "true" ]; then
-            echo "::error::Failed to connect via SSH after 30 attempts"
+            echo "::error::Failed to connect via SSH after 1 minute"
             exit 1
           fi
 
