@@ -1,5 +1,4 @@
 import SwiftUI
-import PencilKit
 
 @MainActor
 @Observable
@@ -11,7 +10,11 @@ public final class CanvasViewModel {
     public private(set) var canRedo = false
     public private(set) var isEmpty = true
 
-    private weak var canvasView: PKCanvasView?
+    public var stabilizationAmount: CGFloat = 0.0 {
+        didSet { canvasView?.stabilizationAmount = stabilizationAmount }
+    }
+
+    private weak var canvasView: DrawingCanvasView?
 
     public let canvasChanges: AsyncStream<SketchSnapshot>
     private let changesContinuation: AsyncStream<SketchSnapshot>.Continuation
@@ -30,35 +33,35 @@ public final class CanvasViewModel {
 
     // MARK: - Public API
 
-    func attach(_ canvasView: PKCanvasView) {
+    func attach(_ canvasView: DrawingCanvasView) {
         self.canvasView = canvasView
-        canvasView.drawingPolicy = .anyInput
-        canvasView.overrideUserInterfaceStyle = .light
-        canvasView.backgroundColor = .white
-        canvasView.isOpaque = true
-        canvasView.tool = PKInkingTool(.pen, color: .black, width: 5)
+        canvasView.currentTool = ToolConfig(lineWidth: 5, color: .black, isEraser: false)
+        canvasView.stabilizationAmount = stabilizationAmount
+        canvasView.onDrawingChanged = { [weak self] in
+            self?.handleDrawingChanged()
+        }
     }
 
     public func selectBrush(width: CGFloat = 5) {
-        canvasView?.tool = PKInkingTool(.pen, color: .black, width: width)
+        canvasView?.currentTool = ToolConfig(lineWidth: width, color: .black, isEraser: false)
     }
 
     public func selectEraser(width: CGFloat = 5) {
-        canvasView?.tool = PKEraserTool(.bitmap, width: width)
+        canvasView?.currentTool = ToolConfig(lineWidth: width, color: .clear, isEraser: true)
     }
 
     public func undo() {
-        canvasView?.undoManager?.undo()
+        canvasView?.undo()
         updateState()
     }
 
     public func redo() {
-        canvasView?.undoManager?.redo()
+        canvasView?.redo()
         updateState()
     }
 
     public func clear() {
-        canvasView?.drawing = PKDrawing()
+        canvasView?.clear()
         updateState()
         changesContinuation.yield(SketchSnapshot(
             image: UIImage(),
@@ -68,44 +71,32 @@ public final class CanvasViewModel {
     }
 
     public func captureSnapshot() -> SketchSnapshot? {
-        guard let canvasView else { return nil }
-        let drawing = canvasView.drawing
-        guard !drawing.strokes.isEmpty else { return nil }
+        guard let canvasView, !canvasView.isEmpty else { return nil }
 
-        // Render the canvas view as-is (white background + strokes), rather than
-        // extracting the drawing separately which loses strokes during compositing.
-        let renderer = UIGraphicsImageRenderer(bounds: canvasView.bounds)
-        let image = renderer.image { _ in
-            canvasView.drawHierarchy(in: canvasView.bounds, afterScreenUpdates: true)
-        }
+        guard let image = canvasView.captureSnapshot() else { return nil }
 
         return SketchSnapshot(
             image: image,
-            strokeCount: drawing.strokes.count,
-            bounds: drawing.bounds
+            strokeCount: 0,
+            bounds: canvasView.bounds
         )
-    }
-
-    // MARK: - Internal
-
-    func handleDrawingChanged() {
-        updateState()
-        // Notify listeners that the canvas changed (lightweight — no snapshot capture).
-        // Actual snapshot capture is deferred to captureSnapshot() calls from the scheduler.
-        changesContinuation.yield(SketchSnapshot(
-            image: UIImage(),
-            strokeCount: canvasView?.drawing.strokes.count ?? 0,
-            bounds: canvasView?.drawing.bounds ?? .zero
-        ))
     }
 
     // MARK: - Private
 
+    private func handleDrawingChanged() {
+        updateState()
+        changesContinuation.yield(SketchSnapshot(
+            image: UIImage(),
+            strokeCount: 0,
+            bounds: canvasView?.bounds ?? .zero
+        ))
+    }
+
     private func updateState() {
         guard let canvasView else { return }
-        let drawing = canvasView.drawing
-        isEmpty = drawing.strokes.isEmpty
-        canUndo = canvasView.undoManager?.canUndo ?? false
-        canRedo = canvasView.undoManager?.canRedo ?? false
+        isEmpty = canvasView.isEmpty
+        canUndo = canvasView.canUndo
+        canRedo = canvasView.canRedo
     }
 }

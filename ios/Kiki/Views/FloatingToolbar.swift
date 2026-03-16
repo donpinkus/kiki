@@ -22,6 +22,24 @@ struct FloatingToolbar: View {
                 .monospacedDigit()
                 .frame(width: 20, alignment: .trailing)
 
+            if coordinator.currentTool == .brush {
+                Divider()
+                    .frame(height: 24)
+
+                Image(systemName: "hand.draw")
+                    .font(.system(size: 14))
+                    .foregroundStyle(.secondary)
+
+                Slider(value: $coordinator.stabilizationAmount, in: 0...1, step: 0.1)
+                    .frame(width: 100)
+
+                Text("\(Int(coordinator.stabilizationAmount * 100))%")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                    .frame(width: 32, alignment: .trailing)
+            }
+
             Divider()
                 .frame(height: 24)
 

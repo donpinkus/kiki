@@ -34,6 +34,9 @@ final class AppCoordinator {
     var toolSize: CGFloat = 5.0 {
         didSet { applyTool() }
     }
+    var stabilizationAmount: CGFloat = 0.0 {
+        didSet { canvasViewModel.stabilizationAmount = stabilizationAmount }
+    }
     var promptText = ""
     var selectedStylePreset: StylePreset = .photoreal
     var resultState: ResultState = .empty
