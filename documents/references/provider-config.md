@@ -76,54 +76,61 @@ interface ProviderAdapter {
 
 ## Operations — Starting a New Pod
 
-### 1. Create Pod on RunPod
-- **Template:** `runpod/comfyui:latest` (do NOT use `aitrepreneur/comfyui` — missing nodes, port conflicts)
-- **GPU:** H100 80GB SXM (or any GPU with 24GB+ VRAM for FP8)
-- **Network volume:** Attach the existing volume (EU: `eu-nl-1`, models in `/workspace/madapps/`; US: `us-ga-2`, models in `/workspace/ComfyUI/models/`)
+### One-Button Deploy (GitHub Action) — Preferred
 
-### 2. Set Up Pod (SSH in, ~2 min)
+Go to **Actions → Deploy RunPod → Run workflow** on GitHub (works from phone).
+
+The action automatically:
+1. Tries existing network volumes for GPU availability
+2. If none available, probes other datacenters and creates a new volume (capped at 10)
+3. Creates a pod with GPU fallback (H100 SXM → H100 PCIe → A100 80GB)
+4. SSHs in and runs `scripts/setup-pod.sh` (symlinks models, installs deps, restarts ComfyUI)
+5. On fresh volumes, downloads all models (~30GB, 5-10 min one-time)
+6. Updates Railway `COMFYUI_URL` via API
+7. Shows pod ID, URL, and datacenter in the Summary tab
+
+**Required GitHub secrets:**
+| Secret | Source |
+|---|---|
+| `RUNPOD_API_KEY` | RunPod Console → Settings → API Keys |
+| `RUNPOD_SSH_PRIVATE_KEY` | Contents of `~/.runpod/ssh/RunPod-Key-Go` |
+| `RAILWAY_TOKEN` | Railway Dashboard → Account → Tokens |
+
+**Cost notes:**
+- Each new network volume costs ~$2/month (30GB storage)
+- GPU pod costs $1.19-2.69/hr depending on GPU type
+- Railway backend costs ~$5/month
+
+### Manual Deploy (CLI)
+
+If the GitHub Action isn't available:
 ```bash
-# Get pod info
+# Option A: Use the create script
+RUNPOD_API_KEY=<key> ./scripts/create-pod.sh
+
+# Option B: Use runpodctl
 /Users/donald/bin/runpodctl pod list
 /Users/donald/bin/runpodctl ssh info <POD_ID>
-
-# SSH in
 ssh -i ~/.runpod/ssh/RunPod-Key-Go root@<IP> -p <PORT>
+# Then run setup-pod.sh on the pod
 
-# Symlink models (EU volume — models are in /workspace/madapps/)
-ln -sf /workspace/madapps/ComfyUI/models/diffusion_models/qwen_image_fp8_e4m3fn.safetensors /workspace/runpod-slim/ComfyUI/models/diffusion_models/
-ln -sf /workspace/madapps/ComfyUI/models/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors /workspace/runpod-slim/ComfyUI/models/text_encoders/
-ln -sf /workspace/madapps/ComfyUI/models/vae/qwen_image_vae.safetensors /workspace/runpod-slim/ComfyUI/models/vae/
-ln -sf /workspace/madapps/ComfyUI/models/controlnet/Qwen-Image-InstantX-ControlNet-Union.safetensors /workspace/runpod-slim/ComfyUI/models/controlnet/
-# Lightning LoRA should already be at /workspace/runpod-slim/ComfyUI/models/loras/
-
-# Install custom node pip deps (git repo persists on volume, but pip packages are in the container)
-cd /workspace/runpod-slim/ComfyUI/custom_nodes/comfyui_controlnet_aux
-/workspace/runpod-slim/ComfyUI/.venv/bin/pip install -r requirements.txt
-
-# Restart ComfyUI to pick up custom nodes
-pkill -f "python.*main.py"
-sleep 2
-cd /workspace/runpod-slim/ComfyUI
-source .venv/bin/activate
-nohup python main.py --listen 0.0.0.0 --port 8188 > /workspace/runpod-slim/comfyui.log 2>&1 &
-```
-
-### 3. Update Railway
-```bash
-# The proxy URL is always: https://<POD_ID>-8188.proxy.runpod.net
+# Update Railway
 railway vars set COMFYUI_URL=https://<POD_ID>-8188.proxy.runpod.net
-# Railway auto-redeploys (~30s). No code push needed.
 ```
 
-### 4. Verify
+### Verify
 ```bash
-# Check proxy
 curl https://<POD_ID>-8188.proxy.runpod.net/system_stats
-
-# Check end-to-end
 curl https://kiki-backend-production-eb81.up.railway.app/health
 ```
+
+### Network Volumes
+
+Volumes persist models across pod terminations. The action manages them automatically.
+- **Template:** `runpod/comfyui:latest` (do NOT use `aitrepreneur/comfyui`)
+- **GPU requirement:** 24GB+ VRAM (FP8 model uses ~21GB)
+- **Model storage:** `/workspace/kiki-models/` (new volumes) or legacy paths on older volumes
+- **Max volumes:** 10 (enforced by the GitHub Action)
 
 ## Updating the ComfyUI Workflow
 
