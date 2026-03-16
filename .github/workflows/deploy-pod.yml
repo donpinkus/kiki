@@ -2,15 +2,6 @@ name: Deploy RunPod
 
 on:
   workflow_dispatch:
-    inputs:
-      region:
-        description: 'Region (must match your network volume)'
-        required: true
-        default: 'eu'
-        type: choice
-        options:
-          - eu
-          - us
 
 jobs:
   deploy:
@@ -25,52 +16,52 @@ jobs:
           RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
         run: |
           set -euo pipefail
-
-          if [ "${{ inputs.region }}" = "eu" ]; then
-            DATACENTER="EU-NL-1"
-          else
-            DATACENTER="US-GA-2"
-          fi
-
           API_URL="https://api.runpod.io/graphql?api_key=${RUNPOD_API_KEY}"
 
-          # Find network volume
+          # Get all network volumes
           echo "::group::Finding network volumes"
           VOLUMES=$(curl -sf "$API_URL" \
             -H 'Content-Type: application/json' \
             -d '{"query": "query { myself { networkVolumes { id name dataCenterId size } } }"}')
-
-          VOLUME_ID=$(echo "$VOLUMES" | jq -r ".data.myself.networkVolumes[] | select(.dataCenterId == \"$DATACENTER\") | .id" | head -1)
-
-          if [ -z "$VOLUME_ID" ] || [ "$VOLUME_ID" = "null" ]; then
-            echo "::error::No network volume found in $DATACENTER"
-            echo "$VOLUMES" | jq '.data.myself.networkVolumes'
-            exit 1
-          fi
-          echo "Found volume: $VOLUME_ID"
+          echo "$VOLUMES" | jq '.data.myself.networkVolumes'
           echo "::endgroup::"
 
-          # Try GPU types in order of preference
-          for GPU in "NVIDIA H100 80GB HBM3" "NVIDIA H100 PCIe" "NVIDIA A100 80GB PCIe"; do
-            echo "::group::Trying $GPU"
-            RESPONSE=$(curl -sf "$API_URL" \
-              -H 'Content-Type: application/json' \
-              -d "{
-                \"query\": \"mutation { podFindAndDeployOnDemand(input: { name: \\\"kiki-comfyui\\\", imageName: \\\"runpod/comfyui:latest\\\", gpuTypeId: \\\"${GPU}\\\", gpuCount: 1, volumeInGb: 0, containerDiskInGb: 20, networkVolumeId: \\\"${VOLUME_ID}\\\", ports: \\\"8188/http,22/tcp\\\", dataCenterId: \\\"${DATACENTER}\\\", startSsh: true }) { id machineId imageName desiredStatus } }\"
-              }" || true)
+          # Try each datacenter that has a network volume, in order of preference
+          DATACENTERS=$(echo "$VOLUMES" | jq -r '.data.myself.networkVolumes[] | .dataCenterId' | sort -u)
 
-            POD_ID=$(echo "$RESPONSE" | jq -r '.data.podFindAndDeployOnDemand.id // empty')
-            echo "::endgroup::"
+          if [ -z "$DATACENTERS" ]; then
+            echo "::error::No network volumes found"
+            exit 1
+          fi
 
-            if [ -n "$POD_ID" ]; then
-              echo "Created pod $POD_ID with $GPU"
-              break
-            fi
-            echo "::warning::$GPU not available, trying next..."
+          GPU_TYPES=("NVIDIA H100 80GB HBM3" "NVIDIA H100 PCIe" "NVIDIA A100 80GB PCIe")
+          POD_ID=""
+
+          for DATACENTER in $DATACENTERS; do
+            VOLUME_ID=$(echo "$VOLUMES" | jq -r ".data.myself.networkVolumes[] | select(.dataCenterId == \"$DATACENTER\") | .id" | head -1)
+            echo "Trying datacenter $DATACENTER (volume: $VOLUME_ID)..."
+
+            for GPU in "${GPU_TYPES[@]}"; do
+              echo "::group::Trying $GPU in $DATACENTER"
+              RESPONSE=$(curl -sf "$API_URL" \
+                -H 'Content-Type: application/json' \
+                -d "{
+                  \"query\": \"mutation { podFindAndDeployOnDemand(input: { name: \\\"kiki-comfyui\\\", imageName: \\\"runpod/comfyui:latest\\\", gpuTypeId: \\\"${GPU}\\\", gpuCount: 1, volumeInGb: 0, containerDiskInGb: 20, networkVolumeId: \\\"${VOLUME_ID}\\\", ports: \\\"8188/http,22/tcp\\\", dataCenterId: \\\"${DATACENTER}\\\", startSsh: true }) { id machineId imageName desiredStatus } }\"
+                }" || true)
+
+              POD_ID=$(echo "$RESPONSE" | jq -r '.data.podFindAndDeployOnDemand.id // empty')
+              echo "::endgroup::"
+
+              if [ -n "$POD_ID" ]; then
+                echo "Created pod $POD_ID with $GPU in $DATACENTER"
+                break 2
+              fi
+              echo "::warning::$GPU not available in $DATACENTER"
+            done
           done
 
-          if [ -z "${POD_ID:-}" ]; then
-            echo "::error::No GPU available in $DATACENTER"
+          if [ -z "$POD_ID" ]; then
+            echo "::error::No GPU available in any datacenter with a network volume"
             exit 1
           fi
 
