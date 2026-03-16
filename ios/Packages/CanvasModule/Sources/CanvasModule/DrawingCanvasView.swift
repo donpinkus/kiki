@@ -127,6 +127,12 @@ public final class DrawingCanvasView: UIView {
         let coalescedTouches = event?.coalescedTouches(for: touch) ?? [touch]
         var dirtyBounds = CGRect.null
 
+        // Include the last existing point so the line segment between it
+        // and the first new point is fully covered by the dirty rect.
+        if let lastPoint = currentPoints.last {
+            dirtyBounds = dirtyRect(around: lastPoint.location)
+        }
+
         for coalescedTouch in coalescedTouches {
             let target = coalescedTouch.location(in: self)
 
