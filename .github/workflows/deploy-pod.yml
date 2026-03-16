@@ -78,6 +78,7 @@ jobs:
           API_URL="https://api.runpod.io/graphql?api_key=${RUNPOD_API_KEY}"
 
           echo "Waiting for pod to start..."
+          POD_READY=false
           for i in $(seq 1 60); do
             STATUS=$(curl -sf "$API_URL" \
               -H 'Content-Type: application/json' \
@@ -95,12 +96,18 @@ jobs:
                 echo "SSH: $SSH_IP:$SSH_PORT"
                 echo "ssh_ip=$SSH_IP" >> "$GITHUB_OUTPUT"
                 echo "ssh_port=$SSH_PORT" >> "$GITHUB_OUTPUT"
+                POD_READY=true
                 break
               fi
             fi
             echo "  Waiting... (${i}/60)"
             sleep 5
           done
+
+          if [ "$POD_READY" != "true" ]; then
+            echo "::error::Pod failed to start within 5 minutes"
+            exit 1
+          fi
 
       - name: Set up models and custom nodes via SSH
         env:
@@ -119,14 +126,21 @@ jobs:
 
           # Wait for SSH to be ready
           echo "Waiting for SSH..."
+          SSH_CONNECTED=false
           for i in $(seq 1 30); do
             if $SSH_CMD "echo ok" 2>/dev/null; then
               echo "SSH connected!"
+              SSH_CONNECTED=true
               break
             fi
             echo "  SSH attempt ${i}/30..."
             sleep 5
           done
+
+          if [ "$SSH_CONNECTED" != "true" ]; then
+            echo "::error::Failed to connect via SSH after 30 attempts"
+            exit 1
+          fi
 
           # Copy and run setup script
           scp -i ~/.ssh/runpod_key -o StrictHostKeyChecking=no -P "$SSH_PORT" \
@@ -153,9 +167,22 @@ jobs:
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
-          npm install -g @railway/cli 2>&1 | tail -1
-          railway vars set COMFYUI_URL=${{ steps.create.outputs.proxy_url }}
-          echo "Railway updated with new ComfyUI URL"
+          # Use Railway GraphQL API directly (CLI requires interactive linking)
+          # These IDs are from the kiki-backend Railway project
+          PROJECT_ID="c651eed9-55bb-464b-98f3-6d8369565740"
+          ENVIRONMENT_ID="4d26f403-75b1-4177-a198-282cccc311b4"
+          SERVICE_ID="bbf5c42d-7020-41a1-924b-a9c24ac49a88"
+          COMFYUI_URL="${{ steps.create.outputs.proxy_url }}"
+
+          RESPONSE=$(curl -sf "https://backboard.railway.app/graphql/v2" \
+            -H "Authorization: Bearer ${RAILWAY_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"query\": \"mutation { variableUpsert(input: { projectId: \\\"${PROJECT_ID}\\\", environmentId: \\\"${ENVIRONMENT_ID}\\\", serviceId: \\\"${SERVICE_ID}\\\", name: \\\"COMFYUI_URL\\\", value: \\\"${COMFYUI_URL}\\\" }) }\"
+            }")
+
+          echo "Railway API response: $RESPONSE"
+          echo "Railway COMFYUI_URL updated to $COMFYUI_URL"
 
       - name: Summary
         if: always()
