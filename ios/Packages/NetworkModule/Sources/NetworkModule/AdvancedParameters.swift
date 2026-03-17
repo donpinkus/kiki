@@ -19,6 +19,17 @@ public struct AdvancedParameters: Codable, Sendable, Equatable {
     /// Denoise strength (0–1, default 1.0).
     public var denoise: Double?
 
+    // MARK: - CodingKeys
+
+    private enum CodingKeys: String, CodingKey {
+        case controlNetStrength
+        case controlNetEndPercent
+        case cfgScale
+        case steps
+        case denoise
+        case seed
+    }
+
     /// Maximum seed value — JS MAX_SAFE_INTEGER (2^53-1).
     public static let maxSeed: UInt64 = 9_007_199_254_740_991
 

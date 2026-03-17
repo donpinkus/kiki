@@ -10,6 +10,17 @@ public struct GenerateRequest: Codable, Sendable {
     public let sketchImageBase64: String
     public let advancedParameters: AdvancedParameters?
 
+    private enum CodingKeys: String, CodingKey {
+        case sessionId
+        case requestId
+        case mode
+        case prompt
+        case stylePreset
+        case adherence
+        case sketchImageBase64
+        case advancedParameters
+    }
+
     public init(
         sessionId: UUID,
         requestId: UUID,
