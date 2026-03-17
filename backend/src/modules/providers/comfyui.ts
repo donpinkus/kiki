@@ -136,10 +136,10 @@ export class ComfyUIAdapter implements ProviderAdapter {
 
   private async uploadImage(baseUrl: string, base64: string): Promise<string> {
     const buffer = Buffer.from(base64, 'base64');
-    const blob = new Blob([buffer], { type: 'image/png' });
+    const blob = new Blob([buffer], { type: 'image/jpeg' });
 
     const formData = new FormData();
-    formData.append('image', blob, `sketch_${Date.now()}.png`);
+    formData.append('image', blob, `sketch_${Date.now()}.jpg`);
     formData.append('overwrite', 'true');
 
     const response = await fetch(`${baseUrl}/upload/image`, {
