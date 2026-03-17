@@ -49,6 +49,18 @@ public struct AdvancedParameters: Codable, Sendable, Equatable {
         self.seed = seed.map { min($0, Self.maxSeed) }
     }
 
+    // Custom decoder — auto-synthesized init(from:) bypasses didSet, so clamp seed here too.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        controlNetStrength = try container.decodeIfPresent(Double.self, forKey: .controlNetStrength)
+        controlNetEndPercent = try container.decodeIfPresent(Double.self, forKey: .controlNetEndPercent)
+        cfgScale = try container.decodeIfPresent(Double.self, forKey: .cfgScale)
+        steps = try container.decodeIfPresent(Int.self, forKey: .steps)
+        denoise = try container.decodeIfPresent(Double.self, forKey: .denoise)
+        let rawSeed = try container.decodeIfPresent(UInt64.self, forKey: .seed)
+        seed = rawSeed.map { min($0, Self.maxSeed) }
+    }
+
     /// True when all fields are nil (no overrides).
     public var isDefault: Bool {
         controlNetStrength == nil

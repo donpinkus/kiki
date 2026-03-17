@@ -143,7 +143,7 @@ export const generateRoute: FastifyPluginAsync = async (fastify) => {
           requestId,
           status: 'error',
           imageUrl: null,
-          seed: 0,
+          seed: null,
           provider: provider.name,
           latencyMs,
           mode,
