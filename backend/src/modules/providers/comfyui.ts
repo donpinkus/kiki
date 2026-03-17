@@ -60,13 +60,7 @@ export class ComfyUIAdapter implements ProviderAdapter {
       throw new ProviderError('comfyui', `CLIPTextEncode node ${POSITIVE_PROMPT_NODE_ID} not found in workflow`);
     }
 
-    // 5. Set seed (use client-provided seed or randomize)
-    if (workflow[KSAMPLER_NODE_ID]) {
-      workflow[KSAMPLER_NODE_ID].inputs['seed'] =
-        request.advancedParameters?.seed ?? Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
-    }
-
-    // 5b. Apply advanced parameters (overrides template defaults)
+    // 5. Apply seed + advanced parameters
     this.applyAdvancedParameters(workflow, request.advancedParameters);
 
     // 6. Submit to ComfyUI queue
@@ -122,20 +116,21 @@ export class ComfyUIAdapter implements ProviderAdapter {
     workflow: Workflow,
     params?: AdvancedParameters,
   ): void {
-    if (!params) return;
-
     const ksampler = workflow[KSAMPLER_NODE_ID];
     if (ksampler) {
-      if (params.cfgScale != null) ksampler.inputs['cfg'] = params.cfgScale;
-      if (params.steps != null) ksampler.inputs['steps'] = params.steps;
-      if (params.denoise != null) ksampler.inputs['denoise'] = params.denoise;
-      // seed is already handled in step 5
+      // Always randomize seed unless client provides one
+      ksampler.inputs['seed'] =
+        params?.seed ?? Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
+
+      if (params?.cfgScale != null) ksampler.inputs['cfg'] = params.cfgScale;
+      if (params?.steps != null) ksampler.inputs['steps'] = params.steps;
+      if (params?.denoise != null) ksampler.inputs['denoise'] = params.denoise;
     }
 
     const controlnet = workflow[CONTROLNET_APPLY_NODE_ID];
     if (controlnet) {
-      if (params.controlNetStrength != null) controlnet.inputs['strength'] = params.controlNetStrength;
-      if (params.controlNetEndPercent != null) controlnet.inputs['end_percent'] = params.controlNetEndPercent;
+      if (params?.controlNetStrength != null) controlnet.inputs['strength'] = params.controlNetStrength;
+      if (params?.controlNetEndPercent != null) controlnet.inputs['end_percent'] = params.controlNetEndPercent;
     }
   }
 

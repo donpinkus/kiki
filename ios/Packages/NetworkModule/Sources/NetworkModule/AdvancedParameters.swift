@@ -20,7 +20,14 @@ public struct AdvancedParameters: Codable, Sendable, Equatable {
     public var denoise: Double?
 
     /// Seed for reproducibility. Nil = random each generation.
-    public var seed: UInt64?
+    /// Capped to JS MAX_SAFE_INTEGER (2^53-1) to avoid precision loss in JSON.
+    public var seed: UInt64? {
+        didSet {
+            if let s = seed {
+                seed = min(s, 9_007_199_254_740_991)
+            }
+        }
+    }
 
     public init(
         controlNetStrength: Double? = nil,

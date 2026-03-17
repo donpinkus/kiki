@@ -51,7 +51,7 @@ const generateBodySchema = {
         cfgScale: { type: 'number', minimum: 0, maximum: 5, nullable: true },
         steps: { type: 'integer', minimum: 1, maximum: 20, nullable: true },
         denoise: { type: 'number', minimum: 0, maximum: 1, nullable: true },
-        seed: { type: 'integer', minimum: 0, nullable: true },
+        seed: { type: 'integer', minimum: 0, maximum: 9007199254740991, nullable: true },
       },
       additionalProperties: false,
     },

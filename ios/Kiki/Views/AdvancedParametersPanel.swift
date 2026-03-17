@@ -27,9 +27,10 @@ struct AdvancedParametersPanel: View {
         return Section("ControlNet") {
             parameterSlider(
                 label: "Strength",
-                value: Binding(
-                    get: { coordinator.advancedParameters.controlNetStrength ?? AdvancedParameters.defaultControlNetStrength },
-                    set: { coordinator.advancedParameters.controlNetStrength = $0 }
+                value: optionalBinding(
+                    get: { coordinator.advancedParameters.controlNetStrength },
+                    set: { coordinator.advancedParameters.controlNetStrength = $0 },
+                    default: AdvancedParameters.defaultControlNetStrength
                 ),
                 range: 0...1,
                 defaultValue: AdvancedParameters.defaultControlNetStrength
@@ -37,9 +38,10 @@ struct AdvancedParametersPanel: View {
 
             parameterSlider(
                 label: "End %",
-                value: Binding(
-                    get: { coordinator.advancedParameters.controlNetEndPercent ?? AdvancedParameters.defaultControlNetEndPercent },
-                    set: { coordinator.advancedParameters.controlNetEndPercent = $0 }
+                value: optionalBinding(
+                    get: { coordinator.advancedParameters.controlNetEndPercent },
+                    set: { coordinator.advancedParameters.controlNetEndPercent = $0 },
+                    default: AdvancedParameters.defaultControlNetEndPercent
                 ),
                 range: 0...1,
                 defaultValue: AdvancedParameters.defaultControlNetEndPercent
@@ -53,9 +55,10 @@ struct AdvancedParametersPanel: View {
         return Section("Sampler") {
             parameterSlider(
                 label: "CFG",
-                value: Binding(
-                    get: { coordinator.advancedParameters.cfgScale ?? AdvancedParameters.defaultCfgScale },
-                    set: { coordinator.advancedParameters.cfgScale = $0 }
+                value: optionalBinding(
+                    get: { coordinator.advancedParameters.cfgScale },
+                    set: { coordinator.advancedParameters.cfgScale = $0 },
+                    default: AdvancedParameters.defaultCfgScale
                 ),
                 range: 0...5,
                 defaultValue: AdvancedParameters.defaultCfgScale
@@ -65,9 +68,10 @@ struct AdvancedParametersPanel: View {
 
             parameterSlider(
                 label: "Denoise",
-                value: Binding(
-                    get: { coordinator.advancedParameters.denoise ?? AdvancedParameters.defaultDenoise },
-                    set: { coordinator.advancedParameters.denoise = $0 }
+                value: optionalBinding(
+                    get: { coordinator.advancedParameters.denoise },
+                    set: { coordinator.advancedParameters.denoise = $0 },
+                    default: AdvancedParameters.defaultDenoise
                 ),
                 range: 0...1,
                 defaultValue: AdvancedParameters.defaultDenoise
@@ -79,14 +83,17 @@ struct AdvancedParametersPanel: View {
         @Bindable var coordinator = coordinator
         let stepsValue = Binding<Double>(
             get: { Double(coordinator.advancedParameters.steps ?? AdvancedParameters.defaultSteps) },
-            set: { coordinator.advancedParameters.steps = Int($0) }
+            set: {
+                let intVal = Int($0.rounded())
+                coordinator.advancedParameters.steps = intVal == AdvancedParameters.defaultSteps ? nil : intVal
+            }
         )
 
         return HStack {
             Text("Steps")
             Spacer()
             Text("\(Int(stepsValue.wrappedValue))")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(coordinator.advancedParameters.steps != nil ? .primary : .secondary)
                 .monospacedDigit()
                 .frame(width: 30, alignment: .trailing)
             Slider(value: stepsValue, in: 1...20, step: 1)
@@ -139,17 +146,34 @@ struct AdvancedParametersPanel: View {
 
     // MARK: - Helpers
 
+    /// Creates a binding that stores nil when the value matches the default,
+    /// preventing parameters from appearing "dirty" when unchanged.
+    private func optionalBinding(
+        get: @escaping () -> Double?,
+        set: @escaping (Double?) -> Void,
+        default defaultValue: Double,
+        tolerance: Double = 0.005
+    ) -> Binding<Double> {
+        Binding(
+            get: { get() ?? defaultValue },
+            set: { newValue in
+                set(abs(newValue - defaultValue) < tolerance ? nil : newValue)
+            }
+        )
+    }
+
     private func parameterSlider(
         label: String,
         value: Binding<Double>,
         range: ClosedRange<Double>,
         defaultValue: Double
     ) -> some View {
-        HStack {
+        let isModified = abs(value.wrappedValue - defaultValue) >= 0.005
+        return HStack {
             Text(label)
             Spacer()
             Text(String(format: "%.2f", value.wrappedValue))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(isModified ? .primary : .secondary)
                 .monospacedDigit()
                 .frame(width: 44, alignment: .trailing)
             Slider(value: value, in: range)
