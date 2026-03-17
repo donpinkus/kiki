@@ -89,15 +89,20 @@ public final class CanvasViewModel {
         let drawing = canvasView.drawing
         guard !drawing.strokes.isEmpty else { return nil }
 
-        // Use PKDrawing.image() to capture the full drawing regardless of zoom/scroll state.
-        // drawHierarchy would only capture the visible viewport when zoomed in.
-        let fullBounds = CGRect(origin: .zero, size: canvasView.frame.size)
-        let renderer = UIGraphicsImageRenderer(bounds: fullBounds)
+        // Use bounds (not frame) — frame is undefined when an ancestor view has
+        // a non-identity CGAffineTransform (zoom/rotation on transformView).
+        // For PKCanvasView (a UIScrollView), bounds.origin == contentOffset,
+        // so this also captures the correct region if scrolled.
+        let captureRect = canvasView.bounds
+        let outputSize = captureRect.size
+        guard outputSize.width > 0, outputSize.height > 0 else { return nil }
+
+        let renderer = UIGraphicsImageRenderer(size: outputSize)
         let image = renderer.image { ctx in
             UIColor.white.setFill()
-            ctx.fill(fullBounds)
-            let drawingImage = drawing.image(from: fullBounds, scale: 1.0)
-            drawingImage.draw(in: fullBounds)
+            ctx.fill(CGRect(origin: .zero, size: outputSize))
+            let drawingImage = drawing.image(from: captureRect, scale: 1.0)
+            drawingImage.draw(in: CGRect(origin: .zero, size: outputSize))
         }
 
         return SketchSnapshot(
