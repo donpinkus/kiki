@@ -89,7 +89,6 @@ export const generateRoute: FastifyPluginAsync = async (fastify) => {
         mode,
         prompt = null,
         stylePreset,
-        adherence = 0.7,
         sketchImageBase64,
         advancedParameters,
       } = request.body;
@@ -106,8 +105,6 @@ export const generateRoute: FastifyPluginAsync = async (fastify) => {
         prompt: buildPrompt(prompt, stylePreset),
         negativePrompt: DEFAULT_NEGATIVE_PROMPT,
         mode,
-        adherence,
-        creativity: 0.85,
         width: mode === 'preview' ? 512 : 1024,
         height: mode === 'preview' ? 512 : 1024,
         advancedParameters: advancedParameters ?? undefined,

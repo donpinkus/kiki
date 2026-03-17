@@ -51,7 +51,7 @@ export const orchestratorPlugin: FastifyPluginAsync = async (fastify) => {
   fastify.decorate('orchestrator', {
     async generate(request: GenerateRequest): Promise<GenerateResult> {
       const startTime = Date.now();
-      const { sessionId, requestId, mode, prompt, stylePreset, adherence, sketchImageBase64 } = request;
+      const { sessionId, requestId, mode, prompt, stylePreset, sketchImageBase64 } = request;
 
       fastify.log.info(
         { sessionId, requestId, mode, stylePreset },
@@ -63,8 +63,6 @@ export const orchestratorPlugin: FastifyPluginAsync = async (fastify) => {
         prompt: buildPrompt(prompt, stylePreset),
         negativePrompt: DEFAULT_NEGATIVE_PROMPT,
         mode,
-        adherence,
-        creativity: 0.5,
         width: mode === 'preview' ? 512 : 1024,
         height: mode === 'preview' ? 512 : 1024,
       };

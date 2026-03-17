@@ -83,8 +83,8 @@ export class FalAdapter implements ProviderAdapter {
       enable_safety_checker: true,
     };
 
-    if (request.seed !== undefined) {
-      input['seed'] = request.seed;
+    if (request.advancedParameters?.seed != null) {
+      input['seed'] = request.advancedParameters.seed;
     }
 
     const url = `${FAL_BASE}/${FAL_MODEL}`;
