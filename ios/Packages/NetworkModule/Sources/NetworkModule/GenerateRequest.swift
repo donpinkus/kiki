@@ -8,6 +8,7 @@ public struct GenerateRequest: Codable, Sendable {
     public let stylePreset: String
     public let adherence: Double
     public let sketchImageBase64: String
+    public let advancedParameters: AdvancedParameters?
 
     public init(
         sessionId: UUID,
@@ -16,7 +17,8 @@ public struct GenerateRequest: Codable, Sendable {
         prompt: String? = nil,
         stylePreset: String,
         adherence: Double = 0.7,
-        sketchImageBase64: String
+        sketchImageBase64: String,
+        advancedParameters: AdvancedParameters? = nil
     ) {
         self.sessionId = sessionId
         self.requestId = requestId
@@ -25,5 +27,6 @@ public struct GenerateRequest: Codable, Sendable {
         self.stylePreset = stylePreset
         self.adherence = adherence
         self.sketchImageBase64 = sketchImageBase64
+        self.advancedParameters = advancedParameters
     }
 }

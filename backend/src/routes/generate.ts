@@ -42,6 +42,19 @@ const generateBodySchema = {
     stylePreset: { type: 'string', enum: [...STYLE_PRESETS] },
     adherence: { type: 'number', minimum: 0, maximum: 1, default: 0.7 },
     sketchImageBase64: { type: 'string', minLength: 1 },
+    advancedParameters: {
+      type: 'object',
+      nullable: true,
+      properties: {
+        controlNetStrength: { type: 'number', minimum: 0, maximum: 1, nullable: true },
+        controlNetEndPercent: { type: 'number', minimum: 0, maximum: 1, nullable: true },
+        cfgScale: { type: 'number', minimum: 0, maximum: 5, nullable: true },
+        steps: { type: 'integer', minimum: 1, maximum: 20, nullable: true },
+        denoise: { type: 'number', minimum: 0, maximum: 1, nullable: true },
+        seed: { type: 'integer', minimum: 0, nullable: true },
+      },
+      additionalProperties: false,
+    },
   },
   additionalProperties: false,
 } as const;
@@ -54,6 +67,14 @@ interface GenerateBody {
   stylePreset: (typeof STYLE_PRESETS)[number];
   adherence?: number;
   sketchImageBase64: string;
+  advancedParameters?: {
+    controlNetStrength?: number | null;
+    controlNetEndPercent?: number | null;
+    cfgScale?: number | null;
+    steps?: number | null;
+    denoise?: number | null;
+    seed?: number | null;
+  } | null;
 }
 
 const provider: ProviderAdapter = new ComfyUIAdapter();
@@ -70,6 +91,7 @@ export const generateRoute: FastifyPluginAsync = async (fastify) => {
         stylePreset,
         adherence = 0.7,
         sketchImageBase64,
+        advancedParameters,
       } = request.body;
 
       const startTime = Date.now();
@@ -88,6 +110,7 @@ export const generateRoute: FastifyPluginAsync = async (fastify) => {
         creativity: 0.85,
         width: mode === 'preview' ? 512 : 1024,
         height: mode === 'preview' ? 512 : 1024,
+        advancedParameters: advancedParameters ?? undefined,
       };
 
       try {

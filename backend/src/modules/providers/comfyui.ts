@@ -1,6 +1,7 @@
 import { config } from '../../config/index.js';
 import { ProviderError } from '../../errors.js';
 import type {
+  AdvancedParameters,
   ProviderAdapter,
   ProviderRequest,
   ProviderResponse,
@@ -12,6 +13,7 @@ const LOAD_IMAGE_NODE_ID = '71';
 const POSITIVE_PROMPT_NODE_ID = '111:6';
 const SAVE_IMAGE_NODE_ID = '60';
 const KSAMPLER_NODE_ID = '111:3';
+const CONTROLNET_APPLY_NODE_ID = '111:85';
 
 const POLL_INTERVAL_MS = 2000;
 const POLL_TIMEOUT_MS = 120_000;
@@ -58,10 +60,14 @@ export class ComfyUIAdapter implements ProviderAdapter {
       throw new ProviderError('comfyui', `CLIPTextEncode node ${POSITIVE_PROMPT_NODE_ID} not found in workflow`);
     }
 
-    // 5. Randomize the seed so each generation produces a different result
+    // 5. Set seed (use client-provided seed or randomize)
     if (workflow[KSAMPLER_NODE_ID]) {
-      workflow[KSAMPLER_NODE_ID].inputs['seed'] = Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
+      workflow[KSAMPLER_NODE_ID].inputs['seed'] =
+        request.advancedParameters?.seed ?? Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
     }
+
+    // 5b. Apply advanced parameters (overrides template defaults)
+    this.applyAdvancedParameters(workflow, request.advancedParameters);
 
     // 6. Submit to ComfyUI queue
     const promptId = await this.submitPrompt(baseUrl, workflow);
@@ -74,7 +80,7 @@ export class ComfyUIAdapter implements ProviderAdapter {
 
     return {
       imageUrl,
-      seed: 0,
+      seed: Number(workflow[KSAMPLER_NODE_ID]?.inputs['seed'] ?? 0),
       latencyMs: Date.now() - startTime,
       jobId: promptId,
     };
@@ -109,6 +115,27 @@ export class ComfyUIAdapter implements ProviderAdapter {
       return response.ok;
     } catch {
       return false;
+    }
+  }
+
+  private applyAdvancedParameters(
+    workflow: Workflow,
+    params?: AdvancedParameters,
+  ): void {
+    if (!params) return;
+
+    const ksampler = workflow[KSAMPLER_NODE_ID];
+    if (ksampler) {
+      if (params.cfgScale != null) ksampler.inputs['cfg'] = params.cfgScale;
+      if (params.steps != null) ksampler.inputs['steps'] = params.steps;
+      if (params.denoise != null) ksampler.inputs['denoise'] = params.denoise;
+      // seed is already handled in step 5
+    }
+
+    const controlnet = workflow[CONTROLNET_APPLY_NODE_ID];
+    if (controlnet) {
+      if (params.controlNetStrength != null) controlnet.inputs['strength'] = params.controlNetStrength;
+      if (params.controlNetEndPercent != null) controlnet.inputs['end_percent'] = params.controlNetEndPercent;
     }
   }
 

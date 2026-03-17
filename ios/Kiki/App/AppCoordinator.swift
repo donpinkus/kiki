@@ -38,6 +38,8 @@ final class AppCoordinator {
     var selectedStylePreset: StylePreset = .photoreal
     var resultState: ResultState = .empty
     var dividerPosition: CGFloat = 0.55
+    var advancedParameters = AdvancedParameters()
+    var isSeedLocked = false
 
     // MARK: - Modules
 
@@ -134,7 +136,8 @@ final class AppCoordinator {
                 prompt: promptText.isEmpty ? nil : promptText,
                 stylePreset: selectedStylePreset.apiKey,
                 adherence: 0.7,
-                sketchImageBase64: base64
+                sketchImageBase64: base64,
+                advancedParameters: advancedParameters.isDefault ? nil : advancedParameters
             )
 
             do {
@@ -150,6 +153,10 @@ final class AppCoordinator {
                 if response.status == .completed, let imageURL = response.imageURL {
                     lastSuccessfulImageURL = imageURL
                     resultState = .preview(imageURL: imageURL)
+                    // Store returned seed when locked so user can see/reuse it
+                    if isSeedLocked, let responseSeed = response.seed {
+                        advancedParameters.seed = responseSeed
+                    }
                 } else {
                     resultState = .error(
                         message: "Generation failed",

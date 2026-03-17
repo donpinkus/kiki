@@ -2,6 +2,7 @@ import SwiftUI
 
 struct FloatingToolbar: View {
     @Environment(AppCoordinator.self) private var coordinator
+    @State private var showAdvancedParameters = false
 
     var body: some View {
         @Bindable var coordinator = coordinator
@@ -54,6 +55,22 @@ struct FloatingToolbar: View {
                     action: coordinator.canvasViewModel.resetViewTransform,
                     disabled: false
                 )
+            }
+
+            Divider()
+                .frame(height: 24)
+
+            Button {
+                showAdvancedParameters = true
+            } label: {
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(coordinator.advancedParameters.isDefault ? .secondary : Color.accentColor)
+                    .frame(width: 36, height: 36)
+            }
+            .popover(isPresented: $showAdvancedParameters) {
+                AdvancedParametersPanel()
+                    .frame(width: 400, height: 500)
             }
         }
         .padding(.horizontal, 16)

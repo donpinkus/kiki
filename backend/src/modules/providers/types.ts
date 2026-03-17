@@ -1,3 +1,12 @@
+export interface AdvancedParameters {
+  controlNetStrength?: number | null;
+  controlNetEndPercent?: number | null;
+  cfgScale?: number | null;
+  steps?: number | null;
+  denoise?: number | null;
+  seed?: number | null;
+}
+
 export interface ProviderRequest {
   sketchImageBase64: string;
   prompt: string;
@@ -8,6 +17,7 @@ export interface ProviderRequest {
   seed?: number;
   width: number;
   height: number;
+  advancedParameters?: AdvancedParameters;
 }
 
 export interface ProviderResponse {
