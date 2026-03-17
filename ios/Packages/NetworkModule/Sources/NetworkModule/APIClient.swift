@@ -1,4 +1,7 @@
 import Foundation
+import os
+
+private let logger = Logger(subsystem: "com.kiki.app", category: "Network")
 
 /// REST client for communicating with the Kiki backend API.
 public final class APIClient: Sendable {
@@ -131,8 +134,8 @@ public final class APIClient: Sendable {
             let decoder = JSONDecoder()
             decoded = try decoder.decode(APIResponse.self, from: data)
         } catch {
-            print("[APIClient] Decoding failed: \(error)")
-            print("[APIClient] Raw response: \(String(data: data, encoding: .utf8) ?? "non-utf8")")
+            logger.error("Decoding failed: \(error.localizedDescription, privacy: .public)")
+            logger.debug("Raw response: \(String(data: data, encoding: .utf8) ?? "non-utf8")")
             throw GenerationError.decodingError
         }
 

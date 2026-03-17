@@ -1,8 +1,11 @@
 import SwiftUI
+import os
 import CanvasModule
 import PreprocessorModule
 import NetworkModule
 import ResultModule
+
+private let logger = Logger(subsystem: "com.kiki.app", category: "Generation")
 
 enum DrawingTool: String, CaseIterable {
     case brush
@@ -97,38 +100,35 @@ final class AppCoordinator {
             // 1. Capture snapshot
             guard let snapshot = canvasViewModel.captureSnapshot(),
                   !snapshot.isEmpty else {
-                print("[Generate] Snapshot capture failed or empty")
+                logger.warning("Snapshot capture failed or empty")
                 return
             }
             let img = snapshot.image
-            print("[Generate] Snapshot captured: \(snapshot.strokeCount) strokes, size: \(img.size), scale: \(img.scale), cgImage: \(img.cgImage != nil)")
-            if let cg = img.cgImage {
-                print("[Generate] CGImage: \(cg.width)x\(cg.height), bpc: \(cg.bitsPerComponent), alpha: \(cg.alphaInfo.rawValue)")
-            }
+            logger.debug("Snapshot captured: \(snapshot.strokeCount) strokes, size: \(img.size.width, privacy: .public)x\(img.size.height, privacy: .public)")
 
             // Show loading state
             resultState = .generating(previousImageURL: lastSuccessfulImageURL)
 
             // Convert directly to JPEG (canvas capture already includes white background)
             guard let jpegData = img.jpegData(compressionQuality: 0.85) else {
-                print("[Generate] JPEG conversion failed")
+                logger.error("JPEG conversion failed")
                 resultState = .error(
                     message: "Failed to process sketch",
                     previousImageURL: lastSuccessfulImageURL
                 )
                 return
             }
-            print("[Generate] JPEG: \(jpegData.count) bytes, image: \(img.size)")
+            logger.debug("JPEG: \(jpegData.count, privacy: .public) bytes")
 
             // Check for cancellation / staleness
             guard !Task.isCancelled, currentRequestId == requestId else {
-                print("[Generate] Cancelled or stale after preprocess")
+                logger.debug("Cancelled or stale after preprocess")
                 return
             }
 
             // 3. Send to backend
             let base64 = jpegData.base64EncodedString()
-            print("[Generate] Sending to backend: base64 length \(base64.count), style: \(selectedStylePreset.apiKey)")
+            logger.info("Sending generation request, style: \(selectedStylePreset.apiKey, privacy: .public)")
             let request = GenerateRequest(
                 sessionId: sessionId,
                 requestId: requestId,
@@ -142,11 +142,11 @@ final class AppCoordinator {
 
             do {
                 let response = try await apiClient.generate(request)
-                print("[Generate] Response: status=\(response.status), imageURL=\(response.imageURL?.absoluteString ?? "nil")")
+                logger.info("Response: status=\(String(describing: response.status), privacy: .public)")
 
                 // Staleness check — only update if this is still the latest request
                 guard !Task.isCancelled, currentRequestId == requestId else {
-                    print("[Generate] Cancelled or stale after response")
+                    logger.debug("Cancelled or stale after response")
                     return
                 }
 
@@ -164,16 +164,16 @@ final class AppCoordinator {
                     )
                 }
             } catch is CancellationError {
-                print("[Generate] Cancelled")
+                logger.debug("Cancelled")
             } catch let error as GenerationError {
-                print("[Generate] GenerationError: \(error)")
+                logger.error("GenerationError: \(error.userMessage, privacy: .public)")
                 guard !Task.isCancelled, currentRequestId == requestId else { return }
                 resultState = .error(
                     message: error.userMessage,
                     previousImageURL: lastSuccessfulImageURL
                 )
             } catch {
-                print("[Generate] Error: \(error)")
+                logger.error("Unexpected error: \(error.localizedDescription, privacy: .public)")
                 guard !Task.isCancelled, currentRequestId == requestId else { return }
                 resultState = .error(
                     message: "Something went wrong",
@@ -183,7 +183,7 @@ final class AppCoordinator {
 
             // Auto-retrigger if canvas changed during generation
             if isCanvasDirty, !Task.isCancelled {
-                print("[Generate] Canvas dirty, auto-retriggering")
+                logger.debug("Canvas dirty, auto-retriggering")
                 generate()
             }
         }
