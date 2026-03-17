@@ -42,7 +42,7 @@ struct ContentView: View {
             Button {
                 coordinator.generate()
             } label: {
-                Image(systemName: coordinator.isGenerating ? "hourglass" : "arrow.trianglehead.2.clockwise")
+                Image(systemName: "apple.intelligence")
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(.white)
                     .frame(width: 36, height: 36)
