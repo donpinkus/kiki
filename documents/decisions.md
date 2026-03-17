@@ -16,15 +16,16 @@ Record implementation decisions here as they are made. Newest first. This preven
 
 ### 2026-03-17 — Canvas zoom and rotation via RotatableCanvasContainer
 **Context:** Users need to zoom in for detail work and rotate the canvas to draw at comfortable angles.
-**Decision:** Wrap PKCanvasView in a RotatableCanvasContainer UIView. Zoom is handled by PKCanvasView's built-in UIScrollView (1x–5x). Rotation is handled by a UIRotationGestureRecognizer on the container, applying a CGAffineTransform to the parent while PKCanvasView's internal zoom transforms stay independent. UIKit automatically translates touch coordinates through the parent's transform, so drawing works at any rotation/zoom.
+**Decision:** Wrap PKCanvasView in a RotatableCanvasContainer with a three-level view hierarchy: container (SwiftUI-managed, no transform) → transformView (receives combined CGAffineTransform for scale + rotation) → PKCanvasView (drawing only). Zoom and rotation are handled by UIPinchGestureRecognizer and UIRotationGestureRecognizer on the container, applied as a single combined transform on the intermediate view. UIKit automatically translates touch coordinates through the parent's transform, so drawing works at any scale/rotation.
 **Alternatives considered:**
 - SwiftUI `.rotationEffect()` — breaks touch coordinate mapping for UIViewRepresentable
-- Direct transform on PKCanvasView — conflicts with UIScrollView's internal zoom transforms
+- Transform on the UIViewRepresentable root view — SwiftUI re-layouts fight the transform, squishing the canvas
+- PKCanvasView's built-in UIScrollView zoom — zooms content inside a fixed frame with scroll bars, not the whole canvas visually
 - CALayer transform3D — undocumented interaction with PencilKit touch handling
 **Consequences:**
-- Snapshot capture switched from `drawHierarchy` to `PKDrawing.image(from:scale:)` to capture full drawing regardless of zoom/scroll state
+- Snapshot capture switched from `drawHierarchy` to `PKDrawing.image(from:scale:)` to capture full drawing regardless of visual transform
 - New file: `RotatableCanvasContainer.swift` in CanvasModule
-- Rotation snaps to 90° increments when released within ~8° threshold
+- Rotation snaps to 90° increments when released within ~8° threshold; scale clamped to 0.5x–5x
 - Reset button appears in toolbar when canvas is zoomed or rotated
 
 ---

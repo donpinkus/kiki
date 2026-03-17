@@ -27,7 +27,7 @@ public struct CanvasView: UIViewRepresentable {
         Coordinator(viewModel: viewModel)
     }
 
-    public final class Coordinator: NSObject, PKCanvasViewDelegate, UIScrollViewDelegate {
+    public final class Coordinator: NSObject, PKCanvasViewDelegate {
         private let viewModel: CanvasViewModel
 
         init(viewModel: CanvasViewModel) {
@@ -37,12 +37,6 @@ public struct CanvasView: UIViewRepresentable {
         public func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
             Task { @MainActor in
                 viewModel.handleDrawingChanged()
-            }
-        }
-
-        public func scrollViewDidZoom(_ scrollView: UIScrollView) {
-            Task { @MainActor in
-                viewModel.handleTransformChanged()
             }
         }
     }

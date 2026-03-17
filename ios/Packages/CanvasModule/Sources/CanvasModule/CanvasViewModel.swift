@@ -10,11 +10,11 @@ public final class CanvasViewModel {
     public private(set) var canUndo = false
     public private(set) var canRedo = false
     public private(set) var isEmpty = true
-    public private(set) var zoomScale: CGFloat = 1.0
+    public private(set) var scale: CGFloat = 1.0
     public private(set) var rotation: CGFloat = 0
 
     public var isDefaultTransform: Bool {
-        abs(rotation) < 0.01 && abs(zoomScale - 1.0) < 0.01
+        abs(rotation) < 0.01 && abs(scale - 1.0) < 0.01
     }
 
     private weak var canvasView: PKCanvasView?
@@ -45,9 +45,8 @@ public final class CanvasViewModel {
         canvasView.backgroundColor = .white
         canvasView.isOpaque = true
         canvasView.tool = PKInkingTool(.pen, color: .black, width: 5)
-        canvasView.minimumZoomScale = 1.0
-        canvasView.maximumZoomScale = 5.0
-        canvasView.bouncesZoom = true
+        canvasView.showsHorizontalScrollIndicator = false
+        canvasView.showsVerticalScrollIndicator = false
     }
 
     public func selectBrush(width: CGFloat = 5) {
@@ -81,7 +80,7 @@ public final class CanvasViewModel {
 
     public func resetViewTransform() {
         container?.resetTransform()
-        zoomScale = 1.0
+        scale = 1.0
         rotation = 0
     }
 
@@ -122,7 +121,7 @@ public final class CanvasViewModel {
     }
 
     func handleTransformChanged() {
-        zoomScale = canvasView?.zoomScale ?? 1.0
+        scale = container?.scale ?? 1.0
         rotation = container?.rotation ?? 0
     }
 
