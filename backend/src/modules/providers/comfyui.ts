@@ -12,6 +12,7 @@ const LOAD_IMAGE_NODE_ID = '71';
 const POSITIVE_PROMPT_NODE_ID = '111:6';
 const SAVE_IMAGE_NODE_ID = '60';
 const KSAMPLER_NODE_ID = '111:3';
+const LINEART_PREVIEW_NODE_ID = '117';
 
 const POLL_INTERVAL_MS = 2000;
 const POLL_TIMEOUT_MS = 120_000;
@@ -67,13 +68,28 @@ export class ComfyUIAdapter implements ProviderAdapter {
     const promptId = await this.submitPrompt(baseUrl, workflow);
 
     // 7. Poll for completion
-    const output = await this.pollForResult(baseUrl, promptId);
+    const outputs = await this.pollForResult(baseUrl, promptId);
 
-    // 8. Construct image URL
-    const imageUrl = `${baseUrl}/view?filename=${encodeURIComponent(output.filename)}&subfolder=${encodeURIComponent(output.subfolder)}&type=${encodeURIComponent(output.type)}`;
+    // 8. Construct image URLs
+    const saveOutput = outputs[SAVE_IMAGE_NODE_ID]?.images?.[0];
+    if (!saveOutput) {
+      throw new ProviderError('comfyui', 'Generation completed but no images in SaveImage output');
+    }
+    const imageUrl = `${baseUrl}/view?filename=${encodeURIComponent(saveOutput.filename)}&subfolder=${encodeURIComponent(saveOutput.subfolder)}&type=${encodeURIComponent(saveOutput.type)}`;
+
+    // Input sketch URL
+    const inputImageUrl = `${baseUrl}/view?filename=${encodeURIComponent(sketchFilename)}&type=input`;
+
+    // Lineart preview URL (node 117)
+    const lineartOutput = outputs[LINEART_PREVIEW_NODE_ID]?.images?.[0];
+    const lineartImageUrl = lineartOutput
+      ? `${baseUrl}/view?filename=${encodeURIComponent(lineartOutput.filename)}&subfolder=${encodeURIComponent(lineartOutput.subfolder)}&type=${encodeURIComponent(lineartOutput.type)}`
+      : undefined;
 
     return {
       imageUrl,
+      inputImageUrl,
+      lineartImageUrl,
       seed: 0,
       latencyMs: Date.now() - startTime,
       jobId: promptId,
@@ -156,7 +172,7 @@ export class ComfyUIAdapter implements ProviderAdapter {
   private async pollForResult(
     baseUrl: string,
     promptId: string,
-  ): Promise<{ filename: string; subfolder: string; type: string }> {
+  ): Promise<Record<string, { images?: Array<{ filename: string; subfolder: string; type: string }> }>> {
     const deadline = Date.now() + POLL_TIMEOUT_MS;
 
     while (Date.now() < deadline) {
@@ -173,16 +189,16 @@ export class ComfyUIAdapter implements ProviderAdapter {
 
         const entry = history[promptId];
         if (entry?.outputs) {
-          // Find the SaveImage node output
+          // Verify at least the SaveImage node produced output
           const saveOutput = entry.outputs[SAVE_IMAGE_NODE_ID];
           if (saveOutput?.images?.[0]) {
-            return saveOutput.images[0];
+            return entry.outputs;
           }
 
-          // Fallback: find any node with images output
+          // Fallback: check if any node has images
           for (const nodeOutput of Object.values(entry.outputs)) {
             if (nodeOutput.images?.[0]) {
-              return nodeOutput.images[0];
+              return entry.outputs;
             }
           }
 

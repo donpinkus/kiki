@@ -120,6 +120,8 @@ public final class APIClient: Sendable {
             let requestId: String
             let status: String
             let imageUrl: String?
+            let inputImageUrl: String?
+            let lineartImageUrl: String?
             let seed: UInt64?
             let provider: String?
             let latencyMs: Int?
@@ -160,10 +162,15 @@ public final class APIClient: Sendable {
             imageURL = nil
         }
 
+        let inputImageURL = decoded.inputImageUrl.flatMap { URL(string: $0) }
+        let lineartImageURL = decoded.lineartImageUrl.flatMap { URL(string: $0) }
+
         return GenerateResponse(
             requestId: requestUUID,
             status: status,
             imageURL: imageURL,
+            inputImageURL: inputImageURL,
+            lineartImageURL: lineartImageURL,
             seed: decoded.seed,
             provider: decoded.provider,
             latencyMs: decoded.latencyMs,

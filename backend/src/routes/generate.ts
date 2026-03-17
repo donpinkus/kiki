@@ -103,6 +103,8 @@ export const generateRoute: FastifyPluginAsync = async (fastify) => {
           requestId,
           status: 'completed',
           imageUrl: result.imageUrl,
+          inputImageUrl: result.inputImageUrl ?? null,
+          lineartImageUrl: result.lineartImageUrl ?? null,
           seed: result.seed,
           provider: provider.name,
           latencyMs,

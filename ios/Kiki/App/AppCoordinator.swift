@@ -139,7 +139,7 @@ final class AppCoordinator {
 
             do {
                 let response = try await apiClient.generate(request)
-                print("[Generate] Response: status=\(response.status), imageURL=\(response.imageURL?.absoluteString ?? "nil")")
+                print("[Generate] Response: status=\(response.status), imageURL=\(response.imageURL?.absoluteString ?? "nil"), inputImageURL=\(response.inputImageURL?.absoluteString ?? "nil"), lineartImageURL=\(response.lineartImageURL?.absoluteString ?? "nil")")
 
                 // Staleness check — only update if this is still the latest request
                 guard !Task.isCancelled, currentRequestId == requestId else {
