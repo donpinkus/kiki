@@ -118,6 +118,7 @@ final class AppCoordinator {
             }
             print("[Generate] JPEG: \(jpegData.count) bytes, image: \(img.size)")
 
+
             // Check for cancellation / staleness
             guard !Task.isCancelled, currentRequestId == requestId else {
                 print("[Generate] Cancelled or stale after preprocess")

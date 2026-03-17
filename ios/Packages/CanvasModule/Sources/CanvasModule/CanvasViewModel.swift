@@ -89,20 +89,15 @@ public final class CanvasViewModel {
         let drawing = canvasView.drawing
         guard !drawing.strokes.isEmpty else { return nil }
 
-        // Use bounds (not frame) — frame is undefined when an ancestor view has
-        // a non-identity CGAffineTransform (zoom/rotation on transformView).
-        // For PKCanvasView (a UIScrollView), bounds.origin == contentOffset,
-        // so this also captures the correct region if scrolled.
-        let captureRect = canvasView.bounds
-        let outputSize = captureRect.size
+        // IMPORTANT: Use drawHierarchy to capture the live view content.
+        // Do NOT use PKDrawing.image(from:scale:) — it returns a blank image
+        // when the canvas is inside a transformed parent (RotatableCanvasContainer).
+        let outputSize = canvasView.bounds.size
         guard outputSize.width > 0, outputSize.height > 0 else { return nil }
 
         let renderer = UIGraphicsImageRenderer(size: outputSize)
-        let image = renderer.image { ctx in
-            UIColor.white.setFill()
-            ctx.fill(CGRect(origin: .zero, size: outputSize))
-            let drawingImage = drawing.image(from: captureRect, scale: 1.0)
-            drawingImage.draw(in: CGRect(origin: .zero, size: outputSize))
+        let image = renderer.image { _ in
+            canvasView.drawHierarchy(in: CGRect(origin: .zero, size: outputSize), afterScreenUpdates: true)
         }
 
         return SketchSnapshot(
