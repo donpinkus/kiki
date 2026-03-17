@@ -19,12 +19,15 @@ public struct AdvancedParameters: Codable, Sendable, Equatable {
     /// Denoise strength (0–1, default 1.0).
     public var denoise: Double?
 
+    /// Maximum seed value — JS MAX_SAFE_INTEGER (2^53-1).
+    public static let maxSeed: UInt64 = 9_007_199_254_740_991
+
     /// Seed for reproducibility. Nil = random each generation.
-    /// Capped to JS MAX_SAFE_INTEGER (2^53-1) to avoid precision loss in JSON.
+    /// Capped to `maxSeed` to avoid precision loss in JSON.
     public var seed: UInt64? {
         didSet {
-            if let s = seed {
-                seed = min(s, 9_007_199_254_740_991)
+            if let s = seed, s > Self.maxSeed {
+                seed = Self.maxSeed
             }
         }
     }
@@ -42,7 +45,8 @@ public struct AdvancedParameters: Codable, Sendable, Equatable {
         self.cfgScale = cfgScale
         self.steps = steps
         self.denoise = denoise
-        self.seed = seed
+        // didSet not called during init, so clamp explicitly
+        self.seed = seed.map { min($0, Self.maxSeed) }
     }
 
     /// True when all fields are nil (no overrides).

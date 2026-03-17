@@ -74,7 +74,7 @@ export class ComfyUIAdapter implements ProviderAdapter {
 
     return {
       imageUrl,
-      seed: Number(workflow[KSAMPLER_NODE_ID]?.inputs['seed'] ?? 0),
+      seed: Math.min(Number(workflow[KSAMPLER_NODE_ID]?.inputs['seed'] ?? 0), Number.MAX_SAFE_INTEGER),
       latencyMs: Date.now() - startTime,
       jobId: promptId,
     };
