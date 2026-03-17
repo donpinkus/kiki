@@ -46,6 +46,7 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
         // canvasView fills transformView
         canvasView.frame = transformView.bounds
         canvasView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        canvasView.isScrollEnabled = false // Zoom/rotation handled by container; prevent contentOffset drift
         transformView.addSubview(canvasView)
 
         let rotationGesture = UIRotationGestureRecognizer(target: self, action: #selector(handleRotation(_:)))
