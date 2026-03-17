@@ -4,6 +4,10 @@ import NetworkModule
 struct AdvancedParametersPanel: View {
     @Environment(AppCoordinator.self) private var coordinator
 
+    /// Tolerance for floating-point comparison to default values.
+    /// Values within this threshold are treated as "default" (stored as nil).
+    private static let defaultTolerance: Double = 0.005
+
     var body: some View {
         @Bindable var coordinator = coordinator
 
@@ -81,12 +85,10 @@ struct AdvancedParametersPanel: View {
 
     private var stepsRow: some View {
         @Bindable var coordinator = coordinator
-        let stepsValue = Binding<Double>(
-            get: { Double(coordinator.advancedParameters.steps ?? AdvancedParameters.defaultSteps) },
-            set: {
-                let intVal = Int($0.rounded())
-                coordinator.advancedParameters.steps = intVal == AdvancedParameters.defaultSteps ? nil : intVal
-            }
+        let stepsValue = optionalIntBinding(
+            get: { coordinator.advancedParameters.steps },
+            set: { coordinator.advancedParameters.steps = $0 },
+            default: AdvancedParameters.defaultSteps
         )
 
         return HStack {
@@ -152,12 +154,27 @@ struct AdvancedParametersPanel: View {
         get: @escaping () -> Double?,
         set: @escaping (Double?) -> Void,
         default defaultValue: Double,
-        tolerance: Double = 0.005
+        tolerance: Double = Self.defaultTolerance
     ) -> Binding<Double> {
         Binding(
             get: { get() ?? defaultValue },
             set: { newValue in
                 set(abs(newValue - defaultValue) < tolerance ? nil : newValue)
+            }
+        )
+    }
+
+    /// Creates a binding that stores nil when the integer value matches the default.
+    private func optionalIntBinding(
+        get: @escaping () -> Int?,
+        set: @escaping (Int?) -> Void,
+        default defaultValue: Int
+    ) -> Binding<Double> {
+        Binding(
+            get: { Double(get() ?? defaultValue) },
+            set: { newValue in
+                let intVal = Int(newValue.rounded())
+                set(intVal == defaultValue ? nil : intVal)
             }
         )
     }
@@ -168,7 +185,7 @@ struct AdvancedParametersPanel: View {
         range: ClosedRange<Double>,
         defaultValue: Double
     ) -> some View {
-        let isModified = abs(value.wrappedValue - defaultValue) >= 0.005
+        let isModified = abs(value.wrappedValue - defaultValue) >= Self.defaultTolerance
         return HStack {
             Text(label)
             Spacer()
