@@ -19,22 +19,24 @@ jobs:
           API_URL="https://api.runpod.io/graphql?api_key=${RUNPOD_API_KEY}"
           GPU_TYPES=("NVIDIA H100 80GB HBM3" "NVIDIA H100 PCIe")
           MAX_VOLUMES=10
-          MAX_BID="3.50"
+          MAX_BID="2.00"
 
           # Fallback bid prices per GPU (used if minimumBidPrice query fails)
           declare -A FALLBACK_BIDS=(
-            ["NVIDIA H100 80GB HBM3"]="2.49"
-            ["NVIDIA H100 PCIe"]="1.79"
+            ["NVIDIA H100 80GB HBM3"]="1.92"
+            ["NVIDIA H100 PCIe"]="1.54"
           )
 
           # ── Helper: get bid price for a GPU type ──
           get_bid_price() {
             local gpu="$1"
-            local min_bid
-            min_bid=$(curl -sf "$API_URL" \
+            local raw_resp
+            raw_resp=$(curl -sf "$API_URL" \
               -H 'Content-Type: application/json' \
-              -d "{\"query\": \"query { gpuTypes(input: {id: \\\"${gpu}\\\"}) { lowestPrice(input: {gpuCount: 1, secureCloud: false}) { minimumBidPrice } } }\"}" \
-              | jq -r '.data.gpuTypes[0].lowestPrice.minimumBidPrice // empty' 2>/dev/null)
+              -d "{\"query\": \"query { gpuTypes(input: {id: \\\"${gpu}\\\"}) { lowestPrice(input: {gpuCount: 1}) { minimumBidPrice } } }\"}" 2>/dev/null)
+
+            local min_bid
+            min_bid=$(echo "$raw_resp" | jq -r '.data.gpuTypes[0].lowestPrice.minimumBidPrice // empty' 2>/dev/null)
 
             if [ -n "$min_bid" ] && [ "$min_bid" != "null" ]; then
               # Add 10% buffer above minimum bid
@@ -46,9 +48,11 @@ jobs:
               else
                 echo "$bid"
               fi
+              echo "  (dynamic bid: min=$min_bid, bidding $bid)" >&2
             else
-              # Use fallback
-              echo "${FALLBACK_BIDS[$gpu]:-$MAX_BID}"
+              local fallback="${FALLBACK_BIDS[$gpu]:-$MAX_BID}"
+              echo "  (minimumBidPrice query returned empty, using fallback \$$fallback. Response: $(echo "$raw_resp" | jq -c . 2>/dev/null || echo "$raw_resp"))" >&2
+              echo "$fallback"
             fi
           }
 
