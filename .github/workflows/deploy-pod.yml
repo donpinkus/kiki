@@ -67,30 +67,61 @@ jobs:
           USED_DC=""
           NEW_VOLUME_CREATED=false
 
-          # ── Phase 2: Try existing volumes (spot instances) ──
+          # ── Helper: try creating a pod (spot then on-demand) ──
+          # Usage: try_create_pod GPU DATACENTER VOLUME_ID
+          # Sets POD_ID and USED_DC on success
+          try_create_pod() {
+            local gpu="$1" dc="$2" vol="$3"
+
+            # Try spot first
+            local bid
+            bid=$(get_bid_price "$gpu")
+            echo "  Trying $gpu spot (bid: \$$bid/hr)..."
+            local resp
+            resp=$(curl -sf "$API_URL" \
+              -H 'Content-Type: application/json' \
+              -d "{
+                \"query\": \"mutation { podRentInterruptable(input: { name: \\\"kiki-comfyui\\\", imageName: \\\"runpod/comfyui:latest\\\", gpuTypeId: \\\"${gpu}\\\", gpuCount: 1, cloudType: COMMUNITY, bidPerGpu: ${bid}, volumeInGb: 0, containerDiskInGb: 20, networkVolumeId: \\\"${vol}\\\", volumeMountPath: \\\"/workspace\\\", ports: \\\"8188/http,22/tcp\\\", dataCenterId: \\\"${dc}\\\", startSsh: true }) { id } }\"
+              }" || true)
+
+            POD_ID=$(echo "$resp" | jq -r '.data.podRentInterruptable.id // empty')
+            if [ -n "$POD_ID" ]; then
+              echo "  ✓ Spot pod $POD_ID with $gpu in $dc (bid: \$$bid/hr)"
+              USED_DC="$dc"
+              return 0
+            fi
+
+            # Fallback to on-demand
+            echo "  Spot unavailable, trying on-demand..."
+            resp=$(curl -sf "$API_URL" \
+              -H 'Content-Type: application/json' \
+              -d "{
+                \"query\": \"mutation { podFindAndDeployOnDemand(input: { name: \\\"kiki-comfyui\\\", imageName: \\\"runpod/comfyui:latest\\\", gpuTypeId: \\\"${gpu}\\\", gpuCount: 1, cloudType: COMMUNITY, volumeInGb: 0, containerDiskInGb: 20, networkVolumeId: \\\"${vol}\\\", volumeMountPath: \\\"/workspace\\\", ports: \\\"8188/http,22/tcp\\\", dataCenterId: \\\"${dc}\\\", startSsh: true }) { id } }\"
+              }" || true)
+
+            POD_ID=$(echo "$resp" | jq -r '.data.podFindAndDeployOnDemand.id // empty')
+            if [ -n "$POD_ID" ]; then
+              echo "  ✓ On-demand pod $POD_ID with $gpu in $dc"
+              USED_DC="$dc"
+              return 0
+            fi
+
+            echo "  No $gpu available in $dc (spot or on-demand)"
+            return 1
+          }
+
+          # ── Phase 2: Try existing volumes (spot then on-demand) ──
           if [ -n "$EXISTING_DCS" ]; then
-            echo "::group::Trying existing datacenters (spot)"
+            echo "::group::Trying existing datacenters"
             for DATACENTER in $EXISTING_DCS; do
               VOLUME_ID=$(echo "$VOLUMES" | jq -r ".data.myself.networkVolumes[] | select(.dataCenterId == \"$DATACENTER\") | .id" | head -1)
               echo "Trying $DATACENTER (volume: $VOLUME_ID)..."
 
               for GPU in "${GPU_TYPES[@]}"; do
-                BID_PRICE=$(get_bid_price "$GPU")
-                echo "  Trying $GPU (bid: \$$BID_PRICE/hr)..."
-                RESPONSE=$(curl -sf "$API_URL" \
-                  -H 'Content-Type: application/json' \
-                  -d "{
-                    \"query\": \"mutation { podRentInterruptable(input: { name: \\\"kiki-comfyui\\\", imageName: \\\"runpod/comfyui:latest\\\", gpuTypeId: \\\"${GPU}\\\", gpuCount: 1, cloudType: COMMUNITY, bidPerGpu: ${BID_PRICE}, volumeInGb: 0, containerDiskInGb: 20, networkVolumeId: \\\"${VOLUME_ID}\\\", volumeMountPath: \\\"/workspace\\\", ports: \\\"8188/http,22/tcp\\\", dataCenterId: \\\"${DATACENTER}\\\", startSsh: true }) { id } }\"
-                  }" || true)
-
-                POD_ID=$(echo "$RESPONSE" | jq -r '.data.podRentInterruptable.id // empty')
-                if [ -n "$POD_ID" ]; then
-                  echo "✓ Created spot pod $POD_ID with $GPU in $DATACENTER (bid: \$$BID_PRICE/hr, existing volume)"
-                  USED_DC="$DATACENTER"
+                if try_create_pod "$GPU" "$DATACENTER" "$VOLUME_ID"; then
                   break 2
                 fi
               done
-              echo "  No GPU available in $DATACENTER"
             done
             echo "::endgroup::"
           fi
@@ -132,89 +163,85 @@ jobs:
               | select(.gpuAvailability | length > 0)
               | {id, name, storage: .storageSupport, gpus: [.gpuAvailability[] | {type: .gpuTypeId, stock: .stockStatus}]}]'
 
-            FOUND_DC=""
-            FOUND_GPU=""
-
-            # Iterate GPU types in preference order (H100 SXM first)
+            # Build ordered list of candidate DCs (GPU preference × DC availability)
+            # Prefer "High" stock, then "Medium", then "Low"
+            CANDIDATE_LIST=""
             for GPU in "${GPU_TYPES[@]}"; do
-              if [ -n "$FOUND_DC" ]; then break; fi
+              for STOCK_PREF in "High" "Medium" "Low"; do
+                AVAILABLE_DCS=$(echo "$DC_AVAIL" | jq -r --arg gpu "$GPU" --arg stock "$STOCK_PREF" '
+                  [.data.dataCenters[]
+                   | select(.storageSupport == true or .storageSupport == "true")
+                   | select(any(.gpuAvailability[];
+                       .gpuTypeId == $gpu and .stockStatus == $stock))
+                   | .id] | .[]')
 
-              # Get ALL DCs that have this GPU with valid stock and storage support
-              AVAILABLE_DCS=$(echo "$DC_AVAIL" | jq -r --arg gpu "$GPU" '
-                [.data.dataCenters[]
-                 | select(.storageSupport == true or .storageSupport == "true")
-                 | select(any(.gpuAvailability[];
-                     .gpuTypeId == $gpu
-                     and (.stockStatus == "High" or .stockStatus == "Low" or .stockStatus == "Medium")))
-                 | .id] | .[]')
-
-              for DC in $AVAILABLE_DCS; do
-                # Skip DCs we already have volumes in (already tried in Phase 2)
-                SKIP=false
-                for EXISTING in $EXISTING_DCS; do
-                  if [ "$DC" = "$EXISTING" ]; then
-                    SKIP=true
-                    break
+                for DC in $AVAILABLE_DCS; do
+                  # Skip DCs we already have volumes in (already tried in Phase 2)
+                  SKIP=false
+                  for EXISTING in $EXISTING_DCS; do
+                    if [ "$DC" = "$EXISTING" ]; then SKIP=true; break; fi
+                  done
+                  if [ "$SKIP" = "false" ]; then
+                    CANDIDATE_LIST="${CANDIDATE_LIST}${GPU}|${DC}\n"
                   fi
                 done
-
-                if [ "$SKIP" = "false" ]; then
-                  FOUND_DC="$DC"
-                  FOUND_GPU="$GPU"
-                  echo "✓ Found $GPU available in $FOUND_DC"
-                  break
-                fi
               done
             done
+
+            # Deduplicate (keep first occurrence = highest priority)
+            CANDIDATE_LIST=$(echo -e "$CANDIDATE_LIST" | awk '!seen[$0]++' | head -20)
+            echo "Candidate DCs to try:"
+            echo "$CANDIDATE_LIST"
             echo "::endgroup::"
 
-            if [ -z "$FOUND_DC" ]; then
+            if [ -z "$CANDIDATE_LIST" ]; then
               echo "::error::No GPU available in any datacenter (checked $DC_COUNT RunPod datacenters dynamically)"
               exit 1
             fi
 
-            # ── Phase 4: Create new volume in the available datacenter ──
-            echo ""
-            echo "📦 Creating new network volume in $FOUND_DC..."
-            echo "   (This will incur ~\$2/month storage cost)"
-            echo "   Total volumes after creation: $((VOLUME_COUNT + 1)) of $MAX_VOLUMES max"
+            # ── Phase 4+5: Create volume and pod in best available DC ──
+            VOLUMES_CREATED=()
+            while IFS='|' read -r CAND_GPU CAND_DC; do
+              [ -z "$CAND_DC" ] && continue
 
-            VOL_RESP=$(curl -sf "$API_URL" \
-              -H 'Content-Type: application/json' \
-              -d "{
-                \"query\": \"mutation { createNetworkVolume(input: { name: \\\"kiki-${FOUND_DC,,}\\\", dataCenterId: \\\"${FOUND_DC}\\\", size: 30 }) { id name dataCenterId } }\"
-              }")
+              if [ "$VOLUME_COUNT" -ge "$MAX_VOLUMES" ]; then
+                echo "::warning::Volume limit reached ($VOLUME_COUNT/$MAX_VOLUMES), cannot try more DCs"
+                break
+              fi
 
-            VOLUME_ID=$(echo "$VOL_RESP" | jq -r '.data.createNetworkVolume.id // empty')
-            if [ -z "$VOLUME_ID" ]; then
-              echo "::error::Failed to create network volume in $FOUND_DC"
-              echo "$VOL_RESP" | jq .
-              exit 1
-            fi
-            echo "✓ Created volume $VOLUME_ID in $FOUND_DC"
-            NEW_VOLUME_CREATED=true
+              echo ""
+              echo "📦 Creating network volume in $CAND_DC for $CAND_GPU..."
+              echo "   Total volumes after creation: $((VOLUME_COUNT + 1)) of $MAX_VOLUMES max"
 
-            # Small delay for volume to be ready
-            sleep 5
+              VOL_RESP=$(curl -sf "$API_URL" \
+                -H 'Content-Type: application/json' \
+                -d "{
+                  \"query\": \"mutation { createNetworkVolume(input: { name: \\\"kiki-${CAND_DC,,}\\\", dataCenterId: \\\"${CAND_DC}\\\", size: 30 }) { id name dataCenterId } }\"
+                }")
 
-            # ── Phase 5: Create pod with the new volume (spot) ──
-            BID_PRICE=$(get_bid_price "$FOUND_GPU")
-            echo "Creating spot pod with $FOUND_GPU in $FOUND_DC (bid: \$$BID_PRICE/hr)..."
-            RESPONSE=$(curl -sf "$API_URL" \
-              -H 'Content-Type: application/json' \
-              -d "{
-                \"query\": \"mutation { podRentInterruptable(input: { name: \\\"kiki-comfyui\\\", imageName: \\\"runpod/comfyui:latest\\\", gpuTypeId: \\\"${FOUND_GPU}\\\", gpuCount: 1, cloudType: COMMUNITY, bidPerGpu: ${BID_PRICE}, volumeInGb: 0, containerDiskInGb: 20, networkVolumeId: \\\"${VOLUME_ID}\\\", volumeMountPath: \\\"/workspace\\\", ports: \\\"8188/http,22/tcp\\\", dataCenterId: \\\"${FOUND_DC}\\\", startSsh: true }) { id } }\"
-              }" || true)
+              VOLUME_ID=$(echo "$VOL_RESP" | jq -r '.data.createNetworkVolume.id // empty')
+              if [ -z "$VOLUME_ID" ]; then
+                echo "::warning::Failed to create volume in $CAND_DC, skipping"
+                echo "$VOL_RESP" | jq . 2>/dev/null || true
+                continue
+              fi
+              echo "✓ Created volume $VOLUME_ID in $CAND_DC"
+              VOLUMES_CREATED+=("$VOLUME_ID")
+              VOLUME_COUNT=$((VOLUME_COUNT + 1))
+              NEW_VOLUME_CREATED=true
 
-            POD_ID=$(echo "$RESPONSE" | jq -r '.data.podRentInterruptable.id // empty')
-            USED_DC="$FOUND_DC"
+              sleep 3
+
+              if try_create_pod "$CAND_GPU" "$CAND_DC" "$VOLUME_ID"; then
+                break
+              fi
+              echo "  GPU unavailable in $CAND_DC after volume creation, trying next..."
+            done <<< "$CANDIDATE_LIST"
 
             if [ -z "$POD_ID" ]; then
-              echo "::error::GPU became unavailable in $FOUND_DC during volume creation"
-              echo "Response: $(echo "$RESPONSE" | jq -c . 2>/dev/null || echo "$RESPONSE")"
+              echo "::error::Exhausted all candidate DCs — no GPU available (tried ${#VOLUMES_CREATED[@]} new DCs + existing DCs)"
               exit 1
             fi
-            echo "✓ Created spot pod $POD_ID with $FOUND_GPU in $FOUND_DC (bid: \$$BID_PRICE/hr, new volume)"
           fi
 
           echo "pod_id=$POD_ID" >> "$GITHUB_OUTPUT"
