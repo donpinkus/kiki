@@ -81,7 +81,7 @@ jobs:
             resp=$(curl -sf "$API_URL" \
               -H 'Content-Type: application/json' \
               -d "{
-                \"query\": \"mutation { podRentInterruptable(input: { name: \\\"kiki-comfyui\\\", imageName: \\\"runpod/comfyui:latest\\\", gpuTypeId: \\\"${gpu}\\\", gpuCount: 1, cloudType: COMMUNITY, bidPerGpu: ${bid}, volumeInGb: 0, containerDiskInGb: 20, networkVolumeId: \\\"${vol}\\\", volumeMountPath: \\\"/workspace\\\", ports: \\\"8188/http,22/tcp\\\", dataCenterId: \\\"${dc}\\\", startSsh: true }) { id } }\"
+                \"query\": \"mutation { podRentInterruptable(input: { name: \\\"kiki-comfyui\\\", imageName: \\\"runpod/comfyui:latest\\\", gpuTypeId: \\\"${gpu}\\\", gpuCount: 1, bidPerGpu: ${bid}, volumeInGb: 0, containerDiskInGb: 20, networkVolumeId: \\\"${vol}\\\", volumeMountPath: \\\"/workspace\\\", ports: \\\"8188/http,22/tcp\\\", dataCenterId: \\\"${dc}\\\", startSsh: true }) { id } }\"
               }" || true)
 
             POD_ID=$(echo "$resp" | jq -r '.data.podRentInterruptable.id // empty')
@@ -100,7 +100,7 @@ jobs:
             resp=$(curl -sf "$API_URL" \
               -H 'Content-Type: application/json' \
               -d "{
-                \"query\": \"mutation { podFindAndDeployOnDemand(input: { name: \\\"kiki-comfyui\\\", imageName: \\\"runpod/comfyui:latest\\\", gpuTypeId: \\\"${gpu}\\\", gpuCount: 1, cloudType: COMMUNITY, volumeInGb: 0, containerDiskInGb: 20, networkVolumeId: \\\"${vol}\\\", volumeMountPath: \\\"/workspace\\\", ports: \\\"8188/http,22/tcp\\\", dataCenterId: \\\"${dc}\\\", startSsh: true }) { id } }\"
+                \"query\": \"mutation { podFindAndDeployOnDemand(input: { name: \\\"kiki-comfyui\\\", imageName: \\\"runpod/comfyui:latest\\\", gpuTypeId: \\\"${gpu}\\\", gpuCount: 1, volumeInGb: 0, containerDiskInGb: 20, networkVolumeId: \\\"${vol}\\\", volumeMountPath: \\\"/workspace\\\", ports: \\\"8188/http,22/tcp\\\", dataCenterId: \\\"${dc}\\\", startSsh: true }) { id } }\"
               }" || true)
 
             POD_ID=$(echo "$resp" | jq -r '.data.podFindAndDeployOnDemand.id // empty')
