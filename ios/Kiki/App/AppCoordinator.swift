@@ -3,24 +3,7 @@ import CanvasModule
 import PreprocessorModule
 import NetworkModule
 import ResultModule
-
-enum DrawingTool: String, CaseIterable {
-    case brush
-    case eraser
-}
-
-enum StylePreset: String, CaseIterable {
-    case photoreal = "Photoreal"
-    case anime = "Anime"
-    case watercolor = "Watercolor"
-    case storybook = "Storybook"
-    case fantasy = "Fantasy"
-    case ink = "Ink"
-    case neon = "Neon"
-
-    /// Maps to the backend's expected style preset key.
-    var apiKey: String { rawValue.lowercased() }
-}
+import SchedulerModule
 
 @MainActor
 @Observable
@@ -44,16 +27,14 @@ final class AppCoordinator {
     let canvasViewModel = CanvasViewModel()
     private let preprocessor = SketchPreprocessor()
     private let apiClient: APIClient
+    private let scheduler = GenerationScheduler()
 
     // MARK: - Generation State
 
     private let sessionId = UUID()
-    private var currentRequestId: UUID?
     private var lastSuccessfulImageURL: URL?
     private var generationTask: Task<Void, Never>?
-    private var isCanvasDirty = false
     private(set) var isGenerating = false
-    private var debounceTask: Task<Void, Never>?
     private var canvasObservationTask: Task<Void, Never>?
 
     // MARK: - Lifecycle
@@ -76,21 +57,19 @@ final class AppCoordinator {
 
     func clear() {
         canvasViewModel.clear()
-        isCanvasDirty = false
+        Task { await scheduler.markClean() }
     }
 
     /// Triggers a preview generation from the current canvas state.
     func generate() {
         // Cancel any in-flight generation
         generationTask?.cancel()
-
-        let requestId = UUID()
-        currentRequestId = requestId
-        isCanvasDirty = false
         isGenerating = true
 
         generationTask = Task {
             defer { isGenerating = false }
+
+            let requestId = await scheduler.beginRequest()
 
             // 1. Capture snapshot
             guard let snapshot = canvasViewModel.captureSnapshot(),
@@ -118,9 +97,8 @@ final class AppCoordinator {
             }
             print("[Generate] JPEG: \(jpegData.count) bytes, image: \(img.size)")
 
-
             // Check for cancellation / staleness
-            guard !Task.isCancelled, currentRequestId == requestId else {
+            guard !Task.isCancelled, await scheduler.isCurrent(requestId) else {
                 print("[Generate] Cancelled or stale after preprocess")
                 return
             }
@@ -143,7 +121,7 @@ final class AppCoordinator {
                 print("[Generate] Response: status=\(response.status), imageURL=\(response.imageURL?.absoluteString ?? "nil"), inputImageURL=\(response.inputImageURL?.absoluteString ?? "nil"), lineartImageURL=\(response.lineartImageURL?.absoluteString ?? "nil")")
 
                 // Staleness check — only update if this is still the latest request
-                guard !Task.isCancelled, currentRequestId == requestId else {
+                guard !Task.isCancelled, await scheduler.isCurrent(requestId) else {
                     print("[Generate] Cancelled or stale after response")
                     return
                 }
@@ -161,14 +139,14 @@ final class AppCoordinator {
                 print("[Generate] Cancelled")
             } catch let error as GenerationError {
                 print("[Generate] GenerationError: \(error)")
-                guard !Task.isCancelled, currentRequestId == requestId else { return }
+                guard !Task.isCancelled, await scheduler.isCurrent(requestId) else { return }
                 resultState = .error(
                     message: error.userMessage,
                     previousImageURL: lastSuccessfulImageURL
                 )
             } catch {
                 print("[Generate] Error: \(error)")
-                guard !Task.isCancelled, currentRequestId == requestId else { return }
+                guard !Task.isCancelled, await scheduler.isCurrent(requestId) else { return }
                 resultState = .error(
                     message: "Something went wrong",
                     previousImageURL: lastSuccessfulImageURL
@@ -176,7 +154,7 @@ final class AppCoordinator {
             }
 
             // Auto-retrigger if canvas changed during generation
-            if isCanvasDirty, !Task.isCancelled {
+            if await scheduler.completeRequest(requestId), !Task.isCancelled {
                 print("[Generate] Canvas dirty, auto-retriggering")
                 generate()
             }
@@ -190,18 +168,10 @@ final class AppCoordinator {
             guard let self else { return }
             for await _ in canvasViewModel.canvasChanges {
                 guard !Task.isCancelled else { return }
-                isCanvasDirty = true
 
-                // Cancel previous debounce timer
-                debounceTask?.cancel()
-
-                // Start new debounce — generate after 1.5s of no drawing
-                debounceTask = Task { [weak self] in
-                    try? await Task.sleep(for: .seconds(1.5))
-                    guard !Task.isCancelled, let self else { return }
-                    if !isGenerating, !canvasViewModel.isEmpty {
-                        generate()
-                    }
+                await scheduler.scheduleGeneration { [weak self] in
+                    guard let self, !isGenerating, !canvasViewModel.isEmpty else { return }
+                    generate()
                 }
             }
         }
@@ -215,29 +185,6 @@ final class AppCoordinator {
             canvasViewModel.selectBrush(width: toolSize)
         case .eraser:
             canvasViewModel.selectEraser(width: toolSize)
-        }
-    }
-}
-
-// MARK: - GenerationError + User Message
-
-extension GenerationError {
-    var userMessage: String {
-        switch self {
-        case .networkTimeout:
-            return "Connection timed out"
-        case .serverError(_, let message):
-            return message
-        case .rateLimited:
-            return "Too many requests. Try again soon."
-        case .contentFiltered:
-            return "Content was filtered"
-        case .invalidRequest(let message):
-            return message
-        case .cancelled:
-            return "Generation cancelled"
-        case .decodingError:
-            return "Unexpected server response"
         }
     }
 }
