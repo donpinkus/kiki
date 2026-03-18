@@ -246,7 +246,7 @@ jobs:
                 VOL_RESP=$(curl -sf "$API_URL" \
                   -H 'Content-Type: application/json' \
                   -d "{
-                    \"query\": \"mutation { createNetworkVolume(input: { name: \\\"kiki-${CAND_DC,,}\\\", dataCenterId: \\\"${CAND_DC}\\\", size: 50 }) { id name dataCenterId } }\"
+                    \"query\": \"mutation { createNetworkVolume(input: { name: \\\"kiki-${CAND_DC,,}\\\", dataCenterId: \\\"${CAND_DC}\\\", size: 100 }) { id name dataCenterId } }\"
                   }")
 
                 VOLUME_ID=$(echo "$VOL_RESP" | jq -r '.data.createNetworkVolume.id // empty')
