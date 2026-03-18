@@ -241,7 +241,7 @@ jobs:
                 VOL_RESP=$(curl -sf "$API_URL" \
                   -H 'Content-Type: application/json' \
                   -d "{
-                    \"query\": \"mutation { createNetworkVolume(input: { name: \\\"kiki-${CAND_DC,,}\\\", dataCenterId: \\\"${CAND_DC}\\\", size: 30 }) { id name dataCenterId } }\"
+                    \"query\": \"mutation { createNetworkVolume(input: { name: \\\"kiki-${CAND_DC,,}\\\", dataCenterId: \\\"${CAND_DC}\\\", size: 50 }) { id name dataCenterId } }\"
                   }")
 
                 VOLUME_ID=$(echo "$VOL_RESP" | jq -r '.data.createNetworkVolume.id // empty')
@@ -326,7 +326,7 @@ jobs:
           echo "$SSH_PRIVATE_KEY" > ~/.ssh/runpod_key
           chmod 600 ~/.ssh/runpod_key
 
-          SSH_CMD="ssh -i ~/.ssh/runpod_key -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p $SSH_PORT root@$SSH_IP"
+          SSH_CMD="ssh -i ~/.ssh/runpod_key -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -p $SSH_PORT root@$SSH_IP"
 
           echo "Waiting for SSH..."
           SSH_CONNECTED=false
