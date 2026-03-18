@@ -1,17 +1,16 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { ComfyUIAdapter } from '../modules/providers/comfyui.js';
 import type { ProviderAdapter, ProviderRequest } from '../modules/providers/types.js';
-import { STYLE_PRESETS, DEFAULT_NEGATIVE_PROMPT, buildPrompt } from '../modules/prompts/index.js';
+import { DEFAULT_NEGATIVE_PROMPT, buildPrompt } from '../modules/prompts/index.js';
 
 const generateBodySchema = {
   type: 'object',
-  required: ['sessionId', 'requestId', 'mode', 'stylePreset', 'sketchImageBase64'],
+  required: ['sessionId', 'requestId', 'mode', 'sketchImageBase64'],
   properties: {
     sessionId: { type: 'string', format: 'uuid' },
     requestId: { type: 'string', format: 'uuid' },
     mode: { type: 'string', enum: ['preview', 'refine'] },
     prompt: { type: ['string', 'null'], maxLength: 500 },
-    stylePreset: { type: 'string', enum: [...STYLE_PRESETS] },
     adherence: { type: 'number', minimum: 0, maximum: 1, default: 0.7 },
     sketchImageBase64: { type: 'string', minLength: 1 },
   },
@@ -23,7 +22,6 @@ interface GenerateBody {
   requestId: string;
   mode: 'preview' | 'refine';
   prompt?: string | null;
-  stylePreset: (typeof STYLE_PRESETS)[number];
   adherence?: number;
   sketchImageBase64: string;
 }
@@ -39,7 +37,6 @@ export const generateRoute: FastifyPluginAsync = async (fastify) => {
         requestId,
         mode,
         prompt = null,
-        stylePreset,
         adherence = 0.7,
         sketchImageBase64,
       } = request.body;
@@ -47,13 +44,13 @@ export const generateRoute: FastifyPluginAsync = async (fastify) => {
       const startTime = Date.now();
 
       request.log.info(
-        { sessionId, requestId, mode, stylePreset },
+        { sessionId, requestId, mode },
         'Received generate request',
       );
 
       const providerRequest: ProviderRequest = {
         sketchImageBase64,
-        prompt: buildPrompt(prompt, stylePreset),
+        prompt: buildPrompt(prompt),
         negativePrompt: DEFAULT_NEGATIVE_PROMPT,
         mode,
         adherence,

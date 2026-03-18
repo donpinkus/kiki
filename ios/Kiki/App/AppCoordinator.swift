@@ -18,7 +18,6 @@ final class AppCoordinator {
         didSet { applyTool() }
     }
     var promptText = ""
-    var selectedStylePreset: StylePreset = .photoreal
     var resultState: ResultState = .empty
     var dividerPosition: CGFloat = 0.55
 
@@ -105,13 +104,12 @@ final class AppCoordinator {
 
             // 3. Send to backend
             let base64 = jpegData.base64EncodedString()
-            print("[Generate] Sending to backend: base64 length \(base64.count), style: \(selectedStylePreset.apiKey)")
+            print("[Generate] Sending to backend: base64 length \(base64.count)")
             let request = GenerateRequest(
                 sessionId: sessionId,
                 requestId: requestId,
                 mode: .preview,
                 prompt: promptText.isEmpty ? nil : promptText,
-                stylePreset: selectedStylePreset.apiKey,
                 adherence: 0.7,
                 sketchImageBase64: base64
             )
