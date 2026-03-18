@@ -171,17 +171,20 @@ jobs:
               | select(.gpuAvailability | length > 0)
               | {id, name, storage: .storageSupport, gpus: [.gpuAvailability[] | {type: .gpuTypeId, stock: .stockStatus}]}]'
 
-            # Build ordered candidate list: GPU preference × stock level (High > Medium > Low)
+            # Build ordered candidate list: GPU preference × stock level (High > Medium > Low > Unknown)
             # Format: GPU|DC|existing  (existing = "yes" if we have a volume there, "no" otherwise)
             # Include existing-volume DCs too — Phase 2 tried them but DC query may show fresh stock
+            # "Unknown" handles DCs where the API returns null for stockStatus
             CANDIDATE_LIST=""
             for GPU in "${GPU_TYPES[@]}"; do
-              for STOCK_PREF in "High" "Medium" "Low"; do
+              for STOCK_PREF in "High" "Medium" "Low" "Unknown"; do
                 AVAILABLE_DCS=$(echo "$DC_AVAIL" | jq -r --arg gpu "$GPU" --arg stock "$STOCK_PREF" '
                   [.data.dataCenters[]
                    | select(.storageSupport == true or .storageSupport == "true")
                    | select(any(.gpuAvailability[];
-                       .gpuTypeId == $gpu and .stockStatus == $stock))
+                       .gpuTypeId == $gpu and
+                       (if $stock == "Unknown" then .stockStatus == null
+                        else .stockStatus == $stock end)))
                    | .id] | .[]')
 
                 for DC in $AVAILABLE_DCS; do
