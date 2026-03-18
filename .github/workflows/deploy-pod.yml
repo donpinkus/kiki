@@ -90,9 +90,13 @@ jobs:
               USED_DC="$dc"
               return 0
             fi
+            # Log why spot failed
+            local spot_err
+            spot_err=$(echo "$resp" | jq -r '.errors[0].message // empty' 2>/dev/null)
+            echo "  Spot failed: ${spot_err:-no error message (response: $(echo "$resp" | jq -c . 2>/dev/null || echo "$resp"))}"
 
             # Fallback to on-demand
-            echo "  Spot unavailable, trying on-demand..."
+            echo "  Trying on-demand..."
             resp=$(curl -sf "$API_URL" \
               -H 'Content-Type: application/json' \
               -d "{
@@ -105,8 +109,10 @@ jobs:
               USED_DC="$dc"
               return 0
             fi
-
-            echo "  No $gpu available in $dc (spot or on-demand)"
+            # Log why on-demand failed
+            local od_err
+            od_err=$(echo "$resp" | jq -r '.errors[0].message // empty' 2>/dev/null)
+            echo "  On-demand failed: ${od_err:-no error message (response: $(echo "$resp" | jq -c . 2>/dev/null || echo "$resp"))}"
             return 1
           }
 
