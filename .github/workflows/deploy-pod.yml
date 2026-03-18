@@ -163,8 +163,9 @@ jobs:
               | select(.gpuAvailability | length > 0)
               | {id, name, storage: .storageSupport, gpus: [.gpuAvailability[] | {type: .gpuTypeId, stock: .stockStatus}]}]'
 
-            # Build ordered list of candidate DCs (GPU preference × DC availability)
-            # Prefer "High" stock, then "Medium", then "Low"
+            # Build ordered candidate list: GPU preference × stock level (High > Medium > Low)
+            # Format: GPU|DC|existing  (existing = "yes" if we have a volume there, "no" otherwise)
+            # Include existing-volume DCs too — Phase 2 tried them but DC query may show fresh stock
             CANDIDATE_LIST=""
             for GPU in "${GPU_TYPES[@]}"; do
               for STOCK_PREF in "High" "Medium" "Low"; do
@@ -176,21 +177,18 @@ jobs:
                    | .id] | .[]')
 
                 for DC in $AVAILABLE_DCS; do
-                  # Skip DCs we already have volumes in (already tried in Phase 2)
-                  SKIP=false
+                  HAS_VOL="no"
                   for EXISTING in $EXISTING_DCS; do
-                    if [ "$DC" = "$EXISTING" ]; then SKIP=true; break; fi
+                    if [ "$DC" = "$EXISTING" ]; then HAS_VOL="yes"; break; fi
                   done
-                  if [ "$SKIP" = "false" ]; then
-                    CANDIDATE_LIST="${CANDIDATE_LIST}${GPU}|${DC}\n"
-                  fi
+                  CANDIDATE_LIST="${CANDIDATE_LIST}${GPU}|${DC}|${HAS_VOL}\n"
                 done
               done
             done
 
             # Deduplicate (keep first occurrence = highest priority)
             CANDIDATE_LIST=$(echo -e "$CANDIDATE_LIST" | awk '!seen[$0]++' | head -20)
-            echo "Candidate DCs to try:"
+            echo "Candidate DCs to try (includes existing-volume DCs for retry):"
             echo "$CANDIDATE_LIST"
             echo "::endgroup::"
 
@@ -199,43 +197,54 @@ jobs:
               exit 1
             fi
 
-            # ── Phase 4+5: Create volume and pod in best available DC ──
+            # ── Phase 4+5: Try candidates — reuse existing volumes or create new ones ──
             VOLUMES_CREATED=()
-            while IFS='|' read -r CAND_GPU CAND_DC; do
+            while IFS='|' read -r CAND_GPU CAND_DC HAS_VOL; do
               [ -z "$CAND_DC" ] && continue
 
-              if [ "$VOLUME_COUNT" -ge "$MAX_VOLUMES" ]; then
-                echo "::warning::Volume limit reached ($VOLUME_COUNT/$MAX_VOLUMES), cannot try more DCs"
-                break
+              if [ "$HAS_VOL" = "yes" ]; then
+                # Retry existing volume DC with fresh stock data
+                VOLUME_ID=$(echo "$VOLUMES" | jq -r ".data.myself.networkVolumes[] | select(.dataCenterId == \"$CAND_DC\") | .id" | head -1)
+                echo ""
+                echo "🔄 Retrying existing volume $VOLUME_ID in $CAND_DC (fresh stock: $CAND_GPU)..."
+                if try_create_pod "$CAND_GPU" "$CAND_DC" "$VOLUME_ID"; then
+                  break
+                fi
+              else
+                # New DC — create volume first
+                if [ "$VOLUME_COUNT" -ge "$MAX_VOLUMES" ]; then
+                  echo "::warning::Volume limit reached ($VOLUME_COUNT/$MAX_VOLUMES), skipping new DC $CAND_DC"
+                  continue
+                fi
+
+                echo ""
+                echo "📦 Creating network volume in $CAND_DC for $CAND_GPU..."
+                echo "   Total volumes after creation: $((VOLUME_COUNT + 1)) of $MAX_VOLUMES max"
+
+                VOL_RESP=$(curl -sf "$API_URL" \
+                  -H 'Content-Type: application/json' \
+                  -d "{
+                    \"query\": \"mutation { createNetworkVolume(input: { name: \\\"kiki-${CAND_DC,,}\\\", dataCenterId: \\\"${CAND_DC}\\\", size: 30 }) { id name dataCenterId } }\"
+                  }")
+
+                VOLUME_ID=$(echo "$VOL_RESP" | jq -r '.data.createNetworkVolume.id // empty')
+                if [ -z "$VOLUME_ID" ]; then
+                  echo "::warning::Failed to create volume in $CAND_DC, skipping"
+                  echo "$VOL_RESP" | jq . 2>/dev/null || true
+                  continue
+                fi
+                echo "✓ Created volume $VOLUME_ID in $CAND_DC"
+                VOLUMES_CREATED+=("$VOLUME_ID")
+                VOLUME_COUNT=$((VOLUME_COUNT + 1))
+                NEW_VOLUME_CREATED=true
+
+                sleep 3
+
+                if try_create_pod "$CAND_GPU" "$CAND_DC" "$VOLUME_ID"; then
+                  break
+                fi
+                echo "  GPU unavailable in $CAND_DC after volume creation, trying next..."
               fi
-
-              echo ""
-              echo "📦 Creating network volume in $CAND_DC for $CAND_GPU..."
-              echo "   Total volumes after creation: $((VOLUME_COUNT + 1)) of $MAX_VOLUMES max"
-
-              VOL_RESP=$(curl -sf "$API_URL" \
-                -H 'Content-Type: application/json' \
-                -d "{
-                  \"query\": \"mutation { createNetworkVolume(input: { name: \\\"kiki-${CAND_DC,,}\\\", dataCenterId: \\\"${CAND_DC}\\\", size: 30 }) { id name dataCenterId } }\"
-                }")
-
-              VOLUME_ID=$(echo "$VOL_RESP" | jq -r '.data.createNetworkVolume.id // empty')
-              if [ -z "$VOLUME_ID" ]; then
-                echo "::warning::Failed to create volume in $CAND_DC, skipping"
-                echo "$VOL_RESP" | jq . 2>/dev/null || true
-                continue
-              fi
-              echo "✓ Created volume $VOLUME_ID in $CAND_DC"
-              VOLUMES_CREATED+=("$VOLUME_ID")
-              VOLUME_COUNT=$((VOLUME_COUNT + 1))
-              NEW_VOLUME_CREATED=true
-
-              sleep 3
-
-              if try_create_pod "$CAND_GPU" "$CAND_DC" "$VOLUME_ID"; then
-                break
-              fi
-              echo "  GPU unavailable in $CAND_DC after volume creation, trying next..."
             done <<< "$CANDIDATE_LIST"
 
             if [ -z "$POD_ID" ]; then
