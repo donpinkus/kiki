@@ -1,6 +1,6 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { ComfyUIAdapter } from '../modules/providers/comfyui.js';
-import type { ProviderAdapter, ProviderRequest } from '../modules/providers/types.js';
+import type { AdvancedParameters, ProviderAdapter, ProviderRequest } from '../modules/providers/types.js';
 
 const STYLE_PRESETS = [
   'photoreal',
@@ -42,6 +42,22 @@ const generateBodySchema = {
     stylePreset: { type: 'string', enum: [...STYLE_PRESETS] },
     adherence: { type: 'number', minimum: 0, maximum: 1, default: 0.7 },
     sketchImageBase64: { type: 'string', minLength: 1 },
+    advancedParameters: {
+      type: 'object',
+      nullable: true,
+      properties: {
+        controlNetStrength: { type: 'number', minimum: 0, maximum: 1, nullable: true },
+        controlNetEndPercent: { type: 'number', minimum: 0, maximum: 1, nullable: true },
+        cfgScale: { type: 'number', minimum: 0, maximum: 5, nullable: true },
+        steps: { type: 'integer', minimum: 1, maximum: 20, nullable: true },
+        denoise: { type: 'number', minimum: 0, maximum: 1, nullable: true },
+        auraFlowShift: { type: 'number', minimum: 0, maximum: 5, nullable: true },
+        loraStrength: { type: 'number', minimum: 0, maximum: 2, nullable: true },
+        negativePrompt: { type: ['string', 'null'], maxLength: 500, nullable: true },
+        seed: { type: 'integer', minimum: 0, maximum: 9007199254740991, nullable: true },
+      },
+      additionalProperties: false,
+    },
   },
   additionalProperties: false,
 } as const;
@@ -54,6 +70,7 @@ interface GenerateBody {
   stylePreset: (typeof STYLE_PRESETS)[number];
   adherence?: number;
   sketchImageBase64: string;
+  advancedParameters?: AdvancedParameters | null;
 }
 
 const provider: ProviderAdapter = new ComfyUIAdapter();
@@ -70,12 +87,13 @@ export const generateRoute: FastifyPluginAsync = async (fastify) => {
         stylePreset,
         adherence = 0.7,
         sketchImageBase64,
+        advancedParameters = null,
       } = request.body;
 
       const startTime = Date.now();
 
       request.log.info(
-        { sessionId, requestId, mode, stylePreset },
+        { sessionId, requestId, mode, stylePreset, hasAdvancedParams: !!advancedParameters },
         'Received generate request',
       );
 
@@ -88,6 +106,7 @@ export const generateRoute: FastifyPluginAsync = async (fastify) => {
         creativity: 0.85,
         width: mode === 'preview' ? 512 : 1024,
         height: mode === 'preview' ? 512 : 1024,
+        advancedParameters: advancedParameters ?? undefined,
       };
 
       try {

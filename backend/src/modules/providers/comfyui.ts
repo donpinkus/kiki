@@ -10,8 +10,12 @@ import workflowTemplate from './comfyui-workflow-api.json' with { type: 'json' }
 // Node IDs in the API-format workflow (subgraph nodes prefixed with "111:")
 const LOAD_IMAGE_NODE_ID = '71';
 const POSITIVE_PROMPT_NODE_ID = '111:6';
+const NEGATIVE_PROMPT_NODE_ID = '111:7';
 const SAVE_IMAGE_NODE_ID = '60';
 const KSAMPLER_NODE_ID = '111:3';
+const CONTROLNET_APPLY_NODE_ID = '111:85';
+const AURAFLOW_NODE_ID = '111:66';
+const LORA_LOADER_NODE_ID = '111:80';
 const LINEART_PREVIEW_NODE_ID = '117';
 
 const POLL_INTERVAL_MS = 2000;
@@ -59,10 +63,8 @@ export class ComfyUIAdapter implements ProviderAdapter {
       throw new ProviderError('comfyui', `CLIPTextEncode node ${POSITIVE_PROMPT_NODE_ID} not found in workflow`);
     }
 
-    // 5. Randomize the seed so each generation produces a different result
-    if (workflow[KSAMPLER_NODE_ID]) {
-      workflow[KSAMPLER_NODE_ID].inputs['seed'] = Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
-    }
+    // 5. Apply advanced parameters (seed, CFG, steps, ControlNet, etc.)
+    this.applyAdvancedParameters(workflow, request);
 
     // 6. Submit to ComfyUI queue
     const promptId = await this.submitPrompt(baseUrl, workflow);
@@ -86,11 +88,13 @@ export class ComfyUIAdapter implements ProviderAdapter {
       ? `${baseUrl}/view?filename=${encodeURIComponent(lineartOutput.filename)}&subfolder=${encodeURIComponent(lineartOutput.subfolder)}&type=${encodeURIComponent(lineartOutput.type)}`
       : undefined;
 
+    const actualSeed = Number(workflow[KSAMPLER_NODE_ID]?.inputs['seed'] ?? 0);
+
     return {
       imageUrl,
       inputImageUrl,
       lineartImageUrl,
-      seed: 0,
+      seed: actualSeed,
       latencyMs: Date.now() - startTime,
       jobId: promptId,
     };
@@ -125,6 +129,45 @@ export class ComfyUIAdapter implements ProviderAdapter {
       return response.ok;
     } catch {
       return false;
+    }
+  }
+
+  private applyAdvancedParameters(workflow: Workflow, request: ProviderRequest): void {
+    const params = request.advancedParameters;
+
+    // KSampler: seed (always set — random if not provided), cfg, steps, denoise
+    const ksampler = workflow[KSAMPLER_NODE_ID];
+    if (ksampler) {
+      ksampler.inputs['seed'] =
+        params?.seed ?? Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
+      if (params?.cfgScale != null) ksampler.inputs['cfg'] = params.cfgScale;
+      if (params?.steps != null) ksampler.inputs['steps'] = params.steps;
+      if (params?.denoise != null) ksampler.inputs['denoise'] = params.denoise;
+    }
+
+    // ControlNetApplyAdvanced: strength, end_percent
+    const controlnet = workflow[CONTROLNET_APPLY_NODE_ID];
+    if (controlnet) {
+      if (params?.controlNetStrength != null) controlnet.inputs['strength'] = params.controlNetStrength;
+      if (params?.controlNetEndPercent != null) controlnet.inputs['end_percent'] = params.controlNetEndPercent;
+    }
+
+    // ModelSamplingAuraFlow: shift
+    const auraflow = workflow[AURAFLOW_NODE_ID];
+    if (auraflow && params?.auraFlowShift != null) {
+      auraflow.inputs['shift'] = params.auraFlowShift;
+    }
+
+    // LoraLoaderModelOnly: strength_model
+    const lora = workflow[LORA_LOADER_NODE_ID];
+    if (lora && params?.loraStrength != null) {
+      lora.inputs['strength_model'] = params.loraStrength;
+    }
+
+    // Negative prompt override
+    const negativeNode = workflow[NEGATIVE_PROMPT_NODE_ID];
+    if (negativeNode && params?.negativePrompt != null) {
+      negativeNode.inputs['text'] = params.negativePrompt;
     }
   }
 
