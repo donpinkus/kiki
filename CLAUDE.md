@@ -98,6 +98,7 @@ Data flows one direction: Canvas → Preprocessor → Scheduler → Network → 
 | State/data flow | `documents/references/state-management.md`, `module-architecture.md` |
 | Implementation decision | Log in `documents/decisions.md` |
 | Starting new work | Check `documents/plans/` for active plans |
+| Deploy/infra scripts (`setup-pod.sh`, `deploy-pod.yml`, `create-pod.sh`) | SSH into a live pod (`runpodctl pod list`) and verify paths/binaries before changing. Never guess from Dockerfiles or docs — the `runpod/comfyui` image internals change without notice. |
 
 ## Git Conventions
 

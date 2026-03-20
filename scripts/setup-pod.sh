@@ -7,6 +7,12 @@ COMFYUI_DIR="/workspace/runpod-slim/ComfyUI"
 # Standard model location on network volume (used for all new volumes)
 VOLUME_MODELS="/workspace/kiki-models"
 
+# ── Find Python/pip ──
+# runpod/comfyui:latest has no venv — pip/python3 are system-wide.
+COMFYUI_PIP=$(command -v pip3 || command -v pip)
+COMFYUI_PYTHON=$(command -v python3)
+echo "Using pip: $COMFYUI_PIP  python: $COMFYUI_PYTHON"
+
 # ── Step 1: Find or download models ──
 
 # Check known model locations (varies by volume history)
@@ -31,7 +37,7 @@ else
   mkdir -p "${MODEL_BASE}/controlnet"
   mkdir -p "${MODEL_BASE}/loras"
 
-  pip install -q huggingface_hub 2>&1 | tail -1
+  "$COMFYUI_PIP" install -q huggingface_hub 2>&1 | tail -1
 
   python3 -c "
 from huggingface_hub import hf_hub_download
@@ -106,7 +112,7 @@ if [ ! -d "${COMFYUI_DIR}/custom_nodes/comfyui_controlnet_aux" ]; then
     "${COMFYUI_DIR}/custom_nodes/comfyui_controlnet_aux"
 fi
 cd "${COMFYUI_DIR}/custom_nodes/comfyui_controlnet_aux"
-"${COMFYUI_DIR}/.venv/bin/pip" install -r requirements.txt 2>&1 | tail -3
+"$COMFYUI_PIP" install -r requirements.txt 2>&1 | tail -3
 
 # ── Step 4: Restart ComfyUI ──
 
@@ -115,8 +121,7 @@ echo "==> Restarting ComfyUI..."
 pkill -f "python.*main.py" || true
 sleep 2
 cd "${COMFYUI_DIR}"
-source .venv/bin/activate
-nohup python main.py --listen 0.0.0.0 --port 8188 > /workspace/runpod-slim/comfyui.log 2>&1 &
+nohup "$COMFYUI_PYTHON" main.py --listen 0.0.0.0 --port 8188 > /workspace/runpod-slim/comfyui.log 2>&1 &
 
 echo ""
 echo "==> Waiting for ComfyUI to start..."
@@ -132,5 +137,6 @@ for i in $(seq 1 30); do
   sleep 2
 done
 
-echo "ComfyUI may still be loading models. Check logs:"
-echo "  tail -f /workspace/runpod-slim/comfyui.log"
+echo "ERROR: ComfyUI did not start within 60s. Last log lines:"
+tail -20 /workspace/runpod-slim/comfyui.log 2>/dev/null || true
+exit 1
