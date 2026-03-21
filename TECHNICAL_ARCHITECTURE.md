@@ -1,5 +1,7 @@
 # Technical Architecture & Engineering Plan — iPad Sketch-to-Image Application
 
+> **⚠️ PARTIALLY STALE.** Written before the switch from fal.ai to ComfyUI/Qwen-Image and before modules were consolidated (5 → 3 packages). Treat as historical context for original design intent. For current architecture, read the code and `CLAUDE.md`.
+
 > **Companion to PRD v2.0 — March 2026** | Confidential — Engineering Team Only
 
 | **Field**      | **Value**                                                            |

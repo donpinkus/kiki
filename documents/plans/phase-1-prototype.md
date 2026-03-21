@@ -3,11 +3,8 @@
 ## Goal
 Validate the core interaction loop end-to-end. Demoable to stakeholders by end of week 4: draw on iPad → see preview → see refined image.
 
-## Prerequisites (Read Before Starting)
-- `documents/references/module-architecture.md`
-- `documents/references/generation-timing.md`
-- `documents/references/api-contracts.md`
-- `documents/references/coding-conventions.md`
+## Prerequisites
+Read `CLAUDE.md` for architecture decisions, module dependencies, and critical constraints. Read the source code directly for API contracts, data models, and timing details.
 
 ## Week 1 — Foundation
 
