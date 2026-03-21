@@ -54,7 +54,7 @@ kiki/
 
 ## Architecture Decisions (Decided — Do Not Propose Alternatives)
 
-**iOS:** SwiftUI for UI. PencilKit for drawing. Swift Concurrency (actors, async/await) — no Combine except PencilKit delegate bridging. URLSession for networking — no third-party HTTP libs. SwiftData for persistence. Core Image + vImage for image processing. 5 local Swift packages via SPM. AppCoordinator (@Observable) injected via environment. GenerationScheduler is a Swift actor.
+**iOS:** SwiftUI for UI. PencilKit for drawing. Swift Concurrency (actors, async/await) — no Combine except PencilKit delegate bridging. URLSession for networking — no third-party HTTP libs. SwiftData for persistence. Core Image + vImage for image processing. 3 local Swift packages via SPM. AppCoordinator (@Observable) injected via environment.
 
 **Backend:** TypeScript + Fastify — no Express. PostgreSQL via Supabase with Drizzle ORM. Redis via Upstash. Sign in with Apple + JWT — no other auth providers. Cloudflare R2 + CDN for image storage. Railway for hosting. Single monolith with internal module boundaries — not microservices. Each module is a Fastify plugin.
 

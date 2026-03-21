@@ -145,7 +145,6 @@ To change generation parameters (strength, steps, models, preprocessor):
 
 ```
 COMFYUI_URL=          # RunPod proxy URL (e.g., https://<POD_ID>-8188.proxy.runpod.net)
-FAL_API_KEY=          # Legacy — fal.ai API key (no longer used)
 ```
 
 Never in client code. Backend only. Stored in Railway environment variables.
