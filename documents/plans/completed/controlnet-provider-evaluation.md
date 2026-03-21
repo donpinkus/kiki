@@ -1,6 +1,6 @@
 # ControlNet Provider Evaluation
 
-**Status:** In Progress — Step 1 (model testing)
+**Status:** Completed — migrated to ComfyUI/Qwen-Image on RunPod
 **Date:** 2026-03-09
 
 ## Problem

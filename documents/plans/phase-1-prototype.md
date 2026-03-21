@@ -19,7 +19,7 @@ Read `CLAUDE.md` for architecture decisions, module dependencies, and critical c
 - [x] Scaffold POST /v1/generate endpoint
 - [x] Implement ComfyUI provider adapter (Qwen-Image on RunPod)
 - [x] Mock auth (skip real auth for week 1)
-- [ ] Docker Compose for local Postgres + Redis
+- [x] Docker Compose for local Postgres + Redis
 
 ### Milestone
 Canvas renders strokes. Backend returns a generated image from ComfyUI given a sketch.
