@@ -8,7 +8,7 @@ NEVER clear the last successful image because of a new failure. The right pane s
 | Failure Mode | Right Pane | User-Facing Indicator | Engineering Behavior |
 |---|---|---|---|
 | Network timeout | Keep last successful image | Toast: "Connection lost. Retrying..." | Retry up to 3x with exponential backoff (1s, 2s, 4s). Log latency + failure. |
-| Provider 5xx | Keep last successful image | Toast: "Connection lost. Retrying..." | Same as timeout. Failover to Replicate if fal.ai errors persist >30 seconds. |
+| Provider 5xx | Keep last successful image | Toast: "Connection lost. Retrying..." | Same as timeout. Log provider error details. |
 | Rate limit (429) | Keep last successful image | Toast: "You've hit your generation limit. Upgrade for more." | Enforce rate limits client-side before hitting backend. Track daily count. |
 | Content filter | Replace with blurred placeholder | Message: "This result was filtered. Try a different prompt." | Log event. Do NOT display filtered image. Do NOT count against quota. |
 | Invalid prompt | No change (don't send request) | Inline validation: "Please use a shorter prompt (max 500 characters)." | Reject at API gateway before forwarding to provider. |

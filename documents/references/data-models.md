@@ -11,7 +11,6 @@ class DrawingSession {
     var updatedAt: Date
     var currentPrompt: String?        // nil if no user prompt
     var currentStylePreset: String    // StylePreset enum raw value
-    var currentAdherence: Float       // 0.0-1.0, default 0.7
     var currentSeed: Int?             // nil = random
     var dividerPosition: Float        // 0.0-1.0, default 0.55
 }
@@ -28,13 +27,12 @@ class GeneratedImage {
     var prompt: String?               // User prompt (nil if auto-captioned)
     var autoCaption: String?          // VLM-generated caption
     var stylePreset: String
-    var adherence: Float
     var seed: Int                     // Seed used by provider
     var sketchThumbnailPath: String   // Local file path to sketch thumbnail
     var imagePath: String             // Local file path to downloaded generated image
     var imageURL: String?             // Remote signed URL (expires in 7 days)
     var latencyMs: Int                // End-to-end generation latency
-    var provider: String              // "fal" or "replicate"
+    var provider: String              // "comfyui"
     var wasSaved: Bool                // User explicitly saved to gallery
 }
 ```
@@ -93,7 +91,7 @@ export const generationEvents = pgTable('generation_events', {
   sessionId: uuid('session_id').notNull(),
   requestId: uuid('request_id').notNull(),
   mode: text('mode').notNull(),         // 'preview' | 'refine'
-  provider: text('provider').notNull(), // 'fal' | 'replicate'
+  provider: text('provider').notNull(), // 'comfyui'
   latencyMs: integer('latency_ms'),
   status: text('status').notNull(),     // 'completed' | 'filtered' | 'error' | 'cancelled'
   contentFilterResult: jsonb('content_filter_result'),

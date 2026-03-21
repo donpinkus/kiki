@@ -8,10 +8,10 @@
 - Follow Apple's Swift API Design Guidelines
 
 ### Naming
-- Types: `PascalCase` — `GenerationScheduler`, `SketchSnapshot`
+- Types: `PascalCase` — `AppCoordinator`, `SketchSnapshot`
 - Properties/methods: `camelCase` — `canvasDidChange`, `latestRequestId`
 - Enum cases: `camelCase` — `StylePreset.watercolor`
-- File naming: one primary type per file, file named after the type — `GenerationScheduler.swift`
+- File naming: one primary type per file, file named after the type — `AppCoordinator.swift`
 
 ### Access Control
 - Default to `internal` (implicit)
@@ -33,7 +33,7 @@
 ### Concurrency
 - All async work off main thread
 - Only UI updates on `@MainActor`
-- Use `actor` for shared mutable state (see GenerationScheduler)
+- Use `actor` for shared mutable state when needed
 - Prefer `async/await` over Combine. Combine only for PencilKit delegate bridging.
 - Use `Task {}` for launching async work from sync contexts
 - Use `TaskGroup` for parallel async operations
@@ -66,7 +66,7 @@
 ### Naming
 - Variables/functions: `camelCase` — `generateImage`, `sessionTracker`
 - Types/interfaces: `PascalCase` — `GenerateRequest`, `ProviderAdapter`
-- Constants: `SCREAMING_SNAKE` — `MAX_PROMPT_LENGTH`, `DEFAULT_ADHERENCE`
+- Constants: `SCREAMING_SNAKE` — `MAX_PROMPT_LENGTH`, `STYLE_PRESETS`
 - Files: `kebab-case` — `prompt-filter.ts`, `session-tracker.ts`
 
 ### Types

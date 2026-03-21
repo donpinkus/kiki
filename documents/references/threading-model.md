@@ -61,16 +61,16 @@ func updateResultImage(_ image: UIImage) {
 ## Actor Isolation
 
 ```swift
-// GenerationScheduler is an actor — all state mutations are thread-safe
-actor GenerationScheduler {
-    private var latestRequestId: UUID?
-    private var activePreviewTask: Task<Void, Never>?
-    private var activeRefineTask: Task<Void, Never>?
+// AppCoordinator is @MainActor — debounce and generation state managed inline
+@MainActor @Observable
+final class AppCoordinator {
+    private var currentRequestId: UUID?
+    private var debounceTask: Task<Void, Never>?
+    private var isGenerating = false
+    private var isCanvasDirty = false
 
-    // All methods are implicitly async when called from outside the actor
-    func schedulePreview(_ sketch: ProcessedSketch) { ... }
-    func scheduleRefine(_ sketch: ProcessedSketch) { ... }
-    func cancelAll() { ... }
+    // Generation lifecycle: debounce → snapshot → send → validate freshness → display
+    func generate() { ... }
 }
 ```
 

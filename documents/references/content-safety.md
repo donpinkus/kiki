@@ -53,9 +53,9 @@ Content safety is infrastructure, not a feature. Must be operational before any 
 - Do NOT display the filtered image to user
 
 ### Provider-Side Safety
-- fal.ai and Replicate may apply their own filters
-- Our filter is an additional layer, not a replacement
-- If provider filters (returns error/blank), propagate as "filtered" status
+- ComfyUI does not apply content filters by default
+- Our filter is the primary safety layer
+- If provider returns an error, propagate as "filtered" or "error" status
 
 ## User Reporting
 - "Report this image" button on every generated output
@@ -65,13 +65,13 @@ Content safety is infrastructure, not a feature. Must be operational before any 
 ## Privacy
 - Sketch images + prompts transmitted via TLS 1.3
 - Sketch data ephemeral — deleted from server after generation response
-- Generated images cached up to 7 days (per fal.ai policy) — disclosed in consent
+- Generated images stored temporarily on RunPod pod storage — disclosed in consent
 - No PII in analytics — anonymized usage metrics only
 
 ## Consent Screen Copy (First Launch)
 Must disclose:
 1. Sketches and prompts are sent to our server for AI processing
-2. Our server forwards them to [fal.ai / Replicate] for image generation
+2. Our server forwards them to ComfyUI (on RunPod) for image generation
 3. Sketch data is deleted after processing — not stored or used for training
 4. Generated images cached for up to 7 days for re-download
 5. Link to full privacy policy
