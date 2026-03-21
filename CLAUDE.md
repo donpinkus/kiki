@@ -60,6 +60,15 @@ kiki/
 
 **Backend:** TypeScript + Fastify — no Express. PostgreSQL via Supabase with Drizzle ORM. Redis via Upstash. Sign in with Apple + JWT — no other auth providers. Cloudflare R2 + CDN for image storage. Railway for hosting. Single monolith with internal module boundaries — not microservices. Each module is a Fastify plugin.
 
+## ComfyUI Workflow
+
+Two representations of the same pipeline exist. They must stay in sync.
+
+- **API format** (`backend/src/modules/providers/comfyui-workflow-api.json`) — the source of truth in the repo. The backend clones this template, injects per-request values (prompt, sketch image, seed), and sends it to ComfyUI's `/prompt` endpoint. Default parameter values in this file are the production defaults.
+- **UI format** (`kiki-workflow-<date>.json` on the pod at `/workspace/runpod-slim/ComfyUI/user/default/workflows/`) — for visual editing in ComfyUI's web UI. Lives only on the pod, never in the repo.
+
+When tuning parameters in the ComfyUI web UI, sync the changes back to the API template in the repo. When changing defaults in the API template, update the UI workflow on the pod. Only one UI workflow should exist on the pod — delete old versions to avoid confusion.
+
 ## Module Dependencies
 
 ```
@@ -98,7 +107,9 @@ Data flows one direction: Canvas → Preprocessor → Scheduler → Network → 
 | State/data flow | `documents/references/state-management.md`, `module-architecture.md` |
 | Implementation decision | Log in `documents/decisions.md` |
 | Starting new work | Check `documents/plans/` for active plans |
+| ComfyUI workflow parameters | Both formats (API in repo, UI on pod) must stay in sync. See "ComfyUI Workflow" section above. Compare with the script from this session if unsure whether they've drifted. |
 | Deploy/infra scripts (`setup-pod.sh`, `deploy-pod.yml`, `create-pod.sh`) | SSH into a live pod (`runpodctl pod list`) and verify paths/binaries before changing. Never guess from Dockerfiles or docs — the `runpod/comfyui` image internals change without notice. |
+| Any work involving remote file systems (pods, servers, ComfyUI directories) | Never assume file paths or directory structures. Always SSH in and `ls`/`find` to confirm the actual layout before writing, copying, or referencing files. This applies to ComfyUI internals (workflows, models, custom nodes), pod volumes, and any non-local file system. |
 
 ## Git Conventions
 
