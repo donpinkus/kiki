@@ -16,15 +16,15 @@ Generate an image from a sketch.
   "stylePreset": "photoreal" | "anime" | "watercolor" | "storybook" | "fantasy" | "ink" | "neon",
   "sketchImageBase64": "string (JPEG at 85% quality)",
   "advancedParameters": {
-    "controlNetStrength": 0.8,
-    "controlNetEndPercent": 0.8,
-    "cfgScale": 1.0,
-    "steps": 8,
-    "denoise": 0.65,
-    "auraFlowShift": 1.73,
-    "loraStrength": 0.8,
+    "controlNetStrength": "number | null (0-1)",
+    "controlNetEndPercent": "number | null (0-1)",
+    "cfgScale": "number | null (0-5)",
+    "steps": "integer | null (1-20)",
+    "denoise": "number | null (0-1)",
+    "auraFlowShift": "number | null (0-5)",
+    "loraStrength": "number | null (0-2)",
     "negativePrompt": "string | null",
-    "seed": null
+    "seed": "integer | null (null = random)"
   }
 }
 ```

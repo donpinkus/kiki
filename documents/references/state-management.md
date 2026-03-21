@@ -25,10 +25,12 @@ State is divided into scopes to avoid a monolithic state object. Each scope has 
 **Owner:** `CanvasViewModel` (within CanvasModule)
 
 **Contains:**
-- `currentDrawing: PKDrawing` — PencilKit's drawing object
 - `canUndo: Bool` — derived from PencilKit
 - `canRedo: Bool` — derived from PencilKit
 - `isEmpty: Bool` — whether canvas has any strokes
+- `scale: CGFloat` — current zoom level
+- `rotation: CGFloat` — current rotation
+- `canvasChanges: AsyncStream<SketchSnapshot>` — emits on every stroke change
 
 **Persistence:** In-memory only. Drawings are NOT persisted across sessions in v1.
 

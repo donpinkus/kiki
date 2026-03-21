@@ -5,7 +5,7 @@ Determine whether on-device auto-captioning is viable for the no-prompt experien
 
 ## Prerequisites
 - `documents/references/generation-timing.md` (200ms latency budget for caption)
-- `documents/references/module-architecture.md` (PreprocessorModule owns this)
+- `documents/references/module-architecture.md`
 
 ## Questions to Answer
 1. Can a distilled BLIP-2 model run on-device in <200ms on iPad Air M1?

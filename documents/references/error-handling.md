@@ -13,8 +13,6 @@ NEVER clear the last successful image because of a new failure. The right pane s
 | Content filter | Replace with blurred placeholder | Message: "This result was filtered. Try a different prompt." | Log event. Do NOT display filtered image. Do NOT count against quota. |
 | Invalid prompt | No change (don't send request) | Inline validation: "Please use a shorter prompt (max 500 characters)." | Reject at API gateway before forwarding to provider. |
 | Memory pressure | Keep last image, reduce quality | Toast: "Close other apps for best performance." | Reduce snapshot resolution. Flush image cache proactively. |
-| WebSocket drop | Keep last image | No visible indicator (silent reconnect) | Auto-reconnect with exponential backoff. Fallback to REST. Heartbeat every 15s. |
-| Auto-caption failure | Use generic style prompt | No visible indicator | Fallback prompt: "A [style] illustration." Skip caption, proceed with generation. |
 | Provider timeout (>8s) | Keep preview image visible | Progress bar + "Taking longer than usual..." | Notify user and offer manual retry button. |
 
 ## Right Pane State Machine
@@ -49,7 +47,7 @@ enum GenerationError: Error {
     case contentFiltered(categories: [String])
     case invalidRequest(message: String)
     case cancelled
-    case quotaExceeded(remaining: Int, resetAt: Date)
+    case decodingError
 }
 ```
 

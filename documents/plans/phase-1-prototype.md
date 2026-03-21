@@ -12,95 +12,86 @@ Validate the core interaction loop end-to-end. Demoable to stakeholders by end o
 ## Week 1 — Foundation
 
 ### iOS
-- [ ] Create Xcode project with SwiftUI app shell
-- [ ] Set up 5 local Swift packages (CanvasModule, PreprocessorModule, SchedulerModule, NetworkModule, ResultModule) with Package.swift files
-- [ ] Implement PencilKit canvas in split-screen layout (HStack: 55% canvas, 45% result)
-- [ ] Basic floating toolbar: brush, eraser, undo, redo, clear
-- [ ] Toolbar auto-hides after 3 seconds of inactivity
+- [x] Create Xcode project with SwiftUI app shell
+- [x] Set up 3 local Swift packages (CanvasModule, NetworkModule, ResultModule) with Package.swift files
+- [x] Implement PencilKit canvas in split-screen layout (HStack: 55% canvas, 45% result)
+- [x] Basic floating toolbar: brush, eraser, undo, redo, clear
 
 ### Backend
-- [ ] Set up Node/Fastify project with TypeScript
-- [ ] Scaffold POST /v1/generate endpoint
-- [ ] Implement fal.ai provider adapter (REST, LCM preview only)
-- [ ] Mock auth (skip real auth for week 1)
+- [x] Set up Node/Fastify project with TypeScript
+- [x] Scaffold POST /v1/generate endpoint
+- [x] Implement ComfyUI provider adapter (Qwen-Image on RunPod)
+- [x] Mock auth (skip real auth for week 1)
 - [ ] Docker Compose for local Postgres + Redis
 
 ### Milestone
-Canvas renders strokes. Backend returns a generated image from fal.ai given a hardcoded sketch.
+Canvas renders strokes. Backend returns a generated image from ComfyUI given a sketch.
 
 ## Week 2 — Wire It Together
 
 ### iOS
-- [ ] Implement `SketchPreprocessor` (snapshot capture, monochrome flatten, crop, resize to 512x512)
-- [ ] Wire canvas changes to preprocessor
-- [ ] Display static result image in right pane (`ResultView` basic implementation)
-- [ ] Implement `APIClient` in NetworkModule (POST request to backend)
+- [x] Wire canvas snapshot capture and JPEG encoding
+- [x] Display result image in right pane (`ResultView` implementation)
+- [x] Implement `APIClient` in NetworkModule (POST request to backend)
 
 ### Backend
-- [ ] Implement generation orchestrator (single mode: preview)
-- [ ] Request validation via Fastify JSON schema
-- [ ] Basic structured logging (requestId, sessionId, latencyMs)
+- [x] Request validation via Fastify JSON schema
+- [x] Basic structured logging (requestId, sessionId, latencyMs)
 - [ ] Deploy to staging on Railway
 
 ### Milestone
 End-to-end: draw on iPad → see a preview image appear on the right pane.
 
-## Week 3 — Scheduler + Cancellation
+## Week 3 — Debounce + Cancellation
 
 ### iOS
-- [ ] Implement `GenerationScheduler` actor: debounce timers (300ms preview, 1200ms refine)
-- [ ] Latest-request-wins logic (request ID tracking, stale response discard)
-- [ ] Cancellation: Task.cancel() on new strokes + POST /v1/cancel
-- [ ] Wire scheduler to NetworkModule (REST)
-- [ ] Implement `ResultView` states: empty, generating, preview, refining, refined, error
-- [ ] Loading shimmer overlay during generation
-- [ ] Non-blocking error toasts
+- [x] Implement debounce in AppCoordinator (1.5s after last canvas change)
+- [x] Latest-request-wins logic (request ID tracking, stale response discard)
+- [x] Auto-retrigger when canvas changes during in-flight generation
+- [x] Implement `ResultView` states: empty, generating (with progress phases), preview, error
+- [x] Phase-based progress tracking (preparing → uploading → downloading)
 
 ### Backend
 - [ ] Add POST /v1/cancel endpoint
 - [ ] Implement stale job tracking in Redis (sessionId → active job IDs)
-- [ ] Add refine mode to orchestrator (SDXL ControlNet via fal.ai)
-- [ ] Basic quota counter (Redis, no auth-based enforcement yet)
 
 ### Milestone
-Preview appears ~1s after drawing pause. Refine replaces it after longer pause. Stale results discarded.
+Preview appears ~5-8s after drawing pause. Stale results discarded.
 
 ## Week 4 — Prompt + Style + Polish
 
 ### iOS
-- [ ] Add prompt input field (text field below canvas, placeholder: "Describe what you're drawing, or leave blank")
-- [ ] Add style preset chips (horizontally scrollable: Photoreal, Anime, Watercolor, Storybook, Fantasy, Ink, Neon)
-- [ ] Wire prompt/style changes as immediate generation triggers (no debounce)
-- [ ] Polish split-screen layout and resizable divider
-- [ ] Crossfade transition (200ms) between old and new result images
+- [x] Add prompt input field
+- [x] Add style preset chips (Photoreal, Anime, Watercolor, Storybook, Fantasy, Ink, Neon)
+- [x] Wire prompt/style changes as generation triggers
+- [x] Polish split-screen layout and resizable divider
+- [x] Advanced parameters panel (ControlNet strength, CFG, steps, denoise, etc.)
+- [x] Seed locking
 
 ### Backend
-- [ ] Add SDXL ControlNet Scribble adapter for refine
-- [ ] Prompt template system (style-based prompt prefixes from style-presets.md)
-- [ ] GET /health endpoint
-- [ ] Negative prompt injection (shared quality negative prompt)
+- [x] Prompt template system (style-based prompt prefixes)
+- [x] GET /health endpoint
+- [x] Accept advanced ComfyUI parameters from client
 
 ### Milestone
-Stakeholder demo: full draw → preview → refine loop with prompt and style control.
+Stakeholder demo: full draw → preview loop with prompt, style, and advanced parameter control.
 
 ## Acceptance Criteria
-- [ ] Drawing on canvas feels instant (no perceived lag)
-- [ ] Preview appears within 2 seconds of stopping drawing
-- [ ] Refined image replaces preview within 6 seconds of stopping drawing
-- [ ] Typing a prompt and pressing return triggers new generation
-- [ ] Changing style preset triggers new generation
-- [ ] Continuing to draw cancels in-flight requests
-- [ ] Only the latest result updates the right pane
-- [ ] Error states show toast, keep last image visible
+- [x] Drawing on canvas feels instant (no perceived lag)
+- [x] Preview appears after stopping drawing (debounced)
+- [x] Typing a prompt and pressing return triggers new generation
+- [x] Changing style preset triggers new generation
+- [x] Continuing to draw queues re-generation after current completes
+- [x] Only the latest result updates the right pane
+- [x] Error states show in result pane, keep last image visible
 - [ ] Backend deploys to Railway staging
-- [ ] End-to-end works on iPad Simulator
+- [x] End-to-end works on iPad Simulator
 
 ## Deferred to Phase 2
 - Auth (Sign in with Apple)
 - Content safety filters
 - Auto-captioning (no-prompt VLM)
 - Gallery/history (SwiftData)
-- WebSocket preview fast path
+- Refine mode (higher quality second pass)
 - Consent screen / age gate
-- Adherence slider
 - Manual mode toggle

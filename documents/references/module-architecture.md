@@ -6,7 +6,7 @@
 - **Responsibilities:** Render PencilKit canvas. Track stroke changes. Export canvas snapshot as UIImage. Undo/redo. Clear.
 - **Key Types:** `CanvasView` (SwiftUI), `CanvasViewModel`, `SketchSnapshot`
 - **Dependencies:** None (fully independent)
-- **Communication:** Emits `canvasDidChange` events via AsyncStream whenever strokes are added/removed/modified
+- **Communication:** Emits canvas change events via `canvasChanges` AsyncStream whenever strokes are added/removed/modified
 
 ### NetworkModule
 - **Responsibilities:** HTTP communication with backend. Request/response serialization. Auth token management.
@@ -30,7 +30,7 @@ AppCoordinator (`@MainActor @Observable`) owns all cross-module coordination:
 
 ## Module Interaction Flow (Unidirectional)
 
-1. **CanvasModule** emits `canvasDidChange` via AsyncStream
+1. **CanvasModule** emits changes via `canvasChanges` AsyncStream
 2. **AppCoordinator** subscribes, resets debounce timer on each event
 3. When timer fires, AppCoordinator captures snapshot, encodes to JPEG, constructs `GenerateRequest`
 4. **NetworkModule** sends to backend (REST), returns `GenerateResponse`

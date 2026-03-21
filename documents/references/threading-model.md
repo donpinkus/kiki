@@ -10,7 +10,7 @@ No synchronous work on the main thread except PencilKit rendering and SwiftUI up
 | Main thread | PencilKit rendering, SwiftUI layout, user input handling | `.userInteractive` | NOTHING else. Sacred. |
 | Preprocessing queue (serial) | Canvas snapshot capture, monochrome conversion, crop, resize | `.userInitiated` | vImage for hardware-accelerated ops |
 | Auto-caption queue (serial) | Core ML VLM inference for sketch captioning | `.utility` | 200ms timeout; skip if exceeded |
-| Network queue (concurrent) | HTTP/WebSocket I/O, request/response serialization | `.utility` | Managed by URLSession internally |
+| Network queue (concurrent) | HTTP I/O, request/response serialization | `.utility` | Managed by URLSession internally |
 | Image decode queue (serial) | Download returned image, decode JPEG/PNG to UIImage | `.utility` | Use CGImageSource with kCGImageSourceShouldCacheImmediately |
 
 ## Swift Concurrency Mapping
