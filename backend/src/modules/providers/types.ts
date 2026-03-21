@@ -14,7 +14,6 @@ export interface ProviderRequest {
   sketchImageBase64: string;
   prompt: string;
   mode: 'preview' | 'refine';
-  seed?: number;
   advancedParameters?: AdvancedParameters;
 }
 
