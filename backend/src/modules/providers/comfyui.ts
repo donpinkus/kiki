@@ -97,6 +97,7 @@ export class ComfyUIAdapter implements ProviderAdapter {
       seed: actualSeed,
       latencyMs: Date.now() - startTime,
       jobId: promptId,
+      workflow,
     };
   }
 

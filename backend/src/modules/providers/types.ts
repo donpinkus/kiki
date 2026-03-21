@@ -30,6 +30,7 @@ export interface ProviderResponse {
   seed: number;
   latencyMs: number;
   jobId?: string;
+  workflow?: Record<string, unknown>;
 }
 
 export interface ProviderAdapter {

@@ -353,6 +353,9 @@ jobs:
           scp -i ~/.ssh/runpod_key -o StrictHostKeyChecking=no -P "$SSH_PORT" \
             scripts/setup-pod.sh root@"$SSH_IP":/tmp/setup-pod.sh
 
+          scp -i ~/.ssh/runpod_key -o StrictHostKeyChecking=no -P "$SSH_PORT" \
+            backend/src/modules/providers/comfyui-workflow-api.json root@"$SSH_IP":/tmp/comfyui-workflow-api.json
+
           $SSH_CMD "chmod +x /tmp/setup-pod.sh && /tmp/setup-pod.sh"
 
       - name: Wait for ComfyUI with models loaded

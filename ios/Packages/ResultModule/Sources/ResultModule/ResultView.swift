@@ -31,14 +31,14 @@ public struct ResultView: View {
             case .empty:
                 emptyView
 
-            case .generating(let previousURL):
-                generatingView(previousURL: previousURL)
+            case .generating(let progress, let previousImage):
+                generatingView(progress: progress, previousImage: previousImage)
 
-            case .preview(let imageURL):
-                imageContent(url: imageURL)
+            case .preview(let image):
+                imageView(image)
 
-            case .error(let message, let previousURL):
-                errorView(message: message, previousURL: previousURL)
+            case .error(let message, let previousImage):
+                errorView(message: message, previousImage: previousImage)
             }
 
             if showToast {
@@ -64,28 +64,27 @@ public struct ResultView: View {
         }
     }
 
-    private func generatingView(previousURL: URL?) -> some View {
+    private func generatingView(progress: GenerationProgress, previousImage: UIImage?) -> some View {
         ZStack {
-            if let url = previousURL {
-                imageContent(url: url)
+            if let image = previousImage {
+                imageView(image)
             } else {
-                placeholderBackground
+                Color(.systemGray5)
             }
-
-            shimmerOverlay
 
             VStack {
                 Spacer()
-                generatingLabel
-                    .padding(.bottom, 32)
+                progressPanel(progress: progress)
+                    .padding(.bottom, 24)
+                    .padding(.horizontal, 24)
             }
         }
     }
 
-    private func errorView(message: String, previousURL: URL?) -> some View {
+    private func errorView(message: String, previousImage: UIImage?) -> some View {
         ZStack {
-            if let url = previousURL {
-                imageContent(url: url)
+            if let image = previousImage {
+                imageView(image)
             } else {
                 emptyView
             }
@@ -95,75 +94,104 @@ public struct ResultView: View {
         }
     }
 
-    private func imageContent(url: URL) -> some View {
-        AsyncImage(url: url) { phase in
-            switch phase {
-            case .success(let image):
-                image
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .transition(.opacity)
+    private func imageView(_ image: UIImage) -> some View {
+        Image(uiImage: image)
+            .resizable()
+            .aspectRatio(contentMode: .fit)
+    }
 
-            case .failure:
-                placeholderBackground
-                    .overlay {
-                        VStack(spacing: 8) {
-                            Image(systemName: "photo.badge.exclamationmark")
-                                .font(.system(size: 36))
-                                .foregroundStyle(.secondary)
-                            Text("Unable to load image")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
+    // MARK: - Progress Panel
 
-            case .empty:
-                placeholderBackground
-                    .overlay {
-                        ProgressView()
-                    }
+    private func progressPanel(progress: GenerationProgress) -> some View {
+        TimelineView(.periodic(from: progress.phaseStartedAt, by: 1.0)) { context in
+            let elapsed = context.date.timeIntervalSince(progress.phaseStartedAt)
 
-            @unknown default:
-                placeholderBackground
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(GenerationPhase.allCases) { phase in
+                    phaseRow(
+                        phase: phase,
+                        progress: progress,
+                        elapsed: elapsed
+                    )
+                }
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
         }
     }
 
-    private var placeholderBackground: some View {
-        Color(.systemGray5)
+    private func phaseRow(
+        phase: GenerationPhase,
+        progress: GenerationProgress,
+        elapsed: TimeInterval
+    ) -> some View {
+        HStack(spacing: 8) {
+            if let duration = progress.durations[phase] {
+                // Completed
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                    .font(.caption2)
+                Text(phase.label)
+                    .foregroundStyle(.white.opacity(0.7))
+                Spacer()
+                Text(formatDuration(duration))
+                    .foregroundStyle(.white.opacity(0.5))
+            } else if phase == progress.currentPhase {
+                // Active
+                ProgressView()
+                    .scaleEffect(0.6)
+                    .frame(width: 14, height: 14)
+                Text(phase.label)
+                    .foregroundStyle(.white)
+                Spacer()
+                Text(formatDuration(elapsed))
+                    .foregroundStyle(.white.opacity(0.7))
+            } else {
+                // Pending
+                Image(systemName: "circle")
+                    .foregroundStyle(.white.opacity(0.3))
+                    .font(.caption2)
+                Text(phase.label)
+                    .foregroundStyle(.white.opacity(0.3))
+                Spacer()
+            }
+        }
+        .font(.caption)
+        .fontDesign(.monospaced)
     }
 
-    private var shimmerOverlay: some View {
-        ShimmerView()
-            .allowsHitTesting(false)
+    private func formatDuration(_ duration: TimeInterval) -> String {
+        if duration < 1 { return "< 1s" }
+        return "\(Int(duration))s"
     }
 
-    private var generatingLabel: some View {
-        Text("Creating preview...")
-            .font(.caption)
-            .fontWeight(.medium)
-            .foregroundStyle(.white)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
-            .background(.ultraThinMaterial, in: Capsule())
-    }
+    // MARK: - Toast
 
     private var toastOverlay: some View {
         VStack {
             Spacer()
 
-            Text(toastMessage)
-                .font(.subheadline)
-                .foregroundStyle(.white)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
-                .background(Color.black.opacity(0.75), in: RoundedRectangle(cornerRadius: 10))
-                .padding(.horizontal, 24)
-                .padding(.bottom, 24)
-                .onTapGesture {
-                    dismissToast()
-                }
-                .transition(.move(edge: .bottom).combined(with: .opacity))
+            HStack {
+                Text(toastMessage)
+                    .font(.caption)
+                    .fontDesign(.monospaced)
+                    .foregroundStyle(.white)
+
+                Image(systemName: "xmark")
+                    .font(.caption2)
+                    .fontWeight(.bold)
+                    .foregroundStyle(.white.opacity(0.7))
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(Color.red.opacity(0.85), in: RoundedRectangle(cornerRadius: 10))
+            .padding(.horizontal, 24)
+            .padding(.bottom, 24)
+            .onTapGesture {
+                dismissToast()
+            }
+            .transition(.move(edge: .bottom).combined(with: .opacity))
         }
     }
 
@@ -176,7 +204,7 @@ public struct ResultView: View {
             showToast = true
         }
         toastDismissTask = Task { @MainActor in
-            try? await Task.sleep(for: .seconds(4))
+            try? await Task.sleep(for: .seconds(10))
             guard !Task.isCancelled else { return }
             dismissToast()
         }
@@ -190,56 +218,42 @@ public struct ResultView: View {
     }
 }
 
-// MARK: - ShimmerView
-
-private struct ShimmerView: View {
-    @State private var phase: CGFloat = -1
-
-    var body: some View {
-        GeometryReader { geometry in
-            LinearGradient(
-                colors: [
-                    .clear,
-                    .white.opacity(0.15),
-                    .white.opacity(0.3),
-                    .white.opacity(0.15),
-                    .clear
-                ],
-                startPoint: .leading,
-                endPoint: .trailing
-            )
-            .frame(width: geometry.size.width * 0.6)
-            .offset(x: phase * geometry.size.width)
-            .onAppear {
-                withAnimation(
-                    .linear(duration: 1.5)
-                    .repeatForever(autoreverses: false)
-                ) {
-                    phase = 1.5
-                }
-            }
-        }
-        .clipped()
-    }
-}
-
 // MARK: - Preview
 
 #Preview("Empty") {
     ResultView(state: .empty)
 }
 
-#Preview("Generating") {
-    ResultView(state: .generating(previousImageURL: nil))
+#Preview("Generating – Preparing") {
+    ResultView(state: .generating(
+        progress: GenerationProgress(currentPhase: .preparing),
+        previousImage: nil
+    ))
 }
 
-#Preview("Preview") {
-    ResultView(state: .preview(imageURL: URL(string: "https://picsum.photos/512")!))
+#Preview("Generating – Uploading") {
+    ResultView(state: .generating(
+        progress: GenerationProgress(
+            currentPhase: .uploading,
+            durations: [.preparing: 0.08]
+        ),
+        previousImage: nil
+    ))
+}
+
+#Preview("Generating – Downloading") {
+    ResultView(state: .generating(
+        progress: GenerationProgress(
+            currentPhase: .downloading,
+            durations: [.preparing: 0.05, .uploading: 11.3]
+        ),
+        previousImage: nil
+    ))
 }
 
 #Preview("Error") {
     ResultView(state: .error(
-        message: "Connection lost. Retrying...",
-        previousImageURL: URL(string: "https://picsum.photos/512")!
+        message: "Server error 200: Generation timed out after 120s",
+        previousImage: nil
     ))
 }

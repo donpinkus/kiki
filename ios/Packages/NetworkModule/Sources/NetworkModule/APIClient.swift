@@ -119,6 +119,7 @@ public final class APIClient: Sendable {
         struct APIResponse: Decodable {
             let requestId: String
             let status: String
+            let error: String?
             let imageUrl: String?
             let inputImageUrl: String?
             let lineartImageUrl: String?
@@ -150,9 +151,13 @@ public final class APIClient: Sendable {
             throw GenerationError.decodingError
         }
 
-        // If status is "filtered", throw contentFiltered
         if status == .filtered {
             throw GenerationError.contentFiltered(categories: [])
+        }
+
+        if status == .error {
+            let message = decoded.error ?? "Unknown server error"
+            throw GenerationError.serverError(statusCode: 200, message: message)
         }
 
         let imageURL: URL?
@@ -165,6 +170,15 @@ public final class APIClient: Sendable {
         let inputImageURL = decoded.inputImageUrl.flatMap { URL(string: $0) }
         let lineartImageURL = decoded.lineartImageUrl.flatMap { URL(string: $0) }
 
+        // Extract workflow JSON as a pretty-printed string
+        var workflowJSON: String?
+        if let rawObject = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let workflow = rawObject["workflow"] {
+            if let workflowData = try? JSONSerialization.data(withJSONObject: workflow, options: .prettyPrinted) {
+                workflowJSON = String(data: workflowData, encoding: .utf8)
+            }
+        }
+
         return GenerateResponse(
             requestId: requestUUID,
             status: status,
@@ -174,7 +188,8 @@ public final class APIClient: Sendable {
             seed: decoded.seed,
             provider: decoded.provider,
             latencyMs: decoded.latencyMs,
-            mode: mode
+            mode: mode,
+            workflowJSON: workflowJSON
         )
     }
 

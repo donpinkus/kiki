@@ -6,6 +6,14 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		404C38372F69891C00EB39C6 /* CanvasModule in Frameworks */ = {isa = PBXBuildFile; productRef = 40949E012F5E400100AF4CF7 /* CanvasModule */; };
+		404C38382F69891C00EB39C6 /* PreprocessorModule in Frameworks */ = {isa = PBXBuildFile; productRef = 40949E012F5E400200AF4CF7 /* PreprocessorModule */; };
+		404C38392F69891C00EB39C6 /* SchedulerModule in Frameworks */ = {isa = PBXBuildFile; productRef = 40949E012F5E400300AF4CF7 /* SchedulerModule */; };
+		404C383A2F69891C00EB39C6 /* NetworkModule in Frameworks */ = {isa = PBXBuildFile; productRef = 40949E012F5E400400AF4CF7 /* NetworkModule */; };
+		404C383B2F69891C00EB39C6 /* ResultModule in Frameworks */ = {isa = PBXBuildFile; productRef = 40949E012F5E400500AF4CF7 /* ResultModule */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		40949DDB2F5E235500AF4CF7 /* Kiki.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Kiki.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -23,6 +31,11 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				404C383B2F69891C00EB39C6 /* ResultModule in Frameworks */,
+				404C383A2F69891C00EB39C6 /* NetworkModule in Frameworks */,
+				404C38392F69891C00EB39C6 /* SchedulerModule in Frameworks */,
+				404C38382F69891C00EB39C6 /* PreprocessorModule in Frameworks */,
+				404C38372F69891C00EB39C6 /* CanvasModule in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -99,15 +112,15 @@
 			);
 			mainGroup = 40949DD22F5E235500AF4CF7;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				40949E002F5E400100AF4CF7 /* XCLocalSwiftPackageReference "Packages/CanvasModule" */,
+				40949E002F5E400200AF4CF7 /* XCLocalSwiftPackageReference "Packages/PreprocessorModule" */,
+				40949E002F5E400300AF4CF7 /* XCLocalSwiftPackageReference "Packages/SchedulerModule" */,
+				40949E002F5E400400AF4CF7 /* XCLocalSwiftPackageReference "Packages/NetworkModule" */,
+				40949E002F5E400500AF4CF7 /* XCLocalSwiftPackageReference "Packages/ResultModule" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 40949DDC2F5E235500AF4CF7 /* Products */;
-			packageReferences = (
-				40949E002F5E400100AF4CF7 /* XCLocalSwiftPackageReference "CanvasModule" */,
-				40949E002F5E400200AF4CF7 /* XCLocalSwiftPackageReference "PreprocessorModule" */,
-				40949E002F5E400300AF4CF7 /* XCLocalSwiftPackageReference "SchedulerModule" */,
-				40949E002F5E400400AF4CF7 /* XCLocalSwiftPackageReference "NetworkModule" */,
-				40949E002F5E400500AF4CF7 /* XCLocalSwiftPackageReference "ResultModule" */,
-			);
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
@@ -338,23 +351,23 @@
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
-		40949E002F5E400100AF4CF7 /* XCLocalSwiftPackageReference "CanvasModule" */ = {
+		40949E002F5E400100AF4CF7 /* XCLocalSwiftPackageReference "Packages/CanvasModule" */ = {
 			isa = XCLocalSwiftPackageReference;
 			relativePath = Packages/CanvasModule;
 		};
-		40949E002F5E400200AF4CF7 /* XCLocalSwiftPackageReference "PreprocessorModule" */ = {
+		40949E002F5E400200AF4CF7 /* XCLocalSwiftPackageReference "Packages/PreprocessorModule" */ = {
 			isa = XCLocalSwiftPackageReference;
 			relativePath = Packages/PreprocessorModule;
 		};
-		40949E002F5E400300AF4CF7 /* XCLocalSwiftPackageReference "SchedulerModule" */ = {
+		40949E002F5E400300AF4CF7 /* XCLocalSwiftPackageReference "Packages/SchedulerModule" */ = {
 			isa = XCLocalSwiftPackageReference;
 			relativePath = Packages/SchedulerModule;
 		};
-		40949E002F5E400400AF4CF7 /* XCLocalSwiftPackageReference "NetworkModule" */ = {
+		40949E002F5E400400AF4CF7 /* XCLocalSwiftPackageReference "Packages/NetworkModule" */ = {
 			isa = XCLocalSwiftPackageReference;
 			relativePath = Packages/NetworkModule;
 		};
-		40949E002F5E400500AF4CF7 /* XCLocalSwiftPackageReference "ResultModule" */ = {
+		40949E002F5E400500AF4CF7 /* XCLocalSwiftPackageReference "Packages/ResultModule" */ = {
 			isa = XCLocalSwiftPackageReference;
 			relativePath = Packages/ResultModule;
 		};

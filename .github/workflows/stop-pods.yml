@@ -1,0 +1,71 @@
+name: Stop All RunPod Pods
+
+on:
+  workflow_dispatch:
+
+jobs:
+  stop:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch and stop all pods
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+        run: |
+          set -euo pipefail
+          API_URL="https://api.runpod.io/graphql?api_key=${RUNPOD_API_KEY}"
+
+          # Get all pods
+          PODS=$(curl -sf "$API_URL" \
+            -H 'Content-Type: application/json' \
+            -d '{"query": "query { myself { pods { id name desiredStatus gpuDisplayName runtime { uptimeInSeconds } } } }"}')
+
+          POD_COUNT=$(echo "$PODS" | jq '.data.myself.pods | length')
+          echo "Found $POD_COUNT pod(s):"
+          echo "$PODS" | jq '.data.myself.pods[] | {id, name, status: .desiredStatus, gpu: .gpuDisplayName}'
+
+          if [ "$POD_COUNT" -eq 0 ]; then
+            echo "No pods to stop."
+            echo "## No Pods Found" >> "$GITHUB_STEP_SUMMARY"
+            echo "There are no active pods to stop." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # Stop each pod
+          STOPPED=0
+          FAILED=0
+          for POD_ID in $(echo "$PODS" | jq -r '.data.myself.pods[].id'); do
+            POD_NAME=$(echo "$PODS" | jq -r ".data.myself.pods[] | select(.id == \"$POD_ID\") | .name")
+            echo ""
+            echo "Stopping pod $POD_ID ($POD_NAME)..."
+
+            RESP=$(curl -sf "$API_URL" \
+              -H 'Content-Type: application/json' \
+              -d "{\"query\": \"mutation { podStop(input: { podId: \\\"${POD_ID}\\\" }) { id desiredStatus } }\"}" || true)
+
+            STATUS=$(echo "$RESP" | jq -r '.data.podStop.desiredStatus // empty' 2>/dev/null)
+            if [ -n "$STATUS" ]; then
+              echo "  ✓ Pod $POD_ID stopped (status: $STATUS)"
+              STOPPED=$((STOPPED + 1))
+            else
+              ERR=$(echo "$RESP" | jq -r '.errors[0].message // empty' 2>/dev/null)
+              echo "  ✗ Failed to stop pod $POD_ID: ${ERR:-unknown error}"
+              echo "    Response: $(echo "$RESP" | jq -c . 2>/dev/null || echo "$RESP")"
+              FAILED=$((FAILED + 1))
+            fi
+          done
+
+          echo ""
+          echo "Done: $STOPPED stopped, $FAILED failed out of $POD_COUNT total"
+
+          # Summary
+          echo "## Pods Stopped" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Metric | Count |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|--------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Total** | $POD_COUNT |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Stopped** | $STOPPED |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Failed** | $FAILED |" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$FAILED" -gt 0 ]; then
+            exit 1
+          fi

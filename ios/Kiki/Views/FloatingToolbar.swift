@@ -2,6 +2,7 @@ import SwiftUI
 
 struct FloatingToolbar: View {
     @Environment(AppCoordinator.self) private var coordinator
+    @State private var showAdvancedParameters = false
 
     var body: some View {
         @Bindable var coordinator = coordinator
@@ -55,6 +56,24 @@ struct FloatingToolbar: View {
                     disabled: false
                 )
             }
+
+            Divider()
+                .frame(height: 24)
+
+            Button {
+                showAdvancedParameters = true
+            } label: {
+                Image(systemName: coordinator.advancedParameters.isDefault
+                    ? "slider.horizontal.3"
+                    : "slider.horizontal.2.gobackward")
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(.primary)
+                    .frame(width: 36, height: 36)
+            }
+            .popover(isPresented: $showAdvancedParameters) {
+                AdvancedParametersPanel()
+                    .frame(width: 400, height: 600)
+            }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -70,7 +89,7 @@ struct FloatingToolbar: View {
         } label: {
             Image(systemName: icon)
                 .font(.system(size: 18, weight: .medium))
-                .foregroundStyle(coordinator.currentTool == tool ? Color.accentColor : .secondary)
+                .foregroundStyle(coordinator.currentTool == tool ? Color.accentColor : .primary)
                 .frame(width: 36, height: 36)
         }
     }
@@ -81,7 +100,7 @@ struct FloatingToolbar: View {
         } label: {
             Image(systemName: icon)
                 .font(.system(size: 18, weight: .medium))
-                .foregroundStyle(disabled ? .tertiary : .secondary)
+                .foregroundStyle(disabled ? .tertiary : .primary)
                 .frame(width: 36, height: 36)
         }
         .disabled(disabled)

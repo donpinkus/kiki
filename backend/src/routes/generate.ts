@@ -128,9 +128,11 @@ export const generateRoute: FastifyPluginAsync = async (fastify) => {
           provider: provider.name,
           latencyMs,
           mode,
+          workflow: result.workflow ?? null,
         });
       } catch (err: unknown) {
         const latencyMs = Date.now() - startTime;
+        const errorMessage = err instanceof Error ? err.message : String(err);
 
         request.log.error(
           { sessionId, requestId, mode, provider: provider.name, latencyMs, err },
@@ -140,6 +142,7 @@ export const generateRoute: FastifyPluginAsync = async (fastify) => {
         return reply.status(200).send({
           requestId,
           status: 'error',
+          error: errorMessage,
           imageUrl: null,
           seed: 0,
           provider: provider.name,

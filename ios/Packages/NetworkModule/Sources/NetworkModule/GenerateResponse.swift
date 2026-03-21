@@ -10,6 +10,7 @@ public struct GenerateResponse: Sendable {
     public let provider: String?
     public let latencyMs: Int?
     public let mode: GenerationMode
+    public let workflowJSON: String?
 
     public init(
         requestId: UUID,
@@ -20,7 +21,8 @@ public struct GenerateResponse: Sendable {
         seed: UInt64? = nil,
         provider: String? = nil,
         latencyMs: Int? = nil,
-        mode: GenerationMode
+        mode: GenerationMode,
+        workflowJSON: String? = nil
     ) {
         self.requestId = requestId
         self.status = status
@@ -31,6 +33,7 @@ public struct GenerateResponse: Sendable {
         self.provider = provider
         self.latencyMs = latencyMs
         self.mode = mode
+        self.workflowJSON = workflowJSON
     }
 }
 

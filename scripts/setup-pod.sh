@@ -102,7 +102,17 @@ else
   echo "  ⚠ Lightning LoRA not found"
 fi
 
-# ── Step 3: Install custom node ──
+# ── Step 3: Save backend workflow to ComfyUI UI ──
+
+WORKFLOWS_DIR="${COMFYUI_DIR}/user/default/workflows"
+if [ -f /tmp/comfyui-workflow-api.json ]; then
+  mkdir -p "$WORKFLOWS_DIR"
+  TIMESTAMP=$(date +%Y-%m-%d-%H%M)
+  cp /tmp/comfyui-workflow-api.json "${WORKFLOWS_DIR}/kiki-backend-${TIMESTAMP}.json"
+  echo "  ✓ Saved workflow as kiki-backend-${TIMESTAMP}.json"
+fi
+
+# ── Step 4: Install custom nodes ──
 
 echo ""
 echo "==> Installing custom node dependencies..."
@@ -114,7 +124,7 @@ fi
 cd "${COMFYUI_DIR}/custom_nodes/comfyui_controlnet_aux"
 "$COMFYUI_PIP" install -r requirements.txt 2>&1 | tail -3
 
-# ── Step 4: Restart ComfyUI ──
+# ── Step 5: Restart ComfyUI ──
 
 echo ""
 echo "==> Restarting ComfyUI..."
