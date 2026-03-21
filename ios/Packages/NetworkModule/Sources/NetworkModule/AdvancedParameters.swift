@@ -18,14 +18,14 @@ public struct AdvancedParameters: Codable, Sendable, Equatable {
         didSet { seed = seed.map { min($0, Self.maxSeed) } }
     }
 
-    // MARK: - Defaults (must match comfyui-workflow-api.json template values)
+    // MARK: - Defaults (must match DEFAULTS in backend/src/modules/providers/comfyui.ts)
 
     public static let defaultControlNetStrength = 1.0
     public static let defaultControlNetEndPercent = 1.0
-    public static let defaultCfgScale = 1.0
+    public static let defaultCfgScale = 0.7
     public static let defaultSteps = 8
     public static let defaultDenoise = 1.0
-    public static let defaultAuraFlowShift = 0.5
+    public static let defaultAuraFlowShift = 2.5
     public static let defaultLoraStrength = 1.0
 
     /// JavaScript `Number.MAX_SAFE_INTEGER` — seeds above this lose precision in JSON.

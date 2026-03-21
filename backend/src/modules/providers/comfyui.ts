@@ -21,6 +21,19 @@ const LINEART_PREVIEW_NODE_ID = '117';
 const POLL_INTERVAL_MS = 2000;
 const POLL_TIMEOUT_MS = 120_000;
 
+// Single source of truth for generation defaults.
+// These are always applied to the workflow, overriding template values.
+// iOS AdvancedParameters.default* constants must match these.
+const DEFAULTS = {
+  controlNetStrength: 1.0,
+  controlNetEndPercent: 1.0,
+  cfgScale: 0.7,
+  steps: 8,
+  denoise: 1.0,
+  auraFlowShift: 2.5,
+  loraStrength: 1.0,
+} as const;
+
 type WorkflowNode = {
   inputs: Record<string, unknown>;
   class_type: string;
@@ -136,36 +149,36 @@ export class ComfyUIAdapter implements ProviderAdapter {
   private applyAdvancedParameters(workflow: Workflow, request: ProviderRequest): void {
     const params = request.advancedParameters;
 
-    // KSampler: seed (always set — random if not provided), cfg, steps, denoise
+    // KSampler: always apply defaults, override with client values
     const ksampler = workflow[KSAMPLER_NODE_ID];
     if (ksampler) {
       ksampler.inputs['seed'] =
         params?.seed ?? Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
-      if (params?.cfgScale != null) ksampler.inputs['cfg'] = params.cfgScale;
-      if (params?.steps != null) ksampler.inputs['steps'] = params.steps;
-      if (params?.denoise != null) ksampler.inputs['denoise'] = params.denoise;
+      ksampler.inputs['cfg'] = params?.cfgScale ?? DEFAULTS.cfgScale;
+      ksampler.inputs['steps'] = params?.steps ?? DEFAULTS.steps;
+      ksampler.inputs['denoise'] = params?.denoise ?? DEFAULTS.denoise;
     }
 
-    // ControlNetApplyAdvanced: strength, end_percent
+    // ControlNetApplyAdvanced: always apply defaults
     const controlnet = workflow[CONTROLNET_APPLY_NODE_ID];
     if (controlnet) {
-      if (params?.controlNetStrength != null) controlnet.inputs['strength'] = params.controlNetStrength;
-      if (params?.controlNetEndPercent != null) controlnet.inputs['end_percent'] = params.controlNetEndPercent;
+      controlnet.inputs['strength'] = params?.controlNetStrength ?? DEFAULTS.controlNetStrength;
+      controlnet.inputs['end_percent'] = params?.controlNetEndPercent ?? DEFAULTS.controlNetEndPercent;
     }
 
-    // ModelSamplingAuraFlow: shift
+    // ModelSamplingAuraFlow: always apply default
     const auraflow = workflow[AURAFLOW_NODE_ID];
-    if (auraflow && params?.auraFlowShift != null) {
-      auraflow.inputs['shift'] = params.auraFlowShift;
+    if (auraflow) {
+      auraflow.inputs['shift'] = params?.auraFlowShift ?? DEFAULTS.auraFlowShift;
     }
 
-    // LoraLoaderModelOnly: strength_model
+    // LoraLoaderModelOnly: always apply default
     const lora = workflow[LORA_LOADER_NODE_ID];
-    if (lora && params?.loraStrength != null) {
-      lora.inputs['strength_model'] = params.loraStrength;
+    if (lora) {
+      lora.inputs['strength_model'] = params?.loraStrength ?? DEFAULTS.loraStrength;
     }
 
-    // Negative prompt override
+    // Negative prompt override (no default — uses workflow template value when not set)
     const negativeNode = workflow[NEGATIVE_PROMPT_NODE_ID];
     if (negativeNode && params?.negativePrompt != null) {
       negativeNode.inputs['text'] = params.negativePrompt;
