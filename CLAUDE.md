@@ -75,7 +75,7 @@ NetworkModule      → (none)
 ResultModule       → (none)
 AppCoordinator     → all 3 modules
 ```
-Data flows one direction: Canvas → Preprocessor → Scheduler → Network → Result. Modules communicate through AppCoordinator (except Scheduler→Network). No circular dependencies. No module imports the main app target.
+Data flows one direction: Canvas → Network → Result. Modules communicate through AppCoordinator. No circular dependencies. No module imports the main app target.
 
 ## Critical Constraints (NEVER Violate)
 

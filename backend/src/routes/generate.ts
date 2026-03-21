@@ -22,9 +22,6 @@ const STYLE_PROMPTS: Record<string, string> = {
   neon: 'neon glow, cyberpunk, vibrant neon colors, dark background',
 };
 
-const DEFAULT_NEGATIVE_PROMPT =
-  'blurry, low quality, distorted, deformed, ugly, bad anatomy';
-
 function buildPrompt(userPrompt: string | null, stylePreset: string): string {
   const styleModifier = STYLE_PROMPTS[stylePreset] ?? '';
   const base = userPrompt?.trim() || 'A detailed illustration';
@@ -97,11 +94,7 @@ export const generateRoute: FastifyPluginAsync = async (fastify) => {
       const providerRequest: ProviderRequest = {
         sketchImageBase64,
         prompt: buildPrompt(prompt, stylePreset),
-        negativePrompt: DEFAULT_NEGATIVE_PROMPT,
         mode,
-        creativity: 0.85,
-        width: mode === 'preview' ? 512 : 1024,
-        height: mode === 'preview' ? 512 : 1024,
         advancedParameters: advancedParameters ?? undefined,
       };
 
