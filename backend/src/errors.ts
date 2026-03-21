@@ -8,20 +8,6 @@ export class AppError extends Error {
   }
 }
 
-export class ValidationError extends AppError {
-  constructor(message: string) {
-    super(400, message);
-    this.name = 'ValidationError';
-  }
-}
-
-export class UnauthorizedError extends AppError {
-  constructor(message = 'Unauthorized') {
-    super(401, message);
-    this.name = 'UnauthorizedError';
-  }
-}
-
 export class RateLimitedError extends AppError {
   readonly retryAfter?: number;
 

@@ -1,6 +1,5 @@
 import SwiftUI
 import CanvasModule
-import PreprocessorModule
 import NetworkModule
 import ResultModule
 
@@ -44,7 +43,6 @@ final class AppCoordinator {
     // MARK: - Modules
 
     let canvasViewModel = CanvasViewModel()
-    private let preprocessor = SketchPreprocessor()
     private let apiClient: APIClient
 
     // MARK: - Generation State
@@ -110,18 +108,12 @@ final class AppCoordinator {
             // Capture snapshot
             guard let snapshot = canvasViewModel.captureSnapshot(),
                   !snapshot.isEmpty else {
-                print("[Generate] Snapshot capture failed or empty")
                 return
             }
             let img = snapshot.image
-            print("[Generate] Snapshot captured: \(snapshot.strokeCount) strokes, size: \(img.size), scale: \(img.scale), cgImage: \(img.cgImage != nil)")
-            if let cg = img.cgImage {
-                print("[Generate] CGImage: \(cg.width)x\(cg.height), bpc: \(cg.bitsPerComponent), alpha: \(cg.alphaInfo.rawValue)")
-            }
 
             // Convert directly to JPEG (canvas capture already includes white background)
             guard let jpegData = img.jpegData(compressionQuality: 0.85) else {
-                print("[Generate] JPEG conversion failed")
                 resultState = .error(
                     message: "Failed to process sketch",
                     previousImage: lastSuccessfulImage
@@ -130,11 +122,7 @@ final class AppCoordinator {
             }
             print("[Generate] JPEG: \(jpegData.count) bytes, image: \(img.size)")
 
-            // Check for cancellation / staleness
-            guard !Task.isCancelled, currentRequestId == requestId else {
-                print("[Generate] Cancelled or stale after preprocess")
-                return
-            }
+            guard !Task.isCancelled, currentRequestId == requestId else { return }
 
             // Phase: uploading (full network round-trip)
             durations[.preparing] = Date().timeIntervalSince(phaseStart)
@@ -152,33 +140,15 @@ final class AppCoordinator {
                 mode: .preview,
                 prompt: promptText.isEmpty ? nil : promptText,
                 stylePreset: selectedStylePreset.apiKey,
-                adherence: 0.7,
                 sketchImageBase64: base64,
                 advancedParameters: advancedParameters.isDefault ? nil : advancedParameters
             )
 
-            // Log full request payload (minus base64 image data)
-            if let jsonData = try? JSONEncoder().encode(request),
-               var jsonObject = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
-                jsonObject["sketchImageBase64"] = "<\(base64.count) chars>"
-                if let prettyData = try? JSONSerialization.data(withJSONObject: jsonObject, options: .prettyPrinted),
-                   let prettyString = String(data: prettyData, encoding: .utf8) {
-                    print("[Generate] Request payload:\n\(prettyString)")
-                }
-            }
-
             do {
                 let response = try await apiClient.generate(request)
                 print("[Generate] Response: status=\(response.status), imageURL=\(response.imageURL?.absoluteString ?? "nil"), inputImageURL=\(response.inputImageURL?.absoluteString ?? "nil"), lineartImageURL=\(response.lineartImageURL?.absoluteString ?? "nil")")
-                if let workflowJSON = response.workflowJSON {
-                    print("[Generate] ComfyUI workflow:\n\(workflowJSON)")
-                }
 
-                // Staleness check — only update if this is still the latest request
-                guard !Task.isCancelled, currentRequestId == requestId else {
-                    print("[Generate] Cancelled or stale after response")
-                    return
-                }
+                guard !Task.isCancelled, currentRequestId == requestId else { return }
 
                 if response.status == .completed, let imageURL = response.imageURL {
                     if isSeedLocked, let seed = response.seed {
@@ -208,23 +178,20 @@ final class AppCoordinator {
                     )
                 }
             } catch is CancellationError {
-                print("[Generate] Cancelled")
+                // Silently ignore cancellation
             } catch let error as GenerationError {
-                print("[Generate] GenerationError: \(error)")
                 guard !Task.isCancelled, currentRequestId == requestId else { return }
                 resultState = .error(
                     message: error.userMessage,
                     previousImage: lastSuccessfulImage
                 )
             } catch let urlError as URLError {
-                print("[Generate] URLError: \(urlError)")
                 guard !Task.isCancelled, currentRequestId == requestId else { return }
                 resultState = .error(
                     message: "Network error: \(urlError.localizedDescription) (code \(urlError.code.rawValue))",
                     previousImage: lastSuccessfulImage
                 )
             } catch {
-                print("[Generate] Error: \(error)")
                 guard !Task.isCancelled, currentRequestId == requestId else { return }
                 resultState = .error(
                     message: "\(type(of: error)): \(error.localizedDescription)",
@@ -236,7 +203,6 @@ final class AppCoordinator {
             // Must clear isGenerating first so generate() doesn't hit the in-flight guard.
             isGenerating = false
             if isCanvasDirty {
-                print("[Generate] Canvas dirty, auto-retriggering")
                 generate()
             }
         }

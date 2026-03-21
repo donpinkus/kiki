@@ -22,9 +22,6 @@ const STYLE_PROMPTS: Record<string, string> = {
   neon: 'neon glow, cyberpunk, vibrant neon colors, dark background',
 };
 
-const DEFAULT_NEGATIVE_PROMPT =
-  'blurry, low quality, distorted, deformed, ugly, bad anatomy';
-
 function buildPrompt(userPrompt: string | null, stylePreset: string): string {
   const styleModifier = STYLE_PROMPTS[stylePreset] ?? '';
   const base = userPrompt?.trim() || 'A detailed illustration';
@@ -40,7 +37,6 @@ const generateBodySchema = {
     mode: { type: 'string', enum: ['preview', 'refine'] },
     prompt: { type: ['string', 'null'], maxLength: 500 },
     stylePreset: { type: 'string', enum: [...STYLE_PRESETS] },
-    adherence: { type: 'number', minimum: 0, maximum: 1, default: 0.7 },
     sketchImageBase64: { type: 'string', minLength: 1 },
     advancedParameters: {
       type: 'object',
@@ -68,7 +64,6 @@ interface GenerateBody {
   mode: 'preview' | 'refine';
   prompt?: string | null;
   stylePreset: (typeof STYLE_PRESETS)[number];
-  adherence?: number;
   sketchImageBase64: string;
   advancedParameters?: AdvancedParameters | null;
 }
@@ -85,7 +80,6 @@ export const generateRoute: FastifyPluginAsync = async (fastify) => {
         mode,
         prompt = null,
         stylePreset,
-        adherence = 0.7,
         sketchImageBase64,
         advancedParameters = null,
       } = request.body;
@@ -100,12 +94,7 @@ export const generateRoute: FastifyPluginAsync = async (fastify) => {
       const providerRequest: ProviderRequest = {
         sketchImageBase64,
         prompt: buildPrompt(prompt, stylePreset),
-        negativePrompt: DEFAULT_NEGATIVE_PROMPT,
         mode,
-        adherence,
-        creativity: 0.85,
-        width: mode === 'preview' ? 512 : 1024,
-        height: mode === 'preview' ? 512 : 1024,
         advancedParameters: advancedParameters ?? undefined,
       };
 

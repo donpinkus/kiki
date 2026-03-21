@@ -1,5 +1,7 @@
 # Product Requirements Document — iPad Sketch-to-Image Application
 
+> **⚠️ PARTIALLY STALE.** Written before the switch from fal.ai to ComfyUI/Qwen-Image. Provider references, latency numbers, and cost models are outdated. Product vision, UX spec, and App Store requirements remain valid. For current implementation, read the code and `CLAUDE.md`.
+
 > **Version 2.0 — March 2026** | Status: Final Draft for Engineering Review | Confidential — Internal Use Only
 
 | **Field**      | **Value**                                     |

@@ -134,8 +134,6 @@ public final class APIClient: Sendable {
             let decoder = JSONDecoder()
             decoded = try decoder.decode(APIResponse.self, from: data)
         } catch {
-            print("[APIClient] Decoding failed: \(error)")
-            print("[APIClient] Raw response: \(String(data: data, encoding: .utf8) ?? "non-utf8")")
             throw GenerationError.decodingError
         }
 

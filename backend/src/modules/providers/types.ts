@@ -13,13 +13,7 @@ export interface AdvancedParameters {
 export interface ProviderRequest {
   sketchImageBase64: string;
   prompt: string;
-  negativePrompt: string;
   mode: 'preview' | 'refine';
-  adherence: number;
-  creativity: number;
-  seed?: number;
-  width: number;
-  height: number;
   advancedParameters?: AdvancedParameters;
 }
 

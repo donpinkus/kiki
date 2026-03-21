@@ -1,6 +1,5 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
-import sensible from '@fastify/sensible';
 import { config } from './config/index.js';
 import { AppError, RateLimitedError } from './errors.js';
 import { healthRoute } from './routes/health.js';
@@ -26,8 +25,6 @@ await app.register(cors, {
   origin: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
 });
-
-await app.register(sensible);
 
 // --- Application modules ---
 await app.register(authPlugin);

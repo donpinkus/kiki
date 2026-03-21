@@ -9,6 +9,5 @@ let package = Package(
     ],
     targets: [
         .target(name: "CanvasModule"),
-        .testTarget(name: "CanvasModuleTests", dependencies: ["CanvasModule"]),
     ]
 )

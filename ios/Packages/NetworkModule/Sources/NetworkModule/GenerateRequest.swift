@@ -6,7 +6,6 @@ public struct GenerateRequest: Codable, Sendable {
     public let mode: GenerationMode
     public let prompt: String?
     public let stylePreset: String
-    public let adherence: Double // Deprecated: use advancedParameters.controlNetStrength
     public let sketchImageBase64: String
     public let advancedParameters: AdvancedParameters?
 
@@ -16,7 +15,6 @@ public struct GenerateRequest: Codable, Sendable {
         mode: GenerationMode,
         prompt: String? = nil,
         stylePreset: String,
-        adherence: Double = 0.7,
         sketchImageBase64: String,
         advancedParameters: AdvancedParameters? = nil
     ) {
@@ -25,7 +23,6 @@ public struct GenerateRequest: Codable, Sendable {
         self.mode = mode
         self.prompt = prompt
         self.stylePreset = stylePreset
-        self.adherence = adherence
         self.sketchImageBase64 = sketchImageBase64
         self.advancedParameters = advancedParameters
     }
