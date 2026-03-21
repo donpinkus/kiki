@@ -39,10 +39,8 @@ kiki/
     Kiki/App/             # Entry point, AppCoordinator, ContentView
     Kiki/Views/           # SwiftUI views (split-screen, controls, onboarding)
     Kiki/Resources/       # Assets, config files
-    Packages/             # 5 local Swift packages (SPM)
+    Packages/             # 3 local Swift packages (SPM)
       CanvasModule/       # PencilKit canvas, stroke tracking, snapshot export
-      PreprocessorModule/ # Monochrome flatten, crop, resize, auto-caption
-      SchedulerModule/    # Debounce, request lifecycle, cancellation, quota
       NetworkModule/      # REST + WebSocket, auth token management
       ResultModule/       # Image display, transitions, gallery (SwiftData)
   backend/                # Node.js API (Fastify + TypeScript)
@@ -73,11 +71,9 @@ When tuning parameters in the ComfyUI web UI, sync the changes back to the API t
 
 ```
 CanvasModule       → (none)
-PreprocessorModule → (none)
-SchedulerModule    → NetworkModule
 NetworkModule      → (none)
 ResultModule       → (none)
-AppCoordinator     → all 5 modules
+AppCoordinator     → all 3 modules
 ```
 Data flows one direction: Canvas → Preprocessor → Scheduler → Network → Result. Modules communicate through AppCoordinator (except Scheduler→Network). No circular dependencies. No module imports the main app target.
 
@@ -86,7 +82,7 @@ Data flows one direction: Canvas → Preprocessor → Scheduler → Network → 
 1. **Canvas responsiveness is sacred.** PencilKit rendering NEVER depends on network/generation state. Target <16ms stroke latency. Any synchronous generation-related work on main thread = P0 bug.
 2. **Latest-request-wins.** Only the newest generation result may update the UI. Every response checked against current latest request ID before display.
 3. **Never clear the right pane.** Always keep last successful image visible. Never show blank after first successful generation.
-4. **No secrets on client.** Provider API keys and URLs (ComfyUI, fal.ai) backend only. Client uses JWT. Client NEVER calls inference providers directly.
+4. **No secrets on client.** Provider API keys and URLs (ComfyUI) backend only. Client uses JWT. Client NEVER calls inference providers directly.
 5. **Content safety before external testing.** NSFW output filter + prompt input filter must be operational before any external TestFlight build.
 6. **Privacy by design.** Sketch data is ephemeral on server — deleted after generation response. Not stored, not trained on, not shared. Exception: flagged content in content_filter_log.
 7. **App Store compliance.** Must include: first-launch AI disclosure consent (guideline 5.1.2(i)), age gate (1.2.1(a)), content filtering, "Report this image" button.

@@ -1,7 +1,6 @@
 export interface AppConfig {
   readonly PORT: number;
   readonly HOST: string;
-  readonly FAL_API_KEY: string;
   readonly COMFYUI_URL: string;
   readonly NODE_ENV: 'development' | 'production' | 'test';
   readonly LOG_LEVEL: 'fatal' | 'error' | 'warn' | 'info' | 'debug' | 'trace';
@@ -21,8 +20,6 @@ function validateConfig(): AppConfig {
   if (!['development', 'production', 'test'].includes(nodeEnv)) {
     throw new Error(`Invalid NODE_ENV: ${nodeEnv}`);
   }
-
-  const falApiKey = process.env['FAL_API_KEY'] ?? '';
 
   const comfyuiUrl = process.env['COMFYUI_URL'] ?? '';
   if (!comfyuiUrl && nodeEnv === 'production') {
@@ -46,7 +43,6 @@ function validateConfig(): AppConfig {
   return {
     PORT: port,
     HOST: process.env['HOST'] ?? '0.0.0.0',
-    FAL_API_KEY: falApiKey,
     COMFYUI_URL: comfyuiUrl,
     NODE_ENV: nodeEnv,
     LOG_LEVEL: logLevel,

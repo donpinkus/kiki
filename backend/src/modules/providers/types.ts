@@ -15,7 +15,6 @@ export interface ProviderRequest {
   prompt: string;
   negativePrompt: string;
   mode: 'preview' | 'refine';
-  adherence: number;
   creativity: number;
   seed?: number;
   width: number;

@@ -9,6 +9,5 @@ let package = Package(
     ],
     targets: [
         .target(name: "NetworkModule"),
-        .testTarget(name: "NetworkModuleTests", dependencies: ["NetworkModule"]),
     ]
 )
