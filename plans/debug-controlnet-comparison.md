@@ -1,7 +1,7 @@
 # Plan: Debug ControlNet Comparison Mode
 
 ## Overview
-Add a toggle that runs a second generation with controlnet strength=0 after the normal generation. A debug button (always visible, disabled until data is ready) opens a full-screen 2x2 grid modal showing: original sketch, lineart, generated image, and no-controlnet image. All comparison failures surface clear error messages.
+Add a toggle that runs a second generation with controlnet strength=0 after the normal generation. A debug button (visible only when comparison mode is active or data exists) opens a full-screen 2x2 grid modal showing: original sketch, lineart, generated image, and no-controlnet image. All comparison failures surface clear error messages via alert.
 
 ---
 
@@ -11,23 +11,21 @@ Add a toggle that runs a second generation with controlnet strength=0 after the 
 It lives on `GenerateRequest` / `ProviderRequest`, not on `AdvancedParameters`. It controls _how many_ generations to run, not _how_ a single generation runs. The toggle state lives on `AppCoordinator`.
 
 **Debug button lives in ContentView, not ResultModule.**
-ResultModule is a standalone SPM package focused on displaying generation results. Debug comparison is a main-app concern. The button overlays the result area from ContentView. No changes to ResultModule.
+ResultModule is a standalone SPM package focused on displaying generation results. Debug comparison is a main-app concern. The button overlays the result area from ContentView. No changes to ResultModule. Button only visible when `compareWithoutControlNet || hasComparisonData` — no UI clutter when the feature is off.
 
-**Comparison data is bundled in structs at every layer.**
-- Pipeline: `ComparisonBundle` (snapshot + lineart + CN=0 image) is optional on `Output`. Only populated when comparison mode is on and all downloads succeed. Keeps `Output` lean for normal usage.
-- Coordinator: `ComparisonData` (all 4 images + CN strength label) is optional. Built by combining `output.image` + `output.comparisonBundle` + coordinator's CN strength. All-or-nothing — no partial state.
+**One struct for comparison data, built in the pipeline.**
+`ComparisonData` holds all 4 images + CN strength label. Built directly in the pipeline (which has access to everything: snapshot, downloaded images, generated image, CN strength from input). Stored as-is on the coordinator — no intermediate struct, no mapping step.
 
 **Comparison errors are explicit, never silent.**
-Every comparison failure — backend generation error, image download failure, decode failure — surfaces a clear error message to the user via a SwiftUI alert. The primary generation is never affected.
-
-**Pipeline downloads all images. Non-critical downloads are best-effort.**
-Main image download is required (throws on failure). Lineart and comparison image downloads catch errors and return an error message — the primary generation never fails because of comparison mode.
+Every comparison failure surfaces a clear error message via SwiftUI alert. The primary generation is never affected. Backend errors pass through with their original message. iOS-side failures (download/decode) use the error's `localizedDescription`.
 
 **Second workflow clones the already-configured first workflow.**
-Don't rebuild from template via `getWorkflow()`. The first workflow already has the sketch filename, prompt, seed, and all parameters applied. Just `structuredClone()` it and override CN strength to 0.
+Don't rebuild from template. The first workflow already has the sketch filename, prompt, seed, and all parameters applied. Just `structuredClone()` it and override CN strength to 0.
 
 **Second generation failure is non-fatal but reported.**
-If the first gen succeeds but the second fails, the backend returns the first result normally with the error message in `comparisonError`. The user gets their generated image plus a clear alert explaining why comparison failed.
+If the first gen succeeds but the second fails, the backend returns the primary result normally with the error in `comparisonError`. The user gets their image plus a clear alert.
+
+**If both `comparisonImageUrl` and `comparisonError` are returned, prefer the image.** Defensive against backend bugs — success wins.
 
 ---
 
@@ -59,7 +57,6 @@ if (request.compareWithoutControlNet) {
   try {
     const compWorkflow = structuredClone(workflow);  // clone configured workflow
     compWorkflow[CONTROLNET_APPLY_NODE_ID].inputs['strength'] = 0;
-    // seed, sketch, prompt, all other params are already set from the first workflow
     const compPromptId = await this.submitPrompt(baseUrl, compWorkflow);
     const compOutputs = await this.pollForResult(baseUrl, compPromptId);
     const compSaveOutput = compOutputs[SAVE_IMAGE_NODE_ID]?.images?.[0];
@@ -72,7 +69,6 @@ if (request.compareWithoutControlNet) {
     const msg = err instanceof Error ? err.message : String(err);
     comparisonError = `Comparison generation failed: ${msg}`;
     console.warn(comparisonError);
-    // Non-fatal: primary result still returned
   }
 }
 ```
@@ -86,7 +82,6 @@ Include both `comparisonImageUrl` and `comparisonError` in the returned `Provide
 **`GenerateRequest.swift`:**
 - Add `public let compareWithoutControlNet: Bool?` property
 - Add to init with default `nil`
-- Swift auto-synthesized Codable uses `encodeIfPresent` for optionals, so `nil` is omitted from JSON (not sent as `null`), keeping the payload clean
 
 **`GenerateResponse.swift`:**
 - Add `public let comparisonImageURL: URL?` property
@@ -103,12 +98,14 @@ Include both `comparisonImageUrl` and `comparisonError` in the returned `Provide
 
 **`GenerationPipeline.swift`:**
 
-Add new struct:
+Add struct (used by both pipeline and coordinator):
 ```swift
-struct ComparisonBundle {
-    let snapshotImage: UIImage     // canvas snapshot that was sent
-    let lineartImage: UIImage      // ControlNet preprocessor output
-    let noControlNetImage: UIImage // generation with CN strength=0
+struct ComparisonData {
+    let snapshotImage: UIImage      // canvas snapshot that was sent
+    let lineartImage: UIImage       // ControlNet preprocessor output
+    let generatedImage: UIImage     // normal generation result
+    let comparisonImage: UIImage    // generation with CN strength=0
+    let controlNetStrength: Double  // the CN strength used (for label)
 }
 ```
 
@@ -116,70 +113,76 @@ Expand `Input`:
 - Add `let compareWithoutControlNet: Bool`
 
 Expand `Output`:
-- Add `let comparisonBundle: ComparisonBundle?` — nil when comparison mode is off or any step fails
-- Add `let comparisonError: String?` — nil when comparison succeeded or wasn't requested. Set when any comparison step fails.
+- Add `let comparisonData: ComparisonData?` — nil when comparison mode is off or any step fails
+- Add `let comparisonError: String?` — nil when comparison succeeded or wasn't requested
 
-In `run()`, update the downloading phase:
-- Download the main image (required, throws on failure) — same as today
-- If `input.compareWithoutControlNet` is true:
-  - First check: if `response.comparisonError` is non-nil, propagate it directly:
-    `comparisonError = response.comparisonError` (backend-side failure)
-  - Otherwise, if `response.lineartImageURL` and `response.comparisonImageURL` are both present:
-    - Download both images sequentially in a do/catch
-    - On download failure: `comparisonError = "Lineart download failed: \(error.localizedDescription)"` or `"Comparison image download failed: \(error.localizedDescription)"`
-    - On decode failure: `comparisonError = "Failed to decode lineart image (\(data.count) bytes)"` or same for comparison image
-    - On success: build `ComparisonBundle` with `snapshot.image` (already in scope from preparing phase), lineart UIImage, and comparison UIImage
-  - If comparison was requested but `response.comparisonImageURL` is nil and `response.comparisonError` is also nil:
-    `comparisonError = "Server returned no comparison image URL"`
-- Return `Output(image: mainImage, seed: seed, comparisonBundle: comparisonBundle, comparisonError: comparisonError)`
+In `run()`, after downloading the main image (which remains required/throwing):
+```swift
+var comparisonData: ComparisonData? = nil
+var comparisonError: String? = nil
 
-**Timeout note:** The `APIClient` has `timeoutIntervalForResource = 60s`. Two sequential backend generations could approach this limit on slow pods. The pipeline should set a longer timeout on the URLRequest when comparison mode is on: `urlRequest.timeoutInterval = 120` in APIClient, or pass a timeout parameter. (Implementation detail — simplest approach is increasing the default to 120s since the timeout is a max, not a delay.)
+if input.compareWithoutControlNet {
+    if let backendError = response.comparisonError, response.comparisonImageURL == nil {
+        // Backend-side failure — pass through the message
+        comparisonError = backendError
+    } else if let lineartURL = response.lineartImageURL,
+              let comparisonURL = response.comparisonImageURL {
+        do {
+            let (lineartData, _) = try await URLSession.shared.data(from: lineartURL)
+            let (compData, _) = try await URLSession.shared.data(from: comparisonURL)
+            guard let lineartImage = UIImage(data: lineartData),
+                  let compImage = UIImage(data: compData) else {
+                throw PipelineError.imageDecodeFailed(byteCount: 0, url: comparisonURL)
+            }
+            let cnStrength = input.advancedParameters?.controlNetStrength
+                ?? AdvancedParameters.defaultControlNetStrength
+            comparisonData = ComparisonData(
+                snapshotImage: snapshot.image,
+                lineartImage: lineartImage,
+                generatedImage: mainImage,
+                comparisonImage: compImage,
+                controlNetStrength: cnStrength
+            )
+        } catch {
+            comparisonError = "Comparison download failed: \(error.localizedDescription)"
+        }
+    } else {
+        comparisonError = "Server returned no comparison image URL"
+    }
+}
+```
+
+Note: `snapshot.image` is already in scope from the preparing phase. `mainImage` is the just-downloaded primary image.
 
 ### 4. iOS AppCoordinator: Store comparison data, add toggle state, show errors
 
 **`AppCoordinator.swift`:**
 
-Add struct (can be nested or top-level in file):
-```swift
-struct ComparisonData {
-    let snapshotImage: UIImage      // what was sent to the server
-    let lineartImage: UIImage       // ControlNet preprocessor output
-    let generatedImage: UIImage     // normal generation result
-    let comparisonImage: UIImage    // generation with CN strength=0
-    let controlNetStrength: Double  // the CN strength used for the normal gen (for label)
-}
-```
-
 Add state properties:
 ```swift
 var comparisonData: ComparisonData?
-var compareWithoutControlNet = false
-var comparisonError: String?       // shown via alert in ContentView
+var compareWithoutControlNet = false {
+    didSet {
+        if !compareWithoutControlNet {
+            comparisonData = nil
+            comparisonError = nil
+        }
+    }
+}
+var comparisonError: String?
 
 var hasComparisonData: Bool { comparisonData != nil }
 ```
 
-In `generate()`:
-- Do NOT clear `comparisonData` at the start. (Clearing it while the debug modal is open would cause SwiftUI to recompute the `fullScreenCover` content and render an empty modal.)
-- Clear `comparisonError = nil` at the start (dismiss any previous error).
-- Pass `compareWithoutControlNet: compareWithoutControlNet` into `GenerationPipeline.Input`
-- After pipeline returns output, handle comparison results:
-  ```swift
-  // Update comparison data
-  if let bundle = output.comparisonBundle {
-      comparisonData = ComparisonData(
-          snapshotImage: bundle.snapshotImage,
-          lineartImage: bundle.lineartImage,
-          generatedImage: output.image,
-          comparisonImage: bundle.noControlNetImage,
-          controlNetStrength: advancedParameters.controlNetStrength
-              ?? AdvancedParameters.defaultControlNetStrength
-      )
-  } else {
-      comparisonData = nil
-  }
+The `didSet` clears stale state when comparison mode is toggled off.
 
-  // Surface comparison error
+In `generate()`:
+- Clear `comparisonError = nil` at the start (dismiss any previous error)
+- Do NOT clear `comparisonData` at the start (keep old data visible in modal until replaced)
+- Pass `compareWithoutControlNet: compareWithoutControlNet` into `GenerationPipeline.Input`
+- After pipeline returns output:
+  ```swift
+  comparisonData = output.comparisonData  // nil if comparison off or failed
   if let error = output.comparisonError {
       comparisonError = error
   }
@@ -203,14 +206,14 @@ Update the Reset button `.disabled` condition to include: `&& !coordinator.compa
 
 **New file: `ios/Kiki/Views/DebugComparisonModal.swift`**
 
-- Init takes `ComparisonData` and a dismiss action or uses `@Environment(\.dismiss)`
+- Init takes `ComparisonData` and uses `@Environment(\.dismiss)`
 - Full-screen dark background (`.background(Color.black)`)
 - 2x2 grid using `LazyVGrid(columns: [.flexible(), .flexible()], spacing: 12)`:
   - Top-left: "Original Sketch" — `data.snapshotImage`
   - Top-right: "Lineart" — `data.lineartImage`
   - Bottom-left: "Generated (CN: {strength})" — `data.generatedImage`
   - Bottom-right: "Generated (CN: 0)" — `data.comparisonImage`
-- Each cell: `Image(uiImage:).resizable().aspectRatio(contentMode: .fit)` with a small caption label below in `.white` / `.secondary`
+- Each cell: `Image(uiImage:).resizable().aspectRatio(contentMode: .fit)` with a small caption label below
 - X button (`xmark.circle.fill`) top-trailing, dismisses the modal
 - Presented via `.fullScreenCover` from ContentView
 
@@ -220,11 +223,11 @@ Update the Reset button `.disabled` condition to include: `&& !coordinator.compa
 
 Add state: `@State private var showDebugModal = false`
 
-Overlay the debug button on the ResultView area (top-trailing of the VStack containing ResultView):
+Overlay the debug button on the ResultView area — **only visible when comparison mode is on or data exists**:
 ```swift
-VStack(spacing: 0) {
-    ResultView(state: coordinator.resultState)
-        .overlay(alignment: .topTrailing) {
+ResultView(state: coordinator.resultState)
+    .overlay(alignment: .topTrailing) {
+        if coordinator.compareWithoutControlNet || coordinator.hasComparisonData {
             Button { showDebugModal = true } label: {
                 Image(systemName: "square.grid.2x2")
                     .font(.system(size: 14))
@@ -236,17 +239,16 @@ VStack(spacing: 0) {
             .opacity(coordinator.hasComparisonData ? 1 : 0.4)
             .padding(12)
         }
-    promptBar(promptText: $coordinator.promptText)
-}
+    }
+```
+
+Full-screen cover and error alert:
+```swift
 .fullScreenCover(isPresented: $showDebugModal) {
     if let data = coordinator.comparisonData {
         DebugComparisonModal(data: data)
     }
 }
-```
-
-Add comparison error alert — bind to `coordinator.comparisonError`:
-```swift
 .alert(
     "Comparison Failed",
     isPresented: Binding(
@@ -260,25 +262,23 @@ Add comparison error alert — bind to `coordinator.comparisonError`:
 }
 ```
 
-This alert fires immediately when a comparison error occurs, showing the full error message. The primary generated image is still displayed normally underneath.
+### 8. iOS APIClient: Increase resource timeout
+
+**`APIClient.swift`:**
+- Change `config.timeoutIntervalForResource = 60` → `120`
+- This is `timeoutIntervalForResource` (session-level, can't be per-request). Two sequential backend generations can approach 60s on slow pods. 120s is still a reasonable safety net — if a normal single gen takes >60s, the backend's own 120s poll timeout will fire first anyway.
 
 ---
 
 ## Error Message Examples
 
-These are the kinds of messages the user will see in the alert:
-
 | Source | Example message |
 |--------|----------------|
-| Backend: ComfyUI submission | "Comparison generation failed: Prompt submission failed 503: Service Unavailable" |
-| Backend: ComfyUI timeout | "Comparison generation failed: Generation timed out after 120s" |
-| Backend: ComfyUI error | "Comparison generation failed: Generation failed on ComfyUI server" |
+| Backend: ComfyUI failure | "Comparison generation failed: Prompt submission failed 503: Service Unavailable" |
+| Backend: timeout | "Comparison generation failed: Generation timed out after 120s" |
 | Backend: no output | "Comparison generation completed but produced no image" |
 | iOS: missing URL | "Server returned no comparison image URL" |
-| iOS: download fail | "Comparison image download failed: The request timed out." |
-| iOS: decode fail | "Failed to decode comparison image (0 bytes)" |
-| iOS: lineart download | "Lineart download failed: A server with the specified hostname could not be found." |
-| iOS: lineart decode | "Failed to decode lineart image (1024 bytes)" |
+| iOS: download/decode fail | "Comparison download failed: The request timed out." |
 
 ---
 
@@ -289,17 +289,15 @@ These are the kinds of messages the user will see in the alert:
 4. iOS AppCoordinator (step 4)
 5. iOS AdvancedParametersPanel (step 5)
 6. iOS DebugComparisonModal (step 6)
-7. iOS ContentView (step 7)
+7. iOS ContentView + timeout (steps 7-8)
 
 ## Risks & Mitigations
-- **Timeout:** Two sequential gens could approach the 60s iOS resource timeout on slow pods. Mitigation: increase `timeoutIntervalForResource` to 120s (it's a max, not a delay — no impact on normal usage).
-- **Second gen failure:** Backend catches errors from comparison gen and returns primary result normally with `comparisonError`. iOS shows alert with the error. Debug button stays disabled.
-- **Memory:** Four decoded UIImages in ComparisonData. Each 1280×1280 RGBA bitmap is ~6.5MB uncompressed in memory (not the JPEG size). ~26MB total, well within iPad's 8-16GB RAM.
+- **Timeout:** Two sequential gens could approach the 60s iOS resource timeout. Mitigation: increase to 120s.
+- **Second gen failure:** Backend catches errors, returns primary result + `comparisonError`. iOS shows alert.
+- **Memory:** Four UIImages in ComparisonData. ~26MB total (4x 1280×1280 RGBA). Well within iPad RAM.
 
 ## Notes
-- Sequential backend execution means generation time roughly doubles when comparison is on. Acceptable for a debug feature.
+- Generation time roughly doubles when comparison is on. Acceptable for a debug feature.
 - Same seed guaranteed: cloned from the first workflow's configured KSampler seed.
 - Toggle defaults to off — zero impact on normal usage.
-- All image downloading stays inside GenerationPipeline.
 - No changes to ResultModule.
-- Every comparison failure point surfaces a clear, specific error message — nothing is silently swallowed.
