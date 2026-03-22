@@ -172,6 +172,9 @@ final class AppCoordinator {
             guard let self else { return }
             for await _ in canvasViewModel.canvasChanges {
                 guard !Task.isCancelled else { return }
+
+                // Don't mark dirty for empty canvas (e.g. after clear or erasing last stroke)
+                guard !canvasViewModel.isEmpty else { continue }
                 hasUnsavedChanges = true
 
                 // In manual mode, just mark dirty — don't auto-generate
