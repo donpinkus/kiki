@@ -135,18 +135,127 @@ nohup "$COMFYUI_PYTHON" main.py --listen 0.0.0.0 --port 8188 > /workspace/runpod
 
 echo ""
 echo "==> Waiting for ComfyUI to start..."
+COMFYUI_READY=false
 for i in $(seq 1 30); do
   if curl -s -o /dev/null -w "" http://localhost:8188/system_stats 2>/dev/null; then
     echo "ComfyUI is running on port 8188!"
     echo ""
     curl -s http://localhost:8188/system_stats | python3 -m json.tool 2>/dev/null || true
-    echo ""
-    echo "Setup complete!"
-    exit 0
+    COMFYUI_READY=true
+    break
   fi
   sleep 2
 done
 
-echo "ERROR: ComfyUI did not start within 60s. Last log lines:"
-tail -20 /workspace/runpod-slim/comfyui.log 2>/dev/null || true
-exit 1
+if [ "$COMFYUI_READY" != "true" ]; then
+  echo "ERROR: ComfyUI did not start within 60s. Last log lines:"
+  tail -20 /workspace/runpod-slim/comfyui.log 2>/dev/null || true
+  exit 1
+fi
+
+# ── Step 6: Warm up models (load into VRAM) ──
+
+warmup_models() {
+  local WARMUP_START
+  WARMUP_START=$(date +%s)
+
+  if [ ! -f /tmp/comfyui-workflow-api.json ]; then
+    echo "  Skipping warmup: workflow template not found at /tmp/comfyui-workflow-api.json"
+    return 1
+  fi
+
+  # Create a small dummy image
+  python3 -c "
+from PIL import Image
+img = Image.new('RGB', (256, 256), (128, 128, 128))
+img.save('/tmp/warmup_input.png')
+"
+
+  # Upload dummy image to ComfyUI
+  local UPLOAD_RESP
+  UPLOAD_RESP=$(curl -s -X POST http://localhost:8188/upload/image \
+    -F "image=@/tmp/warmup_input.png" \
+    -F "overwrite=true")
+  local WARMUP_FILENAME
+  WARMUP_FILENAME=$(echo "$UPLOAD_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['name'])")
+
+  if [ -z "$WARMUP_FILENAME" ]; then
+    echo "  Failed to upload warmup image"
+    return 1
+  fi
+  echo "  Uploaded warmup image: $WARMUP_FILENAME"
+
+  # Build warmup workflow: use template but with dummy image, minimal prompt, 1 step
+  python3 -c "
+import json
+with open('/tmp/comfyui-workflow-api.json') as f:
+    wf = json.load(f)
+wf['71']['inputs']['image'] = '${WARMUP_FILENAME}'
+wf['111:6']['inputs']['text'] = 'warmup test'
+wf['111:3']['inputs']['steps'] = 1
+wf['111:3']['inputs']['seed'] = 1
+print(json.dumps({'prompt': wf, 'client_id': 'warmup'}))
+" > /tmp/warmup-payload.json
+
+  # Submit warmup workflow
+  local PROMPT_RESP
+  PROMPT_RESP=$(curl -s -X POST http://localhost:8188/prompt \
+    -H "Content-Type: application/json" \
+    -d @/tmp/warmup-payload.json)
+  local PROMPT_ID
+  PROMPT_ID=$(echo "$PROMPT_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('prompt_id',''))")
+
+  if [ -z "$PROMPT_ID" ]; then
+    echo "  Failed to submit warmup workflow"
+    echo "  Response: $PROMPT_RESP"
+    return 1
+  fi
+  echo "  Submitted warmup workflow: $PROMPT_ID"
+
+  # Poll for completion
+  local WARMUP_TIMEOUT=120
+  local WARMUP_POLL=3
+  local WARMUP_ELAPSED=0
+
+  while [ "$WARMUP_ELAPSED" -lt "$WARMUP_TIMEOUT" ]; do
+    local HISTORY
+    HISTORY=$(curl -s "http://localhost:8188/history/${PROMPT_ID}" 2>/dev/null || echo "{}")
+    local STATUS
+    STATUS=$(echo "$HISTORY" | python3 -c "
+import sys, json
+h = json.load(sys.stdin)
+entry = h.get('${PROMPT_ID}', {})
+status = entry.get('status', {})
+if status.get('status_str') == 'error':
+    print('error')
+elif entry.get('outputs', {}).get('60', {}).get('images'):
+    print('done')
+else:
+    print('pending')
+" 2>/dev/null || echo "pending")
+
+    if [ "$STATUS" = "done" ]; then
+      local WARMUP_END
+      WARMUP_END=$(date +%s)
+      echo "  Models loaded and warm! (${WARMUP_ELAPSED}s, total warmup: $((WARMUP_END - WARMUP_START))s)"
+      return 0
+    elif [ "$STATUS" = "error" ]; then
+      echo "  Warmup workflow failed on ComfyUI server"
+      return 1
+    fi
+
+    sleep "$WARMUP_POLL"
+    WARMUP_ELAPSED=$((WARMUP_ELAPSED + WARMUP_POLL))
+  done
+
+  echo "  Warmup timed out after ${WARMUP_TIMEOUT}s"
+  return 1
+}
+
+echo ""
+echo "==> Warming up models (loading into VRAM)..."
+warmup_models || echo "WARNING: Model warmup failed (non-fatal). First request will load models on demand."
+
+echo ""
+echo "Setup complete!"
+exit 0
