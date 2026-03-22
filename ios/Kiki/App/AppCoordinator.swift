@@ -49,7 +49,6 @@ final class AppCoordinator {
         }
     }
     var comparisonError: String?
-    var hasComparisonData: Bool { comparisonData != nil }
 
     // MARK: - Generation Mode
 

@@ -22,7 +22,7 @@ struct ContentView: View {
                 VStack(spacing: 0) {
                     ResultView(state: coordinator.resultState)
                         .overlay(alignment: .topTrailing) {
-                            if coordinator.compareWithoutControlNet || coordinator.hasComparisonData {
+                            if coordinator.compareWithoutControlNet || coordinator.comparisonData != nil {
                                 Button { showDebugModal = true } label: {
                                     Image(systemName: "square.grid.2x2")
                                         .font(.system(size: 14))
@@ -30,8 +30,8 @@ struct ContentView: View {
                                         .padding(8)
                                         .background(.ultraThinMaterial, in: Circle())
                                 }
-                                .disabled(!coordinator.hasComparisonData)
-                                .opacity(coordinator.hasComparisonData ? 1 : 0.4)
+                                .disabled(!coordinator.comparisonData != nil)
+                                .opacity(coordinator.comparisonData != nil ? 1 : 0.4)
                                 .padding(12)
                             }
                         }

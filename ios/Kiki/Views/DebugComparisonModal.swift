@@ -46,7 +46,7 @@ struct DebugComparisonModal: View {
     }
 
     private func formatted(_ value: Double) -> String {
-        value.truncatingRemainder(dividingBy: 1) == 0
+        abs(value - value.rounded()) < 0.001
             ? String(format: "%.0f", value)
             : String(format: "%.2f", value)
     }

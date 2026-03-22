@@ -112,8 +112,10 @@ final class GenerationPipeline {
             } else if let lineartURL = response.lineartImageURL,
                       let comparisonURL = response.comparisonImageURL {
                 do {
-                    let (lineartData, _) = try await URLSession.shared.data(from: lineartURL)
-                    let (compData, _) = try await URLSession.shared.data(from: comparisonURL)
+                    async let lineartDownload = URLSession.shared.data(from: lineartURL)
+                    async let compDownload = URLSession.shared.data(from: comparisonURL)
+                    let (lineartData, _) = try await lineartDownload
+                    let (compData, _) = try await compDownload
                     guard let lineartImage = UIImage(data: lineartData) else {
                         throw PipelineError.imageDecodeFailed(byteCount: lineartData.count, url: lineartURL.lastPathComponent)
                     }

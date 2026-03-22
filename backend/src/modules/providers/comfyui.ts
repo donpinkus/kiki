@@ -90,15 +90,15 @@ export class ComfyUIAdapter implements ProviderAdapter {
     if (!saveOutput) {
       throw new ProviderError('comfyui', 'Generation completed but no images in SaveImage output');
     }
-    const imageUrl = `${baseUrl}/view?filename=${encodeURIComponent(saveOutput.filename)}&subfolder=${encodeURIComponent(saveOutput.subfolder)}&type=${encodeURIComponent(saveOutput.type)}`;
+    const imageUrl = this.buildImageUrl(baseUrl, saveOutput);
 
     // Input sketch URL
-    const inputImageUrl = `${baseUrl}/view?filename=${encodeURIComponent(sketchFilename)}&type=input`;
+    const inputImageUrl = this.buildImageUrl(baseUrl, { filename: sketchFilename, type: 'input' });
 
     // Lineart preview URL (node 117)
     const lineartOutput = outputs[LINEART_PREVIEW_NODE_ID]?.images?.[0];
     const lineartImageUrl = lineartOutput
-      ? `${baseUrl}/view?filename=${encodeURIComponent(lineartOutput.filename)}&subfolder=${encodeURIComponent(lineartOutput.subfolder)}&type=${encodeURIComponent(lineartOutput.type)}`
+      ? this.buildImageUrl(baseUrl, lineartOutput)
       : undefined;
 
     const actualSeed = Number(workflow[KSAMPLER_NODE_ID]?.inputs['seed'] ?? 0);
@@ -117,7 +117,7 @@ export class ComfyUIAdapter implements ProviderAdapter {
         const compSaveOutput = compOutputs[SAVE_IMAGE_NODE_ID]?.images?.[0];
 
         if (compSaveOutput) {
-          comparisonImageUrl = `${baseUrl}/view?filename=${encodeURIComponent(compSaveOutput.filename)}&subfolder=${encodeURIComponent(compSaveOutput.subfolder)}&type=${encodeURIComponent(compSaveOutput.type)}`;
+          comparisonImageUrl = this.buildImageUrl(baseUrl, compSaveOutput);
         } else {
           comparisonError = 'Comparison generation completed but produced no image';
         }
@@ -232,6 +232,16 @@ export class ComfyUIAdapter implements ProviderAdapter {
 
     const result = (await response.json()) as { name: string; subfolder: string; type: string };
     return result.name;
+  }
+
+  private buildImageUrl(
+    baseUrl: string,
+    output: { filename: string; subfolder?: string; type?: string },
+  ): string {
+    const params = new URLSearchParams({ filename: output.filename });
+    if (output.subfolder) params.set('subfolder', output.subfolder);
+    if (output.type) params.set('type', output.type);
+    return `${baseUrl}/view?${params.toString()}`;
   }
 
   private async submitPrompt(baseUrl: string, workflow: Workflow): Promise<string> {
