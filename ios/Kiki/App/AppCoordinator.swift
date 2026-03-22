@@ -112,8 +112,6 @@ final class AppCoordinator {
         generationTask?.cancel()
 
         generationTask = Task {
-            defer { isGenerating = false }
-
             let input = GenerationPipeline.Input(
                 sessionId: sessionId,
                 requestId: requestId,
@@ -136,7 +134,10 @@ final class AppCoordinator {
                 guard !Task.isCancelled, currentRequestId == requestId else { return }
 
                 // Empty canvas — no generation needed
-                guard let output else { return }
+                guard let output else {
+                    isGenerating = false
+                    return
+                }
 
                 lastSuccessfulImage = output.image
                 resultState = .preview(image: output.image)
@@ -145,16 +146,18 @@ final class AppCoordinator {
                     advancedParameters.seed = seed
                 }
             } catch is CancellationError {
-                // Silently ignore cancellation
+                return
             } catch {
-                guard !Task.isCancelled, currentRequestId == requestId else { return }
+                if Task.isCancelled { return }
+                guard currentRequestId == requestId else { return }
                 resultState = .error(
                     message: mapErrorMessage(error),
                     previousImage: lastSuccessfulImage
                 )
             }
 
-            // Auto-retrigger if canvas changed during generation
+            // Clear isGenerating before retrigger so generate() doesn't hit the in-flight guard
+            isGenerating = false
             if hasUnsavedChanges {
                 generate()
             }
