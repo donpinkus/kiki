@@ -106,8 +106,37 @@ export const generateRoute: FastifyPluginAsync = async (fastify) => {
         const result = await provider.generate(providerRequest);
         const latencyMs = Date.now() - startTime;
 
+        // Debug: log what the client sent vs what was applied to the workflow
+        const wf = result.workflow as Record<string, { inputs: Record<string, unknown> }> | undefined;
         request.log.info(
-          { sessionId, requestId, mode, provider: provider.name, latencyMs },
+          {
+            sessionId,
+            requestId,
+            mode,
+            provider: provider.name,
+            latencyMs,
+            debug: {
+              clientParams: advancedParameters,
+              appliedWorkflow: wf ? {
+                ksampler: wf['111:3']?.inputs ? {
+                  seed: wf['111:3'].inputs['seed'],
+                  cfg: wf['111:3'].inputs['cfg'],
+                  steps: wf['111:3'].inputs['steps'],
+                  denoise: wf['111:3'].inputs['denoise'],
+                } : 'NODE MISSING',
+                controlnet: wf['111:85']?.inputs ? {
+                  strength: wf['111:85'].inputs['strength'],
+                  end_percent: wf['111:85'].inputs['end_percent'],
+                } : 'NODE MISSING',
+                auraflow: wf['111:66']?.inputs ? {
+                  shift: wf['111:66'].inputs['shift'],
+                } : 'NODE MISSING',
+                lora: wf['111:80']?.inputs ? {
+                  strength_model: wf['111:80'].inputs['strength_model'],
+                } : 'NODE MISSING',
+              } : 'NO WORKFLOW RETURNED',
+            },
+          },
           'Generation completed',
         );
 

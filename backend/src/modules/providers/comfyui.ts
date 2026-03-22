@@ -176,8 +176,6 @@ export class ComfyUIAdapter implements ProviderAdapter {
   private applyAdvancedParameters(workflow: Workflow, request: ProviderRequest): void {
     const params = request.advancedParameters;
 
-    console.log('[ComfyUI] advancedParameters received:', JSON.stringify(params ?? null));
-
     // KSampler: always apply defaults, override with client values
     const ksampler = workflow[KSAMPLER_NODE_ID];
     if (ksampler) {
@@ -213,21 +211,6 @@ export class ComfyUIAdapter implements ProviderAdapter {
       negativeNode.inputs['text'] = params.negativePrompt;
     }
 
-    console.log('[ComfyUI] Applied workflow values:', JSON.stringify({
-      ksampler: ksampler ? {
-        seed: ksampler.inputs['seed'],
-        cfg: ksampler.inputs['cfg'],
-        steps: ksampler.inputs['steps'],
-        denoise: ksampler.inputs['denoise'],
-      } : 'NODE MISSING',
-      controlnet: controlnet ? {
-        strength: controlnet.inputs['strength'],
-        end_percent: controlnet.inputs['end_percent'],
-      } : 'NODE MISSING',
-      auraflow: auraflow ? { shift: auraflow.inputs['shift'] } : 'NODE MISSING',
-      lora: lora ? { strength_model: lora.inputs['strength_model'] } : 'NODE MISSING',
-      negativePrompt: negativeNode ? negativeNode.inputs['text'] : 'NODE MISSING',
-    }));
   }
 
   private async uploadImage(baseUrl: string, base64: string): Promise<string> {
