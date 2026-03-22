@@ -5,7 +5,7 @@
 ComfyUI on RunPod H100 80GB SXM running Qwen-Image 20B (FP8) + InstantX ControlNet Union.
 
 - ~6-8s per generation (including network round-trip)
-- ~30-60s first generation after cold start (model loading)
+- ~30-60s first generation after cold start (model loading) — mitigated by automatic warmup in `setup-pod.sh`
 - 24GB+ VRAM required (FP8 model uses ~21GB)
 
 Model filenames and pipeline details are in `comfyui-workflow-api.json` (source of truth).
@@ -31,7 +31,7 @@ The action automatically:
 1. Tries existing network volumes for GPU availability
 2. If none available, probes other datacenters and creates a new volume (capped at 10)
 3. Creates a pod with GPU fallback (H100 SXM → H100 PCIe → A100 80GB)
-4. SSHs in and runs `scripts/setup-pod.sh` (symlinks models, installs deps, restarts ComfyUI)
+4. SSHs in and runs `scripts/setup-pod.sh` (symlinks models, installs deps, restarts ComfyUI, warms up models)
 5. On fresh volumes, downloads all models (~30GB, 5-10 min one-time)
 6. Updates Railway `COMFYUI_URL` via API
 7. Shows pod ID, URL, and datacenter in the Summary tab
