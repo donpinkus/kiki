@@ -1,0 +1,122 @@
+import UIKit
+import CanvasModule
+import NetworkModule
+import ResultModule
+
+@MainActor
+final class GenerationPipeline {
+
+    struct Input {
+        let sessionId: UUID
+        let requestId: UUID
+        let canvasViewModel: CanvasViewModel
+        let prompt: String?
+        let stylePreset: String
+        let advancedParameters: AdvancedParameters?
+        let isSeedLocked: Bool
+    }
+
+    struct Output {
+        let image: UIImage
+        let seed: Int?
+    }
+
+    private let apiClient: APIClient
+
+    init(apiClient: APIClient) {
+        self.apiClient = apiClient
+    }
+
+    /// Runs the full generation pipeline: snapshot → JPEG → API → image download.
+    ///
+    /// Reports progress via `onPhase`. Returns the generated image on success.
+    /// Throws on any failure. Respects Task cancellation at each phase boundary.
+    /// Returns `nil` if the canvas is empty (no generation needed).
+    func run(
+        input: Input,
+        onPhase: @escaping (GenerationPhase, [GenerationPhase: TimeInterval]) -> Void
+    ) async throws -> Output? {
+        var durations: [GenerationPhase: TimeInterval] = [:]
+        var phaseStart = Date()
+
+        // Phase: preparing (snapshot + JPEG encoding)
+        onPhase(.preparing, durations)
+
+        guard let snapshot = input.canvasViewModel.captureSnapshot(),
+              !snapshot.isEmpty else {
+            return nil
+        }
+
+        guard let jpegData = snapshot.image.jpegData(compressionQuality: 0.85) else {
+            throw PipelineError.jpegEncodingFailed
+        }
+        print("[Generate] JPEG: \(jpegData.count) bytes, image: \(snapshot.image.size)")
+
+        try Task.checkCancellation()
+
+        // Phase: uploading (network round-trip)
+        durations[.preparing] = Date().timeIntervalSince(phaseStart)
+        phaseStart = Date()
+        onPhase(.uploading, durations)
+
+        let request = GenerateRequest(
+            sessionId: input.sessionId,
+            requestId: input.requestId,
+            mode: .preview,
+            prompt: input.prompt,
+            stylePreset: input.stylePreset,
+            sketchImageBase64: jpegData.base64EncodedString(),
+            advancedParameters: input.advancedParameters
+        )
+
+        let response = try await apiClient.generate(request)
+        print("[Generate] Response: status=\(response.status), imageURL=\(response.imageURL?.absoluteString ?? "nil")")
+
+        try Task.checkCancellation()
+
+        guard response.status == .completed, let imageURL = response.imageURL else {
+            throw PipelineError.generationFailed(
+                status: "\(response.status)",
+                imageURL: response.imageURL?.absoluteString
+            )
+        }
+
+        let seed: Int? = input.isSeedLocked ? response.seed : nil
+
+        // Phase: downloading
+        durations[.uploading] = Date().timeIntervalSince(phaseStart)
+        phaseStart = Date()
+        onPhase(.downloading, durations)
+
+        let (data, _) = try await URLSession.shared.data(from: imageURL)
+        guard let image = UIImage(data: data) else {
+            throw PipelineError.imageDecodeFailed(
+                byteCount: data.count,
+                url: imageURL.lastPathComponent
+            )
+        }
+
+        try Task.checkCancellation()
+
+        return Output(image: image, seed: seed)
+    }
+}
+
+// MARK: - Pipeline Errors
+
+enum PipelineError: Error {
+    case jpegEncodingFailed
+    case generationFailed(status: String, imageURL: String?)
+    case imageDecodeFailed(byteCount: Int, url: String)
+
+    var userMessage: String {
+        switch self {
+        case .jpegEncodingFailed:
+            return "Failed to process sketch"
+        case .generationFailed(let status, let imageURL):
+            return "Generation failed — status: \(status), imageURL: \(imageURL ?? "nil")"
+        case .imageDecodeFailed(let byteCount, let url):
+            return "Image decode failed — \(byteCount) bytes from \(url)"
+        }
+    }
+}
