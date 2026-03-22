@@ -18,7 +18,7 @@ final class GenerationPipeline {
 
     struct Output {
         let image: UIImage
-        let seed: Int?
+        let seed: UInt64?
     }
 
     private let apiClient: APIClient
@@ -81,7 +81,7 @@ final class GenerationPipeline {
             )
         }
 
-        let seed: Int? = input.isSeedLocked ? response.seed : nil
+        let seed: UInt64? = input.isSeedLocked ? response.seed : nil
 
         // Phase: downloading
         durations[.uploading] = Date().timeIntervalSince(phaseStart)
