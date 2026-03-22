@@ -133,8 +133,9 @@ final class AppCoordinator {
 
                 guard !Task.isCancelled, currentRequestId == requestId else { return }
 
-                // Empty canvas — no generation needed
+                // Empty canvas — no generation needed, restore previous state
                 guard let output else {
+                    resultState = lastSuccessfulImage.map { .preview(image: $0) } ?? .empty
                     isGenerating = false
                     return
                 }
