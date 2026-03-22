@@ -90,7 +90,7 @@ export const generateRoute: FastifyPluginAsync = async (fastify) => {
       const startTime = Date.now();
 
       request.log.info(
-        { sessionId, requestId, mode, stylePreset, hasAdvancedParams: !!advancedParameters },
+        { sessionId, requestId, mode, stylePreset, hasAdvancedParams: !!advancedParameters, advancedParameters },
         'Received generate request',
       );
 
