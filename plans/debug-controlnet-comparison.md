@@ -138,9 +138,9 @@ var hasComparisonData: Bool { comparisonData != nil }
 ```
 
 In `generate()`:
-- Clear `comparisonData = nil` at the start (line ~108, alongside `hasUnsavedChanges = false`)
+- Do NOT clear `comparisonData` at the start. (Clearing it while the debug modal is open would cause SwiftUI to recompute the `fullScreenCover` content and render an empty modal.)
 - Pass `compareWithoutControlNet: compareWithoutControlNet` into `GenerationPipeline.Input`
-- After pipeline returns output, if `output.comparisonBundle` is non-nil, build `ComparisonData`:
+- After pipeline returns output, overwrite `comparisonData` based on the result:
   ```swift
   if let bundle = output.comparisonBundle {
       comparisonData = ComparisonData(
@@ -151,8 +151,11 @@ In `generate()`:
           controlNetStrength: advancedParameters.controlNetStrength
               ?? AdvancedParameters.defaultControlNetStrength
       )
+  } else {
+      comparisonData = nil
   }
   ```
+  This way old comparison data stays visible until replaced (stale but not empty — acceptable for debug). When comparison mode is off, `comparisonBundle` is nil → `comparisonData` set to nil → debug button disables.
 
 ### 5. iOS AdvancedParametersPanel: Add toggle
 
@@ -228,7 +231,7 @@ VStack(spacing: 0) {
 ## Risks & Mitigations
 - **Timeout:** Two sequential gens could approach the 60s iOS resource timeout on slow pods. Mitigation: increase `timeoutIntervalForResource` to 120s (it's a max, not a delay — no impact on normal usage).
 - **Second gen failure:** Backend catches errors from comparison gen and returns primary result normally. iOS sees nil `comparisonImageURL` → no comparison bundle → debug button stays disabled.
-- **Memory:** Four UIImages in ComparisonData. Each is ~1-2MB decoded. ~8MB total, acceptable on iPad.
+- **Memory:** Four decoded UIImages in ComparisonData. Each 1280×1280 RGBA bitmap is ~6.5MB uncompressed in memory (not the JPEG size). ~26MB total, well within iPad's 8-16GB RAM.
 
 ## Notes
 - Sequential backend execution means generation time roughly doubles when comparison is on. Acceptable for a debug feature.
