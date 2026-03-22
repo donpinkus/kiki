@@ -103,6 +103,31 @@ export class ComfyUIAdapter implements ProviderAdapter {
 
     const actualSeed = Number(workflow[KSAMPLER_NODE_ID]?.inputs['seed'] ?? 0);
 
+    // Comparison generation: run same workflow with CN strength=0
+    let comparisonImageUrl: string | undefined;
+    let comparisonError: string | undefined;
+
+    if (request.compareWithoutControlNet) {
+      try {
+        const compWorkflow = structuredClone(workflow);
+        compWorkflow[CONTROLNET_APPLY_NODE_ID].inputs['strength'] = 0;
+
+        const compPromptId = await this.submitPrompt(baseUrl, compWorkflow);
+        const compOutputs = await this.pollForResult(baseUrl, compPromptId);
+        const compSaveOutput = compOutputs[SAVE_IMAGE_NODE_ID]?.images?.[0];
+
+        if (compSaveOutput) {
+          comparisonImageUrl = `${baseUrl}/view?filename=${encodeURIComponent(compSaveOutput.filename)}&subfolder=${encodeURIComponent(compSaveOutput.subfolder)}&type=${encodeURIComponent(compSaveOutput.type)}`;
+        } else {
+          comparisonError = 'Comparison generation completed but produced no image';
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        comparisonError = `Comparison generation failed: ${msg}`;
+        console.warn(comparisonError);
+      }
+    }
+
     return {
       imageUrl,
       inputImageUrl,
@@ -111,6 +136,8 @@ export class ComfyUIAdapter implements ProviderAdapter {
       latencyMs: Date.now() - startTime,
       jobId: promptId,
       workflow,
+      comparisonImageUrl,
+      comparisonError,
     };
   }
 

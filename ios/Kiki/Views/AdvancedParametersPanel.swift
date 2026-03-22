@@ -15,12 +15,21 @@ struct AdvancedParametersPanel: View {
                 negativePromptSection
                 seedSection
 
+                Section("Debug") {
+                    Toggle("Compare without ControlNet", isOn: $coordinator.compareWithoutControlNet)
+                }
+
                 Section {
                     Button("Reset All to Defaults", role: .destructive) {
                         coordinator.advancedParameters = AdvancedParameters()
                         coordinator.isSeedLocked = false
+                        coordinator.compareWithoutControlNet = false
                     }
-                    .disabled(coordinator.advancedParameters.isDefault && !coordinator.isSeedLocked)
+                    .disabled(
+                        coordinator.advancedParameters.isDefault
+                        && !coordinator.isSeedLocked
+                        && !coordinator.compareWithoutControlNet
+                    )
                 }
             }
             .navigationTitle("Advanced")

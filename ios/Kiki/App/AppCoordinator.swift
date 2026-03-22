@@ -39,6 +39,17 @@ final class AppCoordinator {
     var dividerPosition: CGFloat = 0.55
     var advancedParameters = AdvancedParameters()
     var isSeedLocked = false
+    var comparisonData: ComparisonData?
+    var compareWithoutControlNet = false {
+        didSet {
+            if !compareWithoutControlNet {
+                comparisonData = nil
+                comparisonError = nil
+            }
+        }
+    }
+    var comparisonError: String?
+    var hasComparisonData: Bool { comparisonData != nil }
 
     // MARK: - Generation Mode
 
@@ -107,6 +118,7 @@ final class AppCoordinator {
         currentRequestId = requestId
         hasUnsavedChanges = false
         isGenerating = true
+        comparisonError = nil
 
         // Cancel any prior generation task (latest-request-wins)
         generationTask?.cancel()
@@ -119,7 +131,8 @@ final class AppCoordinator {
                 prompt: promptText.isEmpty ? nil : promptText,
                 stylePreset: selectedStylePreset.apiKey,
                 advancedParameters: advancedParameters.isDefault ? nil : advancedParameters,
-                isSeedLocked: isSeedLocked
+                isSeedLocked: isSeedLocked,
+                compareWithoutControlNet: compareWithoutControlNet
             )
 
             do {
@@ -142,6 +155,11 @@ final class AppCoordinator {
 
                 lastSuccessfulImage = output.image
                 resultState = .preview(image: output.image)
+
+                comparisonData = output.comparisonData
+                if let error = output.comparisonError {
+                    comparisonError = error
+                }
 
                 if isSeedLocked, let seed = output.seed {
                     advancedParameters.seed = seed
