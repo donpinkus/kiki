@@ -23,7 +23,7 @@ struct ContentView: View {
                     ResultView(state: coordinator.resultState)
                         .overlay(alignment: .topTrailing) {
                             if coordinator.compareWithoutControlNet || coordinator.comparisonData != nil {
-                                Button { showDebugModal = true } label: {
+                                Button { if coordinator.comparisonData != nil { showDebugModal = true } } label: {
                                     Image(systemName: "square.grid.2x2")
                                         .font(.system(size: 14))
                                         .foregroundStyle(.white)

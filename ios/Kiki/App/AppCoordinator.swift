@@ -148,6 +148,8 @@ final class AppCoordinator {
                 // Empty canvas — no generation needed, restore previous state
                 guard let output else {
                     resultState = lastSuccessfulImage.map { .preview(image: $0) } ?? .empty
+                    comparisonData = nil
+                    comparisonError = nil
                     isGenerating = false
                     return
                 }
@@ -155,9 +157,11 @@ final class AppCoordinator {
                 lastSuccessfulImage = output.image
                 resultState = .preview(image: output.image)
 
-                comparisonData = output.comparisonData
-                if let error = output.comparisonError {
-                    comparisonError = error
+                if compareWithoutControlNet {
+                    comparisonData = output.comparisonData
+                    if let error = output.comparisonError {
+                        comparisonError = error
+                    }
                 }
 
                 if isSeedLocked, let seed = output.seed {
