@@ -40,10 +40,19 @@ final class AppCoordinator {
     var advancedParameters = AdvancedParameters()
     var isSeedLocked = false
 
+    // MARK: - Generation Mode
+
+    var triggerMode: GenerationTriggerMode = .auto {
+        didSet { UserDefaults.standard.set(triggerMode.rawValue, forKey: "generationTriggerMode") }
+    }
+
+    /// True when the canvas has changed since the last generation started.
+    private(set) var hasUnsavedChanges = false
+
     // MARK: - Modules
 
     let canvasViewModel = CanvasViewModel()
-    private let apiClient: APIClient
+    private let pipeline: GenerationPipeline
 
     // MARK: - Generation State
 
@@ -51,15 +60,22 @@ final class AppCoordinator {
     private var currentRequestId: UUID?
     private var lastSuccessfulImage: UIImage?
 
-    private var isCanvasDirty = false
     private(set) var isGenerating = false
+    private var generationTask: Task<Void, Never>?
     private var debounceTask: Task<Void, Never>?
     private var canvasObservationTask: Task<Void, Never>?
 
     // MARK: - Lifecycle
 
     init(backendURL: URL = URL(string: "https://kiki-backend-production-eb81.up.railway.app")!) {
-        self.apiClient = APIClient(baseURL: backendURL)
+        let apiClient = APIClient(baseURL: backendURL)
+        self.pipeline = GenerationPipeline(apiClient: apiClient)
+
+        if let stored = UserDefaults.standard.string(forKey: "generationTriggerMode"),
+           let mode = GenerationTriggerMode(rawValue: stored) {
+            self.triggerMode = mode
+        }
+
         applyTool()
         startObservingCanvas()
     }
@@ -76,133 +92,74 @@ final class AppCoordinator {
 
     func clear() {
         canvasViewModel.clear()
-        isCanvasDirty = false
+        hasUnsavedChanges = false
     }
 
     /// Triggers a preview generation from the current canvas state.
     func generate() {
-        // If a request is already in-flight, mark dirty so it auto-retriggers on completion.
-        // This prevents concurrent requests from piling up on the single GPU.
+        // Serial queue: if already generating, mark dirty for auto-retrigger on completion.
         if isGenerating {
-            isCanvasDirty = true
+            hasUnsavedChanges = true
             return
         }
 
         let requestId = UUID()
         currentRequestId = requestId
-        isCanvasDirty = false
+        hasUnsavedChanges = false
         isGenerating = true
 
-        Task {
-            defer { if isGenerating { isGenerating = false } }
+        // Cancel any prior generation task (latest-request-wins)
+        generationTask?.cancel()
 
-            var durations: [GenerationPhase: TimeInterval] = [:]
-            var phaseStart = Date()
-
-            // Phase: preparing (snapshot + JPEG encoding)
-            resultState = .generating(
-                progress: GenerationProgress(currentPhase: .preparing, phaseStartedAt: phaseStart),
-                previousImage: lastSuccessfulImage
-            )
-
-            // Capture snapshot
-            guard let snapshot = canvasViewModel.captureSnapshot(),
-                  !snapshot.isEmpty else {
-                return
-            }
-            let img = snapshot.image
-
-            // Convert directly to JPEG (canvas capture already includes white background)
-            guard let jpegData = img.jpegData(compressionQuality: 0.85) else {
-                resultState = .error(
-                    message: "Failed to process sketch",
-                    previousImage: lastSuccessfulImage
-                )
-                return
-            }
-            print("[Generate] JPEG: \(jpegData.count) bytes, image: \(img.size)")
-
-            guard !Task.isCancelled, currentRequestId == requestId else { return }
-
-            // Phase: uploading (full network round-trip)
-            durations[.preparing] = Date().timeIntervalSince(phaseStart)
-            phaseStart = Date()
-            resultState = .generating(
-                progress: GenerationProgress(currentPhase: .uploading, phaseStartedAt: phaseStart, durations: durations),
-                previousImage: lastSuccessfulImage
-            )
-
-            // Send to backend
-            let base64 = jpegData.base64EncodedString()
-            let request = GenerateRequest(
+        generationTask = Task {
+            let input = GenerationPipeline.Input(
                 sessionId: sessionId,
                 requestId: requestId,
-                mode: .preview,
+                canvasViewModel: canvasViewModel,
                 prompt: promptText.isEmpty ? nil : promptText,
                 stylePreset: selectedStylePreset.apiKey,
-                sketchImageBase64: base64,
-                advancedParameters: advancedParameters.isDefault ? nil : advancedParameters
+                advancedParameters: advancedParameters.isDefault ? nil : advancedParameters,
+                isSeedLocked: isSeedLocked
             )
 
             do {
-                let response = try await apiClient.generate(request)
-                print("[Generate] Response: status=\(response.status), imageURL=\(response.imageURL?.absoluteString ?? "nil"), inputImageURL=\(response.inputImageURL?.absoluteString ?? "nil"), lineartImageURL=\(response.lineartImageURL?.absoluteString ?? "nil")")
-
-                guard !Task.isCancelled, currentRequestId == requestId else { return }
-
-                if response.status == .completed, let imageURL = response.imageURL {
-                    if isSeedLocked, let seed = response.seed {
-                        advancedParameters.seed = seed
-                    }
-
-                    // Phase: downloading
-                    durations[.uploading] = Date().timeIntervalSince(phaseStart)
-                    phaseStart = Date()
+                let output = try await pipeline.run(input: input) { [weak self] phase, durations in
+                    guard let self, currentRequestId == requestId else { return }
                     resultState = .generating(
-                        progress: GenerationProgress(currentPhase: .downloading, phaseStartedAt: phaseStart, durations: durations),
-                        previousImage: lastSuccessfulImage
-                    )
-
-                    let (data, _) = try await URLSession.shared.data(from: imageURL)
-                    guard let image = UIImage(data: data) else {
-                        resultState = .error(message: "Image decode failed — \(data.count) bytes from \(imageURL.lastPathComponent)", previousImage: lastSuccessfulImage)
-                        return
-                    }
-                    guard !Task.isCancelled, currentRequestId == requestId else { return }
-                    lastSuccessfulImage = image
-                    resultState = .preview(image: image)
-                } else {
-                    resultState = .error(
-                        message: "Generation failed — status: \(response.status), imageURL: \(response.imageURL?.absoluteString ?? "nil")",
+                        progress: GenerationProgress(currentPhase: phase, durations: durations),
                         previousImage: lastSuccessfulImage
                     )
                 }
+
+                guard !Task.isCancelled, currentRequestId == requestId else { return }
+
+                // Empty canvas — no generation needed, restore previous state
+                guard let output else {
+                    resultState = lastSuccessfulImage.map { .preview(image: $0) } ?? .empty
+                    isGenerating = false
+                    return
+                }
+
+                lastSuccessfulImage = output.image
+                resultState = .preview(image: output.image)
+
+                if isSeedLocked, let seed = output.seed {
+                    advancedParameters.seed = seed
+                }
             } catch is CancellationError {
-                // Silently ignore cancellation
-            } catch let error as GenerationError {
-                guard !Task.isCancelled, currentRequestId == requestId else { return }
-                resultState = .error(
-                    message: error.userMessage,
-                    previousImage: lastSuccessfulImage
-                )
-            } catch let urlError as URLError {
-                guard !Task.isCancelled, currentRequestId == requestId else { return }
-                resultState = .error(
-                    message: "Network error: \(urlError.localizedDescription) (code \(urlError.code.rawValue))",
-                    previousImage: lastSuccessfulImage
-                )
+                return
             } catch {
-                guard !Task.isCancelled, currentRequestId == requestId else { return }
+                if Task.isCancelled { return }
+                guard currentRequestId == requestId else { return }
                 resultState = .error(
-                    message: "\(type(of: error)): \(error.localizedDescription)",
+                    message: mapErrorMessage(error),
                     previousImage: lastSuccessfulImage
                 )
             }
 
-            // Auto-retrigger if canvas changed during generation.
-            // Must clear isGenerating first so generate() doesn't hit the in-flight guard.
+            // Clear isGenerating before retrigger so generate() doesn't hit the in-flight guard
             isGenerating = false
-            if isCanvasDirty {
+            if hasUnsavedChanges {
                 generate()
             }
         }
@@ -215,12 +172,16 @@ final class AppCoordinator {
             guard let self else { return }
             for await _ in canvasViewModel.canvasChanges {
                 guard !Task.isCancelled else { return }
-                isCanvasDirty = true
 
-                // Cancel previous debounce timer
+                // Don't mark dirty for empty canvas (e.g. after clear or erasing last stroke)
+                guard !canvasViewModel.isEmpty else { continue }
+                hasUnsavedChanges = true
+
+                // In manual mode, just mark dirty — don't auto-generate
+                guard triggerMode == .auto else { continue }
+
+                // Auto mode: debounce then generate after 1.5s of no drawing
                 debounceTask?.cancel()
-
-                // Start new debounce — generate after 1.5s of no drawing
                 debounceTask = Task { [weak self] in
                     try? await Task.sleep(for: .seconds(1.5))
                     guard !Task.isCancelled, let self else { return }
@@ -240,6 +201,19 @@ final class AppCoordinator {
             canvasViewModel.selectBrush(width: toolSize)
         case .eraser:
             canvasViewModel.selectEraser(width: toolSize)
+        }
+    }
+
+    private func mapErrorMessage(_ error: Error) -> String {
+        switch error {
+        case let pipelineError as PipelineError:
+            return pipelineError.userMessage
+        case let generationError as GenerationError:
+            return generationError.userMessage
+        case let urlError as URLError:
+            return "Network error: \(urlError.localizedDescription) (code \(urlError.code.rawValue))"
+        default:
+            return "\(type(of: error)): \(error.localizedDescription)"
         }
     }
 }
