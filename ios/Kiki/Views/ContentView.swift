@@ -52,6 +52,13 @@ struct ContentView: View {
                             : Color.accentColor,
                         in: Circle()
                     )
+                    .overlay(alignment: .topTrailing) {
+                        if coordinator.hasUnsavedChanges && !coordinator.isGenerating {
+                            Circle()
+                                .fill(.orange)
+                                .frame(width: 8, height: 8)
+                        }
+                    }
             }
             .disabled(coordinator.canvasViewModel.isEmpty || coordinator.isGenerating)
         }

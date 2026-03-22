@@ -61,6 +61,18 @@ struct FloatingToolbar: View {
                 .frame(height: 24)
 
             Button {
+                coordinator.triggerMode = (coordinator.triggerMode == .auto) ? .manual : .auto
+            } label: {
+                Image(systemName: coordinator.triggerMode == .auto ? "bolt.fill" : "hand.tap.fill")
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(coordinator.triggerMode == .auto ? Color.accentColor : .primary)
+                    .frame(width: 36, height: 36)
+            }
+
+            Divider()
+                .frame(height: 24)
+
+            Button {
                 showAdvancedParameters = true
             } label: {
                 Image(systemName: coordinator.advancedParameters.isDefault
