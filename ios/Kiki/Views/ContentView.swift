@@ -30,7 +30,7 @@ struct ContentView: View {
                                         .padding(8)
                                         .background(.ultraThinMaterial, in: Circle())
                                 }
-                                .disabled(!coordinator.comparisonData != nil)
+                                .disabled(coordinator.comparisonData == nil)
                                 .opacity(coordinator.comparisonData != nil ? 1 : 0.4)
                                 .padding(12)
                             }
