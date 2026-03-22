@@ -1,104 +1,163 @@
 # Plan: Debug ControlNet Comparison Mode
 
 ## Overview
-Add a toggle that runs a second generation with controlnet strength=0 after the normal generation. A debug button (always visible, disabled until results ready) opens a full-screen 2x2 grid modal showing: original sketch, lineart, generated image, and no-controlnet image.
+Add a toggle that runs a second generation with controlnet strength=0 after the normal generation. A debug button (always visible, disabled until data is ready) opens a full-screen 2x2 grid modal showing: original sketch, lineart, generated image, and no-controlnet image.
+
+---
+
+## Architecture Decisions
+
+**`compareWithoutControlNet` is a request-level flag, not a generation parameter.**
+It lives on `GenerateRequest` / `ProviderRequest`, not on `AdvancedParameters`. It controls _how many_ generations to run, not _how_ a single generation runs. The toggle state lives on `AppCoordinator`.
+
+**Debug button lives in ContentView, not ResultModule.**
+ResultModule is a standalone SPM package focused on displaying generation results. Debug comparison is a main-app concern. The button overlays the result area from ContentView.
+
+**Comparison data is bundled in a struct.**
+A `ComparisonData` struct on AppCoordinator holds all 4 images + the CN strength used. It's either complete or nil — no partial state. Cleared at the start of every generation.
+
+**Pipeline downloads all images.**
+The pipeline already handles the main image download. Extend it to also download lineart and comparison images, keeping all network I/O in one place. Return everything in `Output`.
 
 ---
 
 ## Changes
 
-### 1. Backend: Add `compareWithoutControlNet` parameter and second image URL
+### 1. Backend: Second generation when flag is set
 
-**Files:**
-- `backend/src/routes/generate.ts` — Add `compareWithoutControlNet: boolean` to request schema. Add `comparisonImageUrl` to response.
-- `backend/src/modules/providers/types.ts` — Add `compareWithoutControlNet` to `AdvancedParameters` interface. Add `comparisonImageUrl` to `ProviderResponse`.
-- `backend/src/modules/providers/comfyui.ts` — When `compareWithoutControlNet` is true, after the first generation completes, run a second workflow with identical parameters except `controlNetStrength=0`. Return both image URLs.
+**`backend/src/modules/providers/types.ts`:**
+- Add `compareWithoutControlNet?: boolean` to `ProviderRequest`
+- Add `comparisonImageUrl?: string` to `ProviderResponse`
 
-**Behavior:**
-- First generation runs normally (with current controlnet strength).
-- After it completes, if `compareWithoutControlNet=true`, clone the workflow again via `structuredClone()`, set node `111:85` strength to `0`, reuse the same uploaded sketch filename (already on the pod), and submit a second prompt.
-- Force the same seed from the first run's KSampler output (node `111:3`) into the second workflow for a fair comparison.
-- Poll the second prompt to completion.
-- Return both `imageUrl` (normal) and `comparisonImageUrl` (no controlnet) in the response.
+**`backend/src/routes/generate.ts`:**
+- Add `compareWithoutControlNet` to `generateBodySchema` (boolean, nullable, optional)
+- Add `compareWithoutControlNet` to `GenerateBody` interface
+- Pass it through to `ProviderRequest`
+- Include `comparisonImageUrl` in the success response
+
+**`backend/src/modules/providers/comfyui.ts`:**
+- After the first generation completes and produces results (after line 86), check `request.compareWithoutControlNet`
+- If true: build a second workflow via `getWorkflow()`, apply the same parameters but force `controlNetStrength=0`, force the same seed (extracted from first run's KSampler output on line 104), set the same sketch filename and prompt
+- Submit second prompt, poll for result
+- Extract the second image URL and set it on the response as `comparisonImageUrl`
+- The first gen's latency is still returned as `latencyMs`; total time includes both gens
 
 ### 2. iOS NetworkModule: Update request/response models
 
-**Files:**
-- `ios/Packages/NetworkModule/Sources/NetworkModule/AdvancedParameters.swift` — Add `compareWithoutControlNet: Bool?` property. Update `isDefault` computed property to include it. No slider default needed (it's a toggle, nil = off).
-- `ios/Packages/NetworkModule/Sources/NetworkModule/GenerateResponse.swift` — Add `comparisonImageURL: URL?` (matching existing `imageURL`/`lineartImageURL` naming convention with `CodingKeys` mapping to `comparisonImageUrl`).
+**`AdvancedParameters.swift`:** No changes.
 
-### 3. iOS AdvancedParametersPanel: Add toggle
+**`GenerateRequest.swift`:**
+- Add `let compareWithoutControlNet: Bool?` property (default nil in init)
 
-**File:** `ios/Kiki/Views/AdvancedParametersPanel.swift`
+**`GenerateResponse.swift`:**
+- Add `let comparisonImageURL: URL?` property
 
-Add a new "Debug" section at the bottom of the panel with a toggle: "Compare without ControlNet". Binds to `coordinator.advancedParameters.compareWithoutControlNet`. When toggled on, sets to `true`; when off, sets to `nil` (keeping request compact when disabled).
+**`APIClient.swift` (`decodeSuccessResponse`):**
+- Add `comparisonImageUrl: String?` to the `APIResponse` struct
+- Map it to `comparisonImageURL` via `URL(string:)`
 
-### 4. iOS GenerationPipeline: Expand Output to include comparison image
+### 3. iOS GenerationPipeline: Expand Output, download all images
 
-**File:** `ios/Kiki/App/GenerationPipeline.swift`
+**`GenerationPipeline.swift`:**
 
-- Add `comparisonImage: UIImage?` to `GenerationPipeline.Output`.
-- Add `inputSnapshotImage: UIImage` to `Output` — the canvas snapshot captured in the preparing phase (already exists as a local variable, just needs to be returned).
-- Add `lineartImage: UIImage?` to `Output` — downloaded from `response.lineartImageURL` if present.
-- After downloading the main generated image, if `response.comparisonImageURL` is present, download it too (still within the downloading phase).
-- If `response.lineartImageURL` is present, download the lineart image as well.
-- This keeps all image fetching inside the pipeline where it belongs.
+Expand `Input`:
+- Add `let compareWithoutControlNet: Bool`
 
-### 5. iOS AppCoordinator: Store comparison data
+Expand `Output`:
+- Add `let snapshotImage: UIImage` — the canvas snapshot (already captured as `snapshot.image`, just return it)
+- Add `let lineartImage: UIImage?` — downloaded from `response.lineartImageURL`
+- Add `let comparisonImage: UIImage?` — downloaded from `response.comparisonImageURL`
 
-**File:** `ios/Kiki/App/AppCoordinator.swift`
+In `run()`, after downloading the main image:
+- If `response.lineartImageURL` is present, download it and decode to UIImage
+- If `response.comparisonImageURL` is present, download it and decode to UIImage
+- Use `async let` to download all images concurrently for speed
+- Return expanded `Output` with all images
 
-- Add properties: `comparisonImage: UIImage?`, `lastInputSnapshot: UIImage?`, `lastLineartImage: UIImage?`.
-- Add `hasComparisonData: Bool` computed property — true when all 4 images are non-nil (lastInputSnapshot, lastLineartImage, lastSuccessfulImage, comparisonImage).
-- After pipeline returns output, store `output.inputSnapshotImage`, `output.lineartImage`, `output.comparisonImage` alongside the existing `lastSuccessfulImage`.
-- Clear `comparisonImage` (and lineart/snapshot) when a new generation starts without the comparison toggle.
+Update request construction to pass through `compareWithoutControlNet` from input.
 
-### 6. iOS ResultView: Add debug button
+### 4. iOS AppCoordinator: Store comparison data, add toggle state
 
-**File:** `ios/Packages/ResultModule/Sources/ResultModule/ResultView.swift`
+**`AppCoordinator.swift`:**
 
-- Add a small debug button (grid icon via `SF Symbols: square.grid.2x2`) positioned top-trailing of the result image area.
-- Button always visible but disabled + reduced opacity until comparison data is available.
-- Since ResultModule has no dependency on AppCoordinator, pass in: `debugEnabled: Bool` and `onDebugTap: () -> Void` as parameters to `ResultView`.
+Add a bundled struct and state:
+```swift
+struct ComparisonData {
+    let snapshotImage: UIImage      // what was sent to the server
+    let lineartImage: UIImage       // ControlNet preprocessor output
+    let generatedImage: UIImage     // normal generation result
+    let comparisonImage: UIImage    // generation with CN strength=0
+    let controlNetStrength: Double  // the CN strength used for the normal gen
+}
 
-### 7. iOS New View: DebugComparisonModal
+var comparisonData: ComparisonData?
+var compareWithoutControlNet = false
+```
 
-**File:** `ios/Kiki/Views/DebugComparisonModal.swift` (new file)
+Add computed property:
+```swift
+var hasComparisonData: Bool { comparisonData != nil }
+```
 
-- Full-screen modal (`.fullScreenCover`).
-- 2x2 grid with labels:
-  - Top-left: "Original Sketch" — `lastInputSnapshot`
-  - Top-right: "Lineart" — `lastLineartImage`
-  - Bottom-left: "Generated (CN: {strength})" — `lastSuccessfulImage`
-  - Bottom-right: "Generated (CN: 0)" — `comparisonImage`
-- Each cell: `Image(uiImage:).resizable().aspectRatio(contentMode: .fit)` with a label below.
-- X button in top-right corner to dismiss.
-- Dark background.
+In `generate()`:
+- Clear `comparisonData = nil` when starting a new generation
+- Pass `compareWithoutControlNet` into `GenerationPipeline.Input`
+- After pipeline returns, if output has `snapshotImage`, `lineartImage`, `comparisonImage` all present, build `ComparisonData` and store it
+- `controlNetStrength` is read from `advancedParameters.controlNetStrength ?? AdvancedParameters.defaultControlNetStrength`
 
-### 8. Wire it up in ContentView
+### 5. iOS AdvancedParametersPanel: Add toggle
 
-**File:** `ios/Kiki/Views/ContentView.swift`
+**`AdvancedParametersPanel.swift`:**
 
-- Add `@State var showDebugModal = false`.
-- Pass `debugEnabled: coordinator.hasComparisonData` and `onDebugTap: { showDebugModal = true }` to `ResultView`.
-- Present `DebugComparisonModal` via `.fullScreenCover(isPresented: $showDebugModal)`, passing the 4 images from coordinator.
+Add a "Debug" section at the bottom (before the Reset button section):
+```swift
+Section("Debug") {
+    Toggle("Compare without ControlNet", isOn: $coordinator.compareWithoutControlNet)
+}
+```
+
+The Reset button should also reset `compareWithoutControlNet = false`.
+
+### 6. iOS New View: DebugComparisonModal
+
+**New file: `ios/Kiki/Views/DebugComparisonModal.swift`**
+
+- Takes `ComparisonData` and a dismiss binding
+- Full-screen dark background
+- 2x2 grid using `LazyVGrid(columns: [.flexible(), .flexible()])`:
+  - Top-left: "Original Sketch" — `data.snapshotImage`
+  - Top-right: "Lineart" — `data.lineartImage`
+  - Bottom-left: "Generated (CN: {strength})" — `data.generatedImage`
+  - Bottom-right: "Generated (CN: 0)" — `data.comparisonImage`
+- Each cell: `Image(uiImage:).resizable().aspectRatio(contentMode: .fit)` with label below
+- X button top-right to dismiss
+- Presented via `.fullScreenCover`
+
+### 7. iOS ContentView: Wire up debug button and modal
+
+**`ContentView.swift`:**
+
+- Add `@State private var showDebugModal = false`
+- Overlay a debug button (SF Symbol: `square.grid.2x2`) on the result pane area, top-trailing
+- Button always visible but disabled + reduced opacity when `!coordinator.hasComparisonData`
+- On tap: `showDebugModal = true`
+- Present `DebugComparisonModal` via `.fullScreenCover(isPresented: $showDebugModal)` passing `coordinator.comparisonData!`
 
 ---
 
 ## Execution Order
-1. Backend types + provider logic (step 1)
-2. iOS network models (step 2)
-3. iOS advanced parameters toggle (step 3)
-4. iOS GenerationPipeline output expansion (step 4)
-5. iOS AppCoordinator state (step 5)
-6. iOS ResultView debug button (step 6)
-7. iOS DebugComparisonModal (step 7)
-8. iOS ContentView wiring (step 8)
+1. Backend: types → comfyui adapter → route (step 1)
+2. iOS NetworkModule: request, response, APIClient (step 2)
+3. iOS GenerationPipeline (step 3)
+4. iOS AppCoordinator (step 4)
+5. iOS AdvancedParametersPanel (step 5)
+6. iOS DebugComparisonModal (step 6)
+7. iOS ContentView (step 7)
 
 ## Notes
-- Sequential execution means generation time roughly doubles when comparison is enabled. This is acceptable for a debug/tuning feature.
-- The same seed is forced for both runs (extracted from first run's KSampler output) to ensure a fair visual comparison.
-- The comparison toggle defaults to off (nil) — no impact on normal usage, no extra bytes in request.
-- No new dependencies or packages needed.
-- All image downloading stays inside `GenerationPipeline` (not AppCoordinator), following the refactored architecture.
-- The `inputSnapshotImage` is the JPEG-encoded canvas snapshot already captured in the pipeline's preparing phase — we just return it in the output instead of discarding it.
+- Sequential execution means generation time roughly doubles when comparison is on. Acceptable for a debug feature.
+- Same seed forced for both runs (extracted from first run's KSampler output) for fair comparison.
+- Toggle defaults to off — zero impact on normal usage, no extra bytes in request (nil omitted by Codable).
+- All image downloading stays inside GenerationPipeline.
+- `ComparisonData` is all-or-nothing — no partial state to manage.
+- No changes to ResultModule at all.
