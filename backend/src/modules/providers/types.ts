@@ -15,6 +15,7 @@ export interface ProviderRequest {
   prompt: string;
   mode: 'preview' | 'refine';
   advancedParameters?: AdvancedParameters;
+  compareWithoutControlNet?: boolean;
 }
 
 export interface ProviderResponse {
@@ -25,6 +26,8 @@ export interface ProviderResponse {
   latencyMs: number;
   jobId?: string;
   workflow?: Record<string, unknown>;
+  comparisonImageUrl?: string;
+  comparisonError?: string;
 }
 
 export interface ProviderAdapter {

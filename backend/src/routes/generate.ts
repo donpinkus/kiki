@@ -38,6 +38,7 @@ const generateBodySchema = {
     prompt: { type: ['string', 'null'], maxLength: 500 },
     stylePreset: { type: 'string', enum: [...STYLE_PRESETS] },
     sketchImageBase64: { type: 'string', minLength: 1 },
+    compareWithoutControlNet: { type: 'boolean', nullable: true },
     advancedParameters: {
       type: 'object',
       nullable: true,
@@ -66,6 +67,7 @@ interface GenerateBody {
   stylePreset: (typeof STYLE_PRESETS)[number];
   sketchImageBase64: string;
   advancedParameters?: AdvancedParameters | null;
+  compareWithoutControlNet?: boolean | null;
 }
 
 const provider: ProviderAdapter = new ComfyUIAdapter();
@@ -82,6 +84,7 @@ export const generateRoute: FastifyPluginAsync = async (fastify) => {
         stylePreset,
         sketchImageBase64,
         advancedParameters = null,
+        compareWithoutControlNet = null,
       } = request.body;
 
       const startTime = Date.now();
@@ -96,6 +99,7 @@ export const generateRoute: FastifyPluginAsync = async (fastify) => {
         prompt: buildPrompt(prompt, stylePreset),
         mode,
         advancedParameters: advancedParameters ?? undefined,
+        compareWithoutControlNet: compareWithoutControlNet ?? undefined,
       };
 
       try {
@@ -113,6 +117,8 @@ export const generateRoute: FastifyPluginAsync = async (fastify) => {
           imageUrl: result.imageUrl,
           inputImageUrl: result.inputImageUrl ?? null,
           lineartImageUrl: result.lineartImageUrl ?? null,
+          comparisonImageUrl: result.comparisonImageUrl ?? null,
+          comparisonError: result.comparisonError ?? null,
           seed: result.seed,
           provider: provider.name,
           latencyMs,

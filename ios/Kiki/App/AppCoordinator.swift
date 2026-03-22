@@ -39,6 +39,16 @@ final class AppCoordinator {
     var dividerPosition: CGFloat = 0.55
     var advancedParameters = AdvancedParameters()
     var isSeedLocked = false
+    var comparisonData: ComparisonData?
+    var compareWithoutControlNet = false {
+        didSet {
+            if !compareWithoutControlNet {
+                comparisonData = nil
+                comparisonError = nil
+            }
+        }
+    }
+    var comparisonError: String?
 
     // MARK: - Generation Mode
 
@@ -107,6 +117,7 @@ final class AppCoordinator {
         currentRequestId = requestId
         hasUnsavedChanges = false
         isGenerating = true
+        comparisonError = nil
 
         // Cancel any prior generation task (latest-request-wins)
         generationTask?.cancel()
@@ -119,7 +130,8 @@ final class AppCoordinator {
                 prompt: promptText.isEmpty ? nil : promptText,
                 stylePreset: selectedStylePreset.apiKey,
                 advancedParameters: advancedParameters.isDefault ? nil : advancedParameters,
-                isSeedLocked: isSeedLocked
+                isSeedLocked: isSeedLocked,
+                compareWithoutControlNet: compareWithoutControlNet
             )
 
             do {
@@ -136,12 +148,21 @@ final class AppCoordinator {
                 // Empty canvas — no generation needed, restore previous state
                 guard let output else {
                     resultState = lastSuccessfulImage.map { .preview(image: $0) } ?? .empty
+                    comparisonData = nil
+                    comparisonError = nil
                     isGenerating = false
                     return
                 }
 
                 lastSuccessfulImage = output.image
                 resultState = .preview(image: output.image)
+
+                if compareWithoutControlNet {
+                    comparisonData = output.comparisonData
+                    if let error = output.comparisonError {
+                        comparisonError = error
+                    }
+                }
 
                 if isSeedLocked, let seed = output.seed {
                     advancedParameters.seed = seed

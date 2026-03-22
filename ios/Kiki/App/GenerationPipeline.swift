@@ -14,11 +14,14 @@ final class GenerationPipeline {
         let stylePreset: String
         let advancedParameters: AdvancedParameters?
         let isSeedLocked: Bool
+        let compareWithoutControlNet: Bool
     }
 
     struct Output {
         let image: UIImage
         let seed: UInt64?
+        let comparisonData: ComparisonData?
+        let comparisonError: String?
     }
 
     private let apiClient: APIClient
@@ -66,7 +69,8 @@ final class GenerationPipeline {
             prompt: input.prompt,
             stylePreset: input.stylePreset,
             sketchImageBase64: jpegData.base64EncodedString(),
-            advancedParameters: input.advancedParameters
+            advancedParameters: input.advancedParameters,
+            compareWithoutControlNet: input.compareWithoutControlNet ? true : nil
         )
 
         let response = try await apiClient.generate(request)
@@ -89,7 +93,7 @@ final class GenerationPipeline {
         onPhase(.downloading, durations)
 
         let (data, _) = try await URLSession.shared.data(from: imageURL)
-        guard let image = UIImage(data: data) else {
+        guard let mainImage = UIImage(data: data) else {
             throw PipelineError.imageDecodeFailed(
                 byteCount: data.count,
                 url: imageURL.lastPathComponent
@@ -98,8 +102,55 @@ final class GenerationPipeline {
 
         try Task.checkCancellation()
 
-        return Output(image: image, seed: seed)
+        // Comparison downloads (best-effort — never fails the primary generation)
+        var comparisonData: ComparisonData?
+        var comparisonError: String?
+
+        if input.compareWithoutControlNet {
+            if let backendError = response.comparisonError, response.comparisonImageURL == nil {
+                comparisonError = backendError
+            } else if let lineartURL = response.lineartImageURL,
+                      let comparisonURL = response.comparisonImageURL {
+                do {
+                    async let lineartDownload = URLSession.shared.data(from: lineartURL)
+                    async let compDownload = URLSession.shared.data(from: comparisonURL)
+                    let (lineartData, _) = try await lineartDownload
+                    let (compData, _) = try await compDownload
+                    guard let lineartImage = UIImage(data: lineartData) else {
+                        throw PipelineError.imageDecodeFailed(byteCount: lineartData.count, url: lineartURL.lastPathComponent)
+                    }
+                    guard let compImage = UIImage(data: compData) else {
+                        throw PipelineError.imageDecodeFailed(byteCount: compData.count, url: comparisonURL.lastPathComponent)
+                    }
+                    let cnStrength = input.advancedParameters?.controlNetStrength
+                        ?? AdvancedParameters.defaultControlNetStrength
+                    comparisonData = ComparisonData(
+                        snapshotImage: snapshot.image,
+                        lineartImage: lineartImage,
+                        generatedImage: mainImage,
+                        comparisonImage: compImage,
+                        controlNetStrength: cnStrength
+                    )
+                } catch {
+                    comparisonError = "Comparison download failed: \(error.localizedDescription)"
+                }
+            } else {
+                comparisonError = "Server returned no comparison image URL"
+            }
+        }
+
+        return Output(image: mainImage, seed: seed, comparisonData: comparisonData, comparisonError: comparisonError)
     }
+}
+
+// MARK: - Comparison Data
+
+struct ComparisonData {
+    let snapshotImage: UIImage
+    let lineartImage: UIImage
+    let generatedImage: UIImage
+    let comparisonImage: UIImage
+    let controlNetStrength: Double
 }
 
 // MARK: - Pipeline Errors

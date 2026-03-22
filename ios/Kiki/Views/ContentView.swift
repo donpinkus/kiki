@@ -4,6 +4,7 @@ import ResultModule
 
 struct ContentView: View {
     @Environment(AppCoordinator.self) private var coordinator
+    @State private var showDebugModal = false
 
     var body: some View {
         @Bindable var coordinator = coordinator
@@ -20,6 +21,20 @@ struct ContentView: View {
 
                 VStack(spacing: 0) {
                     ResultView(state: coordinator.resultState)
+                        .overlay(alignment: .topTrailing) {
+                            if coordinator.compareWithoutControlNet || coordinator.comparisonData != nil {
+                                Button { if coordinator.comparisonData != nil { showDebugModal = true } } label: {
+                                    Image(systemName: "square.grid.2x2")
+                                        .font(.system(size: 14))
+                                        .foregroundStyle(.white)
+                                        .padding(8)
+                                        .background(.ultraThinMaterial, in: Circle())
+                                }
+                                .disabled(coordinator.comparisonData == nil)
+                                .opacity(coordinator.comparisonData != nil ? 1 : 0.4)
+                                .padding(12)
+                            }
+                        }
 
                     promptBar(promptText: $coordinator.promptText)
                 }
@@ -28,6 +43,22 @@ struct ContentView: View {
         .overlay(alignment: .bottomLeading) {
             FloatingToolbar()
                 .padding(16)
+        }
+        .fullScreenCover(isPresented: $showDebugModal) {
+            if let data = coordinator.comparisonData {
+                DebugComparisonModal(data: data)
+            }
+        }
+        .alert(
+            "Comparison Failed",
+            isPresented: Binding(
+                get: { coordinator.comparisonError != nil },
+                set: { if !$0 { coordinator.comparisonError = nil } }
+            )
+        ) {
+            Button("OK") { coordinator.comparisonError = nil }
+        } message: {
+            Text(coordinator.comparisonError ?? "")
         }
     }
 
