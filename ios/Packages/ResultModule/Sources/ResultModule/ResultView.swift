@@ -89,8 +89,16 @@ public struct ResultView: View {
                 emptyView
             }
         }
-        .onAppear {
-            showToastMessage(message)
+        .overlay {
+            // Invisible view with .id(message) forces .onAppear to re-fire when
+            // the error message changes within the same structural view position.
+            // Without this, consecutive errors (e.g. two fast failures during the
+            // synchronous preparation phase) would swallow the second toast.
+            Color.clear
+                .id(message)
+                .onAppear {
+                    showToastMessage(message)
+                }
         }
     }
 
