@@ -230,6 +230,49 @@
       "title": "Load LoRA"
     }
   },
+  "120": {
+    "inputs": {
+      "merge_with_lineart": "lineart_standard",
+      "resolution": 1280,
+      "lineart_lower_bound": 0,
+      "lineart_upper_bound": 1,
+      "object_min_size": 36,
+      "object_connectivity": 1,
+      "image": [
+        "111:8",
+        0
+      ]
+    },
+    "class_type": "AnyLineArtPreprocessor_aux",
+    "_meta": {
+      "title": "Generated Lineart"
+    }
+  },
+  "121": {
+    "inputs": {
+      "filename_prefix": "GeneratedLineart",
+      "images": [
+        "122",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Generated Lineart"
+    }
+  },
+  "122": {
+    "inputs": {
+      "image": [
+        "120",
+        0
+      ]
+    },
+    "class_type": "ImageInvert",
+    "_meta": {
+      "title": "Invert Generated Lineart"
+    }
+  },
   "111:3": {
     "inputs": {
       "seed": 638315103272948,

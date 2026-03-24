@@ -17,6 +17,7 @@ const CONTROLNET_APPLY_NODE_ID = '111:85';
 const AURAFLOW_NODE_ID = '111:66';
 const LORA_LOADER_NODE_ID = '111:80';
 const LINEART_PREVIEW_NODE_ID = '117';
+const GENERATED_LINEART_SAVE_NODE_ID = '121';
 
 const POLL_INTERVAL_MS = 2000;
 const POLL_TIMEOUT_MS = 120_000;
@@ -101,6 +102,12 @@ export class ComfyUIAdapter implements ProviderAdapter {
       ? this.buildImageUrl(baseUrl, lineartOutput)
       : undefined;
 
+    // Generated lineart URL (node 121 — lineart of the generated output, inverted)
+    const generatedLineartOutput = outputs[GENERATED_LINEART_SAVE_NODE_ID]?.images?.[0];
+    const generatedLineartImageUrl = generatedLineartOutput
+      ? this.buildImageUrl(baseUrl, generatedLineartOutput)
+      : undefined;
+
     const actualSeed = Number(workflow[KSAMPLER_NODE_ID]?.inputs['seed'] ?? 0);
 
     // Comparison generation: run same workflow with CN strength=0
@@ -132,6 +139,7 @@ export class ComfyUIAdapter implements ProviderAdapter {
       imageUrl,
       inputImageUrl,
       lineartImageUrl,
+      generatedLineartImageUrl,
       seed: actualSeed,
       latencyMs: Date.now() - startTime,
       jobId: promptId,

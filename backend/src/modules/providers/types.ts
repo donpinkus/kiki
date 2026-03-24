@@ -26,6 +26,7 @@ export interface ProviderResponse {
   latencyMs: number;
   jobId?: string;
   workflow?: Record<string, unknown>;
+  generatedLineartImageUrl?: string;
   comparisonImageUrl?: string;
   comparisonError?: string;
 }

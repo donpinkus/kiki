@@ -146,6 +146,7 @@ export const generateRoute: FastifyPluginAsync = async (fastify) => {
           imageUrl: result.imageUrl,
           inputImageUrl: result.inputImageUrl ?? null,
           lineartImageUrl: result.lineartImageUrl ?? null,
+          generatedLineartImageUrl: result.generatedLineartImageUrl ?? null,
           comparisonImageUrl: result.comparisonImageUrl ?? null,
           comparisonError: result.comparisonError ?? null,
           seed: result.seed,
