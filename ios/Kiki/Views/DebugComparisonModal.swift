@@ -4,45 +4,54 @@ struct DebugComparisonModal: View {
     let data: ComparisonData
     @Environment(\.dismiss) private var dismiss
 
-    private let columns = [
-        GridItem(.flexible(), spacing: 12),
-        GridItem(.flexible(), spacing: 12),
-    ]
-
     var body: some View {
-        ZStack(alignment: .topTrailing) {
-            Color.black.ignoresSafeArea()
+        GeometryReader { geo in
+            let cellSize = min(
+                (geo.size.width - 12 - 32) / 2,
+                (geo.size.height - 12 - 80) / 2
+            )
 
-            LazyVGrid(columns: columns, spacing: 12) {
-                cell(image: data.snapshotImage, label: "Original Sketch")
-                cell(image: data.lineartImage, label: "Lineart")
-                cell(image: data.generatedImage, label: "Generated (CN: \(formatted(data.controlNetStrength)))")
-                cell(image: data.comparisonImage, label: "Generated (CN: 0)")
-            }
-            .padding(16)
+            ZStack(alignment: .topTrailing) {
+                Color.black.ignoresSafeArea()
 
-            Button {
-                dismiss()
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 28))
-                    .foregroundStyle(.white.opacity(0.7))
+                VStack(spacing: 12) {
+                    HStack(spacing: 12) {
+                        cell(image: data.snapshotImage, label: "Original Sketch", size: cellSize)
+                        cell(image: data.lineartImage, label: "Lineart", size: cellSize)
+                    }
+                    HStack(spacing: 12) {
+                        cell(image: data.generatedImage, label: "Generated (CN: \(formatted(data.controlNetStrength)))", size: cellSize)
+                        cell(image: data.comparisonImage, label: "Generated (CN: 0)", size: cellSize)
+                    }
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 32))
+                        .foregroundStyle(.white.opacity(0.8))
+                }
+                .padding(20)
             }
-            .padding(16)
         }
     }
 
-    private func cell(image: UIImage, label: String) -> some View {
+    private func cell(image: UIImage, label: String, size: CGFloat) -> some View {
         VStack(spacing: 6) {
             Image(uiImage: image)
                 .resizable()
                 .aspectRatio(contentMode: .fit)
+                .frame(maxWidth: size, maxHeight: size - 20)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
 
             Text(label)
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }
+        .frame(width: size)
     }
 
     private func formatted(_ value: Double) -> String {

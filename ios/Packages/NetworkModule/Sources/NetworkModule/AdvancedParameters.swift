@@ -67,6 +67,29 @@ public struct AdvancedParameters: Codable, Sendable, Equatable {
 
     // MARK: - Codable
 
+    private enum CodingKeys: String, CodingKey {
+        case controlNetStrength, controlNetEndPercent, cfgScale, steps,
+             denoise, auraFlowShift, loraStrength, negativePrompt, seed
+    }
+
+    /// Rounds to 2 decimal places so encoded values match what the UI displays.
+    private static func round2(_ value: Double) -> Double {
+        (value * 100).rounded() / 100
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(controlNetStrength.map(Self.round2), forKey: .controlNetStrength)
+        try container.encodeIfPresent(controlNetEndPercent.map(Self.round2), forKey: .controlNetEndPercent)
+        try container.encodeIfPresent(cfgScale.map(Self.round2), forKey: .cfgScale)
+        try container.encodeIfPresent(steps, forKey: .steps)
+        try container.encodeIfPresent(denoise.map(Self.round2), forKey: .denoise)
+        try container.encodeIfPresent(auraFlowShift.map(Self.round2), forKey: .auraFlowShift)
+        try container.encodeIfPresent(loraStrength.map(Self.round2), forKey: .loraStrength)
+        try container.encodeIfPresent(negativePrompt, forKey: .negativePrompt)
+        try container.encodeIfPresent(seed, forKey: .seed)
+    }
+
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         controlNetStrength = try container.decodeIfPresent(Double.self, forKey: .controlNetStrength)
