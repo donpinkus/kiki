@@ -6,6 +6,7 @@ public struct GenerateResponse: Sendable {
     public let imageURL: URL?
     public let inputImageURL: URL?
     public let lineartImageURL: URL?
+    public let generatedLineartImageURL: URL?
     public let comparisonImageURL: URL?
     public let comparisonError: String?
     public let seed: UInt64?
@@ -20,6 +21,7 @@ public struct GenerateResponse: Sendable {
         imageURL: URL? = nil,
         inputImageURL: URL? = nil,
         lineartImageURL: URL? = nil,
+        generatedLineartImageURL: URL? = nil,
         comparisonImageURL: URL? = nil,
         comparisonError: String? = nil,
         seed: UInt64? = nil,
@@ -33,6 +35,7 @@ public struct GenerateResponse: Sendable {
         self.imageURL = imageURL
         self.inputImageURL = inputImageURL
         self.lineartImageURL = lineartImageURL
+        self.generatedLineartImageURL = generatedLineartImageURL
         self.comparisonImageURL = comparisonImageURL
         self.comparisonError = comparisonError
         self.seed = seed

@@ -123,6 +123,7 @@ public final class APIClient: Sendable {
             let imageUrl: String?
             let inputImageUrl: String?
             let lineartImageUrl: String?
+            let generatedLineartImageUrl: String?
             let comparisonImageUrl: String?
             let comparisonError: String?
             let seed: UInt64?
@@ -169,6 +170,7 @@ public final class APIClient: Sendable {
 
         let inputImageURL = decoded.inputImageUrl.flatMap { URL(string: $0) }
         let lineartImageURL = decoded.lineartImageUrl.flatMap { URL(string: $0) }
+        let generatedLineartImageURL = decoded.generatedLineartImageUrl.flatMap { URL(string: $0) }
         let comparisonImageURL = decoded.comparisonImageUrl.flatMap { URL(string: $0) }
 
         // Extract workflow JSON as a pretty-printed string
@@ -186,6 +188,7 @@ public final class APIClient: Sendable {
             imageURL: imageURL,
             inputImageURL: inputImageURL,
             lineartImageURL: lineartImageURL,
+            generatedLineartImageURL: generatedLineartImageURL,
             comparisonImageURL: comparisonImageURL,
             comparisonError: decoded.comparisonError,
             seed: decoded.seed,

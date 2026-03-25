@@ -20,6 +20,7 @@ final class GenerationPipeline {
     struct Output {
         let image: UIImage
         let seed: UInt64?
+        let generatedLineartImage: UIImage?
         let comparisonData: ComparisonData?
         let comparisonError: String?
     }
@@ -102,6 +103,17 @@ final class GenerationPipeline {
 
         try Task.checkCancellation()
 
+        // Download generated lineart (best-effort — never fails the primary generation)
+        var generatedLineartImage: UIImage?
+        if let generatedLineartURL = response.generatedLineartImageURL {
+            do {
+                let (lineartData, _) = try await URLSession.shared.data(from: generatedLineartURL)
+                generatedLineartImage = UIImage(data: lineartData)
+            } catch {
+                print("[Generate] Generated lineart download failed: \(error.localizedDescription)")
+            }
+        }
+
         // Comparison downloads (best-effort — never fails the primary generation)
         var comparisonData: ComparisonData?
         var comparisonError: String?
@@ -139,7 +151,7 @@ final class GenerationPipeline {
             }
         }
 
-        return Output(image: mainImage, seed: seed, comparisonData: comparisonData, comparisonError: comparisonError)
+        return Output(image: mainImage, seed: seed, generatedLineartImage: generatedLineartImage, comparisonData: comparisonData, comparisonError: comparisonError)
     }
 }
 

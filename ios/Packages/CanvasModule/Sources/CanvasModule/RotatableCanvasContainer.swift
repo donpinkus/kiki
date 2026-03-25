@@ -15,6 +15,7 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
     /// Intermediate view that receives the combined scale + rotation transform.
     /// The container itself has no transform (SwiftUI manages its frame).
     private let transformView = UIView()
+    private let backgroundImageView = UIImageView()
     private static let snapThreshold: CGFloat = 0.15 // ~8.6 degrees
     private static let minScale: CGFloat = 0.5
     private static let maxScale: CGFloat = 5.0
@@ -43,7 +44,15 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
         transformView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         addSubview(transformView)
 
-        // canvasView fills transformView
+        // backgroundImageView sits below canvasView — always present, white bg by default.
+        // When lineart is swapped in, its image is set; when cleared, white bg shows through.
+        backgroundImageView.frame = transformView.bounds
+        backgroundImageView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        backgroundImageView.contentMode = .scaleToFill
+        backgroundImageView.backgroundColor = .white
+        transformView.addSubview(backgroundImageView)
+
+        // canvasView fills transformView (always transparent — background handled by backgroundImageView)
         canvasView.frame = transformView.bounds
         canvasView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         canvasView.isScrollEnabled = false // Zoom/rotation handled by container; prevent contentOffset drift
@@ -116,6 +125,14 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
     }
 
     // MARK: - Public API
+
+    public func setBackgroundImage(_ image: UIImage?) {
+        backgroundImageView.image = image
+    }
+
+    public var backgroundImage: UIImage? {
+        backgroundImageView.image
+    }
 
     public func resetTransform() {
         rotation = 0

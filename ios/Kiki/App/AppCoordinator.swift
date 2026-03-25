@@ -39,6 +39,8 @@ final class AppCoordinator {
     var dividerPosition: CGFloat = 0.55
     var advancedParameters = AdvancedParameters()
     var isSeedLocked = false
+    var lastGeneratedLineartImage: UIImage?
+    var showingLineart = false
     var comparisonData: ComparisonData?
     var compareWithoutControlNet = false {
         didSet {
@@ -103,6 +105,14 @@ final class AppCoordinator {
     func clear() {
         canvasViewModel.clear()
         hasUnsavedChanges = false
+        lastGeneratedLineartImage = nil
+        showingLineart = false
+    }
+
+    func swapLineartToCanvas() {
+        guard let lineartImage = lastGeneratedLineartImage else { return }
+        canvasViewModel.swapLineart(image: lineartImage)
+        showingLineart = false
     }
 
     /// Triggers a preview generation from the current canvas state.
@@ -155,6 +165,8 @@ final class AppCoordinator {
                 }
 
                 lastSuccessfulImage = output.image
+                lastGeneratedLineartImage = output.generatedLineartImage
+                showingLineart = false
                 resultState = .preview(image: output.image)
 
                 if compareWithoutControlNet {

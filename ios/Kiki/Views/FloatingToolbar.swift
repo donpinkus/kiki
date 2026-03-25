@@ -14,7 +14,7 @@ struct FloatingToolbar: View {
             Divider()
                 .frame(height: 24)
 
-            Slider(value: $coordinator.toolSize, in: 1...20, step: 1)
+            Slider(value: $coordinator.toolSize, in: 1...100, step: 1)
                 .frame(width: 120)
 
             Text("\(Int(coordinator.toolSize))")

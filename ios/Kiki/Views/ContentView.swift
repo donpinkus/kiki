@@ -20,7 +20,11 @@ struct ContentView: View {
                     .frame(width: 1)
 
                 VStack(spacing: 0) {
-                    ResultView(state: coordinator.resultState)
+                    if coordinator.lastGeneratedLineartImage != nil && !coordinator.isGenerating {
+                        lineartToggleBar
+                    }
+
+                    ResultView(state: effectiveResultState)
                         .overlay(alignment: .topTrailing) {
                             if coordinator.compareWithoutControlNet || coordinator.comparisonData != nil {
                                 Button { if coordinator.comparisonData != nil { showDebugModal = true } } label: {
@@ -63,6 +67,43 @@ struct ContentView: View {
     }
 
     // MARK: - Private
+
+    private var effectiveResultState: ResultState {
+        if coordinator.showingLineart,
+           let lineart = coordinator.lastGeneratedLineartImage,
+           case .preview = coordinator.resultState {
+            return .preview(image: lineart)
+        }
+        return coordinator.resultState
+    }
+
+    private var lineartToggleBar: some View {
+        @Bindable var coordinator = coordinator
+        return HStack(spacing: 12) {
+            Picker("View", selection: $coordinator.showingLineart) {
+                Text("Generated").tag(false)
+                Text("Lineart").tag(true)
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 200)
+
+            if coordinator.showingLineart {
+                Button {
+                    coordinator.swapLineartToCanvas()
+                } label: {
+                    Label("Swap to Canvas", systemImage: "arrow.left.arrow.right")
+                        .font(.caption)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+            }
+
+            Spacer()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(.bar)
+    }
 
     private func promptBar(promptText: Binding<String>) -> some View {
         HStack(spacing: 12) {

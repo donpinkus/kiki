@@ -17,6 +17,8 @@ public final class CanvasViewModel {
         abs(rotation) < 0.01 && abs(scale - 1.0) < 0.01
     }
 
+    public var hasBackgroundContent: Bool { container?.backgroundImage != nil }
+
     private weak var canvasView: PKCanvasView?
     private weak var container: RotatableCanvasContainer?
 
@@ -42,8 +44,8 @@ public final class CanvasViewModel {
         self.container = container
         canvasView.drawingPolicy = .anyInput
         canvasView.overrideUserInterfaceStyle = .light
-        canvasView.backgroundColor = .white
-        canvasView.isOpaque = true
+        canvasView.backgroundColor = .clear
+        canvasView.isOpaque = false
         canvasView.tool = PKInkingTool(.pen, color: .black, width: 5)
         canvasView.showsHorizontalScrollIndicator = false
         canvasView.showsVerticalScrollIndicator = false
@@ -54,7 +56,7 @@ public final class CanvasViewModel {
     }
 
     public func selectEraser(width: CGFloat = 5) {
-        canvasView?.tool = PKEraserTool(.bitmap, width: width)
+        canvasView?.tool = PKInkingTool(.pen, color: .white, width: width)
     }
 
     public func undo() {
@@ -68,6 +70,7 @@ public final class CanvasViewModel {
     }
 
     public func clear() {
+        container?.setBackgroundImage(nil)
         canvasView?.drawing = PKDrawing()
         resetViewTransform()
         updateState()
@@ -76,6 +79,27 @@ public final class CanvasViewModel {
             strokeCount: 0,
             bounds: .zero
         ))
+    }
+
+    public func swapLineart(image: UIImage) {
+        guard let canvasView else { return }
+        let prevDrawing = canvasView.drawing
+        let prevBgImage = container?.backgroundImage
+
+        canvasView.undoManager?.registerUndo(withTarget: self) { target in
+            target.canvasView?.undoManager?.disableUndoRegistration()
+            target.canvasView?.drawing = prevDrawing
+            target.canvasView?.undoManager?.enableUndoRegistration()
+            target.container?.setBackgroundImage(prevBgImage)
+            target.updateState()
+        }
+
+        canvasView.undoManager?.disableUndoRegistration()
+        canvasView.drawing = PKDrawing()
+        canvasView.undoManager?.enableUndoRegistration()
+
+        container?.setBackgroundImage(image)
+        updateState()
     }
 
     public func resetViewTransform() {
@@ -87,7 +111,7 @@ public final class CanvasViewModel {
     public func captureSnapshot() -> SketchSnapshot? {
         guard let canvasView else { return nil }
         let drawing = canvasView.drawing
-        guard !drawing.strokes.isEmpty else { return nil }
+        guard !drawing.strokes.isEmpty || hasBackgroundContent else { return nil }
 
         // IMPORTANT: Use drawHierarchy to capture the live view content.
         // Do NOT use PKDrawing.image(from:scale:) — it returns a blank image
@@ -95,15 +119,20 @@ public final class CanvasViewModel {
         let outputSize = canvasView.bounds.size
         guard outputSize.width > 0, outputSize.height > 0 else { return nil }
 
+        let rect = CGRect(origin: .zero, size: outputSize)
         let renderer = UIGraphicsImageRenderer(size: outputSize)
         let image = renderer.image { _ in
-            canvasView.drawHierarchy(in: CGRect(origin: .zero, size: outputSize), afterScreenUpdates: true)
+            // Always composite: white base → background image → PK strokes (transparent canvas)
+            UIColor.white.setFill()
+            UIRectFill(rect)
+            container?.backgroundImage?.draw(in: rect)
+            canvasView.drawHierarchy(in: rect, afterScreenUpdates: true)
         }
 
         return SketchSnapshot(
             image: image,
-            strokeCount: drawing.strokes.count,
-            bounds: drawing.bounds
+            strokeCount: max(drawing.strokes.count, hasBackgroundContent ? 1 : 0),
+            bounds: hasBackgroundContent ? rect : drawing.bounds
         )
     }
 
@@ -130,7 +159,7 @@ public final class CanvasViewModel {
     private func updateState() {
         guard let canvasView else { return }
         let drawing = canvasView.drawing
-        isEmpty = drawing.strokes.isEmpty
+        isEmpty = drawing.strokes.isEmpty && !hasBackgroundContent
         canUndo = canvasView.undoManager?.canUndo ?? false
         canRedo = canvasView.undoManager?.canRedo ?? false
     }
