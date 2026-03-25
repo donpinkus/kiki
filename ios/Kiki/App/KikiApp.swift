@@ -1,13 +1,22 @@
 import SwiftUI
+import SwiftData
 
 @main
 struct KikiApp: App {
-    @State private var coordinator = AppCoordinator()
+    private let container: ModelContainer
+    @State private var coordinator: AppCoordinator
+
+    init() {
+        let container = try! ModelContainer(for: Drawing.self)
+        self.container = container
+        _coordinator = State(initialValue: AppCoordinator(modelContext: container.mainContext))
+    }
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            RootView()
                 .environment(coordinator)
+                .modelContainer(container)
         }
     }
 }

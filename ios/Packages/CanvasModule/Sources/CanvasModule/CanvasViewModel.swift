@@ -1,6 +1,17 @@
 import SwiftUI
 import PencilKit
 
+/// Holds the complete canvas state for save/restore across sessions.
+public struct CanvasState: Sendable {
+    public let drawingData: Data
+    public let backgroundImageData: Data?
+
+    public init(drawingData: Data, backgroundImageData: Data?) {
+        self.drawingData = drawingData
+        self.backgroundImageData = backgroundImageData
+    }
+}
+
 @MainActor
 @Observable
 public final class CanvasViewModel {
@@ -21,6 +32,7 @@ public final class CanvasViewModel {
 
     private weak var canvasView: PKCanvasView?
     private weak var container: RotatableCanvasContainer?
+    private var pendingState: CanvasState?
 
     public let canvasChanges: AsyncStream<SketchSnapshot>
     private let changesContinuation: AsyncStream<SketchSnapshot>.Continuation
@@ -50,6 +62,19 @@ public final class CanvasViewModel {
         canvasView.showsHorizontalScrollIndicator = false
         canvasView.showsVerticalScrollIndicator = false
         container.updateCursorSize(diameter: 5)
+
+        // Apply pending state from a saved drawing (set via setPendingState before navigation).
+        // This runs BEFORE the delegate is set in makeUIView, so no canvasViewDrawingDidChange fires.
+        if let state = pendingState {
+            if let drawing = try? PKDrawing(data: state.drawingData) {
+                canvasView.drawing = drawing
+            }
+            if let bgData = state.backgroundImageData, let bgImage = UIImage(data: bgData) {
+                container.setBackgroundImage(bgImage)
+            }
+            pendingState = nil
+            updateState()
+        }
     }
 
     public func selectBrush(width: CGFloat = 5) {
@@ -137,6 +162,47 @@ public final class CanvasViewModel {
             strokeCount: max(drawing.strokes.count, hasBackgroundContent ? 1 : 0),
             bounds: hasBackgroundContent ? rect : drawing.bounds
         )
+    }
+
+    // MARK: - Persistence
+
+    /// Returns the current PKDrawing as serialized data, or nil if the canvas is not attached.
+    public func exportDrawingData() -> Data? {
+        canvasView?.drawing.dataRepresentation()
+    }
+
+    /// Returns the current background image (lineart swap) as PNG data, or nil.
+    public func exportBackgroundImageData() -> Data? {
+        container?.backgroundImage?.pngData()
+    }
+
+    /// Sets canvas state to apply on the next `attach()` call.
+    /// Used when loading a saved drawing before the CanvasView is created.
+    public func setPendingState(_ state: CanvasState?) {
+        pendingState = state
+    }
+
+    /// Renders a thumbnail of the current canvas at the given max dimension.
+    /// Returns nil if the canvas is not attached or is empty.
+    public func generateThumbnail(maxDimension: CGFloat = 256) -> UIImage? {
+        guard let canvasView else { return nil }
+        let drawing = canvasView.drawing
+        guard !drawing.strokes.isEmpty || hasBackgroundContent else { return nil }
+
+        let fullSize = canvasView.bounds.size
+        guard fullSize.width > 0, fullSize.height > 0 else { return nil }
+
+        let scale = min(maxDimension / fullSize.width, maxDimension / fullSize.height, 1.0)
+        let thumbSize = CGSize(width: fullSize.width * scale, height: fullSize.height * scale)
+
+        let renderer = UIGraphicsImageRenderer(size: thumbSize)
+        return renderer.image { _ in
+            let rect = CGRect(origin: .zero, size: thumbSize)
+            UIColor.white.setFill()
+            UIRectFill(rect)
+            container?.backgroundImage?.draw(in: rect)
+            canvasView.drawHierarchy(in: rect, afterScreenUpdates: true)
+        }
     }
 
     // MARK: - Internal

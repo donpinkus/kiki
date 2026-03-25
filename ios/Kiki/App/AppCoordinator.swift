@@ -1,4 +1,5 @@
 import SwiftUI
+import SwiftData
 import CanvasModule
 import NetworkModule
 import ResultModule
@@ -21,9 +22,25 @@ enum StylePreset: String, CaseIterable {
     var apiKey: String { rawValue.lowercased() }
 }
 
+enum AppScreen: Equatable {
+    case gallery
+    case drawing
+}
+
 @MainActor
 @Observable
 final class AppCoordinator {
+
+    // MARK: - Navigation
+
+    var currentScreen: AppScreen = .gallery
+    var currentDrawingId: UUID?
+
+    // MARK: - Persistence
+
+    private let modelContext: ModelContext
+    private var isSuppressingObservation = false
+    private var saveDebounceTask: Task<Void, Never>?
 
     // MARK: - UI State
 
@@ -33,12 +50,20 @@ final class AppCoordinator {
     var toolSize: CGFloat = 5.0 {
         didSet { applyTool() }
     }
-    var promptText = ""
-    var selectedStylePreset: StylePreset = .photoreal
+    var promptText = "" {
+        didSet { if !isSuppressingObservation { scheduleSave() } }
+    }
+    var selectedStylePreset: StylePreset = .photoreal {
+        didSet { if !isSuppressingObservation { scheduleSave() } }
+    }
     var resultState: ResultState = .empty
     var dividerPosition: CGFloat = 0.55
-    var advancedParameters = AdvancedParameters()
-    var isSeedLocked = false
+    var advancedParameters = AdvancedParameters() {
+        didSet { if !isSuppressingObservation { scheduleSave() } }
+    }
+    var isSeedLocked = false {
+        didSet { if !isSuppressingObservation { scheduleSave() } }
+    }
     var lastGeneratedLineartImage: UIImage?
     var showingLineart = false
     var comparisonData: ComparisonData?
@@ -79,13 +104,28 @@ final class AppCoordinator {
 
     // MARK: - Lifecycle
 
-    init(backendURL: URL = URL(string: "https://kiki-backend-production-eb81.up.railway.app")!) {
+    init(
+        modelContext: ModelContext,
+        backendURL: URL = URL(string: "https://kiki-backend-production-eb81.up.railway.app")!
+    ) {
+        self.modelContext = modelContext
         let apiClient = APIClient(baseURL: backendURL)
         self.pipeline = GenerationPipeline(apiClient: apiClient)
 
         if let stored = UserDefaults.standard.string(forKey: "generationTriggerMode"),
            let mode = GenerationTriggerMode(rawValue: stored) {
             self.triggerMode = mode
+        }
+
+        // If no drawings exist, go directly to a new drawing
+        let descriptor = FetchDescriptor<Drawing>(sortBy: [SortDescriptor(\.updatedAt, order: .reverse)])
+        let count = (try? modelContext.fetchCount(descriptor)) ?? 0
+        if count == 0 {
+            let drawing = Drawing()
+            modelContext.insert(drawing)
+            try? modelContext.save()
+            currentDrawingId = drawing.id
+            currentScreen = .drawing
         }
 
         applyTool()
@@ -113,6 +153,162 @@ final class AppCoordinator {
         guard let lineartImage = lastGeneratedLineartImage else { return }
         canvasViewModel.swapLineart(image: lineartImage)
         showingLineart = false
+    }
+
+    // MARK: - Gallery / Persistence
+
+    func newDrawing() {
+        // Save current drawing before switching (if canvas is still live)
+        saveCurrentDrawing()
+        saveDebounceTask?.cancel()
+
+        isSuppressingObservation = true
+
+        let drawing = Drawing()
+        modelContext.insert(drawing)
+        try? modelContext.save()
+        currentDrawingId = drawing.id
+
+        // Reset all state to defaults
+        promptText = ""
+        selectedStylePreset = .photoreal
+        advancedParameters = AdvancedParameters()
+        isSeedLocked = false
+        lastSuccessfulImage = nil
+        lastGeneratedLineartImage = nil
+        showingLineart = false
+        resultState = .empty
+        hasUnsavedChanges = false
+        comparisonData = nil
+        comparisonError = nil
+        compareWithoutControlNet = false
+
+        // No pending state needed — fresh canvas
+        canvasViewModel.setPendingState(nil)
+
+        currentScreen = .drawing
+        isSuppressingObservation = false
+    }
+
+    func openDrawing(_ drawing: Drawing) {
+        isSuppressingObservation = true
+
+        currentDrawingId = drawing.id
+
+        // Restore settings
+        promptText = drawing.promptText
+        selectedStylePreset = drawing.stylePreset
+        advancedParameters = drawing.advancedParameters
+        isSeedLocked = drawing.isSeedLocked
+
+        // Restore generated images
+        if let imgData = drawing.generatedImageData {
+            lastSuccessfulImage = UIImage(data: imgData)
+        } else {
+            lastSuccessfulImage = nil
+        }
+        if let lineartData = drawing.lineartImageData {
+            lastGeneratedLineartImage = UIImage(data: lineartData)
+        } else {
+            lastGeneratedLineartImage = nil
+        }
+        resultState = lastSuccessfulImage.map { .preview(image: $0) } ?? .empty
+        showingLineart = false
+
+        // Reset transient state
+        hasUnsavedChanges = false
+        comparisonData = nil
+        comparisonError = nil
+        compareWithoutControlNet = false
+
+        // Prepare canvas state — will be applied in attach() before delegate is set
+        canvasViewModel.setPendingState(CanvasState(
+            drawingData: drawing.drawingData ?? Data(),
+            backgroundImageData: drawing.backgroundImageData
+        ))
+
+        currentScreen = .drawing
+        isSuppressingObservation = false
+    }
+
+    func navigateToGallery() {
+        // Save while canvas is still live
+        saveCurrentDrawing()
+        saveDebounceTask?.cancel()
+
+        // Delete empty drawings to keep gallery clean
+        if let drawingId = currentDrawingId {
+            let id = drawingId
+            var descriptor = FetchDescriptor<Drawing>(predicate: #Predicate { $0.id == id })
+            descriptor.fetchLimit = 1
+            if let drawing = try? modelContext.fetch(descriptor).first, drawing.isContentEmpty {
+                modelContext.delete(drawing)
+                try? modelContext.save()
+            }
+        }
+
+        // Cancel in-flight generation
+        generationTask?.cancel()
+        debounceTask?.cancel()
+        isGenerating = false
+
+        currentDrawingId = nil
+        currentScreen = .gallery
+    }
+
+    func deleteDrawing(_ drawing: Drawing) {
+        modelContext.delete(drawing)
+        try? modelContext.save()
+
+        // If no drawings remain, auto-create a new one
+        let descriptor = FetchDescriptor<Drawing>()
+        let count = (try? modelContext.fetchCount(descriptor)) ?? 0
+        if count == 0 {
+            newDrawing()
+        }
+    }
+
+    func saveCurrentDrawing() {
+        guard !isSuppressingObservation else { return }
+        guard let drawingId = currentDrawingId else { return }
+
+        // Guard: skip save if canvas is deallocated (prevents nil overwrite)
+        guard canvasViewModel.exportDrawingData() != nil else { return }
+
+        let id = drawingId
+        var descriptor = FetchDescriptor<Drawing>(predicate: #Predicate { $0.id == id })
+        descriptor.fetchLimit = 1
+        guard let drawing = try? modelContext.fetch(descriptor).first else { return }
+
+        // Canvas state
+        drawing.drawingData = canvasViewModel.exportDrawingData()
+        drawing.backgroundImageData = canvasViewModel.exportBackgroundImageData()
+
+        // Generated images
+        drawing.generatedImageData = lastSuccessfulImage?.jpegData(compressionQuality: 0.85)
+        drawing.lineartImageData = lastGeneratedLineartImage?.pngData()
+
+        // Thumbnail
+        drawing.canvasThumbnailData = canvasViewModel.generateThumbnail()?.jpegData(compressionQuality: 0.7)
+
+        // Settings
+        drawing.promptText = promptText
+        drawing.stylePreset = selectedStylePreset
+        drawing.advancedParameters = advancedParameters
+        drawing.isSeedLocked = isSeedLocked
+
+        drawing.updatedAt = Date()
+        try? modelContext.save()
+    }
+
+    private func scheduleSave() {
+        guard currentDrawingId != nil else { return }
+        saveDebounceTask?.cancel()
+        saveDebounceTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            guard !Task.isCancelled, let self else { return }
+            saveCurrentDrawing()
+        }
     }
 
     /// Triggers a preview generation from the current canvas state.
@@ -179,6 +375,9 @@ final class AppCoordinator {
                 if isSeedLocked, let seed = output.seed {
                     advancedParameters.seed = seed
                 }
+
+                // Persist the new generated image immediately
+                saveCurrentDrawing()
             } catch is CancellationError {
                 return
             } catch {
@@ -205,10 +404,14 @@ final class AppCoordinator {
             guard let self else { return }
             for await _ in canvasViewModel.canvasChanges {
                 guard !Task.isCancelled else { return }
+                guard !isSuppressingObservation else { continue }
 
                 // Don't mark dirty for empty canvas (e.g. after clear or erasing last stroke)
                 guard !canvasViewModel.isEmpty else { continue }
                 hasUnsavedChanges = true
+
+                // Persist canvas changes (debounced)
+                scheduleSave()
 
                 // In manual mode, just mark dirty — don't auto-generate
                 guard triggerMode == .auto else { continue }

@@ -1,8 +1,9 @@
 import SwiftUI
+import SwiftData
 import CanvasModule
 import ResultModule
 
-struct ContentView: View {
+struct DrawingView: View {
     @Environment(AppCoordinator.self) private var coordinator
     @State private var showDebugModal = false
 
@@ -47,6 +48,18 @@ struct ContentView: View {
         .overlay(alignment: .bottomLeading) {
             FloatingToolbar()
                 .padding(16)
+        }
+        .overlay(alignment: .topLeading) {
+            Button {
+                coordinator.navigateToGallery()
+            } label: {
+                Label("Gallery", systemImage: "square.grid.2x2")
+                    .font(.subheadline.weight(.medium))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(.ultraThinMaterial, in: Capsule())
+            }
+            .padding(16)
         }
         .fullScreenCover(isPresented: $showDebugModal) {
             if let data = coordinator.comparisonData {
@@ -141,6 +154,6 @@ struct ContentView: View {
 }
 
 #Preview {
-    ContentView()
-        .environment(AppCoordinator())
+    DrawingView()
+        .environment(AppCoordinator(modelContext: try! ModelContainer(for: Drawing.self).mainContext))
 }

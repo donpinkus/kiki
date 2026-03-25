@@ -1,4 +1,5 @@
 import SwiftUI
+import SwiftData
 import NetworkModule
 
 struct AdvancedParametersPanel: View {
@@ -249,6 +250,6 @@ struct AdvancedParametersPanel: View {
 
 #Preview {
     AdvancedParametersPanel()
-        .environment(AppCoordinator())
+        .environment(AppCoordinator(modelContext: try! ModelContainer(for: Drawing.self).mainContext))
         .frame(width: 400, height: 600)
 }
