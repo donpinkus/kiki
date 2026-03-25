@@ -36,13 +36,24 @@ cd backend && npm run migrate      # Run DB migrations
 
 **Backend:** TypeScript + Fastify — no Express. PostgreSQL via Supabase with Drizzle ORM. Redis via Upstash. Sign in with Apple + JWT — no other auth providers. Cloudflare R2 + CDN for image storage. Railway for hosting. Single monolith with internal module boundaries — not microservices. Each module is a Fastify plugin.
 
+## Navigation & Persistence
+
+State-based navigation via `AppCoordinator.currentScreen` (`.gallery` | `.drawing`). No NavigationStack.
+
+- **Gallery view** (`GalleryView`) — root screen when drawings exist. 2-column grid of tiles. Uses `@Query` to observe SwiftData directly.
+- **Drawing view** (`DrawingView`, renamed from ContentView) — canvas + result split pane. Gallery button top-left navigates back.
+- **Drawing model** (`Drawing.swift`) — SwiftData `@Model` with `@Attribute(.externalStorage)` for all image blobs (PKDrawing data, background image, generated image, lineart, canvas thumbnail). Settings stored as fields (prompt, style preset raw value, advanced params as JSON, seed lock).
+- **Auto-save** — debounced 1s on stroke/prompt/settings changes, immediate on generation result. `saveCurrentDrawing()` guards against nil canvas exports.
+- **Pending-state pattern** — `CanvasViewModel.setPendingState()` queues canvas data before navigation; `attach()` applies it before the PKCanvasView delegate is set (no spurious change events).
+- **Empty drawing cleanup** — `navigateToGallery()` deletes drawings with no content (no thumbnail, no prompt, no generated image).
+
 ## Module Dependencies
 
 ```
 CanvasModule       → (none)
 NetworkModule      → (none)
 ResultModule       → (none)
-AppCoordinator     → all 3 modules
+AppCoordinator     → all 3 modules + SwiftData
 ```
 Data flows one direction: Canvas → Network → Result. Modules communicate through AppCoordinator. No circular dependencies. No module imports the main app target.
 

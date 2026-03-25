@@ -84,11 +84,13 @@ Stakeholder demo: full draw → preview loop with prompt, style, and advanced pa
 - [ ] Backend deploys to Railway staging
 - [x] End-to-end works on iPad Simulator
 
+## Completed (originally deferred)
+- [x] Gallery/history (SwiftData) — gallery home page with tile grid, auto-save, full drawing persistence
+- [x] Manual mode toggle — auto/manual generation trigger in floating toolbar
+
 ## Deferred to Phase 2
 - Auth (Sign in with Apple)
 - Content safety filters
 - Auto-captioning (no-prompt VLM)
-- Gallery/history (SwiftData)
 - Refine mode (higher quality second pass)
 - Consent screen / age gate
-- Manual mode toggle
