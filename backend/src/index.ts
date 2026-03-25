@@ -7,6 +7,7 @@ import { generateRoute } from './routes/generate.js';
 import { authPlugin } from './modules/auth/index.js';
 
 const app = Fastify({
+  bodyLimit: 10 * 1024 * 1024, // 10 MB — composited lineart snapshots are larger than plain sketches
   logger: {
     level: config.LOG_LEVEL,
     ...(config.NODE_ENV === 'development'
