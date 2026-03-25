@@ -16,6 +16,8 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
     /// The container itself has no transform (SwiftUI manages its frame).
     private let transformView = UIView()
     private let backgroundImageView = UIImageView()
+    private let cursorView = CursorOverlayView()
+    private var cursorBaseWidth: CGFloat = 5
     private static let snapThreshold: CGFloat = 0.15 // ~8.6 degrees
     private static let minScale: CGFloat = 0.5
     private static let maxScale: CGFloat = 5.0
@@ -58,6 +60,17 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
         canvasView.isScrollEnabled = false // Zoom/rotation handled by container; prevent contentOffset drift
         transformView.addSubview(canvasView)
 
+        // Cursor overlay — renders on top of canvas, shows brush/eraser size at touch position
+        cursorView.frame = CGRect(x: 0, y: 0, width: 5, height: 5)
+        cursorView.isHidden = true
+        transformView.addSubview(cursorView)
+
+        let touchTracker = TouchTrackingGestureRecognizer(target: self, action: #selector(handleTouchTracking(_:)))
+        touchTracker.cancelsTouchesInView = false
+        touchTracker.delaysTouchesBegan = false
+        touchTracker.delegate = self
+        addGestureRecognizer(touchTracker)
+
         let rotationGesture = UIRotationGestureRecognizer(target: self, action: #selector(handleRotation(_:)))
         rotationGesture.delegate = self
         addGestureRecognizer(rotationGesture)
@@ -68,6 +81,28 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
     }
 
     // MARK: - Gesture Handling
+
+    @objc private func handleTouchTracking(_ gesture: TouchTrackingGestureRecognizer) {
+        switch gesture.state {
+        case .began, .changed:
+            let location = gesture.location(in: canvasView)
+            cursorView.center = location
+            cursorView.isHidden = false
+
+            // Dynamically size cursor based on pressure and tilt.
+            // PK's .pen ink scales width with force and reduces it at low tilt angles.
+            let forceFraction = 0.15 + 0.85 * gesture.normalizedForce
+            // Altitude: perpendicular (π/2) = full width, flat (0) = thinner
+            let tiltFraction = 0.3 + 0.7 * (gesture.altitudeAngle / (.pi / 2))
+            let diameter = cursorBaseWidth * forceFraction * tiltFraction / 3.0
+            cursorView.bounds = CGRect(x: 0, y: 0, width: diameter, height: diameter)
+            cursorView.setNeedsDisplay()
+        case .ended, .cancelled:
+            cursorView.isHidden = true
+        default:
+            break
+        }
+    }
 
     @objc private func handleRotation(_ gesture: UIRotationGestureRecognizer) {
         switch gesture.state {
@@ -116,6 +151,10 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
         _ gestureRecognizer: UIGestureRecognizer,
         shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer
     ) -> Bool {
+        // Touch tracker always coexists with everything (PK drawing, pinch, rotation)
+        if gestureRecognizer is TouchTrackingGestureRecognizer || other is TouchTrackingGestureRecognizer {
+            return true
+        }
         // Allow pinch and rotation to work simultaneously
         let dominated = gestureRecognizer is UIRotationGestureRecognizer
             || gestureRecognizer is UIPinchGestureRecognizer
@@ -132,6 +171,10 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
 
     public var backgroundImage: UIImage? {
         backgroundImageView.image
+    }
+
+    public func updateCursorSize(diameter: CGFloat) {
+        cursorBaseWidth = diameter
     }
 
     public func resetTransform() {

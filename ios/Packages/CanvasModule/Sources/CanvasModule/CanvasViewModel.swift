@@ -49,14 +49,17 @@ public final class CanvasViewModel {
         canvasView.tool = PKInkingTool(.pen, color: .black, width: 5)
         canvasView.showsHorizontalScrollIndicator = false
         canvasView.showsVerticalScrollIndicator = false
+        container.updateCursorSize(diameter: 5)
     }
 
     public func selectBrush(width: CGFloat = 5) {
         canvasView?.tool = PKInkingTool(.pen, color: .black, width: width)
+        container?.updateCursorSize(diameter: width)
     }
 
     public func selectEraser(width: CGFloat = 5) {
         canvasView?.tool = PKInkingTool(.pen, color: .white, width: width)
+        container?.updateCursorSize(diameter: width)
     }
 
     public func undo() {

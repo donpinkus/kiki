@@ -1,8 +1,12 @@
 import SwiftUI
+import PencilKit
 
 struct FloatingToolbar: View {
     @Environment(AppCoordinator.self) private var coordinator
     @State private var showAdvancedParameters = false
+    @State private var isDraggingSlider = false
+
+    private let penWidthRange = PKInkingTool.InkType.pen.validWidthRange
 
     var body: some View {
         @Bindable var coordinator = coordinator
@@ -14,14 +18,22 @@ struct FloatingToolbar: View {
             Divider()
                 .frame(height: 24)
 
-            Slider(value: $coordinator.toolSize, in: 1...100, step: 1)
-                .frame(width: 120)
-
-            Text("\(Int(coordinator.toolSize))")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
-                .frame(width: 20, alignment: .trailing)
+            Slider(value: $coordinator.toolSize, in: penWidthRange) { editing in
+                isDraggingSlider = editing
+            }
+            .frame(width: 120)
+            .overlay(alignment: .top) {
+                if isDraggingSlider {
+                    let displaySize = max(coordinator.toolSize * 0.13, 4)
+                    let containerSize = max(displaySize + 16, 32)
+                    Circle()
+                        .stroke(.primary, lineWidth: 1)
+                        .frame(width: displaySize, height: displaySize)
+                        .frame(width: containerSize, height: containerSize)
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+                        .offset(y: -containerSize / 2 - 12)
+                }
+            }
 
             Divider()
                 .frame(height: 24)
