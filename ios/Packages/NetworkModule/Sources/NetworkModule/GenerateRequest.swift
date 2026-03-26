@@ -5,7 +5,6 @@ public struct GenerateRequest: Codable, Sendable {
     public let requestId: UUID
     public let mode: GenerationMode
     public let prompt: String?
-    public let stylePreset: String
     public let sketchImageBase64: String
     public let advancedParameters: AdvancedParameters?
     public let compareWithoutControlNet: Bool?
@@ -15,7 +14,6 @@ public struct GenerateRequest: Codable, Sendable {
         requestId: UUID,
         mode: GenerationMode,
         prompt: String? = nil,
-        stylePreset: String,
         sketchImageBase64: String,
         advancedParameters: AdvancedParameters? = nil,
         compareWithoutControlNet: Bool? = nil
@@ -24,7 +22,6 @@ public struct GenerateRequest: Codable, Sendable {
         self.requestId = requestId
         self.mode = mode
         self.prompt = prompt
-        self.stylePreset = stylePreset
         self.sketchImageBase64 = sketchImageBase64
         self.advancedParameters = advancedParameters
         self.compareWithoutControlNet = compareWithoutControlNet

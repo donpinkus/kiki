@@ -9,19 +9,6 @@ enum DrawingTool: String, CaseIterable {
     case eraser
 }
 
-enum StylePreset: String, CaseIterable {
-    case photoreal = "Photoreal"
-    case anime = "Anime"
-    case watercolor = "Watercolor"
-    case storybook = "Storybook"
-    case fantasy = "Fantasy"
-    case ink = "Ink"
-    case neon = "Neon"
-
-    /// Maps to the backend's expected style preset key.
-    var apiKey: String { rawValue.lowercased() }
-}
-
 enum AppScreen: Equatable {
     case gallery
     case drawing
@@ -53,9 +40,10 @@ final class AppCoordinator {
     var promptText = "" {
         didSet { if !isSuppressingObservation { scheduleSave() } }
     }
-    var selectedStylePreset: StylePreset = .photoreal {
+    var selectedStyle: PromptStyle = .default {
         didSet { if !isSuppressingObservation { scheduleSave() } }
     }
+    var showStylePicker = false
     var resultState: ResultState = .empty
     var dividerPosition: CGFloat = 0.55
     var advancedParameters = AdvancedParameters() {
@@ -171,7 +159,7 @@ final class AppCoordinator {
 
         // Reset all state to defaults
         promptText = ""
-        selectedStylePreset = .photoreal
+        selectedStyle = .default
         advancedParameters = AdvancedParameters()
         isSeedLocked = false
         lastSuccessfulImage = nil
@@ -197,7 +185,7 @@ final class AppCoordinator {
 
         // Restore settings
         promptText = drawing.promptText
-        selectedStylePreset = drawing.stylePreset
+        selectedStyle = PromptStyle.from(id: drawing.styleId)
         advancedParameters = drawing.advancedParameters
         isSeedLocked = drawing.isSeedLocked
 
@@ -293,7 +281,7 @@ final class AppCoordinator {
 
         // Settings
         drawing.promptText = promptText
-        drawing.stylePreset = selectedStylePreset
+        drawing.styleId = selectedStyle.id
         drawing.advancedParameters = advancedParameters
         drawing.isSeedLocked = isSeedLocked
 
@@ -333,8 +321,7 @@ final class AppCoordinator {
                 sessionId: sessionId,
                 requestId: requestId,
                 canvasViewModel: canvasViewModel,
-                prompt: promptText.isEmpty ? nil : promptText,
-                stylePreset: selectedStylePreset.apiKey,
+                prompt: composedPrompt,
                 advancedParameters: advancedParameters.isDefault ? nil : advancedParameters,
                 isSeedLocked: isSeedLocked,
                 compareWithoutControlNet: compareWithoutControlNet
@@ -430,6 +417,13 @@ final class AppCoordinator {
     }
 
     // MARK: - Private
+
+    private var composedPrompt: String? {
+        let base = promptText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let result = base.isEmpty ? selectedStyle.promptSuffix.trimmingCharacters(in: .whitespacesAndNewlines)
+                                  : base + selectedStyle.promptSuffix
+        return result.isEmpty ? nil : result
+    }
 
     private func applyTool() {
         switch currentTool {

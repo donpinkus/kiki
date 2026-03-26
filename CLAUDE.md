@@ -42,7 +42,8 @@ State-based navigation via `AppCoordinator.currentScreen` (`.gallery` | `.drawin
 
 - **Gallery view** (`GalleryView`) — root screen when drawings exist. 2-column grid of tiles. Uses `@Query` to observe SwiftData directly.
 - **Drawing view** (`DrawingView`, renamed from ContentView) — canvas + result split pane. Gallery button top-left navigates back.
-- **Drawing model** (`Drawing.swift`) — SwiftData `@Model` with `@Attribute(.externalStorage)` for all image blobs (PKDrawing data, background image, generated image, lineart, canvas thumbnail). Settings stored as fields (prompt, style preset raw value, advanced params as JSON, seed lock).
+- **Style picker** — `PromptStyle` model defines available styles (None, Studio Ghibli, 3D Render). Selected style's `promptSuffix` is appended to the user's prompt client-side before sending to backend. Style composition lives entirely on the client; backend is style-agnostic.
+- **Drawing model** (`Drawing.swift`) — SwiftData `@Model` with `@Attribute(.externalStorage)` for all image blobs (PKDrawing data, background image, generated image, lineart, canvas thumbnail). Settings stored as fields (prompt, style ID, advanced params as JSON, seed lock).
 - **Auto-save** — debounced 1s on stroke/prompt/settings changes, immediate on generation result. `saveCurrentDrawing()` guards against nil canvas exports.
 - **Pending-state pattern** — `CanvasViewModel.setPendingState()` queues canvas data before navigation; `attach()` applies it before the PKCanvasView delegate is set (no spurious change events).
 - **Empty drawing cleanup** — `navigateToGallery()` deletes drawings with no content (no thumbnail, no prompt, no generated image).

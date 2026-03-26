@@ -11,7 +11,6 @@ final class GenerationPipeline {
         let requestId: UUID
         let canvasViewModel: CanvasViewModel
         let prompt: String?
-        let stylePreset: String
         let advancedParameters: AdvancedParameters?
         let isSeedLocked: Bool
         let compareWithoutControlNet: Bool
@@ -68,7 +67,6 @@ final class GenerationPipeline {
             requestId: input.requestId,
             mode: .preview,
             prompt: input.prompt,
-            stylePreset: input.stylePreset,
             sketchImageBase64: jpegData.base64EncodedString(),
             advancedParameters: input.advancedParameters,
             compareWithoutControlNet: input.compareWithoutControlNet ? true : nil

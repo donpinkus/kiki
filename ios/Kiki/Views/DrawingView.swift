@@ -66,6 +66,10 @@ struct DrawingView: View {
                 DebugComparisonModal(data: data)
             }
         }
+        .fullScreenCover(isPresented: $coordinator.showStylePicker) {
+            StylePickerView()
+                .environment(coordinator)
+        }
         .alert(
             "Comparison Failed",
             isPresented: Binding(
@@ -120,6 +124,17 @@ struct DrawingView: View {
 
     private func promptBar(promptText: Binding<String>) -> some View {
         HStack(spacing: 12) {
+            Button {
+                coordinator.showStylePicker = true
+            } label: {
+                Text(coordinator.selectedStyle.name)
+                    .font(.caption.weight(.medium))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color.accentColor.opacity(0.12), in: Capsule())
+                    .foregroundStyle(Color.accentColor)
+            }
+
             TextField("Describe what you want…", text: promptText)
                 .textFieldStyle(.plain)
                 .font(.subheadline)

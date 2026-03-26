@@ -39,7 +39,7 @@ final class Drawing {
         createdAt: Date = Date(),
         updatedAt: Date = Date(),
         promptText: String = "",
-        stylePresetRawValue: String = StylePreset.photoreal.rawValue,
+        stylePresetRawValue: String = PromptStyle.default.id,
         isSeedLocked: Bool = false
     ) {
         self.id = id
@@ -55,9 +55,9 @@ final class Drawing {
 
 extension Drawing {
 
-    var stylePreset: StylePreset {
-        get { StylePreset(rawValue: stylePresetRawValue) ?? .photoreal }
-        set { stylePresetRawValue = newValue.rawValue }
+    var styleId: String {
+        get { stylePresetRawValue }
+        set { stylePresetRawValue = newValue }
     }
 
     var advancedParameters: AdvancedParameters {

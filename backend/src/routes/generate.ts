@@ -2,41 +2,14 @@ import type { FastifyPluginAsync } from 'fastify';
 import { ComfyUIAdapter } from '../modules/providers/comfyui.js';
 import type { AdvancedParameters, ProviderAdapter, ProviderRequest } from '../modules/providers/types.js';
 
-const STYLE_PRESETS = [
-  'photoreal',
-  'anime',
-  'watercolor',
-  'storybook',
-  'fantasy',
-  'ink',
-  'neon',
-] as const;
-
-const STYLE_PROMPTS: Record<string, string> = {
-  photoreal: 'photorealistic, high detail, professional photography',
-  anime: 'anime style, cel shaded, vibrant colors',
-  watercolor: 'watercolor painting, soft edges, artistic',
-  storybook: "children's storybook illustration, whimsical, colorful",
-  fantasy: 'fantasy art, epic, magical, detailed',
-  ink: 'ink drawing, black and white, detailed linework',
-  neon: 'neon glow, cyberpunk, vibrant neon colors, dark background',
-};
-
-function buildPrompt(userPrompt: string | null, stylePreset: string): string {
-  const styleModifier = STYLE_PROMPTS[stylePreset] ?? '';
-  const base = userPrompt?.trim() || 'A detailed illustration';
-  return styleModifier ? `${base}, ${styleModifier}` : base;
-}
-
 const generateBodySchema = {
   type: 'object',
-  required: ['sessionId', 'requestId', 'mode', 'stylePreset', 'sketchImageBase64'],
+  required: ['sessionId', 'requestId', 'mode', 'sketchImageBase64'],
   properties: {
     sessionId: { type: 'string', format: 'uuid' },
     requestId: { type: 'string', format: 'uuid' },
     mode: { type: 'string', enum: ['preview', 'refine'] },
-    prompt: { type: ['string', 'null'], maxLength: 500 },
-    stylePreset: { type: 'string', enum: [...STYLE_PRESETS] },
+    prompt: { type: ['string', 'null'], maxLength: 1000 },
     sketchImageBase64: { type: 'string', minLength: 1 },
     compareWithoutControlNet: { type: 'boolean', nullable: true },
     advancedParameters: {
@@ -64,7 +37,6 @@ interface GenerateBody {
   requestId: string;
   mode: 'preview' | 'refine';
   prompt?: string | null;
-  stylePreset: (typeof STYLE_PRESETS)[number];
   sketchImageBase64: string;
   advancedParameters?: AdvancedParameters | null;
   compareWithoutControlNet?: boolean | null;
@@ -81,7 +53,6 @@ export const generateRoute: FastifyPluginAsync = async (fastify) => {
         requestId,
         mode,
         prompt = null,
-        stylePreset,
         sketchImageBase64,
         advancedParameters = null,
         compareWithoutControlNet = null,
@@ -90,13 +61,13 @@ export const generateRoute: FastifyPluginAsync = async (fastify) => {
       const startTime = Date.now();
 
       request.log.info(
-        { sessionId, requestId, mode, stylePreset, hasAdvancedParams: !!advancedParameters, advancedParameters },
+        { sessionId, requestId, mode, hasAdvancedParams: !!advancedParameters, advancedParameters },
         'Received generate request',
       );
 
       const providerRequest: ProviderRequest = {
         sketchImageBase64,
-        prompt: buildPrompt(prompt, stylePreset),
+        prompt: prompt?.trim() || 'A detailed illustration',
         mode,
         advancedParameters: advancedParameters ?? undefined,
         compareWithoutControlNet: compareWithoutControlNet ?? undefined,
