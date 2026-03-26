@@ -18,6 +18,7 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
     private let backgroundImageView = UIImageView()
     private let cursorView = CursorOverlayView()
     private var cursorBaseWidth: CGFloat = 5
+    private var cursorDivisor: CGFloat = 3.0
     private static let snapThreshold: CGFloat = 0.15 // ~8.6 degrees
     private static let minScale: CGFloat = 0.5
     private static let maxScale: CGFloat = 5.0
@@ -94,7 +95,7 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
             let forceFraction = 0.15 + 0.85 * gesture.normalizedForce
             // Altitude: perpendicular (π/2) = full width, flat (0) = thinner
             let tiltFraction = 0.3 + 0.7 * (gesture.altitudeAngle / (.pi / 2))
-            let diameter = cursorBaseWidth * forceFraction * tiltFraction / 3.0
+            let diameter = cursorBaseWidth * forceFraction * tiltFraction / cursorDivisor
             cursorView.bounds = CGRect(x: 0, y: 0, width: diameter, height: diameter)
             cursorView.setNeedsDisplay()
         case .ended, .cancelled:
@@ -173,8 +174,9 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
         backgroundImageView.image
     }
 
-    public func updateCursorSize(diameter: CGFloat) {
+    public func updateCursorSize(diameter: CGFloat, divisor: CGFloat = 3.0) {
         cursorBaseWidth = diameter
+        cursorDivisor = divisor
     }
 
     public func resetTransform() {

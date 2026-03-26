@@ -18,6 +18,10 @@ public final class CanvasViewModel {
 
     // MARK: - Properties
 
+    /// PK's .pen ink renders strokes ~3x smaller than the specified width due to pressure modulation.
+    /// Used by both the canvas cursor and the slider tooltip to approximate visual stroke size.
+    public static let penCursorDivisor: CGFloat = 3.0
+
     public private(set) var canUndo = false
     public private(set) var canRedo = false
     public private(set) var isEmpty = true
@@ -79,12 +83,12 @@ public final class CanvasViewModel {
 
     public func selectBrush(width: CGFloat = 5) {
         canvasView?.tool = PKInkingTool(.pen, color: .black, width: width)
-        container?.updateCursorSize(diameter: width)
+        container?.updateCursorSize(diameter: width, divisor: Self.penCursorDivisor)
     }
 
     public func selectEraser(width: CGFloat = 5) {
         canvasView?.tool = PKInkingTool(.pen, color: .white, width: width)
-        container?.updateCursorSize(diameter: width)
+        container?.updateCursorSize(diameter: width, divisor: Self.penCursorDivisor)
     }
 
     public func undo() {
