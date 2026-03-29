@@ -8,6 +8,7 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
     public let canvasView = PKCanvasView()
     public private(set) var rotation: CGFloat = 0
     public private(set) var scale: CGFloat = 1.0
+    public private(set) var translation: CGPoint = .zero
     public var onTransformChanged: (() -> Void)?
 
     // MARK: - Private
@@ -79,6 +80,12 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
         let pinchGesture = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
         pinchGesture.delegate = self
         addGestureRecognizer(pinchGesture)
+
+        let panGesture = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
+        panGesture.minimumNumberOfTouches = 2
+        panGesture.maximumNumberOfTouches = 2
+        panGesture.delegate = self
+        addGestureRecognizer(panGesture)
     }
 
     // MARK: - Gesture Handling
@@ -148,6 +155,28 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
         }
     }
 
+    @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
+        switch gesture.state {
+        case .changed:
+            let delta = gesture.translation(in: self)
+            translation.x += delta.x
+            translation.y += delta.y
+            gesture.setTranslation(.zero, in: self)
+            applyTransform()
+            onTransformChanged?()
+
+        case .ended, .cancelled:
+            let delta = gesture.translation(in: self)
+            translation.x += delta.x
+            translation.y += delta.y
+            applyTransform()
+            onTransformChanged?()
+
+        default:
+            break
+        }
+    }
+
     public func gestureRecognizer(
         _ gestureRecognizer: UIGestureRecognizer,
         shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer
@@ -156,12 +185,13 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
         if gestureRecognizer is TouchTrackingGestureRecognizer || other is TouchTrackingGestureRecognizer {
             return true
         }
-        // Allow pinch and rotation to work simultaneously
-        let dominated = gestureRecognizer is UIRotationGestureRecognizer
-            || gestureRecognizer is UIPinchGestureRecognizer
-        let dominating = other is UIRotationGestureRecognizer
-            || other is UIPinchGestureRecognizer
-        return dominated && dominating
+        // Allow pinch, rotation, and pan to work simultaneously
+        let isTransform = { (g: UIGestureRecognizer) -> Bool in
+            g is UIRotationGestureRecognizer
+                || g is UIPinchGestureRecognizer
+                || g is UIPanGestureRecognizer
+        }
+        return isTransform(gestureRecognizer) && isTransform(other)
     }
 
     // MARK: - Public API
@@ -182,13 +212,15 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
     public func resetTransform() {
         rotation = 0
         scale = 1.0
+        translation = .zero
         UIView.animate(withDuration: 0.3) { self.applyTransform() }
     }
 
     // MARK: - Private
 
     private func applyTransform() {
-        transformView.transform = CGAffineTransform(rotationAngle: rotation)
+        transformView.transform = CGAffineTransform(translationX: translation.x, y: translation.y)
+            .rotated(by: rotation)
             .scaledBy(x: scale, y: scale)
     }
 }

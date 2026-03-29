@@ -27,9 +27,11 @@ public final class CanvasViewModel {
     public private(set) var isEmpty = true
     public private(set) var scale: CGFloat = 1.0
     public private(set) var rotation: CGFloat = 0
+    public private(set) var translation: CGPoint = .zero
 
     public var isDefaultTransform: Bool {
         abs(rotation) < 0.01 && abs(scale - 1.0) < 0.01
+            && abs(translation.x) < 0.01 && abs(translation.y) < 0.01
     }
 
     public var hasBackgroundContent: Bool { container?.backgroundImage != nil }
@@ -138,6 +140,7 @@ public final class CanvasViewModel {
         container?.resetTransform()
         scale = 1.0
         rotation = 0
+        translation = .zero
     }
 
     public func captureSnapshot() -> SketchSnapshot? {
@@ -225,6 +228,7 @@ public final class CanvasViewModel {
     func handleTransformChanged() {
         scale = container?.scale ?? 1.0
         rotation = container?.rotation ?? 0
+        translation = container?.translation ?? .zero
     }
 
     // MARK: - Private
