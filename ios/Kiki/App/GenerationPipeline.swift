@@ -19,7 +19,8 @@ final class GenerationPipeline {
     struct Output {
         let image: UIImage
         let seed: UInt64?
-        let generatedLineartImage: UIImage?
+        let generatedLineartHighImage: UIImage?
+        let generatedLineartLowImage: UIImage?
         let comparisonData: ComparisonData?
         let comparisonError: String?
     }
@@ -101,15 +102,24 @@ final class GenerationPipeline {
 
         try Task.checkCancellation()
 
-        // Download generated lineart (best-effort — never fails the primary generation)
-        var generatedLineartImage: UIImage?
-        if let generatedLineartURL = response.generatedLineartImageURL {
-            do {
-                let (lineartData, _) = try await URLSession.shared.data(from: generatedLineartURL)
-                generatedLineartImage = UIImage(data: lineartData)
-            } catch {
-                print("[Generate] Generated lineart download failed: \(error.localizedDescription)")
-            }
+        // Download generated lineart — high + low detail (best-effort, parallel)
+        var generatedLineartHighImage: UIImage?
+        var generatedLineartLowImage: UIImage?
+        do {
+            async let highDownload: UIImage? = {
+                guard let url = response.generatedLineartHighImageURL else { return nil }
+                let (data, _) = try await URLSession.shared.data(from: url)
+                return UIImage(data: data)
+            }()
+            async let lowDownload: UIImage? = {
+                guard let url = response.generatedLineartLowImageURL else { return nil }
+                let (data, _) = try await URLSession.shared.data(from: url)
+                return UIImage(data: data)
+            }()
+            generatedLineartHighImage = try await highDownload
+            generatedLineartLowImage = try await lowDownload
+        } catch {
+            print("[Generate] Generated lineart download failed: \(error.localizedDescription)")
         }
 
         // Comparison downloads (best-effort — never fails the primary generation)
@@ -149,7 +159,7 @@ final class GenerationPipeline {
             }
         }
 
-        return Output(image: mainImage, seed: seed, generatedLineartImage: generatedLineartImage, comparisonData: comparisonData, comparisonError: comparisonError)
+        return Output(image: mainImage, seed: seed, generatedLineartHighImage: generatedLineartHighImage, generatedLineartLowImage: generatedLineartLowImage, comparisonData: comparisonData, comparisonError: comparisonError)
     }
 }
 

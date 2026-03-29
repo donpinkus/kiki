@@ -250,7 +250,7 @@
   },
   "121": {
     "inputs": {
-      "filename_prefix": "GeneratedLineart",
+      "filename_prefix": "GeneratedLineartHigh",
       "images": [
         "122",
         0
@@ -258,7 +258,50 @@
     },
     "class_type": "SaveImage",
     "_meta": {
-      "title": "Save Generated Lineart"
+      "title": "Save Generated Lineart (High Detail)"
+    }
+  },
+  "123": {
+    "inputs": {
+      "merge_with_lineart": "lineart_standard",
+      "resolution": 1280,
+      "lineart_lower_bound": 0,
+      "lineart_upper_bound": 1,
+      "object_min_size": 100,
+      "object_connectivity": 1,
+      "image": [
+        "111:8",
+        0
+      ]
+    },
+    "class_type": "AnyLineArtPreprocessor_aux",
+    "_meta": {
+      "title": "Generated Lineart (Low Detail)"
+    }
+  },
+  "124": {
+    "inputs": {
+      "image": [
+        "123",
+        0
+      ]
+    },
+    "class_type": "ImageInvert",
+    "_meta": {
+      "title": "Invert Generated Lineart (Low Detail)"
+    }
+  },
+  "125": {
+    "inputs": {
+      "filename_prefix": "GeneratedLineartLow",
+      "images": [
+        "124",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Generated Lineart (Low Detail)"
     }
   },
   "122": {

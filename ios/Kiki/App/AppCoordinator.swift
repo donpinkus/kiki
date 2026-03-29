@@ -14,6 +14,10 @@ enum AppScreen: Equatable {
     case drawing
 }
 
+enum LineartDetail: String, CaseIterable {
+    case high, low
+}
+
 @MainActor
 @Observable
 final class AppCoordinator {
@@ -52,8 +56,17 @@ final class AppCoordinator {
     var isSeedLocked = false {
         didSet { if !isSuppressingObservation { scheduleSave() } }
     }
-    var lastGeneratedLineartImage: UIImage?
+    var lastLineartHighImage: UIImage?
+    var lastLineartLowImage: UIImage?
+    var lineartDetail: LineartDetail = .high
     var showingLineart = false
+
+    var currentLineartImage: UIImage? {
+        switch lineartDetail {
+        case .high: lastLineartHighImage
+        case .low: lastLineartLowImage
+        }
+    }
     var comparisonData: ComparisonData?
     var compareWithoutControlNet = false {
         didSet {
@@ -133,12 +146,13 @@ final class AppCoordinator {
     func clear() {
         canvasViewModel.clear()
         hasUnsavedChanges = false
-        lastGeneratedLineartImage = nil
+        lastLineartHighImage = nil
+        lastLineartLowImage = nil
         showingLineart = false
     }
 
     func swapLineartToCanvas() {
-        guard let lineartImage = lastGeneratedLineartImage else { return }
+        guard let lineartImage = currentLineartImage else { return }
         canvasViewModel.swapLineart(image: lineartImage)
         showingLineart = false
     }
@@ -163,7 +177,8 @@ final class AppCoordinator {
         advancedParameters = AdvancedParameters()
         isSeedLocked = false
         lastSuccessfulImage = nil
-        lastGeneratedLineartImage = nil
+        lastLineartHighImage = nil
+        lastLineartLowImage = nil
         showingLineart = false
         resultState = .empty
         hasUnsavedChanges = false
@@ -195,11 +210,8 @@ final class AppCoordinator {
         } else {
             lastSuccessfulImage = nil
         }
-        if let lineartData = drawing.lineartImageData {
-            lastGeneratedLineartImage = UIImage(data: lineartData)
-        } else {
-            lastGeneratedLineartImage = nil
-        }
+        lastLineartHighImage = drawing.lineartHighImageData.flatMap { UIImage(data: $0) }
+        lastLineartLowImage = drawing.lineartLowImageData.flatMap { UIImage(data: $0) }
         resultState = lastSuccessfulImage.map { .preview(image: $0) } ?? .empty
         showingLineart = false
 
@@ -274,7 +286,8 @@ final class AppCoordinator {
 
         // Generated images
         drawing.generatedImageData = lastSuccessfulImage?.jpegData(compressionQuality: 0.85)
-        drawing.lineartImageData = lastGeneratedLineartImage?.pngData()
+        drawing.lineartHighImageData = lastLineartHighImage?.pngData()
+        drawing.lineartLowImageData = lastLineartLowImage?.pngData()
 
         // Thumbnail
         drawing.canvasThumbnailData = canvasViewModel.generateThumbnail()?.jpegData(compressionQuality: 0.7)
@@ -348,7 +361,8 @@ final class AppCoordinator {
                 }
 
                 lastSuccessfulImage = output.image
-                lastGeneratedLineartImage = output.generatedLineartImage
+                lastLineartHighImage = output.generatedLineartHighImage
+                lastLineartLowImage = output.generatedLineartLowImage
                 showingLineart = false
                 resultState = .preview(image: output.image)
 

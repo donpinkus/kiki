@@ -21,7 +21,7 @@ struct DrawingView: View {
                     .frame(width: 1)
 
                 VStack(spacing: 0) {
-                    if coordinator.lastGeneratedLineartImage != nil && !coordinator.isGenerating {
+                    if coordinator.lastLineartHighImage != nil && !coordinator.isGenerating {
                         lineartToggleBar
                     }
 
@@ -87,7 +87,7 @@ struct DrawingView: View {
 
     private var effectiveResultState: ResultState {
         if coordinator.showingLineart,
-           let lineart = coordinator.lastGeneratedLineartImage,
+           let lineart = coordinator.currentLineartImage,
            case .preview = coordinator.resultState {
             return .preview(image: lineart)
         }
@@ -105,6 +105,13 @@ struct DrawingView: View {
             .frame(width: 200)
 
             if coordinator.showingLineart {
+                Picker("Detail", selection: $coordinator.lineartDetail) {
+                    Text("High").tag(LineartDetail.high)
+                    Text("Low").tag(LineartDetail.low)
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 120)
+
                 Button {
                     coordinator.swapLineartToCanvas()
                 } label: {

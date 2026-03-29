@@ -19,7 +19,8 @@ final class Drawing {
     // MARK: - Generation Results
 
     @Attribute(.externalStorage) var generatedImageData: Data?
-    @Attribute(.externalStorage) var lineartImageData: Data?
+    @Attribute(.externalStorage) var lineartHighImageData: Data?
+    @Attribute(.externalStorage) var lineartLowImageData: Data?
 
     // MARK: - Thumbnail
 
