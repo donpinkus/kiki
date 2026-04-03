@@ -74,6 +74,8 @@ final class GenerationPipeline {
 
         let response = try await apiClient.generate(request)
         print("[Generate] Response: status=\(response.status), imageURL=\(response.imageURL?.absoluteString ?? "nil")")
+        print("[Generate] lineartImageURL: \(response.lineartImageURL?.absoluteString ?? "nil")")
+        print("[Generate] generatedLineartImageURL: \(response.generatedLineartImageURL?.absoluteString ?? "nil")")
 
         try Task.checkCancellation()
 
@@ -101,15 +103,22 @@ final class GenerationPipeline {
 
         try Task.checkCancellation()
 
-        // Download generated lineart (best-effort — never fails the primary generation)
+        // Download generated lineart — we always expect this from our API
         var generatedLineartImage: UIImage?
         if let generatedLineartURL = response.generatedLineartImageURL {
             do {
                 let (lineartData, _) = try await URLSession.shared.data(from: generatedLineartURL)
-                generatedLineartImage = UIImage(data: lineartData)
+                if let img = UIImage(data: lineartData) {
+                    generatedLineartImage = img
+                    print("[Generate] Generated lineart downloaded: \(img.size)")
+                } else {
+                    print("[Generate] ERROR: Generated lineart data (\(lineartData.count) bytes) could not be decoded to UIImage")
+                }
             } catch {
-                print("[Generate] Generated lineart download failed: \(error.localizedDescription)")
+                print("[Generate] ERROR: Generated lineart download failed: \(error.localizedDescription)")
             }
+        } else {
+            print("[Generate] ERROR: No generatedLineartImageURL in response — expected lineart from API")
         }
 
         // Comparison downloads (best-effort — never fails the primary generation)

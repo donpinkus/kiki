@@ -86,6 +86,13 @@ export class ComfyUIAdapter implements ProviderAdapter {
     // 7. Poll for completion
     const outputs = await this.pollForResult(baseUrl, promptId);
 
+    // Debug: log which nodes produced output
+    const outputNodeIds = Object.keys(outputs);
+    console.log(`[ComfyUI] Output nodes: [${outputNodeIds.join(', ')}]`);
+    console.log(`[ComfyUI] SaveImage (${SAVE_IMAGE_NODE_ID}): ${outputs[SAVE_IMAGE_NODE_ID]?.images?.[0]?.filename ?? 'NULL'}`);
+    console.log(`[ComfyUI] LineartPreview (${LINEART_PREVIEW_NODE_ID}): ${outputs[LINEART_PREVIEW_NODE_ID]?.images?.[0]?.filename ?? 'NULL'}`);
+    console.log(`[ComfyUI] GeneratedLineart (${GENERATED_LINEART_SAVE_NODE_ID}): ${outputs[GENERATED_LINEART_SAVE_NODE_ID]?.images?.[0]?.filename ?? 'NULL'}`);
+
     // 8. Construct image URLs
     const saveOutput = outputs[SAVE_IMAGE_NODE_ID]?.images?.[0];
     if (!saveOutput) {
@@ -107,6 +114,11 @@ export class ComfyUIAdapter implements ProviderAdapter {
     const generatedLineartImageUrl = generatedLineartOutput
       ? this.buildImageUrl(baseUrl, generatedLineartOutput)
       : undefined;
+
+    // Debug: log constructed URLs
+    console.log(`[ComfyUI] Result imageUrl: ${imageUrl}`);
+    console.log(`[ComfyUI] lineartImageUrl: ${lineartImageUrl ?? 'NULL'}`);
+    console.log(`[ComfyUI] generatedLineartImageUrl: ${generatedLineartImageUrl ?? 'NULL'}`);
 
     const actualSeed = Number(workflow[KSAMPLER_NODE_ID]?.inputs['seed'] ?? 0);
 
