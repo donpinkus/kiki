@@ -14,40 +14,33 @@ struct DrawingView: View {
             DrawingTopBar()
 
             GeometryReader { geometry in
-                HStack(spacing: 0) {
+                ZStack(alignment: .topLeading) {
+                    // Canvas — always full-size, never recreated on layout switch
                     CanvasView(viewModel: coordinator.canvasViewModel)
-                        .frame(width: geometry.size.width * coordinator.dividerPosition)
                         .ignoresSafeArea(.keyboard)
-                        .overlay(alignment: .leading) {
-                            CanvasSidebar()
-                                .padding(.leading, 12)
-                        }
 
-                    Rectangle()
-                        .fill(Color(.separator))
-                        .frame(width: 1)
+                    // Canvas sidebar — always present
+                    CanvasSidebar()
+                        .padding(.leading, 12)
+                        .frame(maxHeight: .infinity, alignment: .leading)
 
-                    ResultView(state: effectiveResultState)
-                        .overlay(alignment: .topTrailing) {
-                            if coordinator.compareWithoutControlNet || coordinator.comparisonData != nil {
-                                Button { if coordinator.comparisonData != nil { showDebugModal = true } } label: {
-                                    Image(systemName: "square.grid.2x2")
-                                        .font(.system(size: 14))
-                                        .foregroundStyle(.white)
-                                        .padding(8)
-                                        .background(.ultraThinMaterial, in: Circle())
-                                }
-                                .disabled(coordinator.comparisonData == nil)
-                                .opacity(coordinator.comparisonData != nil ? 1 : 0.4)
-                                .padding(12)
-                            }
-                        }
-                        .overlay(alignment: .bottom) {
-                            if coordinator.lastGeneratedLineartImage != nil && !coordinator.isGenerating {
-                                lineartToggleBar
-                                    .padding(.bottom, 16)
-                            }
-                        }
+                    // Layout-specific result display
+                    if coordinator.drawingLayout == .splitScreen {
+                        splitScreenResultPane(geometry: geometry)
+                    } else if coordinator.showFloatingPanel {
+                        FloatingResultPanel(
+                            resultState: effectiveResultState,
+                            showingLineart: coordinator.showingLineart,
+                            hasLineart: coordinator.lastGeneratedLineartImage != nil,
+                            isGenerating: coordinator.isGenerating,
+                            containerSize: geometry.size,
+                            onClose: { coordinator.showFloatingPanel = false },
+                            onToggleLineart: { coordinator.showingLineart.toggle() },
+                            onSwapToCanvas: { coordinator.swapLineartToCanvas() }
+                        )
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                        .padding(16)
+                    }
                 }
             }
         }
@@ -70,6 +63,44 @@ struct DrawingView: View {
             Button("OK") { coordinator.comparisonError = nil }
         } message: {
             Text(coordinator.comparisonError ?? "")
+        }
+    }
+
+    // MARK: - Split Screen Result Pane
+
+    private func splitScreenResultPane(geometry: GeometryProxy) -> some View {
+        HStack(spacing: 0) {
+            // Transparent spacer over the canvas area
+            Color.clear
+                .frame(width: geometry.size.width * coordinator.dividerPosition)
+                .contentShape(Rectangle())
+                .allowsHitTesting(false)
+
+            Rectangle()
+                .fill(Color(.separator))
+                .frame(width: 1)
+
+            ResultView(state: effectiveResultState)
+                .overlay(alignment: .topTrailing) {
+                    if coordinator.compareWithoutControlNet || coordinator.comparisonData != nil {
+                        Button { if coordinator.comparisonData != nil { showDebugModal = true } } label: {
+                            Image(systemName: "square.grid.2x2")
+                                .font(.system(size: 14))
+                                .foregroundStyle(.white)
+                                .padding(8)
+                                .background(.ultraThinMaterial, in: Circle())
+                        }
+                        .disabled(coordinator.comparisonData == nil)
+                        .opacity(coordinator.comparisonData != nil ? 1 : 0.4)
+                        .padding(12)
+                    }
+                }
+                .overlay(alignment: .bottom) {
+                    if coordinator.lastGeneratedLineartImage != nil && !coordinator.isGenerating {
+                        lineartToggleBar
+                            .padding(.bottom, 16)
+                    }
+                }
         }
     }
 

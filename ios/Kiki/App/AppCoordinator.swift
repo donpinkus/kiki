@@ -14,6 +14,10 @@ enum AppScreen: Equatable {
     case drawing
 }
 
+enum DrawingLayout: String, CaseIterable {
+    case splitScreen, fullscreen
+}
+
 @MainActor
 @Observable
 final class AppCoordinator {
@@ -54,6 +58,7 @@ final class AppCoordinator {
     }
     var lastGeneratedLineartImage: UIImage?
     var showingLineart = false
+    var showFloatingPanel = false
     var comparisonData: ComparisonData?
     var compareWithoutControlNet = false {
         didSet {
@@ -64,6 +69,12 @@ final class AppCoordinator {
         }
     }
     var comparisonError: String?
+
+    // MARK: - Layout
+
+    var drawingLayout: DrawingLayout = .splitScreen {
+        didSet { UserDefaults.standard.set(drawingLayout.rawValue, forKey: "drawingLayout") }
+    }
 
     // MARK: - Generation Mode
 
@@ -103,6 +114,10 @@ final class AppCoordinator {
         if let stored = UserDefaults.standard.string(forKey: "generationTriggerMode"),
            let mode = GenerationTriggerMode(rawValue: stored) {
             self.triggerMode = mode
+        }
+        if let stored = UserDefaults.standard.string(forKey: "drawingLayout"),
+           let layout = DrawingLayout(rawValue: stored) {
+            self.drawingLayout = layout
         }
 
         // If no drawings exist, go directly to a new drawing
@@ -165,6 +180,7 @@ final class AppCoordinator {
         lastSuccessfulImage = nil
         lastGeneratedLineartImage = nil
         showingLineart = false
+        showFloatingPanel = false
         resultState = .empty
         hasUnsavedChanges = false
         comparisonData = nil
@@ -202,6 +218,7 @@ final class AppCoordinator {
         }
         resultState = lastSuccessfulImage.map { .preview(image: $0) } ?? .empty
         showingLineart = false
+        showFloatingPanel = lastSuccessfulImage != nil
 
         // Reset transient state
         hasUnsavedChanges = false
@@ -351,6 +368,9 @@ final class AppCoordinator {
                 lastGeneratedLineartImage = output.generatedLineartImage
                 showingLineart = false
                 resultState = .preview(image: output.image)
+                if drawingLayout == .fullscreen {
+                    showFloatingPanel = true
+                }
 
                 if compareWithoutControlNet {
                     comparisonData = output.comparisonData

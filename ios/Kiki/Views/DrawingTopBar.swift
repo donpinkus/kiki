@@ -4,6 +4,7 @@ import CanvasModule
 struct DrawingTopBar: View {
     @Environment(AppCoordinator.self) private var coordinator
     @State private var showAdvancedParameters = false
+    @State private var isSpinning = false
 
     var body: some View {
         @Bindable var coordinator = coordinator
@@ -39,25 +40,43 @@ struct DrawingTopBar: View {
             Button {
                 coordinator.generate()
             } label: {
-                Image(systemName: "apple.intelligence")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 36, height: 36)
-                    .background(
-                        coordinator.canvasViewModel.isEmpty || coordinator.isGenerating
-                            ? Color.accentColor.opacity(0.4)
-                            : Color.accentColor,
-                        in: Circle()
-                    )
-                    .overlay(alignment: .topTrailing) {
-                        if coordinator.hasUnsavedChanges && !coordinator.isGenerating {
-                            Circle()
-                                .fill(.orange)
-                                .frame(width: 8, height: 8)
-                        }
+                HStack(spacing: 6) {
+                    Image(systemName: "apple.intelligence")
+                        .font(.system(size: 14, weight: .semibold))
+                        .rotationEffect(.degrees(isSpinning ? 360 : 0))
+                    Text(coordinator.isGenerating ? "Generating…" : "Generate")
+                        .font(.subheadline.weight(.medium))
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(
+                    coordinator.canvasViewModel.isEmpty || coordinator.isGenerating
+                        ? Color.accentColor.opacity(0.4)
+                        : Color.accentColor,
+                    in: Capsule()
+                )
+                .overlay(alignment: .topTrailing) {
+                    if coordinator.hasUnsavedChanges && !coordinator.isGenerating {
+                        Circle()
+                            .fill(.orange)
+                            .frame(width: 8, height: 8)
+                            .offset(x: 2, y: -2)
                     }
+                }
             }
             .disabled(coordinator.canvasViewModel.isEmpty || coordinator.isGenerating)
+            .onChange(of: coordinator.isGenerating) { _, generating in
+                if generating {
+                    withAnimation(.linear(duration: 2).repeatForever(autoreverses: false)) {
+                        isSpinning = true
+                    }
+                } else {
+                    withAnimation(.default) {
+                        isSpinning = false
+                    }
+                }
+            }
 
             Button {
                 showAdvancedParameters = true
@@ -72,6 +91,17 @@ struct DrawingTopBar: View {
             .popover(isPresented: $showAdvancedParameters) {
                 AdvancedParametersPanel()
                     .frame(width: 400, height: 600)
+            }
+
+            Button {
+                coordinator.drawingLayout = coordinator.drawingLayout == .splitScreen
+                    ? .fullscreen : .splitScreen
+            } label: {
+                Image(systemName: coordinator.drawingLayout == .splitScreen
+                    ? "rectangle.inset.filled" : "rectangle.split.2x1")
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(.primary)
+                    .frame(width: 36, height: 36)
             }
 
             Spacer()

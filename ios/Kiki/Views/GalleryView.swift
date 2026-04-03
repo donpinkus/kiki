@@ -72,44 +72,38 @@ private struct GalleryTile: View {
         Button(action: onTap) {
             HStack(spacing: 0) {
                 // Canvas thumbnail (left half)
-                Group {
-                    if let thumbnail = drawing.canvasThumbnail {
-                        Image(uiImage: thumbnail)
-                            .resizable()
-                            .scaledToFill()
-                    } else {
-                        Rectangle()
-                            .fill(Color(.systemGray6))
-                            .overlay {
-                                Image(systemName: "pencil.tip")
-                                    .font(.title2)
-                                    .foregroundStyle(.quaternary)
-                            }
+                Color(.systemGray6)
+                    .overlay {
+                        if let thumbnail = drawing.canvasThumbnail {
+                            Image(uiImage: thumbnail)
+                                .resizable()
+                                .scaledToFill()
+                        } else {
+                            Image(systemName: "pencil.tip")
+                                .font(.title2)
+                                .foregroundStyle(.quaternary)
+                        }
                     }
-                }
-                .clipped()
+                    .clipped()
 
                 Rectangle()
                     .fill(Color(.separator))
                     .frame(width: 1)
 
                 // Generated image (right half)
-                Group {
-                    if let generated = drawing.generatedImage {
-                        Image(uiImage: generated)
-                            .resizable()
-                            .scaledToFill()
-                    } else {
-                        Rectangle()
-                            .fill(Color(.systemGray5))
-                            .overlay {
-                                Image(systemName: "sparkles")
-                                    .font(.title2)
-                                    .foregroundStyle(.quaternary)
-                            }
+                Color(.systemGray5)
+                    .overlay {
+                        if let generated = drawing.generatedImage {
+                            Image(uiImage: generated)
+                                .resizable()
+                                .scaledToFill()
+                        } else {
+                            Image(systemName: "sparkles")
+                                .font(.title2)
+                                .foregroundStyle(.quaternary)
+                        }
                     }
-                }
-                .clipped()
+                    .clipped()
             }
             .aspectRatio(16 / 9, contentMode: .fit)
             .clipShape(RoundedRectangle(cornerRadius: 12))

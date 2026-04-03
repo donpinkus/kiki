@@ -40,4 +40,9 @@ public enum ResultState {
     case generating(progress: GenerationProgress, previousImage: UIImage?)
     case preview(image: UIImage)
     case error(message: String, previousImage: UIImage?)
+
+    public var isPreview: Bool {
+        if case .preview = self { return true }
+        return false
+    }
 }
