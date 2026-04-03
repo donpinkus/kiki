@@ -10,6 +10,7 @@ struct AdvancedParametersPanel: View {
 
         NavigationStack {
             Form {
+                generationModeSection
                 controlNetSection
                 samplerSection
                 modelSection
@@ -39,6 +40,18 @@ struct AdvancedParametersPanel: View {
     }
 
     // MARK: - Sections
+
+    private var generationModeSection: some View {
+        @Bindable var coordinator = coordinator
+
+        return Section("Generation Mode") {
+            Picker("Trigger", selection: $coordinator.triggerMode) {
+                Text("Auto").tag(GenerationTriggerMode.auto)
+                Text("Manual").tag(GenerationTriggerMode.manual)
+            }
+            .pickerStyle(.segmented)
+        }
+    }
 
     private var controlNetSection: some View {
         Section("ControlNet") {

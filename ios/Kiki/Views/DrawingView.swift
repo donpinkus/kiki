@@ -10,20 +10,22 @@ struct DrawingView: View {
     var body: some View {
         @Bindable var coordinator = coordinator
 
-        GeometryReader { geometry in
-            HStack(spacing: 0) {
-                CanvasView(viewModel: coordinator.canvasViewModel)
-                    .frame(width: geometry.size.width * coordinator.dividerPosition)
-                    .ignoresSafeArea(.keyboard)
+        VStack(spacing: 0) {
+            DrawingTopBar()
 
-                Rectangle()
-                    .fill(Color(.separator))
-                    .frame(width: 1)
+            GeometryReader { geometry in
+                HStack(spacing: 0) {
+                    CanvasView(viewModel: coordinator.canvasViewModel)
+                        .frame(width: geometry.size.width * coordinator.dividerPosition)
+                        .ignoresSafeArea(.keyboard)
+                        .overlay(alignment: .leading) {
+                            CanvasSidebar()
+                                .padding(.leading, 12)
+                        }
 
-                VStack(spacing: 0) {
-                    if coordinator.lastGeneratedLineartImage != nil && !coordinator.isGenerating {
-                        lineartToggleBar
-                    }
+                    Rectangle()
+                        .fill(Color(.separator))
+                        .frame(width: 1)
 
                     ResultView(state: effectiveResultState)
                         .overlay(alignment: .topTrailing) {
@@ -40,26 +42,14 @@ struct DrawingView: View {
                                 .padding(12)
                             }
                         }
-
-                    promptBar(promptText: $coordinator.promptText)
+                        .overlay(alignment: .bottom) {
+                            if coordinator.lastGeneratedLineartImage != nil && !coordinator.isGenerating {
+                                lineartToggleBar
+                                    .padding(.bottom, 16)
+                            }
+                        }
                 }
             }
-        }
-        .overlay(alignment: .bottomLeading) {
-            FloatingToolbar()
-                .padding(16)
-        }
-        .overlay(alignment: .topLeading) {
-            Button {
-                coordinator.navigateToGallery()
-            } label: {
-                Label("Gallery", systemImage: "square.grid.2x2")
-                    .font(.subheadline.weight(.medium))
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(.ultraThinMaterial, in: Capsule())
-            }
-            .padding(16)
         }
         .fullScreenCover(isPresented: $showDebugModal) {
             if let data = coordinator.comparisonData {
@@ -114,57 +104,11 @@ struct DrawingView: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
             }
-
-            Spacer()
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
-        .background(.bar)
-    }
-
-    private func promptBar(promptText: Binding<String>) -> some View {
-        HStack(spacing: 12) {
-            Button {
-                coordinator.showStylePicker = true
-            } label: {
-                Text(coordinator.selectedStyle.name)
-                    .font(.caption.weight(.medium))
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(Color.accentColor.opacity(0.12), in: Capsule())
-                    .foregroundStyle(Color.accentColor)
-            }
-
-            TextField("Describe what you want…", text: promptText)
-                .textFieldStyle(.plain)
-                .font(.subheadline)
-
-            Button {
-                coordinator.generate()
-            } label: {
-                Image(systemName: "apple.intelligence")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 36, height: 36)
-                    .background(
-                        coordinator.canvasViewModel.isEmpty || coordinator.isGenerating
-                            ? Color.accentColor.opacity(0.4)
-                            : Color.accentColor,
-                        in: Circle()
-                    )
-                    .overlay(alignment: .topTrailing) {
-                        if coordinator.hasUnsavedChanges && !coordinator.isGenerating {
-                            Circle()
-                                .fill(.orange)
-                                .frame(width: 8, height: 8)
-                        }
-                    }
-            }
-            .disabled(coordinator.canvasViewModel.isEmpty || coordinator.isGenerating)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
-        .background(.bar)
+        .background(.ultraThinMaterial, in: Capsule())
+        .shadow(color: .black.opacity(0.15), radius: 8, y: 4)
     }
 }
 
