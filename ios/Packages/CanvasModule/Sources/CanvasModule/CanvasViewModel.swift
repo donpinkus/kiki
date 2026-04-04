@@ -35,6 +35,7 @@ public final class CanvasViewModel {
     }
 
     public var hasBackgroundContent: Bool { container?.backgroundImage != nil }
+    public private(set) var isInteracting = false
 
     private weak var canvasView: PKCanvasView?
     private weak var container: RotatableCanvasContainer?
@@ -230,6 +231,9 @@ public final class CanvasViewModel {
         rotation = container?.rotation ?? 0
         translation = container?.translation ?? .zero
     }
+
+    public func handleInteractionBegan() { isInteracting = true }
+    public func handleInteractionEnded() { isInteracting = false }
 
     // MARK: - Private
 

@@ -18,6 +18,18 @@ public struct CanvasView: UIViewRepresentable {
                 viewModel?.handleTransformChanged()
             }
         }
+        container.onInteractionChanged = { [weak viewModel] interacting in
+            Task { @MainActor in
+                if interacting { viewModel?.handleInteractionBegan() }
+                else { viewModel?.handleInteractionEnded() }
+            }
+        }
+        container.onUndoRequested = { [weak viewModel] in
+            Task { @MainActor in viewModel?.undo() }
+        }
+        container.onRedoRequested = { [weak viewModel] in
+            Task { @MainActor in viewModel?.redo() }
+        }
         return container
     }
 
@@ -37,6 +49,18 @@ public struct CanvasView: UIViewRepresentable {
         public func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
             Task { @MainActor in
                 viewModel.handleDrawingChanged()
+            }
+        }
+
+        public func canvasViewDidBeginUsingTool(_ canvasView: PKCanvasView) {
+            Task { @MainActor in
+                viewModel.handleInteractionBegan()
+            }
+        }
+
+        public func canvasViewDidEndUsingTool(_ canvasView: PKCanvasView) {
+            Task { @MainActor in
+                viewModel.handleInteractionEnded()
             }
         }
     }

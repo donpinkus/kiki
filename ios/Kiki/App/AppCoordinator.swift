@@ -59,6 +59,8 @@ final class AppCoordinator {
     var lastGeneratedLineartImage: UIImage?
     var showingLineart = false
     var showFloatingPanel = false
+    var canvasOnTop = false
+    var generationError: String?
     var comparisonData: ComparisonData?
     var compareWithoutControlNet = false {
         didSet {
@@ -328,6 +330,8 @@ final class AppCoordinator {
         currentRequestId = requestId
         hasUnsavedChanges = false
         isGenerating = true
+        canvasOnTop = false
+        generationError = nil
         comparisonError = nil
 
         // Cancel any prior generation task (latest-request-wins)
@@ -367,6 +371,7 @@ final class AppCoordinator {
                 lastSuccessfulImage = output.image
                 lastGeneratedLineartImage = output.generatedLineartImage
                 showingLineart = false
+                generationError = nil
                 resultState = .preview(image: output.image)
                 if drawingLayout == .fullscreen {
                     showFloatingPanel = true
@@ -390,8 +395,10 @@ final class AppCoordinator {
             } catch {
                 if Task.isCancelled { return }
                 guard currentRequestId == requestId else { return }
+                let message = mapErrorMessage(error)
+                generationError = message
                 resultState = .error(
-                    message: mapErrorMessage(error),
+                    message: message,
                     previousImage: lastSuccessfulImage
                 )
             }

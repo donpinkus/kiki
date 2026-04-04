@@ -10,6 +10,9 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
     public private(set) var scale: CGFloat = 1.0
     public private(set) var translation: CGPoint = .zero
     public var onTransformChanged: (() -> Void)?
+    public var onInteractionChanged: ((Bool) -> Void)?
+    public var onUndoRequested: (() -> Void)?
+    public var onRedoRequested: (() -> Void)?
 
     // MARK: - Private
 
@@ -86,6 +89,16 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
         panGesture.maximumNumberOfTouches = 2
         panGesture.delegate = self
         addGestureRecognizer(panGesture)
+
+        let undoTap = UITapGestureRecognizer(target: self, action: #selector(handleUndoTap(_:)))
+        undoTap.numberOfTouchesRequired = 2
+        undoTap.delegate = self
+        addGestureRecognizer(undoTap)
+
+        let redoTap = UITapGestureRecognizer(target: self, action: #selector(handleRedoTap(_:)))
+        redoTap.numberOfTouchesRequired = 3
+        redoTap.delegate = self
+        addGestureRecognizer(redoTap)
     }
 
     // MARK: - Gesture Handling
@@ -114,6 +127,9 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
 
     @objc private func handleRotation(_ gesture: UIRotationGestureRecognizer) {
         switch gesture.state {
+        case .began:
+            onInteractionChanged?(true)
+
         case .changed:
             rotation += gesture.rotation
             gesture.rotation = 0
@@ -131,6 +147,7 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
                 applyTransform()
             }
             onTransformChanged?()
+            onInteractionChanged?(false)
 
         default:
             break
@@ -139,6 +156,9 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
 
     @objc private func handlePinch(_ gesture: UIPinchGestureRecognizer) {
         switch gesture.state {
+        case .began:
+            onInteractionChanged?(true)
+
         case .changed:
             scale = (scale * gesture.scale).clamped(to: Self.minScale...Self.maxScale)
             gesture.scale = 1.0
@@ -149,6 +169,7 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
             scale = (scale * gesture.scale).clamped(to: Self.minScale...Self.maxScale)
             applyTransform()
             onTransformChanged?()
+            onInteractionChanged?(false)
 
         default:
             break
@@ -157,6 +178,9 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
 
     @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
         switch gesture.state {
+        case .began:
+            onInteractionChanged?(true)
+
         case .changed:
             let delta = gesture.translation(in: self)
             translation.x += delta.x
@@ -171,10 +195,19 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
             translation.y += delta.y
             applyTransform()
             onTransformChanged?()
+            onInteractionChanged?(false)
 
         default:
             break
         }
+    }
+
+    @objc private func handleUndoTap(_ gesture: UITapGestureRecognizer) {
+        if gesture.state == .ended { onUndoRequested?() }
+    }
+
+    @objc private func handleRedoTap(_ gesture: UITapGestureRecognizer) {
+        if gesture.state == .ended { onRedoRequested?() }
     }
 
     public func gestureRecognizer(

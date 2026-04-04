@@ -6,6 +6,8 @@ import ResultModule
 struct DrawingView: View {
     @Environment(AppCoordinator.self) private var coordinator
     @State private var showDebugModal = false
+    @State private var panelReturnTask: Task<Void, Never>?
+    @State private var errorDismissTask: Task<Void, Never>?
 
     var body: some View {
         @Bindable var coordinator = coordinator
@@ -13,20 +15,53 @@ struct DrawingView: View {
         VStack(spacing: 0) {
             DrawingTopBar()
 
+            if let error = coordinator.generationError {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.subheadline)
+                    Text(error)
+                        .font(.subheadline)
+                        .lineLimit(2)
+                    Spacer()
+                    Button {
+                        coordinator.generationError = nil
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.caption.weight(.semibold))
+                    }
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(Color.red.opacity(0.85))
+                .transition(.move(edge: .top).combined(with: .opacity))
+                .onAppear {
+                    errorDismissTask?.cancel()
+                    errorDismissTask = Task {
+                        try? await Task.sleep(for: .seconds(8))
+                        guard !Task.isCancelled else { return }
+                        coordinator.generationError = nil
+                    }
+                }
+            }
+
             GeometryReader { geometry in
                 ZStack(alignment: .topLeading) {
                     // Canvas — always full-size, never recreated on layout switch
                     CanvasView(viewModel: coordinator.canvasViewModel)
                         .ignoresSafeArea(.keyboard)
+                        .zIndex(coordinator.canvasOnTop ? 2 : 0)
 
-                    // Canvas sidebar — always present
+                    // Canvas sidebar — always on top of both canvas and panel
                     CanvasSidebar()
                         .padding(.leading, 12)
                         .frame(maxHeight: .infinity, alignment: .leading)
+                        .zIndex(3)
 
                     // Layout-specific result display
                     if coordinator.drawingLayout == .splitScreen {
                         splitScreenResultPane(geometry: geometry)
+                            .zIndex(2)
                     } else if coordinator.showFloatingPanel {
                         FloatingResultPanel(
                             resultState: effectiveResultState,
@@ -36,14 +71,37 @@ struct DrawingView: View {
                             containerSize: geometry.size,
                             onClose: { coordinator.showFloatingPanel = false },
                             onToggleLineart: { coordinator.showingLineart.toggle() },
-                            onSwapToCanvas: { coordinator.swapLineartToCanvas() }
+                            onSwapToCanvas: { coordinator.swapLineartToCanvas() },
+                            onInteraction: {
+                                panelReturnTask?.cancel()
+                                coordinator.canvasOnTop = false
+                            }
                         )
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
                         .padding(16)
+                        .zIndex(coordinator.canvasOnTop ? 0 : 2)
+                        .opacity(coordinator.canvasOnTop ? 0 : 1)
+                    }
+                }
+                .onChange(of: coordinator.canvasViewModel.isInteracting) { _, interacting in
+                    guard coordinator.drawingLayout == .fullscreen else { return }
+                    if interacting {
+                        panelReturnTask?.cancel()
+                        coordinator.canvasOnTop = true
+                    } else {
+                        panelReturnTask?.cancel()
+                        panelReturnTask = Task {
+                            try? await Task.sleep(for: .milliseconds(500))
+                            guard !Task.isCancelled else { return }
+                            withAnimation(.easeIn(duration: 0.25)) {
+                                coordinator.canvasOnTop = false
+                            }
+                        }
                     }
                 }
             }
         }
+        .animation(.easeInOut(duration: 0.3), value: coordinator.generationError != nil)
         .fullScreenCover(isPresented: $showDebugModal) {
             if let data = coordinator.comparisonData {
                 DebugComparisonModal(data: data)

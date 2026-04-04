@@ -10,6 +10,7 @@ struct FloatingResultPanel: View {
     let onClose: () -> Void
     let onToggleLineart: () -> Void
     let onSwapToCanvas: () -> Void
+    var onInteraction: (() -> Void)? = nil
 
     @State private var position: CGPoint = .zero
     @State private var size: CGSize?
@@ -44,6 +45,7 @@ struct FloatingResultPanel: View {
             .gesture(
                 DragGesture()
                     .onChanged { value in
+                        onInteraction?()
                         dragOffset = value.translation
                     }
                     .onEnded { value in
@@ -147,6 +149,7 @@ struct FloatingResultPanel: View {
                 .gesture(
                     DragGesture()
                         .onChanged { value in
+                            onInteraction?()
                             resizeOffset = value.translation
                         }
                         .onEnded { value in
