@@ -390,6 +390,15 @@ jobs:
             }")
           echo "Railway COMFYUI_URL updated to $COMFYUI_URL"
 
+          # Redeploy service so it picks up the new env var
+          REDEPLOY=$(curl -sf "https://backboard.railway.app/graphql/v2" \
+            -H "Authorization: Bearer ${RAILWAY_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"query\": \"mutation { serviceInstanceRedeploy(environmentId: \\\"${ENVIRONMENT_ID}\\\", serviceId: \\\"${SERVICE_ID}\\\") }\"
+            }")
+          echo "Railway service redeployed"
+
       - name: Summary
         if: always()
         run: |
