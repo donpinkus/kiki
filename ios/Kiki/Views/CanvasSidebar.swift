@@ -1,12 +1,11 @@
 import SwiftUI
-import PencilKit
 import CanvasModule
 
 struct CanvasSidebar: View {
     @Environment(AppCoordinator.self) private var coordinator
     @State private var isDraggingSlider = false
 
-    private let widthRange = PKInkingTool.InkType.pen.validWidthRange
+    private let widthRange = BrushConfig.widthRange
 
     var body: some View {
         @Bindable var coordinator = coordinator

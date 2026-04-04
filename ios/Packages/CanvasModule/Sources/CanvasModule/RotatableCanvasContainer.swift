@@ -1,11 +1,10 @@
 import UIKit
-import PencilKit
 
 public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate {
 
     // MARK: - Public
 
-    public let canvasView = PKCanvasView()
+    public let canvasView = DrawingCanvasView()
     public private(set) var rotation: CGFloat = 0
     public private(set) var scale: CGFloat = 1.0
     public private(set) var translation: CGPoint = .zero
@@ -62,7 +61,6 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
         // canvasView fills transformView (always transparent — background handled by backgroundImageView)
         canvasView.frame = transformView.bounds
         canvasView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        canvasView.isScrollEnabled = false // Zoom/rotation handled by container; prevent contentOffset drift
         transformView.addSubview(canvasView)
 
         // Cursor overlay — renders on top of canvas, shows brush/eraser size at touch position
@@ -214,7 +212,7 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
         _ gestureRecognizer: UIGestureRecognizer,
         shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer
     ) -> Bool {
-        // Touch tracker always coexists with everything (PK drawing, pinch, rotation)
+        // Touch tracker always coexists with everything (drawing, pinch, rotation)
         if gestureRecognizer is TouchTrackingGestureRecognizer || other is TouchTrackingGestureRecognizer {
             return true
         }

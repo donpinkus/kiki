@@ -81,8 +81,8 @@ extension Drawing {
     }
 
     /// True when the drawing has no meaningful content.
-    /// Uses canvasThumbnailData as the canvas indicator because PKDrawing.dataRepresentation()
-    /// returns non-empty data even for an empty canvas (format header bytes).
+    /// Uses canvasThumbnailData as the canvas indicator because drawing data
+    /// may contain serialization overhead even for an empty canvas.
     var isContentEmpty: Bool {
         canvasThumbnailData == nil && promptText.isEmpty && generatedImageData == nil
     }

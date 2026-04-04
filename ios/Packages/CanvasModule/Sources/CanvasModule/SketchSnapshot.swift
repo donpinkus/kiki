@@ -1,5 +1,4 @@
 import UIKit
-import PencilKit
 
 public struct SketchSnapshot: @unchecked Sendable {
     public let image: UIImage

@@ -1,5 +1,4 @@
 import SwiftUI
-import PencilKit
 
 /// Holds the complete canvas state for save/restore across sessions.
 public struct CanvasState: Sendable {
@@ -18,9 +17,10 @@ public final class CanvasViewModel {
 
     // MARK: - Properties
 
-    /// PK's .pen ink renders strokes ~3x smaller than the specified width due to pressure modulation.
-    /// Used by both the canvas cursor and the slider tooltip to approximate visual stroke size.
-    public static let penCursorDivisor: CGFloat = 3.0
+    /// Cursor divisor for approximating visual stroke size in the sidebar tooltip.
+    /// With the custom engine, pressure gamma means the visual width ≈ baseWidth * 0.5 at rest,
+    /// so divisor ~2.0 gives a reasonable preview.
+    public static let penCursorDivisor: CGFloat = 2.0
 
     public private(set) var canUndo = false
     public private(set) var canRedo = false
@@ -37,7 +37,7 @@ public final class CanvasViewModel {
     public var hasBackgroundContent: Bool { container?.backgroundImage != nil }
     public private(set) var isInteracting = false
 
-    private weak var canvasView: PKCanvasView?
+    private weak var canvasView: DrawingCanvasView?
     private weak var container: RotatableCanvasContainer?
     private var pendingState: CanvasState?
 
@@ -58,23 +58,16 @@ public final class CanvasViewModel {
 
     // MARK: - Public API
 
-    func attach(_ canvasView: PKCanvasView, container: RotatableCanvasContainer) {
+    func attach(_ canvasView: DrawingCanvasView, container: RotatableCanvasContainer) {
         self.canvasView = canvasView
         self.container = container
-        canvasView.drawingPolicy = .anyInput
-        canvasView.overrideUserInterfaceStyle = .light
-        canvasView.backgroundColor = .clear
-        canvasView.isOpaque = false
-        canvasView.tool = PKInkingTool(.pen, color: .black, width: 5)
-        canvasView.showsHorizontalScrollIndicator = false
-        canvasView.showsVerticalScrollIndicator = false
         container.updateCursorSize(diameter: 5)
 
         // Apply pending state from a saved drawing (set via setPendingState before navigation).
-        // This runs BEFORE the delegate is set in makeUIView, so no canvasViewDrawingDidChange fires.
+        // This runs BEFORE callbacks are wired in makeUIView, so no handleDrawingChanged fires.
         if let state = pendingState {
-            if let drawing = try? PKDrawing(data: state.drawingData) {
-                canvasView.drawing = drawing
+            if let strokes = try? JSONDecoder().decode([Stroke].self, from: state.drawingData) {
+                canvasView.loadStrokes(strokes)
             }
             if let bgData = state.backgroundImageData, let bgImage = UIImage(data: bgData) {
                 container.setBackgroundImage(bgImage)
@@ -85,28 +78,54 @@ public final class CanvasViewModel {
     }
 
     public func selectBrush(width: CGFloat = 5) {
-        canvasView?.tool = PKInkingTool(.pen, color: .black, width: width)
+        let config = BrushConfig(color: .black, baseWidth: width, pressureGamma: 0.7)
+        canvasView?.currentTool = .brush(config)
         container?.updateCursorSize(diameter: width, divisor: Self.penCursorDivisor)
     }
 
     public func selectEraser(width: CGFloat = 5) {
-        canvasView?.tool = PKInkingTool(.pen, color: .white, width: width)
+        canvasView?.currentTool = .eraser(width: width)
         container?.updateCursorSize(diameter: width, divisor: Self.penCursorDivisor)
     }
 
     public func undo() {
-        canvasView?.undoManager?.undo()
+        guard let action = canvasView?.performUndo() else { return }
+        // Restore background image for actions that modify it
+        switch action {
+        case .lineartSwap(_, _, let prevBackground, _):
+            container?.setBackgroundImage(prevBackground)
+        case .clear(_, _, let prevBackground):
+            container?.setBackgroundImage(prevBackground)
+        default:
+            break
+        }
         updateState()
     }
 
     public func redo() {
-        canvasView?.undoManager?.redo()
+        guard let action = canvasView?.performRedo() else { return }
+        // Re-apply background changes for actions that modify it
+        switch action {
+        case .lineartSwap(_, _, _, let newBackground):
+            container?.setBackgroundImage(newBackground)
+        case .clear:
+            container?.setBackgroundImage(nil)
+        default:
+            break
+        }
         updateState()
     }
 
     public func clear() {
+        guard let canvasView else { return }
+        let prev = canvasView.clearAll()
+        let prevBg = container?.backgroundImage
+        canvasView.undoStack.push(.clear(
+            prevStrokes: prev.strokes,
+            prevPersistent: prev.persistent,
+            prevBackground: prevBg
+        ))
         container?.setBackgroundImage(nil)
-        canvasView?.drawing = PKDrawing()
         resetViewTransform()
         updateState()
         changesContinuation.yield(SketchSnapshot(
@@ -118,20 +137,16 @@ public final class CanvasViewModel {
 
     public func swapLineart(image: UIImage) {
         guard let canvasView else { return }
-        let prevDrawing = canvasView.drawing
+        let prevStrokes = canvasView.strokes
+        let prevPersistent = canvasView.clearAll().persistent
         let prevBgImage = container?.backgroundImage
 
-        canvasView.undoManager?.registerUndo(withTarget: self) { target in
-            target.canvasView?.undoManager?.disableUndoRegistration()
-            target.canvasView?.drawing = prevDrawing
-            target.canvasView?.undoManager?.enableUndoRegistration()
-            target.container?.setBackgroundImage(prevBgImage)
-            target.updateState()
-        }
-
-        canvasView.undoManager?.disableUndoRegistration()
-        canvasView.drawing = PKDrawing()
-        canvasView.undoManager?.enableUndoRegistration()
+        canvasView.undoStack.push(.lineartSwap(
+            prevStrokes: prevStrokes,
+            prevPersistent: prevPersistent,
+            prevBackground: prevBgImage,
+            newBackground: image
+        ))
 
         container?.setBackgroundImage(image)
         updateState()
@@ -146,37 +161,34 @@ public final class CanvasViewModel {
 
     public func captureSnapshot() -> SketchSnapshot? {
         guard let canvasView else { return nil }
-        let drawing = canvasView.drawing
-        guard !drawing.strokes.isEmpty || hasBackgroundContent else { return nil }
+        guard !canvasView.isEmpty || hasBackgroundContent else { return nil }
 
-        // IMPORTANT: Use drawHierarchy to capture the live view content.
-        // Do NOT use PKDrawing.image(from:scale:) — it returns a blank image
-        // when the canvas is inside a transformed parent (RotatableCanvasContainer).
         let outputSize = canvasView.bounds.size
         guard outputSize.width > 0, outputSize.height > 0 else { return nil }
 
         let rect = CGRect(origin: .zero, size: outputSize)
         let renderer = UIGraphicsImageRenderer(size: outputSize)
         let image = renderer.image { _ in
-            // Always composite: white base → background image → PK strokes (transparent canvas)
+            // Composite: white base → background image → custom canvas strokes
             UIColor.white.setFill()
             UIRectFill(rect)
             container?.backgroundImage?.draw(in: rect)
             canvasView.drawHierarchy(in: rect, afterScreenUpdates: true)
         }
 
+        let strokeCount = canvasView.strokes.count
         return SketchSnapshot(
             image: image,
-            strokeCount: max(drawing.strokes.count, hasBackgroundContent ? 1 : 0),
-            bounds: hasBackgroundContent ? rect : drawing.bounds
+            strokeCount: max(strokeCount, hasBackgroundContent ? 1 : 0),
+            bounds: rect
         )
     }
 
     // MARK: - Persistence
 
-    /// Returns the current PKDrawing as serialized data, or nil if the canvas is not attached.
+    /// Returns the current stroke data as JSON, or nil if the canvas is not attached.
     public func exportDrawingData() -> Data? {
-        canvasView?.drawing.dataRepresentation()
+        canvasView?.exportStrokeData()
     }
 
     /// Returns the current background image (lineart swap) as PNG data, or nil.
@@ -194,8 +206,7 @@ public final class CanvasViewModel {
     /// Returns nil if the canvas is not attached or is empty.
     public func generateThumbnail(maxDimension: CGFloat = 256) -> UIImage? {
         guard let canvasView else { return nil }
-        let drawing = canvasView.drawing
-        guard !drawing.strokes.isEmpty || hasBackgroundContent else { return nil }
+        guard !canvasView.isEmpty || hasBackgroundContent else { return nil }
 
         let fullSize = canvasView.bounds.size
         guard fullSize.width > 0, fullSize.height > 0 else { return nil }
@@ -217,12 +228,10 @@ public final class CanvasViewModel {
 
     func handleDrawingChanged() {
         updateState()
-        // Notify listeners that the canvas changed (lightweight — no snapshot capture).
-        // Actual snapshot capture is deferred to captureSnapshot() calls from the scheduler.
         changesContinuation.yield(SketchSnapshot(
             image: UIImage(),
-            strokeCount: canvasView?.drawing.strokes.count ?? 0,
-            bounds: canvasView?.drawing.bounds ?? .zero
+            strokeCount: canvasView?.strokes.count ?? 0,
+            bounds: canvasView?.bounds ?? .zero
         ))
     }
 
@@ -239,9 +248,8 @@ public final class CanvasViewModel {
 
     private func updateState() {
         guard let canvasView else { return }
-        let drawing = canvasView.drawing
-        isEmpty = drawing.strokes.isEmpty && !hasBackgroundContent
-        canUndo = canvasView.undoManager?.canUndo ?? false
-        canRedo = canvasView.undoManager?.canRedo ?? false
+        isEmpty = canvasView.isEmpty && !hasBackgroundContent
+        canUndo = canvasView.undoStack.canUndo
+        canRedo = canvasView.undoStack.canRedo
     }
 }
