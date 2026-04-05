@@ -1,6 +1,9 @@
 import UIKit
+import os
 import CanvasModule
 import NetworkModule
+
+private let logger = Logger(subsystem: "com.kiki.app", category: "StreamSession")
 
 /// Orchestrates real-time streaming generation: captures canvas frames,
 /// sends them over WebSocket, and delivers generated images back.
@@ -52,12 +55,15 @@ final class StreamSession {
 
     // MARK: - Capture Pause
 
-    /// Track last canvas change to pause capture on inactivity.
     private var lastCanvasChangeTime = Date()
     private var canvasObservationTask: Task<Void, Never>?
     private static let inactivityPauseInterval: TimeInterval = 0.5
-    /// After pausing, send one final frame to ensure last state is processed.
     private var sentFinalFrame = false
+
+    // MARK: - Stats
+
+    private var framesSent = 0
+    private var framesReceived = 0
 
     // MARK: - Lifecycle
 
@@ -70,15 +76,19 @@ final class StreamSession {
     // MARK: - Control
 
     func start(prompt: String?, strength: Double) async {
+        logger.info("Starting stream: url=\(self.url.absoluteString), prompt=\(prompt ?? "(none)"), strength=\(strength)")
         self.strength = strength
         self.currentPrompt = prompt
         self.isStopped = false
         self.reconnectAttempts = 0
+        self.framesSent = 0
+        self.framesReceived = 0
 
         await connectAndRun()
     }
 
     func stop() {
+        logger.info("Stopping stream (sent=\(self.framesSent), received=\(self.framesReceived))")
         isStopped = true
         cancelAllTasks()
         Task { await client.disconnect() }
@@ -89,6 +99,7 @@ final class StreamSession {
         if let s = strength { self.strength = s }
         if let p = prompt { self.currentPrompt = p }
         let config = StreamConfig(prompt: currentPrompt, strength: self.strength)
+        logger.info("Updating config: prompt=\(self.currentPrompt ?? "(none)"), strength=\(self.strength)")
         Task { try? await client.sendConfig(config) }
     }
 
@@ -100,15 +111,18 @@ final class StreamSession {
         do {
             try await client.connect()
             reconnectAttempts = 0
+            logger.info("Connected to StreamDiffusion server")
             updateConnectionState(.connected)
 
             let config = StreamConfig(prompt: currentPrompt, strength: strength)
             try await client.sendConfig(config)
+            logger.info("Initial config sent")
 
             startReceiveLoop()
             startCaptureLoop()
             startCanvasObservation()
         } catch {
+            logger.error("Connection failed: \(error.localizedDescription)")
             if !isStopped {
                 await attemptReconnect()
             }
@@ -118,22 +132,22 @@ final class StreamSession {
     private func attemptReconnect() async {
         guard !isStopped else { return }
         reconnectAttempts += 1
+        logger.warning("Reconnect attempt \(self.reconnectAttempts)/\(Self.maxReconnectAttempts)")
 
         if reconnectAttempts > Self.maxReconnectAttempts {
+            logger.error("Giving up after \(Self.maxReconnectAttempts) retries")
             updateConnectionState(.error("Connection lost after \(Self.maxReconnectAttempts) retries"))
             return
         }
 
         cancelAllTasks()
 
-        // Exponential backoff: 1s, 2s, 4s
         let delay = pow(2.0, Double(reconnectAttempts - 1))
         updateConnectionState(.connecting)
 
         try? await Task.sleep(for: .seconds(delay))
         guard !isStopped, !Task.isCancelled else { return }
 
-        // Create a fresh client for the new connection
         self.client = StreamWebSocketClient(url: url)
         await connectAndRun()
     }
@@ -141,32 +155,47 @@ final class StreamSession {
     // MARK: - Capture Loop
 
     private func startCaptureLoop() {
-        captureTask = Task { @MainActor [weak self] in
+        // Run on background thread. Only hop to MainActor for captureSnapshot()
+        // and resizeImage() which use UIGraphicsImageRenderer (main thread only).
+        // Task.sleep on background does NOT block the main thread.
+        captureTask = Task.detached { [weak self] in
             while !Task.isCancelled {
                 guard let self else { break }
 
-                let timeSinceLastChange = Date().timeIntervalSince(self.lastCanvasChangeTime)
-                let isInactive = timeSinceLastChange > Self.inactivityPauseInterval
+                let isStopped = await self.isStopped
+                if isStopped { break }
 
-                if isInactive && self.sentFinalFrame {
+                let timeSinceLastChange = await Date().timeIntervalSince(self.lastCanvasChangeTime)
+                let inactivityThreshold = await Self.inactivityPauseInterval
+                let isInactive = timeSinceLastChange > inactivityThreshold
+                let alreadySentFinal = await self.sentFinalFrame
+
+                if isInactive && alreadySentFinal {
                     try? await Task.sleep(for: .milliseconds(100))
                     continue
                 }
 
-                // captureSnapshot() and resizeImage() use UIGraphicsImageRenderer
-                // which requires the main thread — @MainActor ensures this.
-                if let snapshot = self.canvasViewModel.captureSnapshot() {
-                    if let resized = self.resizeImage(snapshot.image, to: CGSize(width: 512, height: 512)),
-                       let jpeg = resized.jpegData(compressionQuality: 0.7) {
-                        try? await self.client.sendFrame(jpeg)
+                // Capture + resize on main thread (UIGraphicsImageRenderer requirement)
+                let jpeg: Data? = await MainActor.run {
+                    guard let snapshot = self.canvasViewModel.captureSnapshot() else { return nil }
+                    guard let resized = self.resizeImage(snapshot.image, to: CGSize(width: 512, height: 512)) else { return nil }
+                    return resized.jpegData(compressionQuality: 0.7)
+                }
+
+                if let jpeg {
+                    try? await self.client.sendFrame(jpeg)
+                    let count = await self.incrementFramesSent()
+                    if count % 10 == 1 {
+                        logger.info("Capture: sent frame \(count) (\(jpeg.count) bytes)")
                     }
                 }
 
                 if isInactive {
-                    self.sentFinalFrame = true
+                    await MainActor.run { self.sentFinalFrame = true }
                 }
 
-                try? await Task.sleep(for: .milliseconds(Int(self.captureInterval * 1000)))
+                let interval = await self.captureInterval
+                try? await Task.sleep(for: .milliseconds(Int(interval * 1000)))
             }
         }
     }
@@ -174,12 +203,15 @@ final class StreamSession {
     // MARK: - Canvas Observation (for pause/resume)
 
     private func startCanvasObservation() {
-        canvasObservationTask = Task { @MainActor [weak self] in
+        canvasObservationTask = Task { [weak self] in
             guard let self else { return }
-            for await _ in self.canvasViewModel.canvasChanges {
+            let changes = await self.canvasViewModel.canvasChanges
+            for await _ in changes {
                 guard !Task.isCancelled else { return }
-                self.lastCanvasChangeTime = Date()
-                self.sentFinalFrame = false
+                await MainActor.run {
+                    self.lastCanvasChangeTime = Date()
+                    self.sentFinalFrame = false
+                }
             }
         }
     }
@@ -187,34 +219,56 @@ final class StreamSession {
     // MARK: - Receive Loop
 
     private func startReceiveLoop() {
-        receiveTask = Task { @MainActor [weak self] in
+        // Run on background thread. Only hop to MainActor for UI callbacks.
+        receiveTask = Task { [weak self] in
             guard let self else { return }
             let frames = await client.receivedFrames
             for await frameData in frames {
                 guard !Task.isCancelled else { break }
                 if let image = UIImage(data: frameData) {
-                    self.onImageReceived?(image)
+                    let count = await self.incrementFramesReceived()
+                    if count % 10 == 1 {
+                        logger.info("Receive: got frame \(count) (\(frameData.count) bytes)")
+                    }
+                    await MainActor.run {
+                        self.onImageReceived?(image)
+                    }
                 }
             }
             // Stream ended — attempt reconnection
-            if !Task.isCancelled, !self.isStopped {
+            let stopped = await self.isStopped
+            if !Task.isCancelled, !stopped {
+                logger.warning("Receive stream ended unexpectedly, attempting reconnect")
                 await self.attemptReconnect()
             }
         }
 
-        statusTask = Task { @MainActor [weak self] in
+        statusTask = Task { [weak self] in
             guard let self else { return }
             let statuses = await client.serverStatuses
             for await status in statuses {
                 guard !Task.isCancelled else { break }
                 if status.type == "status" && status.status == "error" {
-                    self.updateConnectionState(.error(status.message ?? "Server error"))
+                    logger.error("Server status error: \(status.message ?? "unknown")")
+                    await MainActor.run {
+                        self.updateConnectionState(.error(status.message ?? "Server error"))
+                    }
                 }
             }
         }
     }
 
     // MARK: - Private
+
+    private func incrementFramesSent() -> Int {
+        framesSent += 1
+        return framesSent
+    }
+
+    private func incrementFramesReceived() -> Int {
+        framesReceived += 1
+        return framesReceived
+    }
 
     private func cancelAllTasks() {
         captureTask?.cancel()
@@ -237,6 +291,7 @@ final class StreamSession {
     }
 
     private func updateConnectionState(_ state: ConnectionState) {
+        logger.info("Connection state: \(String(describing: state))")
         connectionState = state
         onConnectionStateChanged?(state)
     }

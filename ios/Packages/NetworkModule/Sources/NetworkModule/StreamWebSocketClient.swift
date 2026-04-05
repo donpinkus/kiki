@@ -1,4 +1,7 @@
 import Foundation
+import os
+
+private let logger = Logger(subsystem: "com.kiki.app", category: "StreamWebSocket")
 
 /// WebSocket client for real-time streaming communication with the StreamDiffusion backend.
 /// Uses native `URLSessionWebSocketTask` — no third-party dependencies.
@@ -29,11 +32,9 @@ public actor StreamWebSocketClient {
 
     public private(set) var state: State = .disconnected
 
-    // Outbound stream of received image frames (binary JPEG data)
     private let framesContinuation: AsyncStream<Data>.Continuation
     public let receivedFrames: AsyncStream<Data>
 
-    // Status updates from server
     private let statusContinuation: AsyncStream<ServerStatus>.Continuation
     public let serverStatuses: AsyncStream<ServerStatus>
 
@@ -57,6 +58,7 @@ public actor StreamWebSocketClient {
     public func connect() async throws {
         guard state == .disconnected else { return }
         state = .connecting
+        logger.info("Connecting to \(self.url.absoluteString)")
 
         let wsTask = session.webSocketTask(with: url)
         self.task = wsTask
@@ -66,22 +68,25 @@ public actor StreamWebSocketClient {
         let message = try await wsTask.receive()
         switch message {
         case .string(let text):
+            logger.info("Initial message: \(text)")
             if let data = text.data(using: .utf8),
                let status = try? JSONDecoder().decode(ServerStatus.self, from: data) {
                 statusContinuation.yield(status)
             }
-        case .data:
-            break
+        case .data(let data):
+            logger.info("Initial binary message: \(data.count) bytes")
         @unknown default:
             break
         }
 
         state = .connected
+        logger.info("Connected successfully")
         startReceiveLoop()
     }
 
     public func disconnect() {
         guard state == .connected || state == .connecting else { return }
+        logger.info("Disconnecting")
         state = .disconnecting
 
         receiveLoopTask?.cancel()
@@ -97,10 +102,14 @@ public actor StreamWebSocketClient {
     // MARK: - Sending
 
     public func sendConfig(_ config: StreamConfig) async throws {
-        guard state == .connected, let task else { return }
+        guard state == .connected, let task else {
+            logger.warning("sendConfig skipped: state=\(String(describing: self.state))")
+            return
+        }
         let data = try JSONEncoder().encode(config)
         let text = String(data: data, encoding: .utf8) ?? "{}"
         try await task.send(.string(text))
+        logger.info("Config sent: \(text)")
     }
 
     public func sendFrame(_ jpegData: Data) async throws {
@@ -120,13 +129,12 @@ public actor StreamWebSocketClient {
 
                     switch message {
                     case .data(let data):
-                        // Binary frame: generated image JPEG
                         await self.framesContinuation.yield(data)
 
                     case .string(let text):
-                        // Text frame: status/error JSON
                         if let data = text.data(using: .utf8),
                            let status = try? JSONDecoder().decode(ServerStatus.self, from: data) {
+                            logger.info("Server status: \(status.status) \(status.message ?? "")")
                             await self.statusContinuation.yield(status)
                         }
 
@@ -134,8 +142,8 @@ public actor StreamWebSocketClient {
                         break
                     }
                 } catch {
-                    // Connection closed or error — exit loop
                     if !Task.isCancelled {
+                        logger.error("Receive error: \(error.localizedDescription)")
                         await self.handleDisconnect()
                     }
                     break
@@ -145,6 +153,7 @@ public actor StreamWebSocketClient {
     }
 
     private func handleDisconnect() {
+        logger.warning("Unexpected disconnect")
         state = .disconnected
         task = nil
         receiveLoopTask = nil

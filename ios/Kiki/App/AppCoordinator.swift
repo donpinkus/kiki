@@ -1,8 +1,11 @@
 import SwiftUI
 import SwiftData
+import os
 import CanvasModule
 import NetworkModule
 import ResultModule
+
+private let streamLog = Logger(subsystem: "com.kiki.app", category: "StreamCoordinator")
 
 enum DrawingTool: String, CaseIterable {
     case brush
@@ -488,11 +491,11 @@ final class AppCoordinator {
         isSwitchingEngine = true
         defer { isSwitchingEngine = false }
 
+        streamLog.info("Engine switch: \(self.generationEngine.rawValue)")
         switch generationEngine {
         case .standard:
             stopStream()
         case .stream:
-            // Cancel any in-flight standard generation
             generationTask?.cancel()
             isGenerating = false
             startStream()
@@ -500,27 +503,32 @@ final class AppCoordinator {
     }
 
     private func startStream() {
-        // Build WebSocket URL from backend URL
         var components = URLComponents(url: backendURL, resolvingAgainstBaseURL: false)!
         components.scheme = backendURL.scheme == "https" ? "wss" : "ws"
         components.path = "/v1/stream"
-        guard let wsURL = components.url else { return }
+        guard let wsURL = components.url else {
+            streamLog.error("Failed to construct WebSocket URL from \(self.backendURL.absoluteString)")
+            return
+        }
+
+        streamLog.info("Starting stream to \(wsURL.absoluteString)")
 
         let session = StreamSession(url: wsURL, canvasViewModel: canvasViewModel)
         session.captureInterval = 1.0 / streamCaptureFPS
 
         session.onImageReceived = { [weak self] image in
             guard let self else { return }
+            streamLog.debug("Image received: \(Int(image.size.width))x\(Int(image.size.height))")
             self.lastSuccessfulImage = image
             self.resultState = .streaming(image: image)
         }
 
         session.onConnectionStateChanged = { [weak self] state in
             guard let self else { return }
+            streamLog.info("Connection state changed: \(String(describing: state))")
             self.streamConnectionState = state
             if case .error(let message) = state {
                 self.generationError = message
-                // Fall back to standard mode (isSwitchingEngine guard prevents recursive didSet)
                 self.generationEngine = .standard
             }
         }
@@ -533,11 +541,11 @@ final class AppCoordinator {
     }
 
     private func stopStream() {
+        streamLog.info("Stopping stream")
         streamSession?.stop()
         streamSession = nil
         streamConnectionState = .disconnected
 
-        // Preserve last image in result pane
         if let image = lastSuccessfulImage {
             resultState = .preview(image: image)
         }
