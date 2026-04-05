@@ -20,6 +20,10 @@ echo "==> Installing StreamDiffusion dependencies..."
 
 # The base image (runpod/comfyui:latest) already has PyTorch + CUDA.
 # Install additional deps that aren't in the base image.
+# Upgrade huggingface_hub first — the base image has an old version that
+# conflicts with newer diffusers (missing hf_cache_home export).
+$PIP install -q --no-cache-dir "huggingface_hub>=0.25.0" 2>&1 | tail -3
+
 $PIP install -q --no-cache-dir \
     "diffusers>=0.25.0" \
     "transformers>=4.36.0" \
