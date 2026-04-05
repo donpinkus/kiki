@@ -10,15 +10,19 @@ struct AdvancedParametersPanel: View {
 
         NavigationStack {
             Form {
-                generationModeSection
-                controlNetSection
-                samplerSection
-                modelSection
-                negativePromptSection
-                seedSection
+                if coordinator.generationEngine == .stream {
+                    streamParametersSection
+                } else {
+                    generationModeSection
+                    controlNetSection
+                    samplerSection
+                    modelSection
+                    negativePromptSection
+                    seedSection
 
-                Section("Debug") {
-                    Toggle("Compare without ControlNet", isOn: $coordinator.compareWithoutControlNet)
+                    Section("Debug") {
+                        Toggle("Compare without ControlNet", isOn: $coordinator.compareWithoutControlNet)
+                    }
                 }
 
                 Section {
@@ -26,12 +30,9 @@ struct AdvancedParametersPanel: View {
                         coordinator.advancedParameters = AdvancedParameters()
                         coordinator.isSeedLocked = false
                         coordinator.compareWithoutControlNet = false
+                        coordinator.streamStrength = 0.5
+                        coordinator.streamCaptureFPS = 7
                     }
-                    .disabled(
-                        coordinator.advancedParameters.isDefault
-                        && !coordinator.isSeedLocked
-                        && !coordinator.compareWithoutControlNet
-                    )
                 }
             }
             .navigationTitle("Advanced")
@@ -39,7 +40,37 @@ struct AdvancedParametersPanel: View {
         }
     }
 
-    // MARK: - Sections
+    // MARK: - Stream Sections
+
+    private var streamParametersSection: some View {
+        @Bindable var coordinator = coordinator
+
+        return Section("Stream Settings") {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Strength")
+                        .font(.subheadline)
+                    Spacer()
+                    Text(String(format: "%.2f", coordinator.streamStrength))
+                        .font(.subheadline.monospacedDigit())
+                }
+                Slider(value: $coordinator.streamStrength, in: 0.3...0.8)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Capture FPS")
+                        .font(.subheadline)
+                    Spacer()
+                    Text("\(Int(coordinator.streamCaptureFPS))")
+                        .font(.subheadline.monospacedDigit())
+                }
+                Slider(value: $coordinator.streamCaptureFPS, in: 3...10, step: 1)
+            }
+        }
+    }
+
+    // MARK: - Standard Sections
 
     private var generationModeSection: some View {
         @Bindable var coordinator = coordinator

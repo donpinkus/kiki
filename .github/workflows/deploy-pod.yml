@@ -86,7 +86,7 @@ jobs:
             # resp=$(curl -sf "$API_URL" \
             #   -H 'Content-Type: application/json' \
             #   -d "{
-            #     \"query\": \"mutation { podRentInterruptable(input: { name: \\\"kiki-comfyui\\\", imageName: \\\"runpod/comfyui:latest\\\", gpuTypeId: \\\"${gpu}\\\", gpuCount: 1, bidPerGpu: ${bid}, volumeInGb: 0, containerDiskInGb: 20, networkVolumeId: \\\"${vol}\\\", volumeMountPath: \\\"/workspace\\\", ports: \\\"8188/http,22/tcp\\\", dataCenterId: \\\"${dc}\\\", startSsh: true }) { id } }\"
+            #     \"query\": \"mutation { podRentInterruptable(input: { name: \\\"kiki-comfyui\\\", imageName: \\\"runpod/comfyui:latest\\\", gpuTypeId: \\\"${gpu}\\\", gpuCount: 1, bidPerGpu: ${bid}, volumeInGb: 0, containerDiskInGb: 20, networkVolumeId: \\\"${vol}\\\", volumeMountPath: \\\"/workspace\\\", ports: \\\"8188/http,8765/http,22/tcp\\\", dataCenterId: \\\"${dc}\\\", startSsh: true }) { id } }\"
             #   }" || true)
             #
             # POD_ID=$(echo "$resp" | jq -r '.data.podRentInterruptable.id // empty')
@@ -106,7 +106,7 @@ jobs:
             resp=$(curl -sf "$API_URL" \
               -H 'Content-Type: application/json' \
               -d "{
-                \"query\": \"mutation { podFindAndDeployOnDemand(input: { name: \\\"kiki-comfyui\\\", imageName: \\\"runpod/comfyui:latest\\\", gpuTypeId: \\\"${gpu}\\\", gpuCount: 1, volumeInGb: 0, containerDiskInGb: 20, networkVolumeId: \\\"${vol}\\\", volumeMountPath: \\\"/workspace\\\", ports: \\\"8188/http,22/tcp\\\", dataCenterId: \\\"${dc}\\\", startSsh: true }) { id } }\"
+                \"query\": \"mutation { podFindAndDeployOnDemand(input: { name: \\\"kiki-comfyui\\\", imageName: \\\"runpod/comfyui:latest\\\", gpuTypeId: \\\"${gpu}\\\", gpuCount: 1, volumeInGb: 0, containerDiskInGb: 20, networkVolumeId: \\\"${vol}\\\", volumeMountPath: \\\"/workspace\\\", ports: \\\"8188/http,8765/http,22/tcp\\\", dataCenterId: \\\"${dc}\\\", startSsh: true }) { id } }\"
               }" || true)
 
             POD_ID=$(echo "$resp" | jq -r '.data.podFindAndDeployOnDemand.id // empty')
@@ -285,6 +285,7 @@ jobs:
 
           echo "pod_id=$POD_ID" >> "$GITHUB_OUTPUT"
           echo "proxy_url=https://${POD_ID}-8188.proxy.runpod.net" >> "$GITHUB_OUTPUT"
+          echo "streamdiffusion_url=wss://${POD_ID}-8765.proxy.runpod.net/ws" >> "$GITHUB_OUTPUT"
           echo "datacenter=$USED_DC" >> "$GITHUB_OUTPUT"
           echo "new_volume=$NEW_VOLUME_CREATED" >> "$GITHUB_OUTPUT"
 
@@ -422,6 +423,7 @@ jobs:
           echo "| **Pod ID** | \`$POD_ID\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| **Datacenter** | $DATACENTER |" >> "$GITHUB_STEP_SUMMARY"
           echo "| **ComfyUI URL** | $PROXY_URL |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **StreamDiffusion URL** | wss://${POD_ID}-8765.proxy.runpod.net/ws |" >> "$GITHUB_STEP_SUMMARY"
           if [ "$NEW_VOL" = "true" ]; then
             echo "" >> "$GITHUB_STEP_SUMMARY"
             echo "> **Note:** A new network volume was created in $DATACENTER because no GPU was available in existing datacenters. This adds ~\$2/month storage cost." >> "$GITHUB_STEP_SUMMARY"

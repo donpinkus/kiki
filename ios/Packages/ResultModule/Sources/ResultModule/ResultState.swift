@@ -39,10 +39,16 @@ public enum ResultState {
     case empty
     case generating(progress: GenerationProgress, previousImage: UIImage?)
     case preview(image: UIImage)
+    case streaming(image: UIImage)
     case error(message: String, previousImage: UIImage?)
 
     public var isPreview: Bool {
         if case .preview = self { return true }
+        return false
+    }
+
+    public var isStreaming: Bool {
+        if case .streaming = self { return true }
         return false
     }
 }

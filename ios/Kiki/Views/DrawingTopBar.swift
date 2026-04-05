@@ -20,7 +20,14 @@ struct DrawingTopBar: View {
 
             Spacer()
 
-            // MARK: Center — Style, Prompt, Generate, Settings
+            // MARK: Center — Engine Toggle, Style, Prompt, Generate, Settings
+            Picker("Engine", selection: $coordinator.generationEngine) {
+                Text("Standard").tag(GenerationEngine.standard)
+                Label("Stream", systemImage: "bolt.fill").tag(GenerationEngine.stream)
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 170)
+
             Button {
                 coordinator.showStylePicker = true
             } label: {
@@ -37,45 +44,51 @@ struct DrawingTopBar: View {
                 .font(.subheadline)
                 .frame(minWidth: 120, maxWidth: 400)
 
-            Button {
-                coordinator.generate()
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "apple.intelligence")
-                        .font(.system(size: 14, weight: .semibold))
-                        .rotationEffect(.degrees(isSpinning ? 360 : 0))
-                    Text(coordinator.isGenerating ? "Generating…" : "Generate")
-                        .font(.subheadline.weight(.medium))
-                }
-                .foregroundStyle(.white)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 8)
-                .background(
-                    coordinator.canvasViewModel.isEmpty || coordinator.isGenerating
-                        ? Color.accentColor.opacity(0.4)
-                        : Color.accentColor,
-                    in: Capsule()
-                )
-                .overlay(alignment: .topTrailing) {
-                    if coordinator.hasUnsavedChanges && !coordinator.isGenerating {
-                        Circle()
-                            .fill(.orange)
-                            .frame(width: 8, height: 8)
-                            .offset(x: 2, y: -2)
+            if coordinator.generationEngine == .standard {
+                // Standard mode: Generate button
+                Button {
+                    coordinator.generate()
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "apple.intelligence")
+                            .font(.system(size: 14, weight: .semibold))
+                            .rotationEffect(.degrees(isSpinning ? 360 : 0))
+                        Text(coordinator.isGenerating ? "Generating…" : "Generate")
+                            .font(.subheadline.weight(.medium))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(
+                        coordinator.canvasViewModel.isEmpty || coordinator.isGenerating
+                            ? Color.accentColor.opacity(0.4)
+                            : Color.accentColor,
+                        in: Capsule()
+                    )
+                    .overlay(alignment: .topTrailing) {
+                        if coordinator.hasUnsavedChanges && !coordinator.isGenerating {
+                            Circle()
+                                .fill(.orange)
+                                .frame(width: 8, height: 8)
+                                .offset(x: 2, y: -2)
+                        }
                     }
                 }
-            }
-            .disabled(coordinator.canvasViewModel.isEmpty || coordinator.isGenerating)
-            .onChange(of: coordinator.isGenerating) { _, generating in
-                if generating {
-                    withAnimation(.linear(duration: 2).repeatForever(autoreverses: false)) {
-                        isSpinning = true
-                    }
-                } else {
-                    withAnimation(.default) {
-                        isSpinning = false
+                .disabled(coordinator.canvasViewModel.isEmpty || coordinator.isGenerating)
+                .onChange(of: coordinator.isGenerating) { _, generating in
+                    if generating {
+                        withAnimation(.linear(duration: 2).repeatForever(autoreverses: false)) {
+                            isSpinning = true
+                        }
+                    } else {
+                        withAnimation(.default) {
+                            isSpinning = false
+                        }
                     }
                 }
+            } else {
+                // Stream mode: connection status indicator
+                streamStatusIndicator
             }
 
             Button {
@@ -121,6 +134,39 @@ struct DrawingTopBar: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
         .background(.bar)
+    }
+
+    // MARK: - Stream Status
+
+    private var streamStatusIndicator: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(streamStatusColor)
+                .frame(width: 8, height: 8)
+            Text(streamStatusLabel)
+                .font(.subheadline.weight(.medium))
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+    }
+
+    private var streamStatusColor: Color {
+        switch coordinator.streamConnectionState {
+        case .connected: return .green
+        case .connecting: return .orange
+        case .disconnected: return .gray
+        case .error: return .red
+        }
+    }
+
+    private var streamStatusLabel: String {
+        switch coordinator.streamConnectionState {
+        case .connected: return "Streaming"
+        case .connecting: return "Connecting…"
+        case .disconnected: return "Disconnected"
+        case .error: return "Error"
+        }
     }
 
     // MARK: - Helpers

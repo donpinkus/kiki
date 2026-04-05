@@ -37,6 +37,9 @@ public struct ResultView: View {
             case .preview(let image):
                 imageView(image)
 
+            case .streaming(let image):
+                streamingView(image)
+
             case .error(let message, let previousImage):
                 errorView(message: message, previousImage: previousImage)
             }
@@ -99,6 +102,20 @@ public struct ResultView: View {
                 .onAppear {
                     showToastMessage(message)
                 }
+        }
+    }
+
+    private func streamingView(_ image: UIImage) -> some View {
+        ZStack(alignment: .topTrailing) {
+            imageView(image)
+
+            Text("LIVE")
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(.red.opacity(0.85), in: Capsule())
+                .padding(12)
         }
     }
 

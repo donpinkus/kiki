@@ -42,10 +42,16 @@ final class AppCoordinator {
         didSet { applyTool() }
     }
     var promptText = "" {
-        didSet { if !isSuppressingObservation { scheduleSave() } }
+        didSet {
+            if !isSuppressingObservation { scheduleSave() }
+            sendStreamConfigUpdate()
+        }
     }
     var selectedStyle: PromptStyle = .default {
-        didSet { if !isSuppressingObservation { scheduleSave() } }
+        didSet {
+            if !isSuppressingObservation { scheduleSave() }
+            sendStreamConfigUpdate()
+        }
     }
     var showStylePicker = false
     var resultState: ResultState = .empty
@@ -84,6 +90,13 @@ final class AppCoordinator {
         didSet { UserDefaults.standard.set(triggerMode.rawValue, forKey: "generationTriggerMode") }
     }
 
+    var generationEngine: GenerationEngine = .standard {
+        didSet {
+            UserDefaults.standard.set(generationEngine.rawValue, forKey: "generationEngine")
+            handleEngineSwitch()
+        }
+    }
+
     /// True when the canvas has changed since the last generation started.
     private(set) var hasUnsavedChanges = false
 
@@ -91,6 +104,22 @@ final class AppCoordinator {
 
     let canvasViewModel = CanvasViewModel()
     private let pipeline: GenerationPipeline
+    private let backendURL: URL
+
+    // MARK: - Stream State
+
+    private var streamSession: StreamSession?
+    private(set) var streamConnectionState: StreamSession.ConnectionState = .disconnected
+
+    /// Denoising strength for stream mode (exposed to UI).
+    var streamStrength: Double = 0.5 {
+        didSet { streamSession?.updateConfig(prompt: composedPrompt, strength: streamStrength) }
+    }
+
+    /// Capture FPS for stream mode (exposed to UI).
+    var streamCaptureFPS: Double = 7 {
+        didSet { streamSession?.captureInterval = 1.0 / streamCaptureFPS }
+    }
 
     // MARK: - Generation State
 
@@ -110,12 +139,17 @@ final class AppCoordinator {
         backendURL: URL = URL(string: "https://kiki-backend-production-eb81.up.railway.app")!
     ) {
         self.modelContext = modelContext
+        self.backendURL = backendURL
         let apiClient = APIClient(baseURL: backendURL)
         self.pipeline = GenerationPipeline(apiClient: apiClient)
 
         if let stored = UserDefaults.standard.string(forKey: "generationTriggerMode"),
            let mode = GenerationTriggerMode(rawValue: stored) {
             self.triggerMode = mode
+        }
+        if let stored = UserDefaults.standard.string(forKey: "generationEngine"),
+           let engine = GenerationEngine(rawValue: stored) {
+            self.generationEngine = engine
         }
         if let stored = UserDefaults.standard.string(forKey: "drawingLayout"),
            let layout = DrawingLayout(rawValue: stored) {
@@ -427,6 +461,9 @@ final class AppCoordinator {
                 // Persist canvas changes (debounced)
                 scheduleSave()
 
+                // In stream mode, the capture loop handles generation — skip auto-trigger
+                guard generationEngine == .standard else { continue }
+
                 // In manual mode, just mark dirty — don't auto-generate
                 guard triggerMode == .auto else { continue }
 
@@ -441,6 +478,70 @@ final class AppCoordinator {
                 }
             }
         }
+    }
+
+    // MARK: - Stream Mode
+
+    private func handleEngineSwitch() {
+        switch generationEngine {
+        case .standard:
+            stopStream()
+        case .stream:
+            // Cancel any in-flight standard generation
+            generationTask?.cancel()
+            isGenerating = false
+            startStream()
+        }
+    }
+
+    private func startStream() {
+        // Build WebSocket URL from backend URL
+        var components = URLComponents(url: backendURL, resolvingAgainstBaseURL: false)!
+        components.scheme = backendURL.scheme == "https" ? "wss" : "ws"
+        components.path = "/v1/stream"
+        guard let wsURL = components.url else { return }
+
+        let session = StreamSession(url: wsURL, canvasViewModel: canvasViewModel)
+        session.captureInterval = 1.0 / streamCaptureFPS
+
+        session.onImageReceived = { [weak self] image in
+            guard let self else { return }
+            self.lastSuccessfulImage = image
+            self.resultState = .streaming(image: image)
+        }
+
+        session.onConnectionStateChanged = { [weak self] state in
+            guard let self else { return }
+            self.streamConnectionState = state
+            if case .error(let message) = state {
+                self.generationError = message
+                // Fall back to standard mode on connection loss
+                self.generationEngine = .standard
+            }
+        }
+
+        self.streamSession = session
+
+        Task {
+            await session.start(prompt: composedPrompt, strength: streamStrength)
+        }
+    }
+
+    private func stopStream() {
+        streamSession?.stop()
+        streamSession = nil
+        streamConnectionState = .disconnected
+
+        // Preserve last image in result pane
+        if let image = lastSuccessfulImage {
+            resultState = .preview(image: image)
+        }
+    }
+
+    /// Send updated prompt/style to the stream session when prompt changes in stream mode.
+    func sendStreamConfigUpdate() {
+        guard generationEngine == .stream else { return }
+        streamSession?.updateConfig(prompt: composedPrompt, strength: streamStrength)
     }
 
     // MARK: - Private

@@ -71,7 +71,7 @@ echo "==> Creating pod with H100 80GB SXM..."
 CREATE_RESPONSE=$(curl -s "$API_URL" \
   -H 'Content-Type: application/json' \
   -d "{
-    \"query\": \"mutation { podFindAndDeployOnDemand(input: { name: \\\"kiki-comfyui\\\", imageName: \\\"runpod/comfyui:latest\\\", gpuTypeId: \\\"NVIDIA H100 80GB HBM3\\\", gpuCount: 1, volumeInGb: 0, containerDiskInGb: 20, networkVolumeId: \\\"${VOLUME_ID}\\\", volumeMountPath: \\\"/workspace\\\", ports: \\\"8188/http,22/tcp\\\", dataCenterId: \\\"${DATACENTER}\\\", startSsh: true }) { id machineId imageName desiredStatus } }\"
+    \"query\": \"mutation { podFindAndDeployOnDemand(input: { name: \\\"kiki-comfyui\\\", imageName: \\\"runpod/comfyui:latest\\\", gpuTypeId: \\\"NVIDIA H100 80GB HBM3\\\", gpuCount: 1, volumeInGb: 0, containerDiskInGb: 20, networkVolumeId: \\\"${VOLUME_ID}\\\", volumeMountPath: \\\"/workspace\\\", ports: \\\"8188/http,8765/http,22/tcp\\\", dataCenterId: \\\"${DATACENTER}\\\", startSsh: true }) { id machineId imageName desiredStatus } }\"
   }")
 
 POD_ID=$(echo "$CREATE_RESPONSE" | jq -r '.data.podFindAndDeployOnDemand.id // empty')
@@ -86,7 +86,7 @@ if [ -z "$POD_ID" ]; then
   CREATE_RESPONSE=$(curl -s "$API_URL" \
     -H 'Content-Type: application/json' \
     -d "{
-      \"query\": \"mutation { podFindAndDeployOnDemand(input: { name: \\\"kiki-comfyui\\\", imageName: \\\"runpod/comfyui:latest\\\", gpuTypeId: \\\"NVIDIA H100 PCIe\\\", gpuCount: 1, volumeInGb: 0, containerDiskInGb: 20, networkVolumeId: \\\"${VOLUME_ID}\\\", volumeMountPath: \\\"/workspace\\\", ports: \\\"8188/http,22/tcp\\\", dataCenterId: \\\"${DATACENTER}\\\", startSsh: true }) { id machineId imageName desiredStatus } }\"
+      \"query\": \"mutation { podFindAndDeployOnDemand(input: { name: \\\"kiki-comfyui\\\", imageName: \\\"runpod/comfyui:latest\\\", gpuTypeId: \\\"NVIDIA H100 PCIe\\\", gpuCount: 1, volumeInGb: 0, containerDiskInGb: 20, networkVolumeId: \\\"${VOLUME_ID}\\\", volumeMountPath: \\\"/workspace\\\", ports: \\\"8188/http,8765/http,22/tcp\\\", dataCenterId: \\\"${DATACENTER}\\\", startSsh: true }) { id machineId imageName desiredStatus } }\"
     }")
 
   POD_ID=$(echo "$CREATE_RESPONSE" | jq -r '.data.podFindAndDeployOnDemand.id // empty')
@@ -96,7 +96,7 @@ if [ -z "$POD_ID" ]; then
     CREATE_RESPONSE=$(curl -s "$API_URL" \
       -H 'Content-Type: application/json' \
       -d "{
-        \"query\": \"mutation { podFindAndDeployOnDemand(input: { name: \\\"kiki-comfyui\\\", imageName: \\\"runpod/comfyui:latest\\\", gpuTypeId: \\\"NVIDIA A100 80GB PCIe\\\", gpuCount: 1, volumeInGb: 0, containerDiskInGb: 20, networkVolumeId: \\\"${VOLUME_ID}\\\", volumeMountPath: \\\"/workspace\\\", ports: \\\"8188/http,22/tcp\\\", dataCenterId: \\\"${DATACENTER}\\\", startSsh: true }) { id machineId imageName desiredStatus } }\"
+        \"query\": \"mutation { podFindAndDeployOnDemand(input: { name: \\\"kiki-comfyui\\\", imageName: \\\"runpod/comfyui:latest\\\", gpuTypeId: \\\"NVIDIA A100 80GB PCIe\\\", gpuCount: 1, volumeInGb: 0, containerDiskInGb: 20, networkVolumeId: \\\"${VOLUME_ID}\\\", volumeMountPath: \\\"/workspace\\\", ports: \\\"8188/http,8765/http,22/tcp\\\", dataCenterId: \\\"${DATACENTER}\\\", startSsh: true }) { id machineId imageName desiredStatus } }\"
       }")
 
     POD_ID=$(echo "$CREATE_RESPONSE" | jq -r '.data.podFindAndDeployOnDemand.id // empty')

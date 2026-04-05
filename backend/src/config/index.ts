@@ -2,6 +2,7 @@ export interface AppConfig {
   readonly PORT: number;
   readonly HOST: string;
   readonly COMFYUI_URL: string;
+  readonly STREAMDIFFUSION_URL: string;
   readonly NODE_ENV: 'development' | 'production' | 'test';
   readonly LOG_LEVEL: 'fatal' | 'error' | 'warn' | 'info' | 'debug' | 'trace';
 }
@@ -44,6 +45,7 @@ function validateConfig(): AppConfig {
     PORT: port,
     HOST: process.env['HOST'] ?? '0.0.0.0',
     COMFYUI_URL: comfyuiUrl,
+    STREAMDIFFUSION_URL: process.env['STREAMDIFFUSION_URL'] ?? '',
     NODE_ENV: nodeEnv,
     LOG_LEVEL: logLevel,
   };

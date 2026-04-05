@@ -1,0 +1,168 @@
+name: Deploy StreamDiffusion
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Find running pod
+        id: find_pod
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+        run: |
+          set -euo pipefail
+          API_URL="https://api.runpod.io/graphql?api_key=${RUNPOD_API_KEY}"
+
+          echo "Finding running kiki pod..."
+          PODS=$(curl -sf "$API_URL" \
+            -H 'Content-Type: application/json' \
+            -d '{"query": "query { myself { pods { id name desiredStatus runtime { uptimeInSeconds ports { ip isIpPublic privatePort publicPort type } } } } }"}')
+
+          # Find a running pod named kiki-comfyui
+          POD_ID=$(echo "$PODS" | jq -r '
+            .data.myself.pods[]
+            | select(.name == "kiki-comfyui" and .desiredStatus == "RUNNING")
+            | .id' | head -1)
+
+          if [ -z "$POD_ID" ] || [ "$POD_ID" = "null" ]; then
+            echo "::error::No running kiki-comfyui pod found. Run 'Deploy RunPod' first."
+            echo ""
+            echo "Available pods:"
+            echo "$PODS" | jq '.data.myself.pods[] | {id, name, status: .desiredStatus}'
+            exit 1
+          fi
+
+          echo "Found pod: $POD_ID"
+
+          # Extract SSH info
+          SSH_IP=$(echo "$PODS" | jq -r "
+            .data.myself.pods[]
+            | select(.id == \"$POD_ID\")
+            | .runtime.ports[]
+            | select(.privatePort == 22)
+            | .ip")
+          SSH_PORT=$(echo "$PODS" | jq -r "
+            .data.myself.pods[]
+            | select(.id == \"$POD_ID\")
+            | .runtime.ports[]
+            | select(.privatePort == 22)
+            | .publicPort")
+
+          if [ -z "$SSH_IP" ] || [ "$SSH_IP" = "null" ]; then
+            echo "::error::Pod $POD_ID has no SSH info. Is it fully booted?"
+            exit 1
+          fi
+
+          echo "SSH: $SSH_IP:$SSH_PORT"
+          echo "pod_id=$POD_ID" >> "$GITHUB_OUTPUT"
+          echo "ssh_ip=$SSH_IP" >> "$GITHUB_OUTPUT"
+          echo "ssh_port=$SSH_PORT" >> "$GITHUB_OUTPUT"
+          echo "streamdiffusion_url=wss://${POD_ID}-8765.proxy.runpod.net/ws" >> "$GITHUB_OUTPUT"
+          echo "health_url=https://${POD_ID}-8765.proxy.runpod.net/health" >> "$GITHUB_OUTPUT"
+
+      - name: Set up StreamDiffusion via SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.RUNPOD_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          SSH_IP="${{ steps.find_pod.outputs.ssh_ip }}"
+          SSH_PORT="${{ steps.find_pod.outputs.ssh_port }}"
+
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/runpod_key
+          chmod 600 ~/.ssh/runpod_key
+
+          SSH_CMD="ssh -i ~/.ssh/runpod_key -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -p $SSH_PORT root@$SSH_IP"
+          SCP_CMD="scp -i ~/.ssh/runpod_key -o StrictHostKeyChecking=no -P $SSH_PORT"
+
+          echo "Waiting for SSH..."
+          SSH_CONNECTED=false
+          for i in $(seq 1 12); do
+            if $SSH_CMD "echo ok" 2>/dev/null; then
+              echo "SSH connected!"
+              SSH_CONNECTED=true
+              break
+            fi
+            echo "  SSH attempt ${i}/12..."
+            sleep 5
+          done
+
+          if [ "$SSH_CONNECTED" != "true" ]; then
+            echo "::error::Failed to connect via SSH after 1 minute"
+            exit 1
+          fi
+
+          # Copy setup script
+          $SCP_CMD scripts/setup-streamdiffusion.sh root@"$SSH_IP":/tmp/setup-streamdiffusion.sh
+
+          # Copy server files
+          $SSH_CMD "rm -rf /tmp/streamdiffusion-server && mkdir -p /tmp/streamdiffusion-server"
+          $SCP_CMD streamdiffusion-server/server.py root@"$SSH_IP":/tmp/streamdiffusion-server/
+          $SCP_CMD streamdiffusion-server/pipeline.py root@"$SSH_IP":/tmp/streamdiffusion-server/
+          $SCP_CMD streamdiffusion-server/config.py root@"$SSH_IP":/tmp/streamdiffusion-server/
+          $SCP_CMD streamdiffusion-server/requirements.txt root@"$SSH_IP":/tmp/streamdiffusion-server/
+
+          # Run setup
+          $SSH_CMD "chmod +x /tmp/setup-streamdiffusion.sh && /tmp/setup-streamdiffusion.sh"
+
+      - name: Wait for StreamDiffusion readiness via proxy
+        run: |
+          HEALTH_URL="${{ steps.find_pod.outputs.health_url }}"
+          echo "Polling $HEALTH_URL ..."
+          for i in $(seq 1 30); do
+            RESP=$(curl -s --max-time 10 "$HEALTH_URL" 2>/dev/null || echo "")
+            STATUS=$(echo "$RESP" | jq -r '.status // empty' 2>/dev/null || echo "")
+            if [ "$STATUS" = "ok" ]; then
+              echo "StreamDiffusion is live via proxy!"
+              echo "$RESP" | jq .
+              break
+            fi
+            echo "  Attempt ${i}/30 (status: ${STATUS:-unreachable})"
+            sleep 10
+          done
+
+      - name: Update Railway STREAMDIFFUSION_URL
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          PROJECT_ID="c651eed9-55bb-464b-98f3-6d8369565740"
+          ENVIRONMENT_ID="4d26f403-75b1-4177-a198-282cccc311b4"
+          SERVICE_ID="bbf5c42d-7020-41a1-924b-a9c24ac49a88"
+          STREAMDIFFUSION_URL="${{ steps.find_pod.outputs.streamdiffusion_url }}"
+
+          RESPONSE=$(curl -sf "https://backboard.railway.app/graphql/v2" \
+            -H "Authorization: Bearer ${RAILWAY_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"query\": \"mutation { variableUpsert(input: { projectId: \\\"${PROJECT_ID}\\\", environmentId: \\\"${ENVIRONMENT_ID}\\\", serviceId: \\\"${SERVICE_ID}\\\", name: \\\"STREAMDIFFUSION_URL\\\", value: \\\"${STREAMDIFFUSION_URL}\\\" }) }\"
+            }")
+          echo "Railway STREAMDIFFUSION_URL updated to $STREAMDIFFUSION_URL"
+
+          # Redeploy service so it picks up the new env var
+          REDEPLOY=$(curl -sf "https://backboard.railway.app/graphql/v2" \
+            -H "Authorization: Bearer ${RAILWAY_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"query\": \"mutation { serviceInstanceRedeploy(environmentId: \\\"${ENVIRONMENT_ID}\\\", serviceId: \\\"${SERVICE_ID}\\\") }\"
+            }")
+          echo "Railway service redeployed"
+
+      - name: Summary
+        if: always()
+        run: |
+          POD_ID="${{ steps.find_pod.outputs.pod_id }}"
+          SD_URL="${{ steps.find_pod.outputs.streamdiffusion_url }}"
+          HEALTH_URL="${{ steps.find_pod.outputs.health_url }}"
+
+          echo "## StreamDiffusion Deployed" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| | |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Pod ID** | \`$POD_ID\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **WebSocket URL** | \`$SD_URL\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Health Check** | $HEALTH_URL |" >> "$GITHUB_STEP_SUMMARY"

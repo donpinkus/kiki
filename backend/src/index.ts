@@ -1,9 +1,11 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
+import websocket from '@fastify/websocket';
 import { config } from './config/index.js';
 import { AppError, RateLimitedError } from './errors.js';
 import { healthRoute } from './routes/health.js';
 import { generateRoute } from './routes/generate.js';
+import { streamRoute } from './routes/stream.js';
 import { authPlugin } from './modules/auth/index.js';
 
 const app = Fastify({
@@ -26,6 +28,7 @@ await app.register(cors, {
   origin: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
 });
+await app.register(websocket);
 
 // --- Application modules ---
 await app.register(authPlugin);
@@ -33,6 +36,7 @@ await app.register(authPlugin);
 // --- Routes ---
 await app.register(healthRoute);
 await app.register(generateRoute);
+await app.register(streamRoute);
 
 // --- Error handler ---
 app.setErrorHandler((error, request, reply) => {
