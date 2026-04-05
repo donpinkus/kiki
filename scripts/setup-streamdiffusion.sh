@@ -1,54 +1,71 @@
 #!/bin/bash
 # Run this ON the RunPod pod (via SSH) to set up StreamDiffusion alongside ComfyUI.
-# Handles both existing installations (cached models) and fresh setups.
+# Uses a virtual environment to avoid dependency conflicts with the base image
+# (ComfyUI needs transformers 5.x / huggingface_hub>=1.3, StreamDiffusion pins diffusers==0.24.0
+#  which needs huggingface_hub<0.25 — these are fundamentally incompatible in one env).
 set -euo pipefail
 
 VOLUME_MODELS="/workspace/kiki-models"
 SD_MODELS_DIR="${VOLUME_MODELS}/streamdiffusion"
 SD_SERVER_DIR="/workspace/streamdiffusion-server"
+SD_VENV="/workspace/streamdiffusion-venv"
 SD_LOG="/workspace/streamdiffusion.log"
 
-# ── Find Python/pip ──
 PYTHON=$(command -v python3)
-PIP=$(command -v pip3 || command -v pip)
-echo "Using pip: $PIP  python: $PYTHON"
+echo "System python: $PYTHON"
 
-# ── Step 1: Install StreamDiffusion dependencies ──
+# ── Step 1: Create or reuse virtual environment ──
 
 echo ""
-echo "==> Installing StreamDiffusion dependencies..."
+echo "==> Setting up virtual environment..."
 
-# The base image (runpod/comfyui:latest) already has PyTorch + CUDA.
-# Install StreamDiffusion FIRST — it pins diffusers==0.24.0 and pulls
-# compatible versions of huggingface_hub, transformers, etc.
-# Do NOT upgrade diffusers or huggingface_hub separately, as newer
-# versions remove hf_cache_home which diffusers 0.24.0 requires.
+if [ -d "$SD_VENV" ] && [ -f "$SD_VENV/bin/python" ]; then
+  echo "  Reusing existing venv at $SD_VENV"
+else
+  echo "  Creating venv at $SD_VENV..."
+  $PYTHON -m venv "$SD_VENV" --system-site-packages
+  echo "  ✓ venv created"
+fi
 
-echo "Installing StreamDiffusion from source (+ its dependencies)..."
-$PIP install -q --no-cache-dir \
+# Use venv python/pip from here on
+VENV_PYTHON="$SD_VENV/bin/python"
+VENV_PIP="$SD_VENV/bin/pip"
+
+# ── Step 2: Install StreamDiffusion + deps in venv ──
+
+echo ""
+echo "==> Installing StreamDiffusion in venv..."
+
+# Install StreamDiffusion first — it pins diffusers==0.24.0
+echo "  Installing StreamDiffusion from source..."
+$VENV_PIP install -q --no-cache-dir \
     "git+https://github.com/cumulo-autumn/StreamDiffusion.git@main#egg=streamdiffusion" 2>&1 | tail -5
 echo "  ✓ StreamDiffusion installed"
 
-# diffusers==0.24.0 imports hf_cache_home which was removed in huggingface_hub>=0.25.
-# The base image ships a newer version, so we must explicitly downgrade.
-echo "Pinning huggingface_hub for diffusers 0.24.0 compatibility..."
-$PIP install -q --no-cache-dir "huggingface_hub>=0.20.2,<0.25.0" 2>&1 | tail -3
+# Pin huggingface_hub to a version compatible with diffusers 0.24.0
+# (hf_cache_home was removed in huggingface_hub>=0.25)
+echo "  Pinning huggingface_hub<0.25..."
+$VENV_PIP install -q --no-cache-dir "huggingface_hub>=0.20.2,<0.25.0" 2>&1 | tail -3
 
-# Install server-only deps that don't conflict with StreamDiffusion's pins
-echo "Installing server dependencies..."
-$PIP install -q --no-cache-dir \
+# Pin transformers to a version compatible with huggingface_hub<0.25
+echo "  Pinning transformers<4.40..."
+$VENV_PIP install -q --no-cache-dir "transformers>=4.36.0,<4.40.0" 2>&1 | tail -3
+
+# Install server deps
+echo "  Installing server dependencies..."
+$VENV_PIP install -q --no-cache-dir \
     "fastapi>=0.108.0" \
     "uvicorn[standard]>=0.25.0" \
     "websockets>=12.0" \
     "Pillow>=10.0.0" 2>&1 | tail -3
+echo "  ✓ All dependencies installed"
 
-# ── Step 2: Pre-download models to network volume ──
+# ── Step 3: Pre-download models to network volume ──
 
 echo ""
 echo "==> Checking/downloading StreamDiffusion models..."
 mkdir -p "$SD_MODELS_DIR"
 
-# Use HF_HOME on network volume so models persist across pod restarts
 export HF_HOME="${SD_MODELS_DIR}/huggingface"
 mkdir -p "$HF_HOME"
 
@@ -57,7 +74,7 @@ if [ -d "${HF_HOME}/hub/models--Lykon--dreamshaper-8" ] && \
   echo "  Models already cached on network volume"
 else
   echo "  Downloading models (~2-3 GB)..."
-  $PYTHON -c "
+  $VENV_PYTHON -c "
 import os
 os.environ['HF_HOME'] = '${HF_HOME}'
 from diffusers import StableDiffusionImg2ImgPipeline
@@ -72,7 +89,7 @@ print('  All models downloaded!')
 "
 fi
 
-# ── Step 3: Copy server files into place ──
+# ── Step 4: Copy server files into place ──
 
 echo ""
 echo "==> Deploying StreamDiffusion server..."
@@ -85,24 +102,24 @@ else
   exit 1
 fi
 
-# ── Step 4: Kill any existing StreamDiffusion process ──
+# ── Step 5: Kill any existing StreamDiffusion process ──
 
 echo ""
 echo "==> Starting StreamDiffusion server..."
+pkill -f "streamdiffusion-venv.*server.py" 2>/dev/null || true
 pkill -f "python.*server.py.*8765" 2>/dev/null || true
-pkill -f "uvicorn.*server:app" 2>/dev/null || true
 sleep 2
 
-# ── Step 5: Launch StreamDiffusion server ──
+# ── Step 6: Launch StreamDiffusion server using venv python ──
 
 cd "$SD_SERVER_DIR"
 export SD_HOST="0.0.0.0"
 export SD_PORT="8765"
-nohup "$PYTHON" server.py > "$SD_LOG" 2>&1 &
+nohup "$VENV_PYTHON" server.py > "$SD_LOG" 2>&1 &
 SD_PID=$!
-echo "  StreamDiffusion started (PID: $SD_PID)"
+echo "  StreamDiffusion started (PID: $SD_PID, venv: $SD_VENV)"
 
-# ── Step 6: Wait for health check ──
+# ── Step 7: Wait for health check ──
 
 echo ""
 echo "==> Waiting for StreamDiffusion to be ready (model loading + warmup)..."
