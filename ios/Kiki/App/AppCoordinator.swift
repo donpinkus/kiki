@@ -521,6 +521,9 @@ final class AppCoordinator {
             streamLog.debug("Image received: \(Int(image.size.width))x\(Int(image.size.height))")
             self.lastSuccessfulImage = image
             self.resultState = .streaming(image: image)
+            if self.drawingLayout == .fullscreen {
+                self.showFloatingPanel = true
+            }
         }
 
         session.onConnectionStateChanged = { [weak self] state in
