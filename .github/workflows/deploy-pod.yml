@@ -209,8 +209,15 @@ jobs:
             done
 
             # Deduplicate (keep first occurrence = highest priority)
-            CANDIDATE_LIST=$(echo -e "$CANDIDATE_LIST" | awk '!seen[$0]++' | head -20)
-            echo "Candidate DCs to try (includes existing-volume DCs for retry):"
+            CANDIDATE_LIST=$(echo -e "$CANDIDATE_LIST" | awk '!seen[$0]++')
+
+            # Prefer US/CA datacenters (Railway backend is in US — cross-region proxies are unreliable)
+            CANDIDATE_LIST=$(echo "$CANDIDATE_LIST" | awk -F'|' '
+              { if ($2 ~ /^US-/ || $2 ~ /^CA-/) us[++u]=$0; else other[++o]=$0 }
+              END { for(i=1;i<=u;i++) print us[i]; for(i=1;i<=o;i++) print other[i] }')
+            CANDIDATE_LIST=$(echo "$CANDIDATE_LIST" | head -20)
+
+            echo "Candidate DCs to try (US/CA preferred, includes existing-volume DCs for retry):"
             echo "$CANDIDATE_LIST"
             echo "::endgroup::"
 
