@@ -19,26 +19,23 @@ echo ""
 echo "==> Installing StreamDiffusion dependencies..."
 
 # The base image (runpod/comfyui:latest) already has PyTorch + CUDA.
-# Install additional deps that aren't in the base image.
-# Upgrade huggingface_hub first — the base image has an old version that
-# conflicts with newer diffusers (missing hf_cache_home export).
-$PIP install -q --no-cache-dir "huggingface_hub>=0.25.0" 2>&1 | tail -3
+# Install StreamDiffusion FIRST — it pins diffusers==0.24.0 and pulls
+# compatible versions of huggingface_hub, transformers, etc.
+# Do NOT upgrade diffusers or huggingface_hub separately, as newer
+# versions remove hf_cache_home which diffusers 0.24.0 requires.
 
+echo "Installing StreamDiffusion from source (+ its dependencies)..."
 $PIP install -q --no-cache-dir \
-    "diffusers>=0.25.0" \
-    "transformers>=4.36.0" \
-    "accelerate>=0.25.0" \
-    "safetensors>=0.4.0" \
-    "xformers>=0.0.23" \
+    "git+https://github.com/cumulo-autumn/StreamDiffusion.git@main#egg=streamdiffusion" 2>&1 | tail -5
+echo "  ✓ StreamDiffusion installed"
+
+# Install server-only deps that don't conflict with StreamDiffusion's pins
+echo "Installing server dependencies..."
+$PIP install -q --no-cache-dir \
     "fastapi>=0.108.0" \
     "uvicorn[standard]>=0.25.0" \
     "websockets>=12.0" \
-    "Pillow>=10.0.0" 2>&1 | tail -5
-
-echo "Installing StreamDiffusion from source..."
-$PIP install -q --no-cache-dir \
-    "git+https://github.com/cumulo-autumn/StreamDiffusion.git@main#egg=streamdiffusion" 2>&1 | tail -3
-echo "  ✓ StreamDiffusion installed"
+    "Pillow>=10.0.0" 2>&1 | tail -3
 
 # ── Step 2: Pre-download models to network volume ──
 
@@ -58,10 +55,10 @@ else
   $PYTHON -c "
 import os
 os.environ['HF_HOME'] = '${HF_HOME}'
-from diffusers import AutoPipelineForImage2Image
+from diffusers import StableDiffusionImg2ImgPipeline
 from huggingface_hub import hf_hub_download
 print('  Downloading Lykon/dreamshaper-8...')
-AutoPipelineForImage2Image.from_pretrained('Lykon/dreamshaper-8', torch_dtype='auto')
+StableDiffusionImg2ImgPipeline.from_pretrained('Lykon/dreamshaper-8')
 print('  ✓ dreamshaper-8')
 print('  Downloading LCM-LoRA...')
 hf_hub_download('latent-consistency/lcm-lora-sdv1-5', 'pytorch_lora_weights.safetensors')

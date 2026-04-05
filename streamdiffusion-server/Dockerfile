@@ -19,18 +19,18 @@ RUN pip install --no-cache-dir \
     torchvision==0.16.2+cu121 \
     --index-url https://download.pytorch.org/whl/cu121
 
-# Install requirements (excluding torch/torchvision already installed)
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Install StreamDiffusion from source
+# Install StreamDiffusion first (pins diffusers==0.24.0)
 RUN pip install --no-cache-dir \
     git+https://github.com/cumulo-autumn/StreamDiffusion.git@main#egg=streamdiffusion
 
+# Install server-only deps
+RUN pip install --no-cache-dir \
+    "fastapi>=0.108.0" "uvicorn[standard]>=0.25.0" "websockets>=12.0" "Pillow>=10.0.0"
+
 # Pre-download models so they're baked into the image
 RUN python3 -c " \
-from diffusers import AutoPipelineForImage2Image; \
-AutoPipelineForImage2Image.from_pretrained('Lykon/dreamshaper-8', torch_dtype='auto'); \
+from diffusers import StableDiffusionImg2ImgPipeline; \
+StableDiffusionImg2ImgPipeline.from_pretrained('Lykon/dreamshaper-8'); \
 from huggingface_hub import hf_hub_download; \
 hf_hub_download('latent-consistency/lcm-lora-sdv1-5', 'pytorch_lora_weights.safetensors') \
 "

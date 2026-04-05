@@ -4,7 +4,7 @@ import logging
 import time
 
 import torch
-from diffusers import AutoPipelineForImage2Image
+from diffusers import StableDiffusionImg2ImgPipeline
 from streamdiffusion import StreamDiffusion
 from streamdiffusion.image_utils import postprocess_image
 
@@ -31,10 +31,9 @@ class StreamPipeline:
         logger.info("Loading base model: %s", config.BASE_MODEL)
         t0 = time.time()
 
-        pipe = AutoPipelineForImage2Image.from_pretrained(
+        pipe = StableDiffusionImg2ImgPipeline.from_pretrained(
             config.BASE_MODEL,
             torch_dtype=torch.float16,
-            variant="fp16",
             safety_checker=None,
         ).to("cuda")
 

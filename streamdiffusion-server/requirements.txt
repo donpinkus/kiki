@@ -1,13 +1,5 @@
-# StreamDiffusion and core ML
-torch>=2.1.0
-torchvision>=0.16.0
-diffusers>=0.25.0
-transformers>=4.36.0
-accelerate>=0.25.0
-safetensors>=0.4.0
-xformers>=0.0.23
-
-# StreamDiffusion (install from git)
+# StreamDiffusion pins diffusers==0.24.0 — do not override.
+# Install StreamDiffusion from git first, then these server-only deps.
 # pip install git+https://github.com/cumulo-autumn/StreamDiffusion.git@main#egg=streamdiffusion
 
 # Server
