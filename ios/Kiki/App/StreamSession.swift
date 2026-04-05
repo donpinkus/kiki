@@ -141,7 +141,7 @@ final class StreamSession {
     // MARK: - Capture Loop
 
     private func startCaptureLoop() {
-        captureTask = Task { [weak self] in
+        captureTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 guard let self else { break }
 
@@ -149,11 +149,12 @@ final class StreamSession {
                 let isInactive = timeSinceLastChange > Self.inactivityPauseInterval
 
                 if isInactive && self.sentFinalFrame {
-                    // Paused: wait a bit before checking again
                     try? await Task.sleep(for: .milliseconds(100))
                     continue
                 }
 
+                // captureSnapshot() and resizeImage() use UIGraphicsImageRenderer
+                // which requires the main thread — @MainActor ensures this.
                 if let snapshot = self.canvasViewModel.captureSnapshot() {
                     if let resized = self.resizeImage(snapshot.image, to: CGSize(width: 512, height: 512)),
                        let jpeg = resized.jpegData(compressionQuality: 0.7) {
@@ -173,7 +174,7 @@ final class StreamSession {
     // MARK: - Canvas Observation (for pause/resume)
 
     private func startCanvasObservation() {
-        canvasObservationTask = Task { [weak self] in
+        canvasObservationTask = Task { @MainActor [weak self] in
             guard let self else { return }
             for await _ in self.canvasViewModel.canvasChanges {
                 guard !Task.isCancelled else { return }
@@ -186,7 +187,7 @@ final class StreamSession {
     // MARK: - Receive Loop
 
     private func startReceiveLoop() {
-        receiveTask = Task { [weak self] in
+        receiveTask = Task { @MainActor [weak self] in
             guard let self else { return }
             let frames = await client.receivedFrames
             for await frameData in frames {
@@ -201,7 +202,7 @@ final class StreamSession {
             }
         }
 
-        statusTask = Task { [weak self] in
+        statusTask = Task { @MainActor [weak self] in
             guard let self else { return }
             let statuses = await client.serverStatuses
             for await status in statuses {

@@ -108,6 +108,7 @@ final class AppCoordinator {
 
     // MARK: - Stream State
 
+    private var isSwitchingEngine = false
     private var streamSession: StreamSession?
     private(set) var streamConnectionState: StreamSession.ConnectionState = .disconnected
 
@@ -483,6 +484,10 @@ final class AppCoordinator {
     // MARK: - Stream Mode
 
     private func handleEngineSwitch() {
+        guard !isSwitchingEngine else { return }
+        isSwitchingEngine = true
+        defer { isSwitchingEngine = false }
+
         switch generationEngine {
         case .standard:
             stopStream()
@@ -515,7 +520,7 @@ final class AppCoordinator {
             self.streamConnectionState = state
             if case .error(let message) = state {
                 self.generationError = message
-                // Fall back to standard mode on connection loss
+                // Fall back to standard mode (isSwitchingEngine guard prevents recursive didSet)
                 self.generationEngine = .standard
             }
         }

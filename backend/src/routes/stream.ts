@@ -19,40 +19,41 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
 
     const relay = new StreamDiffusionRelay(config.STREAMDIFFUSION_URL);
 
+    // Register handlers BEFORE connect to avoid race conditions
+    // (upstream could close between connect resolving and handler registration)
+    relay.onMessage((data) => {
+      if (socket.readyState === socket.OPEN) {
+        socket.send(data);
+      }
+    });
+
+    relay.onClose((code, reason) => {
+      request.log.info({ clientId, code, reason }, 'Upstream closed');
+      if (socket.readyState === socket.OPEN) {
+        socket.send(JSON.stringify({
+          type: 'error',
+          message: 'Upstream connection lost',
+        }));
+        socket.close(1001, 'Upstream closed');
+      }
+    });
+
+    relay.onError((err) => {
+      request.log.error({ clientId, err }, 'Upstream error');
+    });
+
     relay.connect()
       .then(() => {
         request.log.info({ clientId }, 'Upstream connected');
 
-        // Forward upstream messages (binary images + text status) to client
-        relay.onMessage((data) => {
-          if (socket.readyState === socket.OPEN) {
-            socket.send(data);
-          }
-        });
-
-        relay.onClose((code, reason) => {
-          request.log.info({ clientId, code, reason }, 'Upstream closed');
-          if (socket.readyState === socket.OPEN) {
-            socket.send(JSON.stringify({
-              type: 'error',
-              message: 'Upstream connection lost',
-            }));
-            socket.close(1001, 'Upstream closed');
-          }
-        });
-
-        relay.onError((err) => {
-          request.log.error({ clientId, err }, 'Upstream error');
-        });
-
         // Forward client messages to upstream
         socket.on('message', (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
+          const buf = Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data as ArrayBuffer);
+
           if (isBinary) {
-            // Binary frame: JPEG sketch data
-            relay.sendFrame(data as Buffer);
+            relay.sendFrame(buf);
           } else {
-            // Text frame: config JSON — parse and forward
-            const text = (data as Buffer).toString('utf-8');
+            const text = buf.toString('utf-8');
             try {
               const parsed = JSON.parse(text);
               if (parsed.type === 'config') {

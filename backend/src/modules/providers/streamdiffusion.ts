@@ -16,13 +16,19 @@ export class StreamDiffusionRelay {
   private upstream: WebSocket | null = null;
   private readonly url: string;
 
+  // Callbacks registered before connect — attached to the socket immediately on open
+  private messageHandler: ((data: Buffer | string) => void) | null = null;
+  private closeHandler: ((code: number, reason: string) => void) | null = null;
+  private errorHandler: ((err: Error) => void) | null = null;
+
   constructor(url: string) {
     this.url = url;
   }
 
   /**
    * Open a connection to the upstream StreamDiffusion server.
-   * Resolves when the connection is established or rejects on error/timeout.
+   * Event handlers registered via onMessage/onClose/onError before calling connect()
+   * are attached immediately, avoiding race conditions.
    */
   connect(): Promise<WebSocket> {
     return new Promise((resolve, reject) => {
@@ -32,13 +38,38 @@ export class StreamDiffusionRelay {
         reject(new Error('Upstream connection timeout'));
       }, 10_000);
 
+      // Register handlers immediately on the socket (before 'open' fires)
+      // so no events are missed between open and handler registration.
+      ws.on('message', (data: WebSocket.RawData, isBinary: boolean) => {
+        if (this.messageHandler) {
+          if (isBinary) {
+            this.messageHandler(data as Buffer);
+          } else {
+            this.messageHandler((data as Buffer).toString('utf-8'));
+          }
+        }
+      });
+
+      ws.on('close', (code: number, reason: Buffer) => {
+        if (this.closeHandler) {
+          this.closeHandler(code, reason.toString('utf-8'));
+        }
+      });
+
+      ws.on('error', (err: Error) => {
+        if (this.errorHandler) {
+          this.errorHandler(err);
+        }
+      });
+
       ws.on('open', () => {
         clearTimeout(timeout);
         this.upstream = ws;
         resolve(ws);
       });
 
-      ws.on('error', (err: Error) => {
+      // Also handle pre-open errors (connection refused, DNS failure, etc.)
+      ws.once('error', (err: Error) => {
         clearTimeout(timeout);
         reject(err);
       });
@@ -58,23 +89,15 @@ export class StreamDiffusionRelay {
   }
 
   onMessage(callback: (data: Buffer | string) => void): void {
-    this.upstream?.on('message', (data: WebSocket.RawData, isBinary: boolean) => {
-      if (isBinary) {
-        callback(data as Buffer);
-      } else {
-        callback((data as Buffer).toString('utf-8'));
-      }
-    });
+    this.messageHandler = callback;
   }
 
   onClose(callback: (code: number, reason: string) => void): void {
-    this.upstream?.on('close', (code: number, reason: Buffer) => {
-      callback(code, reason.toString('utf-8'));
-    });
+    this.closeHandler = callback;
   }
 
   onError(callback: (err: Error) => void): void {
-    this.upstream?.on('error', callback);
+    this.errorHandler = callback;
   }
 
   close(): void {
