@@ -157,7 +157,7 @@ jobs:
               -d '{
                 "operationName": "getAllDatacenters",
                 "query": "query getAllDatacenters($input: GpuAvailabilityInput) { dataCenters { id name storageSupport gpuAvailability(input: $input) { stockStatus gpuTypeId gpuTypeDisplayName } } }",
-                "variables": { "input": { "gpuCount": 1, "secureCloud": false, "minMemoryInGb": 80 } }
+                "variables": { "input": { "gpuCount": 1, "minMemoryInGb": 80 } }
               }')
 
             # Validate we got data back (API schema might change)
