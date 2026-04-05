@@ -29,6 +29,11 @@ $PIP install -q --no-cache-dir \
     "git+https://github.com/cumulo-autumn/StreamDiffusion.git@main#egg=streamdiffusion" 2>&1 | tail -5
 echo "  ✓ StreamDiffusion installed"
 
+# diffusers==0.24.0 imports hf_cache_home which was removed in huggingface_hub>=0.25.
+# The base image ships a newer version, so we must explicitly downgrade.
+echo "Pinning huggingface_hub for diffusers 0.24.0 compatibility..."
+$PIP install -q --no-cache-dir "huggingface_hub>=0.20.2,<0.25.0" 2>&1 | tail -3
+
 # Install server-only deps that don't conflict with StreamDiffusion's pins
 echo "Installing server dependencies..."
 $PIP install -q --no-cache-dir \
