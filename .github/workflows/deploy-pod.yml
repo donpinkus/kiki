@@ -78,30 +78,31 @@ jobs:
           try_create_pod() {
             local gpu="$1" dc="$2" vol="$3"
 
-            # Try spot first
-            local bid
-            bid=$(get_bid_price "$gpu")
-            echo "  Trying $gpu spot (bid: \$$bid/hr)..."
+            # # Spot disabled — Iceland proxy issues. Re-enable when proxy is reliable.
+            # local bid
+            # bid=$(get_bid_price "$gpu")
+            # echo "  Trying $gpu spot (bid: \$$bid/hr)..."
+            # local resp
+            # resp=$(curl -sf "$API_URL" \
+            #   -H 'Content-Type: application/json' \
+            #   -d "{
+            #     \"query\": \"mutation { podRentInterruptable(input: { name: \\\"kiki-comfyui\\\", imageName: \\\"runpod/comfyui:latest\\\", gpuTypeId: \\\"${gpu}\\\", gpuCount: 1, bidPerGpu: ${bid}, volumeInGb: 0, containerDiskInGb: 20, networkVolumeId: \\\"${vol}\\\", volumeMountPath: \\\"/workspace\\\", ports: \\\"8188/http,22/tcp\\\", dataCenterId: \\\"${dc}\\\", startSsh: true }) { id } }\"
+            #   }" || true)
+            #
+            # POD_ID=$(echo "$resp" | jq -r '.data.podRentInterruptable.id // empty')
+            # if [ -n "$POD_ID" ]; then
+            #   echo "  ✓ Spot pod $POD_ID with $gpu in $dc (bid: \$$bid/hr)"
+            #   USED_DC="$dc"
+            #   return 0
+            # fi
+            # # Log why spot failed
+            # local spot_err
+            # spot_err=$(echo "$resp" | jq -r '.errors[0].message // empty' 2>/dev/null)
+            # echo "  Spot failed: ${spot_err:-no error message (response: $(echo "$resp" | jq -c . 2>/dev/null || echo "$resp"))}"
+
+            # On-demand only
+            echo "  Trying $gpu on-demand..."
             local resp
-            resp=$(curl -sf "$API_URL" \
-              -H 'Content-Type: application/json' \
-              -d "{
-                \"query\": \"mutation { podRentInterruptable(input: { name: \\\"kiki-comfyui\\\", imageName: \\\"runpod/comfyui:latest\\\", gpuTypeId: \\\"${gpu}\\\", gpuCount: 1, bidPerGpu: ${bid}, volumeInGb: 0, containerDiskInGb: 20, networkVolumeId: \\\"${vol}\\\", volumeMountPath: \\\"/workspace\\\", ports: \\\"8188/http,22/tcp\\\", dataCenterId: \\\"${dc}\\\", startSsh: true }) { id } }\"
-              }" || true)
-
-            POD_ID=$(echo "$resp" | jq -r '.data.podRentInterruptable.id // empty')
-            if [ -n "$POD_ID" ]; then
-              echo "  ✓ Spot pod $POD_ID with $gpu in $dc (bid: \$$bid/hr)"
-              USED_DC="$dc"
-              return 0
-            fi
-            # Log why spot failed
-            local spot_err
-            spot_err=$(echo "$resp" | jq -r '.errors[0].message // empty' 2>/dev/null)
-            echo "  Spot failed: ${spot_err:-no error message (response: $(echo "$resp" | jq -c . 2>/dev/null || echo "$resp"))}"
-
-            # Fallback to on-demand
-            echo "  Trying on-demand..."
             resp=$(curl -sf "$API_URL" \
               -H 'Content-Type: application/json' \
               -d "{
