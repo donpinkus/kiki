@@ -577,9 +577,18 @@ final class AppCoordinator {
     }
 
     /// Send updated prompt/style to the stream session when prompt changes in stream mode.
+    /// Debounced to avoid overwhelming the server on every keystroke.
+    private var streamConfigDebounceTask: Task<Void, Never>?
+
     func sendStreamConfigUpdate() {
         guard generationEngine == .stream else { return }
-        streamSession?.updateConfig(prompt: composedPrompt, tIndexList: parsedTIndexList)
+        streamConfigDebounceTask?.cancel()
+        streamConfigDebounceTask = Task {
+            try? await Task.sleep(for: .seconds(1.0))
+            guard !Task.isCancelled else { return }
+            print("[Stream] Prompt update: '\(self.composedPrompt ?? "(none)")'")
+            self.streamSession?.updateConfig(prompt: self.composedPrompt, tIndexList: self.parsedTIndexList)
+        }
     }
 
     /// Called when user explicitly commits a new t_index_list from the UI (e.g. pressing Return).
