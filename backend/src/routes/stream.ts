@@ -21,9 +21,9 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
 
     // Register handlers BEFORE connect to avoid race conditions
     // (upstream could close between connect resolving and handler registration)
-    relay.onMessage((data) => {
+    relay.onMessage((data, isBinary) => {
       if (socket.readyState === socket.OPEN) {
-        socket.send(data);
+        socket.send(data, { binary: isBinary });
       }
     });
 

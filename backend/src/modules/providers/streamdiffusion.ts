@@ -17,7 +17,7 @@ export class StreamDiffusionRelay {
   private readonly url: string;
 
   // Callbacks registered before connect — attached to the socket immediately on open
-  private messageHandler: ((data: Buffer | string) => void) | null = null;
+  private messageHandler: ((data: Buffer | string, isBinary: boolean) => void) | null = null;
   private closeHandler: ((code: number, reason: string) => void) | null = null;
   private errorHandler: ((err: Error) => void) | null = null;
 
@@ -32,7 +32,7 @@ export class StreamDiffusionRelay {
    */
   connect(): Promise<WebSocket> {
     return new Promise((resolve, reject) => {
-      const ws = new WebSocket(this.url);
+      const ws = new WebSocket(this.url, { perMessageDeflate: false });
       const timeout = setTimeout(() => {
         ws.close();
         reject(new Error('Upstream connection timeout'));
@@ -42,11 +42,8 @@ export class StreamDiffusionRelay {
       // so no events are missed between open and handler registration.
       ws.on('message', (data: WebSocket.RawData, isBinary: boolean) => {
         if (this.messageHandler) {
-          if (isBinary) {
-            this.messageHandler(data as Buffer);
-          } else {
-            this.messageHandler((data as Buffer).toString('utf-8'));
-          }
+          const payload = isBinary ? (data as Buffer) : (data as Buffer).toString('utf-8');
+          this.messageHandler(payload, isBinary);
         }
       });
 
@@ -88,7 +85,7 @@ export class StreamDiffusionRelay {
     }
   }
 
-  onMessage(callback: (data: Buffer | string) => void): void {
+  onMessage(callback: (data: Buffer | string, isBinary: boolean) => void): void {
     this.messageHandler = callback;
   }
 
