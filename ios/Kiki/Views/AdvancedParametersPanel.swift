@@ -30,7 +30,7 @@ struct AdvancedParametersPanel: View {
                         coordinator.advancedParameters = AdvancedParameters()
                         coordinator.isSeedLocked = false
                         coordinator.compareWithoutControlNet = false
-                        coordinator.streamTIndexListText = "5,15,25,35"
+                        coordinator.streamTIndexListText = "20,30"
                         coordinator.streamCaptureFPS = 7
                     }
                 }
