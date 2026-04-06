@@ -112,7 +112,7 @@ final class AppCoordinator {
 
     /// t_index_list for stream mode — controls creativity vs fidelity.
     /// Raw comma-separated string edited in UI, parsed to [Int] for the server.
-    var streamTIndexListText: String = "20,30"
+    var streamTIndexListText: String = "5,15,25,35"
 
     var parsedTIndexList: [Int] {
         streamTIndexListText
