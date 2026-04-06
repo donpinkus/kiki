@@ -232,6 +232,8 @@ final class AppCoordinator {
 
         currentScreen = .drawing
         isSuppressingObservation = false
+
+        if generationEngine == .stream { startStream() }
     }
 
     func openDrawing(_ drawing: Drawing) {
@@ -274,6 +276,8 @@ final class AppCoordinator {
 
         currentScreen = .drawing
         isSuppressingObservation = false
+
+        if generationEngine == .stream { startStream() }
     }
 
     func navigateToGallery() {
@@ -296,6 +300,7 @@ final class AppCoordinator {
         generationTask?.cancel()
         debounceTask?.cancel()
         isGenerating = false
+        stopStream()
 
         currentDrawingId = nil
         currentScreen = .gallery
@@ -488,6 +493,11 @@ final class AppCoordinator {
 
     private func handleEngineSwitch() {
         guard !isSwitchingEngine else { return }
+        // Don't start stream from gallery — wait until user is on a drawing
+        guard currentScreen == .drawing else {
+            print("[Stream] Engine switch deferred (not on drawing screen)")
+            return
+        }
         isSwitchingEngine = true
         defer { isSwitchingEngine = false }
 

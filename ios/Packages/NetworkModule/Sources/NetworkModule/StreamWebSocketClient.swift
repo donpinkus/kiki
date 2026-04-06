@@ -66,6 +66,16 @@ public actor StreamWebSocketClient {
         switch message {
         case .string(let text):
             print("[StreamWS] Initial message: \(text)")
+            // Check for error response (backend sends this if upstream is unavailable)
+            if text.contains("\"type\":\"error\"") {
+                let errorMsg = text  // Keep for error message
+                wsTask.cancel(with: .normalClosure, reason: nil)
+                self.task = nil
+                state = .disconnected
+                throw URLError(.cannotConnectToHost, userInfo: [
+                    NSLocalizedDescriptionKey: "Server error: \(errorMsg)"
+                ])
+            }
             if let data = text.data(using: .utf8),
                let status = try? JSONDecoder().decode(ServerStatus.self, from: data) {
                 statusContinuation.yield(status)
