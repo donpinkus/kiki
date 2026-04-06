@@ -80,8 +80,10 @@ class StreamPipeline:
             cfg_type="none",
         )
 
+        # Load LCM-LoRA but DON'T fuse — fusing permanently modifies the
+        # underlying pipe weights, breaking subsequent reinits with different
+        # t_index_list values. Unfused is ~10% slower but reinit-safe.
         self.stream.load_lcm_lora(config.LCM_LORA)
-        self.stream.fuse_lora()
         self.stream.vae = torch.compile(self.stream.vae, mode="reduce-overhead")
 
         if config.ENABLE_SIMILARITY_FILTER:
