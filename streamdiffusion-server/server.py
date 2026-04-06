@@ -2,12 +2,12 @@
 
 Protocol:
   Client -> Server:
-    - Text frame (JSON): { "type": "config", "prompt": "...", "strength": 0.5, "width": 512, "height": 512 }
+    - Text frame (JSON): { "type": "config", "prompt": "...", "tIndexList": [20, 30], "width": 512, "height": 512 }
     - Binary frame: Raw JPEG bytes of input sketch
 
   Server -> Client:
     - Text frame (JSON): { "type": "status", "status": "ready" | "warmup" | "error", "message": "..." }
-    - Binary frame: Raw JPEG bytes of generated image
+    - Text frame (JSON): { "type": "frame", "data": "<base64 JPEG>" } (generated image)
 """
 
 import asyncio

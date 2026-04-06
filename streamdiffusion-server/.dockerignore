@@ -1,5 +1,6 @@
 __pycache__
 *.pyc
 .git
-output.jpg
+*.jpg
+*.png
 test_sketch.*

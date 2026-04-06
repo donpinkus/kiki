@@ -2,16 +2,16 @@
 
 Usage:
     # Single image roundtrip
-    python test_client.py --image test_sketch.png --prompt "a cat sitting on a hill"
+    python test_client.py --image sketch.png --prompt "a cat" --t-index-list 10,20
 
     # Burst mode: send N frames and measure throughput
-    python test_client.py --image test_sketch.png --prompt "a cat" --burst 30
+    python test_client.py --image sketch.png --prompt "a cat" --burst 30
 
-    # Prompt switch mid-stream
-    python test_client.py --image test_sketch.png --prompt "a cat" --switch-prompt "a dog" --burst 20
+    # Different t_index_list (more creative)
+    python test_client.py --image sketch.png --prompt "a cat" --t-index-list 5,15
 
     # Connect to remote server
-    python test_client.py --url ws://pod-ip:8765/ws --image test_sketch.png --prompt "a cat"
+    python test_client.py --url ws://pod-ip:8765/ws --image sketch.png --prompt "a cat"
 """
 
 import argparse
@@ -43,15 +43,16 @@ async def run_test(args):
             print("Server ready.")
 
         # Send config
+        t_index_list = [int(x) for x in args.t_index_list.split(",")]
         config = {
             "type": "config",
             "prompt": args.prompt,
-            "strength": args.strength,
+            "tIndexList": t_index_list,
             "width": 512,
             "height": 512,
         }
         await ws.send(json.dumps(config))
-        print(f"Config sent: prompt='{args.prompt}', strength={args.strength}")
+        print(f"Config sent: prompt='{args.prompt}', tIndexList={t_index_list}")
 
         # Load and encode input image
         image = Image.open(args.image).convert("RGB").resize((512, 512))
@@ -71,7 +72,7 @@ async def run_test(args):
                 switch_config = {
                     "type": "config",
                     "prompt": args.switch_prompt,
-                    "strength": args.strength,
+                    "tIndexList": t_index_list,
                 }
                 await ws.send(json.dumps(switch_config))
                 print(f"\n--- Prompt switched to: '{args.switch_prompt}' at frame {i} ---\n")
@@ -140,7 +141,7 @@ def main():
     parser.add_argument("--url", default="ws://localhost:8765/ws", help="WebSocket URL")
     parser.add_argument("--image", required=True, help="Input image path")
     parser.add_argument("--prompt", default="", help="Generation prompt")
-    parser.add_argument("--strength", type=float, default=0.5, help="Denoising strength")
+    parser.add_argument("--t-index-list", default="20,30", help="Comma-separated t_index_list (e.g. 10,20 or 5,15,25)")
     parser.add_argument("--burst", type=int, default=0, help="Number of frames to send (0=single)")
     parser.add_argument("--switch-prompt", default=None, help="Switch to this prompt mid-stream")
     args = parser.parse_args()

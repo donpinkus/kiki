@@ -6,8 +6,6 @@ import time
 import torch
 from diffusers import StableDiffusionImg2ImgPipeline
 from streamdiffusion import StreamDiffusion
-from streamdiffusion.image_utils import postprocess_image
-
 import config
 
 logger = logging.getLogger(__name__)

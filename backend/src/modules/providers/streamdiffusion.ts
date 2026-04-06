@@ -3,7 +3,7 @@ import WebSocket from 'ws';
 export interface StreamConfig {
   type: 'config';
   prompt?: string;
-  strength?: number;
+  tIndexList?: number[];
   width?: number;
   height?: number;
 }

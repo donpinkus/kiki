@@ -91,7 +91,14 @@ SD_T_INDEX_LIST=30,40 python server.py  # More faithful to input
 ### Parameters that DON'T do what you'd expect
 
 - **`delta` in `prepare()`**: NOT a denoising strength. It's a CFG noise scaling factor only relevant when `cfg_type` is "self" or "initialize". With our `cfg_type="none"`, it does nothing.
-- **`strength` from the iOS UI**: Currently sent to the server but not used. The actual input influence is controlled entirely by `t_index_list`.
+- **`t_index_list` is the ONLY control** for input influence. There is no separate "strength" or "denoising" parameter in StreamDiffusion's img2img mode.
+
+### UI Controls
+
+In the iOS app's Advanced Parameters (stream mode):
+- **t_index_list text field**: Type values directly (e.g. `10,20`). Press Return to stage the change, then tap "Update" in the toolbar to apply.
+- **Capture FPS slider**: Controls how many frames per second are sent to the server.
+- **Update button**: Appears in the toolbar when prompt or t_index_list has been changed. Sends all pending changes to the server at once.
 
 ## Server Files
 
@@ -120,11 +127,15 @@ The venv is necessary because StreamDiffusion pins `diffusers==0.24.0` which con
 ```bash
 # Single frame test
 python test_client.py --url wss://<pod>-8765.proxy.runpod.net/ws \
-  --image sketch.png --prompt "a cat, watercolor" --strength 0.3
+  --image sketch.png --prompt "a cat, watercolor" --t-index-list 10,20
 
 # Burst test (10 frames, measures throughput)
 python test_client.py --url wss://<pod>-8765.proxy.runpod.net/ws \
   --image sketch.png --prompt "a cat" --burst 10
+
+# More creative transformation
+python test_client.py --url wss://<pod>-8765.proxy.runpod.net/ws \
+  --image sketch.png --prompt "a cat" --t-index-list 5,15 --burst 10
 
 # Through the backend relay
 python test_client.py --url wss://kiki-backend-production-eb81.up.railway.app/v1/stream \
