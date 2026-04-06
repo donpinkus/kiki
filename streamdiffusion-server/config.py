@@ -11,8 +11,13 @@ BASE_MODEL = os.getenv("SD_BASE_MODEL", "Lykon/dreamshaper-8")
 LCM_LORA = os.getenv("SD_LCM_LORA", "latent-consistency/lcm-lora-sdv1-5")
 
 # Pipeline
-NUM_STEPS = int(os.getenv("SD_NUM_STEPS", "4"))
-T_INDEX_LIST = list(range(NUM_STEPS))  # [0, 1, 2, 3]
+# t_index_list controls which scheduler timesteps to use for denoising.
+# Higher indices = more noise added to input = more transformation by the model.
+# [0,1,2,3] = barely any noise (output ≈ input, prompt ignored)
+# [32,45] = standard img2img setting from StreamDiffusion examples
+T_INDEX_LIST_STR = os.getenv("SD_T_INDEX_LIST", "32,45")
+T_INDEX_LIST = [int(x) for x in T_INDEX_LIST_STR.split(",")]
+NUM_STEPS = len(T_INDEX_LIST)
 DEFAULT_STRENGTH = float(os.getenv("SD_DEFAULT_STRENGTH", "0.5"))
 DEFAULT_WIDTH = int(os.getenv("SD_DEFAULT_WIDTH", "512"))
 DEFAULT_HEIGHT = int(os.getenv("SD_DEFAULT_HEIGHT", "512"))

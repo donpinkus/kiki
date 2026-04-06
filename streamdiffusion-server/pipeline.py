@@ -103,14 +103,11 @@ class StreamPipeline:
         self.current_prompt = prompt
         self.current_strength = strength
 
-        # delta controls how much of the original image to preserve
-        # Lower delta = more of original (less generation), higher = more generation
         self.stream.prepare(
             prompt=prompt,
             guidance_scale=config.GUIDANCE_SCALE,
-            delta=strength,
         )
-        logger.info("Prompt updated: '%s' (strength=%.2f)", prompt[:50], strength)
+        logger.info("Prompt updated: '%s'", prompt[:50])
 
     def get_info(self) -> dict:
         """Return pipeline info for health endpoint."""
