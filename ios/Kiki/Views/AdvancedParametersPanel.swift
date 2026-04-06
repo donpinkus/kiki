@@ -42,8 +42,6 @@ struct AdvancedParametersPanel: View {
 
     // MARK: - Stream Sections
 
-    @State private var tIndexListDraft: String = ""
-
     private var streamParametersSection: some View {
         @Bindable var coordinator = coordinator
 
@@ -51,19 +49,14 @@ struct AdvancedParametersPanel: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("t_index_list")
                     .font(.subheadline)
-                Text("Lower = more creative, higher = more faithful to input")
+                Text("Lower = more creative, higher = more faithful to input. Tap Update in toolbar to apply.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                TextField("e.g. 15,25", text: $tIndexListDraft)
+                TextField("e.g. 15,25", text: $coordinator.streamTIndexListText)
                     .font(.subheadline.monospacedDigit())
                     .textFieldStyle(.roundedBorder)
                     .keyboardType(.numbersAndPunctuation)
-                    .onSubmit {
-                        coordinator.streamTIndexListText = tIndexListDraft
-                    }
-                    .onAppear {
-                        tIndexListDraft = coordinator.streamTIndexListText
-                    }
+                    .autocorrectionDisabled()
             }
 
             VStack(alignment: .leading, spacing: 4) {
