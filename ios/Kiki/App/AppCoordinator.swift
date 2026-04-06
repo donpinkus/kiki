@@ -543,11 +543,7 @@ final class AppCoordinator {
 
             let count = self.streamFrameCount
             if count == 1 || count % 30 == 0 {
-                if let jpegData = image.jpegData(compressionQuality: 0.8) {
-                    let b64 = jpegData.base64EncodedString()
-                    print("[Stream] RECEIVED frame \(count) — paste in browser:")
-                    print("data:image/jpeg;base64,\(b64)")
-                }
+                print("[Stream] Received frame \(count)")
             }
         }
 

@@ -173,9 +173,6 @@ final class StreamSession {
                         await self.setFramesSent(count)
                         if count == 1 || count % 30 == 0 {
                             print("[Stream] Sent frame \(count) (\(jpeg.count) bytes)")
-                            let b64 = jpeg.base64EncodedString()
-                            print("[Stream] SENT frame \(count) — paste in browser:")
-                            print("data:image/jpeg;base64,\(b64)")
                         }
                     } catch {
                         print("[Stream] Send error: \(error)")
