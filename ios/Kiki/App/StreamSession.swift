@@ -29,8 +29,8 @@ final class StreamSession {
     /// How often to capture and send frames (default ~7 FPS).
     var captureInterval: TimeInterval = 0.150
 
-    /// Denoising strength for img2img.
-    var strength: Double = 0.5
+    /// t_index_list controlling creativity vs fidelity.
+    var tIndexList: [Int] = [20, 30]
 
     /// Current prompt (cached for reconnection).
     private var currentPrompt: String?
@@ -65,9 +65,9 @@ final class StreamSession {
 
     // MARK: - Control
 
-    func start(prompt: String?, strength: Double) async {
-        print("[Stream] Starting: url=\(url.absoluteString), prompt=\(prompt ?? "(none)"), strength=\(strength)")
-        self.strength = strength
+    func start(prompt: String?, tIndexList: [Int]) async {
+        print("[Stream] Starting: url=\(url.absoluteString), prompt=\(prompt ?? "(none)"), tIndexList=\(tIndexList)")
+        self.tIndexList = tIndexList
         self.currentPrompt = prompt
         self.isStopped = false
         self.reconnectAttempts = 0
@@ -85,11 +85,11 @@ final class StreamSession {
         updateConnectionState(.disconnected)
     }
 
-    func updateConfig(prompt: String?, strength: Double? = nil) {
-        if let s = strength { self.strength = s }
+    func updateConfig(prompt: String?, tIndexList: [Int]? = nil) {
+        if let t = tIndexList { self.tIndexList = t }
         if let p = prompt { self.currentPrompt = p }
-        let config = StreamConfig(prompt: currentPrompt, strength: self.strength)
-        print("[Stream] Config update: prompt=\(currentPrompt ?? "(none)"), strength=\(self.strength)")
+        let config = StreamConfig(prompt: currentPrompt, tIndexList: self.tIndexList)
+        print("[Stream] Config update: prompt=\(currentPrompt ?? "(none)"), tIndexList=\(self.tIndexList)")
         Task { try? await client.sendConfig(config) }
     }
 
@@ -104,7 +104,7 @@ final class StreamSession {
             print("[Stream] Connected to server")
             updateConnectionState(.connected)
 
-            let config = StreamConfig(prompt: currentPrompt, strength: strength)
+            let config = StreamConfig(prompt: currentPrompt, tIndexList: tIndexList)
             try await client.sendConfig(config)
             print("[Stream] Initial config sent")
 

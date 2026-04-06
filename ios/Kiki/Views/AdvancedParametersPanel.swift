@@ -30,7 +30,7 @@ struct AdvancedParametersPanel: View {
                         coordinator.advancedParameters = AdvancedParameters()
                         coordinator.isSeedLocked = false
                         coordinator.compareWithoutControlNet = false
-                        coordinator.streamStrength = 0.5
+                        coordinator.streamTIndexListText = "20,30"
                         coordinator.streamCaptureFPS = 7
                     }
                 }
@@ -42,19 +42,29 @@ struct AdvancedParametersPanel: View {
 
     // MARK: - Stream Sections
 
+    @State private var tIndexListDraft: String = ""
+
     private var streamParametersSection: some View {
         @Bindable var coordinator = coordinator
 
         return Section("Stream Settings") {
             VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("Strength")
-                        .font(.subheadline)
-                    Spacer()
-                    Text(String(format: "%.2f", coordinator.streamStrength))
-                        .font(.subheadline.monospacedDigit())
-                }
-                Slider(value: $coordinator.streamStrength, in: 0.3...0.8)
+                Text("t_index_list")
+                    .font(.subheadline)
+                Text("Lower = more creative, higher = more faithful to input")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                TextField("e.g. 15,25", text: $tIndexListDraft)
+                    .font(.subheadline.monospacedDigit())
+                    .textFieldStyle(.roundedBorder)
+                    .keyboardType(.numbersAndPunctuation)
+                    .onSubmit {
+                        coordinator.streamTIndexListText = tIndexListDraft
+                        coordinator.commitStreamTIndexList()
+                    }
+                    .onAppear {
+                        tIndexListDraft = coordinator.streamTIndexListText
+                    }
             }
 
             VStack(alignment: .leading, spacing: 4) {

@@ -116,9 +116,14 @@ final class AppCoordinator {
     private(set) var streamConnectionState: StreamSession.ConnectionState = .disconnected
     private(set) var streamFrameCount = 0
 
-    /// Denoising strength for stream mode (exposed to UI).
-    var streamStrength: Double = 0.5 {
-        didSet { streamSession?.updateConfig(prompt: composedPrompt, strength: streamStrength) }
+    /// t_index_list for stream mode — controls creativity vs fidelity.
+    /// Raw comma-separated string edited in UI, parsed to [Int] for the server.
+    var streamTIndexListText: String = "20,30"
+
+    var parsedTIndexList: [Int] {
+        streamTIndexListText
+            .split(separator: ",")
+            .compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
     }
 
     /// Capture FPS for stream mode (exposed to UI).
@@ -559,7 +564,7 @@ final class AppCoordinator {
         self.streamSession = session
 
         Task {
-            await session.start(prompt: composedPrompt, strength: streamStrength)
+            await session.start(prompt: composedPrompt, tIndexList: self.parsedTIndexList)
         }
     }
 
@@ -578,7 +583,14 @@ final class AppCoordinator {
     /// Send updated prompt/style to the stream session when prompt changes in stream mode.
     func sendStreamConfigUpdate() {
         guard generationEngine == .stream else { return }
-        streamSession?.updateConfig(prompt: composedPrompt, strength: streamStrength)
+        streamSession?.updateConfig(prompt: composedPrompt, tIndexList: parsedTIndexList)
+    }
+
+    /// Called when user explicitly commits a new t_index_list from the UI (e.g. pressing Return).
+    func commitStreamTIndexList() {
+        guard generationEngine == .stream else { return }
+        print("[Stream] t_index_list committed: \(parsedTIndexList)")
+        streamSession?.updateConfig(prompt: composedPrompt, tIndexList: parsedTIndexList)
     }
 
     // MARK: - Private

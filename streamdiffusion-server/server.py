@@ -99,15 +99,17 @@ async def websocket_stream(ws: WebSocket):
                 try:
                     data = json.loads(message["text"])
                     if data.get("type") == "config":
-                        pipeline.update_config(
-                            prompt=data.get("prompt"),
-                            strength=data.get("strength"),
-                        )
+                        # Handle t_index_list change (reinitializes pipeline)
+                        t_index_list = data.get("tIndexList")
+                        if t_index_list and isinstance(t_index_list, list):
+                            pipeline.reinitialize(t_index_list)
+
+                        pipeline.update_config(prompt=data.get("prompt"))
                         logger.info(
-                            "Client %d config: prompt='%s', strength=%s",
+                            "Client %d config: prompt='%s', t_index_list=%s",
                             client_id,
                             str(data.get("prompt", ""))[:50],
-                            data.get("strength"),
+                            t_index_list,
                         )
                 except json.JSONDecodeError:
                     logger.warning("Client %d sent invalid JSON", client_id)

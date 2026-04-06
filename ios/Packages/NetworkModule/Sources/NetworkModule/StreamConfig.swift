@@ -4,14 +4,14 @@ import Foundation
 public struct StreamConfig: Codable, Sendable {
     public let type: String
     public let prompt: String?
-    public let strength: Double
+    public let tIndexList: [Int]
     public let width: Int
     public let height: Int
 
-    public init(prompt: String?, strength: Double, width: Int = 512, height: Int = 512) {
+    public init(prompt: String?, tIndexList: [Int], width: Int = 512, height: Int = 512) {
         self.type = "config"
         self.prompt = prompt
-        self.strength = strength
+        self.tIndexList = tIndexList
         self.width = width
         self.height = height
     }
