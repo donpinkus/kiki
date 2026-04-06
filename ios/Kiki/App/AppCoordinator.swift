@@ -45,16 +45,10 @@ final class AppCoordinator {
         didSet { applyTool() }
     }
     var promptText = "" {
-        didSet {
-            if !isSuppressingObservation { scheduleSave() }
-            sendStreamConfigUpdate()
-        }
+        didSet { if !isSuppressingObservation { scheduleSave() } }
     }
     var selectedStyle: PromptStyle = .default {
-        didSet {
-            if !isSuppressingObservation { scheduleSave() }
-            sendStreamConfigUpdate()
-        }
+        didSet { if !isSuppressingObservation { scheduleSave() } }
     }
     var showStylePicker = false
     var resultState: ResultState = .empty
@@ -129,6 +123,16 @@ final class AppCoordinator {
     /// Capture FPS for stream mode (exposed to UI).
     var streamCaptureFPS: Double = 7 {
         didSet { streamSession?.captureInterval = 1.0 / streamCaptureFPS }
+    }
+
+    /// Tracks what was last sent to the server so we know if there are pending changes.
+    private var lastSentPrompt: String?
+    private var lastSentTIndexList: [Int] = []
+
+    /// True when prompt or t_index_list differs from what the server currently has.
+    var streamHasPendingUpdate: Bool {
+        guard generationEngine == .stream, streamSession != nil else { return false }
+        return composedPrompt != lastSentPrompt || parsedTIndexList != lastSentTIndexList
     }
 
     // MARK: - Generation State
@@ -558,6 +562,8 @@ final class AppCoordinator {
         }
 
         self.streamSession = session
+        self.lastSentPrompt = composedPrompt
+        self.lastSentTIndexList = parsedTIndexList
 
         Task {
             await session.start(prompt: composedPrompt, tIndexList: self.parsedTIndexList)
@@ -576,26 +582,16 @@ final class AppCoordinator {
         }
     }
 
-    /// Send updated prompt/style to the stream session when prompt changes in stream mode.
-    /// Debounced to avoid overwhelming the server on every keystroke.
-    private var streamConfigDebounceTask: Task<Void, Never>?
-
-    func sendStreamConfigUpdate() {
+    /// Explicitly apply pending prompt / t_index_list changes to the stream server.
+    /// Called by the "Update" button in the toolbar.
+    func applyStreamUpdate() {
         guard generationEngine == .stream else { return }
-        streamConfigDebounceTask?.cancel()
-        streamConfigDebounceTask = Task {
-            try? await Task.sleep(for: .seconds(1.0))
-            guard !Task.isCancelled else { return }
-            print("[Stream] Prompt update: '\(self.composedPrompt ?? "(none)")'")
-            self.streamSession?.updateConfig(prompt: self.composedPrompt, tIndexList: self.parsedTIndexList)
-        }
-    }
-
-    /// Called when user explicitly commits a new t_index_list from the UI (e.g. pressing Return).
-    func commitStreamTIndexList() {
-        guard generationEngine == .stream else { return }
-        print("[Stream] t_index_list committed: \(parsedTIndexList)")
-        streamSession?.updateConfig(prompt: composedPrompt, tIndexList: parsedTIndexList)
+        let prompt = composedPrompt
+        let tIndexList = parsedTIndexList
+        print("[Stream] Applying update: prompt='\(prompt ?? "(none)")', tIndexList=\(tIndexList)")
+        lastSentPrompt = prompt
+        lastSentTIndexList = tIndexList
+        streamSession?.updateConfig(prompt: prompt, tIndexList: tIndexList)
     }
 
     // MARK: - Private

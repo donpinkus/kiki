@@ -60,7 +60,6 @@ struct AdvancedParametersPanel: View {
                     .keyboardType(.numbersAndPunctuation)
                     .onSubmit {
                         coordinator.streamTIndexListText = tIndexListDraft
-                        coordinator.commitStreamTIndexList()
                     }
                     .onAppear {
                         tIndexListDraft = coordinator.streamTIndexListText

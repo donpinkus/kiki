@@ -87,8 +87,8 @@ struct DrawingTopBar: View {
                     }
                 }
             } else {
-                // Stream mode: connection status indicator
-                streamStatusIndicator
+                // Stream mode: update button / status indicator
+                streamActionButton
             }
 
             Button {
@@ -136,19 +136,40 @@ struct DrawingTopBar: View {
         .background(.bar)
     }
 
-    // MARK: - Stream Status
+    // MARK: - Stream Action Button
 
-    private var streamStatusIndicator: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(streamStatusColor)
-                .frame(width: 8, height: 8)
-            Text(streamStatusLabel)
-                .font(.subheadline.weight(.medium))
+    private var streamActionButton: some View {
+        Group {
+            if coordinator.streamHasPendingUpdate {
+                // Pending changes — show Update button
+                Button {
+                    coordinator.applyStreamUpdate()
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                            .font(.system(size: 14, weight: .semibold))
+                        Text("Update")
+                            .font(.subheadline.weight(.medium))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(Color.accentColor, in: Capsule())
+                }
+            } else {
+                // No pending changes — show connection status
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(streamStatusColor)
+                        .frame(width: 8, height: 8)
+                    Text(streamStatusLabel)
+                        .font(.subheadline.weight(.medium))
+                }
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+            }
         }
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
     }
 
     private var streamStatusColor: Color {
