@@ -58,8 +58,8 @@ public struct BrushConfig: Codable, Sendable {
 
     public static let defaultPen = BrushConfig(color: .black, baseWidth: 5, pressureGamma: 0.7)
 
-    /// Valid width range for the pen tool (replaces PKInkingTool.InkType.pen.validWidthRange).
-    public static let widthRange: ClosedRange<CGFloat> = 1...20
+    /// Valid width range for the pen and eraser tools.
+    public static let widthRange: ClosedRange<CGFloat> = 1...100
 
     /// Compute effective stroke width for a given pressure value.
     public func effectiveWidth(force: CGFloat) -> CGFloat {

@@ -11,6 +11,14 @@ struct CanvasSidebar: View {
         @Bindable var coordinator = coordinator
 
         VStack(spacing: 12) {
+            // Color picker (only meaningful for brush, but always visible for quick access)
+            ColorPicker("", selection: $coordinator.currentColor, supportsOpacity: false)
+                .labelsHidden()
+                .frame(width: 36, height: 36)
+
+            Divider()
+                .frame(width: 24)
+
             // Vertical size slider
             Slider(value: $coordinator.toolSize, in: widthRange) { editing in
                 isDraggingSlider = editing

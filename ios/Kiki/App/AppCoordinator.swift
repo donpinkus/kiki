@@ -44,6 +44,9 @@ final class AppCoordinator {
     var toolSize: CGFloat = 5.0 {
         didSet { applyTool() }
     }
+    var currentColor: Color = .black {
+        didSet { applyTool() }
+    }
     var promptText = "" {
         didSet { if !isSuppressingObservation { scheduleSave() } }
     }
@@ -606,7 +609,7 @@ final class AppCoordinator {
     private func applyTool() {
         switch currentTool {
         case .brush:
-            canvasViewModel.selectBrush(width: toolSize)
+            canvasViewModel.selectBrush(width: toolSize, color: currentColor.codable)
         case .eraser:
             canvasViewModel.selectEraser(width: toolSize)
         }
@@ -623,6 +626,18 @@ final class AppCoordinator {
         default:
             return "\(type(of: error)): \(error.localizedDescription)"
         }
+    }
+}
+
+// MARK: - Color Conversion
+
+extension Color {
+    /// Convert SwiftUI Color to CodableColor for brush serialization.
+    var codable: CodableColor {
+        let uiColor = UIColor(self)
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        uiColor.getRed(&r, green: &g, blue: &b, alpha: &a)
+        return CodableColor(red: r, green: g, blue: b, alpha: a)
     }
 }
 
