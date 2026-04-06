@@ -536,14 +536,14 @@ final class AppCoordinator {
                 self.showFloatingPanel = true
             }
 
-            // Save first 3 received frames + every 30th to tmp for inspection
+            // Log first 3 received frames as data URLs for browser inspection
             let count = self.streamFrameCount
-            if count <= 3 || count % 30 == 0 {
-                let dir = FileManager.default.temporaryDirectory.appendingPathComponent("stream-debug")
-                try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-                let path = dir.appendingPathComponent("received-\(count).jpg")
-                try? image.jpegData(compressionQuality: 0.9)?.write(to: path)
-                print("[Stream] Saved received frame \(count) to \(path.path)")
+            if count <= 3 {
+                if let jpegData = image.jpegData(compressionQuality: 0.8) {
+                    let b64 = jpegData.base64EncodedString()
+                    print("[Stream] RECEIVED frame \(count) — paste in browser:")
+                    print("data:image/jpeg;base64,\(b64)")
+                }
             }
         }
 
