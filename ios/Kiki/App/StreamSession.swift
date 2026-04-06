@@ -173,6 +173,12 @@ final class StreamSession {
                         await self.setFramesSent(count)
                         if count <= 3 || count % 30 == 0 {
                             print("[Stream] Sent frame \(count) (\(jpeg.count) bytes)")
+                            // Save sent frames to tmp for inspection
+                            let dir = FileManager.default.temporaryDirectory.appendingPathComponent("stream-debug")
+                            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                            let path = dir.appendingPathComponent("sent-\(count).jpg")
+                            try? jpeg.write(to: path)
+                            print("[Stream] Saved sent frame to \(path.path)")
                         }
                     } catch {
                         print("[Stream] Send error: \(error)")

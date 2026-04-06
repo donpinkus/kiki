@@ -114,6 +114,7 @@ final class AppCoordinator {
     private var isSwitchingEngine = false
     private var streamSession: StreamSession?
     private(set) var streamConnectionState: StreamSession.ConnectionState = .disconnected
+    private(set) var streamFrameCount = 0
 
     /// Denoising strength for stream mode (exposed to UI).
     var streamStrength: Double = 0.5 {
@@ -528,11 +529,21 @@ final class AppCoordinator {
 
         session.onImageReceived = { [weak self] image in
             guard let self else { return }
-            streamLog.debug("Image received: \(Int(image.size.width))x\(Int(image.size.height))")
+            self.streamFrameCount += 1
             self.lastSuccessfulImage = image
-            self.resultState = .streaming(image: image)
+            self.resultState = .streaming(image: image, frameCount: self.streamFrameCount)
             if self.drawingLayout == .fullscreen {
                 self.showFloatingPanel = true
+            }
+
+            // Save first 3 received frames + every 30th to tmp for inspection
+            let count = self.streamFrameCount
+            if count <= 3 || count % 30 == 0 {
+                let dir = FileManager.default.temporaryDirectory.appendingPathComponent("stream-debug")
+                try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                let path = dir.appendingPathComponent("received-\(count).jpg")
+                try? image.jpegData(compressionQuality: 0.9)?.write(to: path)
+                print("[Stream] Saved received frame \(count) to \(path.path)")
             }
         }
 
@@ -558,6 +569,7 @@ final class AppCoordinator {
         streamSession?.stop()
         streamSession = nil
         streamConnectionState = .disconnected
+        streamFrameCount = 0
 
         if let image = lastSuccessfulImage {
             resultState = .preview(image: image)

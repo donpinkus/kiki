@@ -37,8 +37,8 @@ public struct ResultView: View {
             case .preview(let image):
                 imageView(image)
 
-            case .streaming(let image):
-                streamingView(image)
+            case .streaming(let image, let frameCount):
+                streamingView(image, frameCount: frameCount)
 
             case .error(let message, let previousImage):
                 errorView(message: message, previousImage: previousImage)
@@ -105,12 +105,12 @@ public struct ResultView: View {
         }
     }
 
-    private func streamingView(_ image: UIImage) -> some View {
+    private func streamingView(_ image: UIImage, frameCount: Int) -> some View {
         ZStack(alignment: .topTrailing) {
             imageView(image)
 
-            Text("LIVE")
-                .font(.caption2.weight(.bold))
+            Text("LIVE \(frameCount)")
+                .font(.caption2.weight(.bold).monospacedDigit())
                 .foregroundStyle(.white)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)

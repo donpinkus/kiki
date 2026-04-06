@@ -74,7 +74,7 @@ struct FloatingResultPanel: View {
     @ViewBuilder
     private var imageContent: some View {
         switch resultState {
-        case .preview(let image), .streaming(let image):
+        case .preview(let image), .streaming(let image, _):
             Image(uiImage: image)
                 .resizable()
                 .aspectRatio(contentMode: .fit)
