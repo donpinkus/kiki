@@ -23,7 +23,14 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
     // (upstream could close between connect resolving and handler registration)
     relay.onMessage((data, isBinary) => {
       if (socket.readyState === socket.OPEN) {
-        socket.send(data, { binary: isBinary });
+        if (isBinary) {
+          // Wrap binary JPEG in a JSON text frame to avoid iOS
+          // URLSessionWebSocketTask binary frame handling issues
+          const base64 = (data as Buffer).toString('base64');
+          socket.send(JSON.stringify({ type: 'frame', data: base64 }));
+        } else {
+          socket.send(data);
+        }
       }
     });
 

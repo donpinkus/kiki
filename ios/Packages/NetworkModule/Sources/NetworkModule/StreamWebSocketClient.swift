@@ -136,13 +136,24 @@ public actor StreamWebSocketClient {
 
                     switch message {
                     case .data(let data):
+                        // Raw binary frame (may not be used if backend wraps in JSON)
                         await self.framesContinuation.yield(data)
 
                     case .string(let text):
-                        if let data = text.data(using: .utf8),
-                           let status = try? JSONDecoder().decode(ServerStatus.self, from: data) {
-                            print("[StreamWS] Server status: \(status.status) \(status.message ?? "")")
-                            await self.statusContinuation.yield(status)
+                        // Backend wraps JPEG as JSON text: {"type":"frame","data":"<base64>"}
+                        // to avoid iOS URLSessionWebSocketTask binary frame issues.
+                        if let jsonData = text.data(using: .utf8),
+                           let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+                           let type = json["type"] as? String {
+                            if type == "frame", let b64 = json["data"] as? String,
+                               let imageData = Data(base64Encoded: b64) {
+                                await self.framesContinuation.yield(imageData)
+                            } else if type == "status" || type == "error" {
+                                if let status = try? JSONDecoder().decode(ServerStatus.self, from: jsonData) {
+                                    print("[StreamWS] Server status: \(status.status) \(status.message ?? "")")
+                                    await self.statusContinuation.yield(status)
+                                }
+                            }
                         }
 
                     @unknown default:
