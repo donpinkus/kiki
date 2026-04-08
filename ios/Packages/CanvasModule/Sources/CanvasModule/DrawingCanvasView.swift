@@ -68,6 +68,21 @@ public final class DrawingCanvasView: UIView {
         contentMode = .redraw
     }
 
+    public override func layoutSubviews() {
+        super.layoutSubviews()
+        // Recover from a deferred load: if strokes were loaded while bounds
+        // were still zero (during makeUIView, before SwiftUI laid us out),
+        // rebuildPersistent bailed out and persistentImage is nil. Now that
+        // bounds are valid, rebuild it.
+        if persistentImage == nil
+            && !strokes.isEmpty
+            && bounds.size.width > 0
+            && bounds.size.height > 0 {
+            rebuildPersistent()
+            setNeedsDisplay()
+        }
+    }
+
     // MARK: - Drawing
 
     public override func draw(_ rect: CGRect) {
