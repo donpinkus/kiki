@@ -85,10 +85,12 @@ struct DrawingView: View {
                             isStreamMode: coordinator.generationEngine == .stream,
                             canSwapStream: coordinator.canSwapStreamImageToCanvas,
                             containerSize: geometry.size,
+                            currentBrushColor: coordinator.currentColor,
                             onClose: { coordinator.showFloatingPanel = false },
                             onToggleLineart: { coordinator.showingLineart.toggle() },
                             onSwapToCanvas: { coordinator.swapLineartToCanvas() },
                             onSwapStreamToCanvas: { coordinator.swapStreamImageToCanvas() },
+                            onColorPicked: { coordinator.currentColor = $0 },
                             onInteraction: {
                                 panelReturnTask?.cancel()
                                 coordinator.canvasOnTop = false
@@ -146,7 +148,11 @@ struct DrawingView: View {
 
     private func splitScreenResultPane(geometry: GeometryProxy) -> some View {
         HStack(spacing: 0) {
-            ResultView(state: effectiveResultState)
+            ResultView(
+                state: effectiveResultState,
+                currentBrushColor: coordinator.currentColor,
+                onColorPicked: { coordinator.currentColor = $0 }
+            )
                 .overlay(alignment: .topTrailing) {
                     if coordinator.compareWithoutControlNet || coordinator.comparisonData != nil {
                         Button { if coordinator.comparisonData != nil { showDebugModal = true } } label: {

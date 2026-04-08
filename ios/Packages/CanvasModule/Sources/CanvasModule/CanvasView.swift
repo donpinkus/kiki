@@ -47,6 +47,12 @@ public struct CanvasView: UIViewRepresentable {
         container.onRedoRequested = { [weak viewModel] in
             Task { @MainActor in viewModel?.redo() }
         }
+        container.onColorPicked = { [weak viewModel] color in
+            Task { @MainActor in viewModel?.handleColorPicked(color) }
+        }
+        container.currentBrushColorProvider = { [weak viewModel] in
+            viewModel?.currentBrushColorProvider?() ?? .black
+        }
         return container
     }
 

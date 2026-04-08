@@ -12,6 +12,10 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
     public var onInteractionChanged: ((Bool) -> Void)?
     public var onUndoRequested: (() -> Void)?
     public var onRedoRequested: (() -> Void)?
+    /// Called when the eyedropper long-press commits a sampled color.
+    public var onColorPicked: ((UIColor) -> Void)?
+    /// Callback to supply the current brush color as the "previous" color on the ring.
+    public var currentBrushColorProvider: (() -> UIColor)?
 
     // MARK: - Private
 
@@ -20,6 +24,9 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
     private let transformView = UIView()
     private let backgroundImageView = UIImageView()
     private let cursorView = CursorOverlayView()
+    private let ringView = ColorPickerRingView()
+    /// Vertical offset applied so the ring sits above the finger instead of being covered.
+    private static let ringFingerOffset: CGFloat = 40
     private var cursorBaseWidth: CGFloat = 5
     private var cursorDivisor: CGFloat = 3.0
     private static let snapThreshold: CGFloat = 0.15 // ~8.6 degrees
@@ -68,6 +75,11 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
         cursorView.isHidden = true
         transformView.addSubview(cursorView)
 
+        // Color picker ring — sits on the container (not transformView) so it stays in screen-space
+        // during canvas rotation/zoom. Hidden until the long-press fires.
+        ringView.isHidden = true
+        addSubview(ringView)
+
         let touchTracker = TouchTrackingGestureRecognizer(target: self, action: #selector(handleTouchTracking(_:)))
         touchTracker.cancelsTouchesInView = false
         touchTracker.delaysTouchesBegan = false
@@ -97,6 +109,13 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
         redoTap.numberOfTouchesRequired = 3
         redoTap.delegate = self
         addGestureRecognizer(redoTap)
+
+        let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress(_:)))
+        longPress.minimumPressDuration = 0.5
+        longPress.allowableMovement = 10
+        longPress.cancelsTouchesInView = true // cancels in-progress stroke when picker fires
+        longPress.delegate = self
+        addGestureRecognizer(longPress)
     }
 
     // MARK: - Gesture Handling
@@ -208,11 +227,72 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
         if gesture.state == .ended { onRedoRequested?() }
     }
 
+    @objc private func handleLongPress(_ gesture: UILongPressGestureRecognizer) {
+        switch gesture.state {
+        case .began:
+            let canvasPoint = gesture.location(in: canvasView)
+            let containerPoint = gesture.location(in: self)
+            ringView.previousColor = currentBrushColorProvider?() ?? .black
+            if let sampled = sampleColor(at: canvasPoint) {
+                ringView.currentColor = sampled
+            }
+            ringView.center = CGPoint(x: containerPoint.x, y: containerPoint.y - Self.ringFingerOffset)
+            ringView.isHidden = false
+
+        case .changed:
+            let canvasPoint = gesture.location(in: canvasView)
+            let containerPoint = gesture.location(in: self)
+            if let sampled = sampleColor(at: canvasPoint) {
+                ringView.currentColor = sampled
+            }
+            ringView.center = CGPoint(x: containerPoint.x, y: containerPoint.y - Self.ringFingerOffset)
+
+        case .ended:
+            let committed = ringView.currentColor
+            ringView.isHidden = true
+            onColorPicked?(committed)
+
+        case .cancelled, .failed:
+            ringView.isHidden = true
+
+        default:
+            break
+        }
+    }
+
+    /// Sample the color of the canvas composite at the given point in canvas view coordinates.
+    /// Uses a 1x1 renderer with a translated context so only the target pixel is rendered.
+    private func sampleColor(at point: CGPoint) -> UIColor? {
+        let size = canvasView.bounds.size
+        guard size.width > 0, size.height > 0 else { return nil }
+        guard point.x >= 0, point.y >= 0, point.x < size.width, point.y < size.height else {
+            // Outside canvas bounds — nothing to sample
+            return .white
+        }
+
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        let renderer = UIGraphicsImageRenderer(
+            size: CGSize(width: 1, height: 1),
+            format: format
+        )
+        let image = renderer.image { ctx in
+            ctx.cgContext.translateBy(x: -point.x, y: -point.y)
+            let fullRect = CGRect(origin: .zero, size: size)
+            UIColor.white.setFill()
+            UIRectFill(fullRect)
+            backgroundImageView.image?.draw(in: fullRect)
+            canvasView.drawHierarchy(in: fullRect, afterScreenUpdates: false)
+        }
+        return image.pixelColor()
+    }
+
     public func gestureRecognizer(
         _ gestureRecognizer: UIGestureRecognizer,
         shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer
     ) -> Bool {
-        // Touch tracker always coexists with everything (drawing, pinch, rotation)
+        // Touch tracker always coexists with everything (drawing, pinch, rotation, long-press)
         if gestureRecognizer is TouchTrackingGestureRecognizer || other is TouchTrackingGestureRecognizer {
             return true
         }
@@ -223,6 +303,8 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
                 || g is UIPanGestureRecognizer
         }
         return isTransform(gestureRecognizer) && isTransform(other)
+        // Long-press is exclusive — it should not fire alongside any other gesture.
+        // Multi-finger gestures naturally cancel it since they introduce additional touches.
     }
 
     // MARK: - Public API

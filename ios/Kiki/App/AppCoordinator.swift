@@ -186,6 +186,15 @@ final class AppCoordinator {
 
         applyTool()
         startObservingCanvas()
+
+        // Eyedropper: commit picked colors to currentColor
+        canvasViewModel.onColorPicked = { [weak self] uiColor in
+            self?.currentColor = Color(uiColor: uiColor)
+        }
+        // Supply the current brush color to the canvas ring preview
+        canvasViewModel.currentBrushColorProvider = { [weak self] in
+            UIColor(self?.currentColor ?? .black)
+        }
     }
 
     // MARK: - Actions

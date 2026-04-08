@@ -44,6 +44,14 @@ public final class CanvasViewModel {
     public let canvasChanges: AsyncStream<SketchSnapshot>
     private let changesContinuation: AsyncStream<SketchSnapshot>.Continuation
 
+    /// Called when the eyedropper long-press commits a sampled color.
+    /// The AppCoordinator sets this to update its currentColor.
+    public var onColorPicked: ((UIColor) -> Void)?
+
+    /// Supplies the current brush color so the preview ring can show it as the "previous" half.
+    /// The AppCoordinator sets this.
+    public var currentBrushColorProvider: (() -> UIColor)?
+
     // MARK: - Lifecycle
 
     public init() {
@@ -243,6 +251,10 @@ public final class CanvasViewModel {
 
     public func handleInteractionBegan() { isInteracting = true }
     public func handleInteractionEnded() { isInteracting = false }
+
+    func handleColorPicked(_ color: UIColor) {
+        onColorPicked?(color)
+    }
 
     // MARK: - Private
 
