@@ -68,10 +68,13 @@ struct DrawingView: View {
                             showingLineart: coordinator.showingLineart,
                             hasLineart: coordinator.lastGeneratedLineartImage != nil,
                             isGenerating: coordinator.isGenerating,
+                            isStreamMode: coordinator.generationEngine == .stream,
+                            canSwapStream: coordinator.canSwapStreamImageToCanvas,
                             containerSize: geometry.size,
                             onClose: { coordinator.showFloatingPanel = false },
                             onToggleLineart: { coordinator.showingLineart.toggle() },
                             onSwapToCanvas: { coordinator.swapLineartToCanvas() },
+                            onSwapStreamToCanvas: { coordinator.swapStreamImageToCanvas() },
                             onInteraction: {
                                 panelReturnTask?.cancel()
                                 coordinator.canvasOnTop = false
@@ -154,8 +157,13 @@ struct DrawingView: View {
                     }
                 }
                 .overlay(alignment: .bottom) {
-                    if coordinator.lastGeneratedLineartImage != nil && !coordinator.isGenerating {
+                    if coordinator.generationEngine == .standard
+                        && coordinator.lastGeneratedLineartImage != nil
+                        && !coordinator.isGenerating {
                         lineartToggleBar
+                            .padding(.bottom, 16)
+                    } else if coordinator.canSwapStreamImageToCanvas {
+                        streamSwapBar
                             .padding(.bottom, 16)
                     }
                 }
@@ -194,6 +202,21 @@ struct DrawingView: View {
                 .controlSize(.small)
             }
         }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.ultraThinMaterial, in: Capsule())
+        .shadow(color: .black.opacity(0.15), radius: 8, y: 4)
+    }
+
+    private var streamSwapBar: some View {
+        Button {
+            coordinator.swapStreamImageToCanvas()
+        } label: {
+            Label("Send to Canvas", systemImage: "arrow.left.arrow.right")
+                .font(.caption)
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.small)
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
         .background(.ultraThinMaterial, in: Capsule())

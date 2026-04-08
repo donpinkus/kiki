@@ -211,6 +211,17 @@ final class AppCoordinator {
         showingLineart = false
     }
 
+    func swapStreamImageToCanvas() {
+        guard generationEngine == .stream else { return }
+        guard let image = lastSuccessfulImage else { return }
+        canvasViewModel.swapLineart(image: image)
+    }
+
+    /// True when in stream mode and a generated frame is available to send to the canvas.
+    var canSwapStreamImageToCanvas: Bool {
+        generationEngine == .stream && lastSuccessfulImage != nil
+    }
+
     // MARK: - Gallery / Persistence
 
     func newDrawing() {

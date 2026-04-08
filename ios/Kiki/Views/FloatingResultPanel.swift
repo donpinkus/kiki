@@ -6,10 +6,13 @@ struct FloatingResultPanel: View {
     let showingLineart: Bool
     let hasLineart: Bool
     let isGenerating: Bool
+    let isStreamMode: Bool
+    let canSwapStream: Bool
     let containerSize: CGSize
     let onClose: () -> Void
     let onToggleLineart: () -> Void
     let onSwapToCanvas: () -> Void
+    let onSwapStreamToCanvas: () -> Void
     var onInteraction: (() -> Void)? = nil
 
     @State private var position: CGPoint = .zero
@@ -112,7 +115,7 @@ struct FloatingResultPanel: View {
 
     private var footer: some View {
         HStack(spacing: 8) {
-            if hasLineart && !isGenerating {
+            if !isStreamMode && hasLineart && !isGenerating {
                 Button { if showingLineart { onToggleLineart() } } label: {
                     Text("Generated")
                         .font(.caption.weight(showingLineart ? .regular : .semibold))
@@ -136,6 +139,13 @@ struct FloatingResultPanel: View {
                     .buttonStyle(.borderedProminent)
                     .controlSize(.mini)
                 }
+            } else if isStreamMode && canSwapStream {
+                Button(action: onSwapStreamToCanvas) {
+                    Text("Send to canvas")
+                        .font(.caption)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.mini)
             }
 
             Spacer()
