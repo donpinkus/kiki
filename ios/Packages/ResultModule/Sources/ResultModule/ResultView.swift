@@ -123,6 +123,8 @@ public struct ResultView: View {
         Image(uiImage: image)
             .resizable()
             .aspectRatio(contentMode: .fit)
+            .shadow(color: .black.opacity(0.25), radius: 12, x: 0, y: 6)
+            .padding(12)
     }
 
     // MARK: - Progress Panel

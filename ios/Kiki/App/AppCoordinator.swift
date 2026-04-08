@@ -55,7 +55,7 @@ final class AppCoordinator {
     }
     var showStylePicker = false
     var resultState: ResultState = .empty
-    var dividerPosition: CGFloat = 0.55
+    var dividerPosition: CGFloat = 0.5
     var advancedParameters = AdvancedParameters() {
         didSet { if !isSuppressingObservation { scheduleSave() } }
     }

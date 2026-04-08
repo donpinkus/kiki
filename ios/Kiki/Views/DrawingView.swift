@@ -46,9 +46,23 @@ struct DrawingView: View {
             }
 
             GeometryReader { geometry in
+                // Square canvas — side length is the smaller of half-width and full-height,
+                // so the canvas fits perfectly in either half of the split-screen layout.
+                // Stays the same size in fullscreen for consistency.
+                let canvasSide = min(
+                    geometry.size.width * coordinator.dividerPosition,
+                    geometry.size.height
+                )
+
                 ZStack(alignment: .topLeading) {
-                    // Canvas — always full-size, never recreated on layout switch
+                    // Canvas — square, trailing-aligned in split-screen, centered in fullscreen.
                     CanvasView(viewModel: coordinator.canvasViewModel)
+                        .frame(width: canvasSide, height: canvasSide)
+                        .frame(
+                            maxWidth: .infinity,
+                            maxHeight: .infinity,
+                            alignment: coordinator.drawingLayout == .splitScreen ? .trailing : .center
+                        )
                         .ignoresSafeArea(.keyboard)
                         .zIndex(coordinator.canvasOnTop ? 2 : 0)
 
@@ -86,6 +100,7 @@ struct DrawingView: View {
                         .opacity(coordinator.canvasOnTop ? 0 : 1)
                     }
                 }
+                .background(Color(.systemGray6))
                 .onChange(of: coordinator.canvasViewModel.isInteracting) { _, interacting in
                     guard coordinator.drawingLayout == .fullscreen else { return }
                     if interacting {
@@ -131,16 +146,6 @@ struct DrawingView: View {
 
     private func splitScreenResultPane(geometry: GeometryProxy) -> some View {
         HStack(spacing: 0) {
-            // Transparent spacer over the canvas area
-            Color.clear
-                .frame(width: geometry.size.width * coordinator.dividerPosition)
-                .contentShape(Rectangle())
-                .allowsHitTesting(false)
-
-            Rectangle()
-                .fill(Color(.separator))
-                .frame(width: 1)
-
             ResultView(state: effectiveResultState)
                 .overlay(alignment: .topTrailing) {
                     if coordinator.compareWithoutControlNet || coordinator.comparisonData != nil {
@@ -167,6 +172,16 @@ struct DrawingView: View {
                             .padding(.bottom, 16)
                     }
                 }
+
+            Rectangle()
+                .fill(Color(.separator))
+                .frame(width: 1)
+
+            // Transparent spacer over the canvas area (on the right)
+            Color.clear
+                .frame(width: geometry.size.width * coordinator.dividerPosition)
+                .contentShape(Rectangle())
+                .allowsHitTesting(false)
         }
     }
 
