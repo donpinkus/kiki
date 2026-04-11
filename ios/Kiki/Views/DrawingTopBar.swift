@@ -36,7 +36,7 @@ struct DrawingTopBar: View {
                 .font(.subheadline)
                 .frame(minWidth: 120, maxWidth: 400)
 
-            streamActionButton
+            connectionStatusIndicator
 
             Button {
                 showAdvancedParameters = true
@@ -81,38 +81,19 @@ struct DrawingTopBar: View {
         .background(.bar)
     }
 
-    // MARK: - Stream Action Button
+    // MARK: - Connection Status
 
-    private var streamActionButton: some View {
-        Group {
-            if coordinator.streamHasPendingUpdate {
-                Button {
-                    coordinator.applyStreamUpdate()
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "arrow.triangle.2.circlepath")
-                            .font(.system(size: 14, weight: .semibold))
-                        Text("Update")
-                            .font(.subheadline.weight(.medium))
-                    }
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .background(Color.accentColor, in: Capsule())
-                }
-            } else {
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(streamStatusColor)
-                        .frame(width: 8, height: 8)
-                    Text(streamStatusLabel)
-                        .font(.subheadline.weight(.medium))
-                }
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 8)
-            }
+    private var connectionStatusIndicator: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(streamStatusColor)
+                .frame(width: 8, height: 8)
+            Text(streamStatusLabel)
+                .font(.subheadline.weight(.medium))
         }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
     }
 
     private var streamStatusColor: Color {

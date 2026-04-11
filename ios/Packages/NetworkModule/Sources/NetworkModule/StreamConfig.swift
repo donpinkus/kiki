@@ -1,7 +1,7 @@
 import Foundation
 
 /// Configuration message sent over WebSocket to the FLUX.2-klein server.
-public struct StreamConfig: Codable, Sendable {
+public struct StreamConfig: Codable, Sendable, Equatable {
     public let type: String
     public let prompt: String?
     public let mode: String

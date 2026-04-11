@@ -48,10 +48,16 @@ final class AppCoordinator {
         didSet { applyTool() }
     }
     var promptText = "" {
-        didSet { if !isSuppressingObservation { scheduleSave() } }
+        didSet {
+            if !isSuppressingObservation { scheduleSave() }
+            syncStreamConfig()
+        }
     }
     var selectedStyle: PromptStyle = .default {
-        didSet { if !isSuppressingObservation { scheduleSave() } }
+        didSet {
+            if !isSuppressingObservation { scheduleSave() }
+            syncStreamConfig()
+        }
     }
     var showStylePicker = false
     var resultState: ResultState = .empty
@@ -81,39 +87,23 @@ final class AppCoordinator {
     // -- Stream parameters --
 
     /// Img2img mode: "reference" (native conditioning) or "denoise" (latent noise).
-    var streamMode: String = "reference"
+    var streamMode: String = "reference" { didSet { syncStreamConfig() } }
 
     /// Denoise strength for denoise mode (0.0-1.0).
-    var streamDenoise: Double = 0.6
+    var streamDenoise: Double = 0.6 { didSet { syncStreamConfig() } }
 
     /// Guidance scale for reference mode.
-    var streamGuidanceScale: Double = 4.0
+    var streamGuidanceScale: Double = 4.0 { didSet { syncStreamConfig() } }
 
     /// Number of inference steps.
-    var streamSteps: Int = 4
+    var streamSteps: Int = 4 { didSet { syncStreamConfig() } }
 
     /// Fixed seed (nil = server picks a stable per-session seed).
-    var streamSeed: Int?
+    var streamSeed: Int? { didSet { syncStreamConfig() } }
 
     /// Capture FPS for stream mode.
     var streamCaptureFPS: Double = 2 {
         didSet { streamSession?.captureInterval = 1.0 / streamCaptureFPS }
-    }
-
-    /// Tracks what was last sent to the server so we know if there are pending changes.
-    private var lastSentPrompt: String?
-    private var lastSentConfig: (mode: String, denoise: Double, guidanceScale: Double, steps: Int, seed: Int?)? = nil
-
-    /// True when config differs from what the server currently has.
-    var streamHasPendingUpdate: Bool {
-        guard streamSession != nil else { return false }
-        if composedPrompt != lastSentPrompt { return true }
-        guard let last = lastSentConfig else { return true }
-        return streamMode != last.mode
-            || streamDenoise != last.denoise
-            || streamGuidanceScale != last.guidanceScale
-            || streamSteps != last.steps
-            || streamSeed != last.seed
     }
 
     // MARK: - Private State
@@ -330,7 +320,11 @@ final class AppCoordinator {
 
         streamLog.info("Starting stream to \(wsURL.absoluteString)")
 
-        let session = StreamSession(url: wsURL, canvasViewModel: canvasViewModel)
+        let session = StreamSession(
+            url: wsURL,
+            canvasViewModel: canvasViewModel,
+            config: buildStreamConfig()
+        )
         session.captureInterval = 1.0 / streamCaptureFPS
 
         session.onImageReceived = { [weak self] image in
@@ -358,12 +352,9 @@ final class AppCoordinator {
         }
 
         self.streamSession = session
-        let config = buildStreamConfig()
-        self.lastSentPrompt = composedPrompt
-        self.lastSentConfig = (streamMode, streamDenoise, streamGuidanceScale, streamSteps, streamSeed)
 
         Task {
-            await session.start(config: config)
+            await session.start()
         }
     }
 
@@ -377,6 +368,12 @@ final class AppCoordinator {
         if let image = lastSuccessfulImage {
             resultState = .preview(image: image)
         }
+    }
+
+    /// Push the current config to the stream session. The capture loop will
+    /// detect the change and send it to the server before the next frame.
+    private func syncStreamConfig() {
+        streamSession?.config = buildStreamConfig()
     }
 
     // MARK: - App Lifecycle
@@ -400,15 +397,6 @@ final class AppCoordinator {
         @unknown default:
             break
         }
-    }
-
-    /// Apply pending config changes to the stream server.
-    func applyStreamUpdate() {
-        let config = buildStreamConfig()
-        print("[Stream] Applying update: prompt='\(config.prompt ?? "(none)")'")
-        lastSentPrompt = composedPrompt
-        lastSentConfig = (streamMode, streamDenoise, streamGuidanceScale, streamSteps, streamSeed)
-        streamSession?.updateConfig(config)
     }
 
     private func buildStreamConfig() -> StreamConfig {

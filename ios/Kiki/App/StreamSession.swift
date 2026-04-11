@@ -4,6 +4,10 @@ import NetworkModule
 
 /// Orchestrates real-time streaming generation: captures canvas frames,
 /// sends them over WebSocket, and delivers generated images back.
+///
+/// Config changes (prompt, mode, denoise, etc.) are applied automatically —
+/// the capture loop sends a config update before the next frame whenever it
+/// detects a change.
 @MainActor
 final class StreamSession {
 
@@ -29,8 +33,12 @@ final class StreamSession {
     /// How often to capture and send frames (default ~2 FPS for FLUX.2-klein).
     var captureInterval: TimeInterval = 0.5
 
-    /// Current stream config (cached for reconnection).
-    private var currentConfig: StreamConfig?
+    /// Current desired config. Set by AppCoordinator whenever prompt/settings
+    /// change. The capture loop detects changes and sends them automatically.
+    var config: StreamConfig
+
+    /// Last config actually sent to the server (used for change detection).
+    private var lastSentConfig: StreamConfig?
 
     /// Current connection state, observed by AppCoordinator.
     private(set) var connectionState: ConnectionState = .disconnected
@@ -56,17 +64,17 @@ final class StreamSession {
 
     // MARK: - Lifecycle
 
-    init(url: URL, canvasViewModel: CanvasViewModel) {
+    init(url: URL, canvasViewModel: CanvasViewModel, config: StreamConfig) {
         self.url = url
         self.client = StreamWebSocketClient(url: url)
         self.canvasViewModel = canvasViewModel
+        self.config = config
     }
 
     // MARK: - Control
 
-    func start(config: StreamConfig) async {
+    func start() async {
         print("[Stream] Starting: url=\(url.absoluteString), prompt=\(config.prompt ?? "(none)")")
-        self.currentConfig = config
         self.isStopped = false
         self.reconnectAttempts = 0
         self.framesSent = 0
@@ -83,12 +91,6 @@ final class StreamSession {
         updateConnectionState(.disconnected)
     }
 
-    func updateConfig(_ config: StreamConfig) {
-        self.currentConfig = config
-        print("[Stream] Config update: prompt=\(config.prompt ?? "(none)")")
-        Task { try? await client.sendConfig(config) }
-    }
-
     // MARK: - Connection
 
     private func connectAndRun() async {
@@ -100,10 +102,9 @@ final class StreamSession {
             print("[Stream] Connected to server")
             updateConnectionState(.connected)
 
-            if let config = currentConfig {
-                try await client.sendConfig(config)
-                print("[Stream] Initial config sent")
-            }
+            try await client.sendConfig(config)
+            lastSentConfig = config
+            print("[Stream] Initial config sent")
 
             startReceiveLoop()
             startCaptureLoop()
@@ -150,6 +151,9 @@ final class StreamSession {
                 let stopped = await self.isStopped
                 if stopped { break }
 
+                // Send config update if it changed since last send
+                await self.sendConfigIfChanged()
+
                 let jpeg: Data? = await MainActor.run {
                     guard let snapshot = self.canvasViewModel.captureSnapshot() else { return nil }
                     guard let resized = self.resizeImage(snapshot.image, to: Self.captureSize) else { return nil }
@@ -175,6 +179,19 @@ final class StreamSession {
                 try? await Task.sleep(for: .milliseconds(Int(interval * 1000)))
             }
             print("[Stream] Capture loop ended (sent \(count) frames)")
+        }
+    }
+
+    /// Compare current config to what was last sent; if different, send an update.
+    private func sendConfigIfChanged() async {
+        let current = config
+        guard current != lastSentConfig else { return }
+        do {
+            try await client.sendConfig(current)
+            lastSentConfig = current
+            print("[Stream] Config auto-sent: prompt=\(current.prompt ?? "(none)")")
+        } catch {
+            print("[Stream] Config send error: \(error)")
         }
     }
 
