@@ -1,38 +1,19 @@
 import UIKit
 
 extension UIImage {
-    /// Reads the single pixel color from a 1×1 image.
-    /// Used for cheap color sampling where the renderer produces a tiny image.
+    /// Reads the single pixel color from a 1x1 image.
+    /// Re-renders into a known RGBA context to avoid byte-order issues
+    /// (UIGraphicsImageRenderer uses BGRA on iOS by default).
     func pixelColor() -> UIColor? {
-        guard let cgImage = self.cgImage,
-              cgImage.width > 0, cgImage.height > 0,
-              let dataProvider = cgImage.dataProvider,
-              let data = dataProvider.data,
-              let bytes = CFDataGetBytePtr(data) else {
-            return nil
-        }
-
-        let bytesPerPixel = cgImage.bitsPerPixel / 8
-        guard bytesPerPixel >= 3 else { return nil }
-
-        // Read the first (and only) pixel of a 1x1 image at offset 0.
-        let r = CGFloat(bytes[0]) / 255
-        let g = CGFloat(bytes[1]) / 255
-        let b = CGFloat(bytes[2]) / 255
-        let a: CGFloat = bytesPerPixel >= 4 ? CGFloat(bytes[3]) / 255 : 1.0
-        return UIColor(red: r, green: g, blue: b, alpha: a)
+        guard let cgImage = self.cgImage else { return nil }
+        return Self.samplePixel(from: cgImage, x: 0, y: 0)
     }
 
     /// Reads the pixel color at a specific point in image-display coordinates.
-    /// `displaySize` is the size of the rendered image on screen (not the UIImage's native pixel size).
-    /// The point is mapped to the underlying pixel grid via scale = image.pixel / displaySize.
     func pixelColor(at point: CGPoint, in displaySize: CGSize) -> UIColor? {
         guard let cgImage = self.cgImage,
               cgImage.width > 0, cgImage.height > 0,
-              displaySize.width > 0, displaySize.height > 0,
-              let dataProvider = cgImage.dataProvider,
-              let data = dataProvider.data,
-              let bytes = CFDataGetBytePtr(data) else {
+              displaySize.width > 0, displaySize.height > 0 else {
             return nil
         }
 
@@ -41,14 +22,34 @@ extension UIImage {
         let pixelX = max(0, min(cgImage.width - 1, Int(point.x * scaleX)))
         let pixelY = max(0, min(cgImage.height - 1, Int(point.y * scaleY)))
 
-        let bytesPerPixel = cgImage.bitsPerPixel / 8
-        guard bytesPerPixel >= 3 else { return nil }
+        return Self.samplePixel(from: cgImage, x: pixelX, y: pixelY)
+    }
 
-        let index = pixelY * cgImage.bytesPerRow + pixelX * bytesPerPixel
-        let r = CGFloat(bytes[index]) / 255
-        let g = CGFloat(bytes[index + 1]) / 255
-        let b = CGFloat(bytes[index + 2]) / 255
-        let a: CGFloat = bytesPerPixel >= 4 ? CGFloat(bytes[index + 3]) / 255 : 1.0
-        return UIColor(red: r, green: g, blue: b, alpha: a)
+    /// Render a single pixel into a known-format RGBA context and read it.
+    /// This avoids depending on the source image's byte order (RGBA vs BGRA).
+    private static func samplePixel(from cgImage: CGImage, x: Int, y: Int) -> UIColor? {
+        var pixel: [UInt8] = [0, 0, 0, 0] // R, G, B, A
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        guard let context = CGContext(
+            data: &pixel,
+            width: 1,
+            height: 1,
+            bitsPerComponent: 8,
+            bytesPerRow: 4,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+
+        // Draw just the target pixel into the 1x1 context
+        context.draw(cgImage, in: CGRect(x: -x, y: -y, width: cgImage.width, height: cgImage.height))
+
+        let r = CGFloat(pixel[0]) / 255
+        let g = CGFloat(pixel[1]) / 255
+        let b = CGFloat(pixel[2]) / 255
+        let a = CGFloat(pixel[3]) / 255
+
+        // Un-premultiply alpha
+        guard a > 0 else { return UIColor(red: r, green: g, blue: b, alpha: 0) }
+        return UIColor(red: r / a, green: g / a, blue: b / a, alpha: a)
     }
 }
