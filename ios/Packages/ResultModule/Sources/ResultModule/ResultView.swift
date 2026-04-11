@@ -156,7 +156,7 @@ public struct ResultView: View {
     // MARK: - Eyedropper
 
     private func eyedropperGesture(image: UIImage, size: CGSize) -> some Gesture {
-        LongPressGesture(minimumDuration: 0.5, maximumDistance: 10)
+        LongPressGesture(minimumDuration: 0.2, maximumDistance: 10)
             .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .local))
             .onChanged { value in
                 switch value {
