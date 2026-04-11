@@ -17,13 +17,16 @@ echo "System python: $PYTHON ($($PYTHON --version 2>&1))"
 echo ""
 echo "==> Setting up virtual environment..."
 
-if [ -d "$FK_VENV" ] && [ -f "$FK_VENV/bin/python" ]; then
-  echo "  Reusing existing venv at $FK_VENV"
-else
-  echo "  Creating venv at $FK_VENV..."
-  $PYTHON -m venv "$FK_VENV" --system-site-packages
-  echo "  ✓ venv created"
+# Always recreate — previous venvs may have stale/incompatible packages.
+# No --system-site-packages: we install our own torch to avoid the base
+# image's 2.4.0 leaking through and breaking diffusers imports.
+if [ -d "$FK_VENV" ]; then
+  echo "  Removing stale venv..."
+  rm -rf "$FK_VENV"
 fi
+echo "  Creating clean venv at $FK_VENV..."
+$PYTHON -m venv "$FK_VENV"
+echo "  ✓ venv created (isolated)"
 
 VENV_PYTHON="$FK_VENV/bin/python"
 VENV_PIP="$FK_VENV/bin/pip"
@@ -33,12 +36,11 @@ VENV_PIP="$FK_VENV/bin/pip"
 echo ""
 echo "==> Installing dependencies in venv..."
 
-# Upgrade PyTorch — base image has 2.4.0 but latest diffusers needs >=2.5
-# for torch._custom_op flash attention support
-echo "  Upgrading PyTorch (base image 2.4 is too old for latest diffusers)..."
+# Install PyTorch with CUDA 12.4 — need >=2.5 for diffusers' custom_op flash attention
+echo "  Installing PyTorch (cu124)..."
 $VENV_PIP install -q --no-cache-dir \
     torch torchvision --index-url https://download.pytorch.org/whl/cu124 2>&1 | tail -5
-echo "  ✓ PyTorch upgraded ($($VENV_PYTHON -c 'import torch; print(torch.__version__)'))"
+echo "  ✓ PyTorch installed ($($VENV_PYTHON -c 'import torch; print(torch.__version__)'))"
 
 # Diffusers from git (required for Flux2KleinPipeline)
 echo "  Installing diffusers (from git)..."
