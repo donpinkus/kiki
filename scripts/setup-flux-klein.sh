@@ -37,32 +37,33 @@ echo ""
 echo "==> Installing dependencies in venv..."
 
 # Install PyTorch with CUDA 12.4 — need >=2.5 for diffusers' custom_op flash attention
+# NOTE: no -q flag — pip output keeps SSH alive during large downloads
 echo "  Installing PyTorch (cu124)..."
-$VENV_PIP install -q --no-cache-dir \
-    torch torchvision --index-url https://download.pytorch.org/whl/cu124 2>&1 | tail -5
+$VENV_PIP install --no-cache-dir --progress-bar on \
+    torch torchvision --index-url https://download.pytorch.org/whl/cu124
 echo "  ✓ PyTorch installed ($($VENV_PYTHON -c 'import torch; print(torch.__version__)'))"
 
 # Diffusers from git (required for Flux2KleinPipeline)
 echo "  Installing diffusers (from git)..."
-$VENV_PIP install -q --no-cache-dir \
-    "git+https://github.com/huggingface/diffusers.git" 2>&1 | tail -5
+$VENV_PIP install --no-cache-dir \
+    "git+https://github.com/huggingface/diffusers.git"
 echo "  ✓ diffusers installed"
 
 # Transformers, accelerate, sentencepiece for FLUX text encoder
 echo "  Installing transformers, accelerate..."
-$VENV_PIP install -q --no-cache-dir \
+$VENV_PIP install --no-cache-dir \
     "transformers>=4.40.0" \
     "accelerate>=0.28.0" \
-    "sentencepiece>=0.2.0" 2>&1 | tail -3
+    "sentencepiece>=0.2.0"
 echo "  ✓ ML dependencies installed"
 
 # Server deps
 echo "  Installing server dependencies..."
-$VENV_PIP install -q --no-cache-dir \
+$VENV_PIP install --no-cache-dir \
     "fastapi>=0.108.0" \
     "uvicorn[standard]>=0.25.0" \
     "websockets>=12.0" \
-    "Pillow>=10.0.0" 2>&1 | tail -3
+    "Pillow>=10.0.0"
 echo "  ✓ Server dependencies installed"
 
 # ── Step 3: Pre-download model to network volume ──
