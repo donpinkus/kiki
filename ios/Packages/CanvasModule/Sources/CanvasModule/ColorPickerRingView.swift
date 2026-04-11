@@ -43,15 +43,13 @@ final class ColorPickerRingView: UIView {
         let innerRadius = outerRadius - Self.ringWidth
 
         // -- Top half of ring: sampled color --
-        // UIBezierPath clockwise is screen-relative (opposite of CGContext).
-        // clockwise:true from π→0 goes over the top on screen.
         ctx.saveGState()
         let topRing = UIBezierPath()
         topRing.addArc(withCenter: center, radius: outerRadius, startAngle: .pi, endAngle: 0, clockwise: true)
         topRing.addArc(withCenter: center, radius: innerRadius, startAngle: 0, endAngle: .pi, clockwise: false)
         topRing.close()
         ctx.addPath(topRing.cgPath)
-        ctx.setFillColor(currentColor.cgColor)
+        ctx.setFillColor(previousColor.cgColor)
         ctx.fillPath()
         ctx.restoreGState()
 
@@ -62,7 +60,7 @@ final class ColorPickerRingView: UIView {
         bottomRing.addArc(withCenter: center, radius: innerRadius, startAngle: .pi, endAngle: 0, clockwise: false)
         bottomRing.close()
         ctx.addPath(bottomRing.cgPath)
-        ctx.setFillColor(previousColor.cgColor)
+        ctx.setFillColor(currentColor.cgColor)
         ctx.fillPath()
         ctx.restoreGState()
 
