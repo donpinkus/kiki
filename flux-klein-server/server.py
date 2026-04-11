@@ -80,13 +80,17 @@ async def websocket_stream(ws: WebSocket):
         await ws.send_text(json.dumps({"type": "status", "status": "ready"}))
 
     # Per-connection state
+    # Default seed is random-per-session (not per-frame) so output is
+    # stable when the sketch doesn't change. Client can override.
+    import random
+    session_seed = random.randint(0, 2**32 - 1)
     current_config = {
         "prompt": "",
         "mode": config.MODE,
         "denoise": config.DENOISE_STRENGTH,
         "guidanceScale": config.GUIDANCE_SCALE,
         "steps": config.STEPS,
-        "seed": None,
+        "seed": session_seed,
     }
 
     # Single-slot frame buffer: only the latest frame is kept.
@@ -127,8 +131,8 @@ async def websocket_stream(ws: WebSocket):
                                 current_config["guidanceScale"] = max(0.0, min(20.0, float(data["guidanceScale"])))
                             if "steps" in data:
                                 current_config["steps"] = max(1, min(50, int(data["steps"])))
-                            if "seed" in data:
-                                current_config["seed"] = int(data["seed"]) if data["seed"] is not None else None
+                            if "seed" in data and data["seed"] is not None:
+                                current_config["seed"] = int(data["seed"])
 
                             logger.info(
                                 "Client %d config: prompt='%s', mode=%s, steps=%d",
