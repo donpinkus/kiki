@@ -133,27 +133,34 @@ jobs:
           fi
 
           # ── Wait for pod to boot and get SSH info ──
+          # Check uptimeInSeconds first — runtime and ports are null while booting
           echo ""
           echo "Waiting for pod $POD_ID to boot..."
           SSH_IP=""
           SSH_PORT=""
+          POD_READY=false
           for i in $(seq 1 60); do
             POD_INFO=$(curl -sf "$API_URL" \
               -H 'Content-Type: application/json' \
               -d "{\"query\": \"query { pod(input: {podId: \\\"${POD_ID}\\\"}) { id desiredStatus runtime { uptimeInSeconds ports { ip isIpPublic privatePort publicPort type } } } }\"}")
 
-            SSH_IP=$(echo "$POD_INFO" | jq -r '.data.pod.runtime.ports[] | select(.privatePort == 22) | .ip // empty')
-            SSH_PORT=$(echo "$POD_INFO" | jq -r '.data.pod.runtime.ports[] | select(.privatePort == 22) | .publicPort // empty')
+            UPTIME=$(echo "$POD_INFO" | jq -r '.data.pod.runtime.uptimeInSeconds // 0')
+            if [ "$UPTIME" -gt 5 ] 2>/dev/null; then
+              echo "Pod is running (uptime: ${UPTIME}s)"
+              SSH_IP=$(echo "$POD_INFO" | jq -r '.data.pod.runtime.ports[] | select(.privatePort == 22) | .ip')
+              SSH_PORT=$(echo "$POD_INFO" | jq -r '.data.pod.runtime.ports[] | select(.privatePort == 22) | .publicPort')
 
-            if [ -n "$SSH_IP" ] && [ "$SSH_IP" != "null" ]; then
-              echo "Pod ready! SSH: $SSH_IP:$SSH_PORT"
-              break
+              if [ -n "$SSH_IP" ] && [ "$SSH_IP" != "null" ]; then
+                echo "SSH: $SSH_IP:$SSH_PORT"
+                POD_READY=true
+                break
+              fi
             fi
-            echo "  Waiting for SSH... (${i}/60)"
+            echo "  Waiting... (${i}/60)"
             sleep 5
           done
 
-          if [ -z "$SSH_IP" ] || [ "$SSH_IP" = "null" ]; then
+          if [ "$POD_READY" != "true" ]; then
             echo "::error::Pod $POD_ID never got SSH info after 5 minutes"
             exit 1
           fi
