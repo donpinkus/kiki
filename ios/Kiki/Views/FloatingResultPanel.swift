@@ -20,6 +20,8 @@ struct FloatingResultPanel: View {
     @State private var isPickingColor = false
     @State private var pickLocation: CGPoint = .zero
     @State private var sampledColor: Color = .white
+    @State private var holdTimer: Task<Void, Never>?
+    @State private var dragStart: CGPoint = .zero
 
     private let minSize = CGSize(width: 200, height: 160)
 
@@ -126,28 +128,44 @@ struct FloatingResultPanel: View {
     // MARK: - Eyedropper
 
     private func eyedropperGesture(image: UIImage, size: CGSize) -> some Gesture {
-        LongPressGesture(minimumDuration: 0.2, maximumDistance: 10)
-            .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .local))
-            .onChanged { value in
-                switch value {
-                case .first:
-                    break
-                case .second(let longPressComplete, let dragValue):
-                    guard longPressComplete, let drag = dragValue else { return }
-                    isPickingColor = true
-                    pickLocation = drag.location
-                    let samplePoint = CGPoint(x: drag.location.x, y: drag.location.y - EyedropperRing.offset)
-                    if let color = EyedropperRing.sampleColor(from: image, at: samplePoint, in: size) {
-                        sampledColor = color
+        DragGesture(minimumDistance: 0, coordinateSpace: .local)
+            .onChanged { drag in
+                if !isPickingColor {
+                    if holdTimer == nil {
+                        dragStart = drag.location
+                        holdTimer = Task { @MainActor in
+                            try? await Task.sleep(for: .milliseconds(300))
+                            guard !Task.isCancelled else { return }
+                            isPickingColor = true
+                            updateSample(at: dragStart, image: image, size: size)
+                        }
                     }
+                    let dx = drag.location.x - dragStart.x
+                    let dy = drag.location.y - dragStart.y
+                    if dx * dx + dy * dy > 100 {
+                        holdTimer?.cancel()
+                        holdTimer = nil
+                    }
+                } else {
+                    updateSample(at: drag.location, image: image, size: size)
                 }
             }
-            .onEnded { value in
-                if case .second(true, _) = value, isPickingColor {
+            .onEnded { _ in
+                holdTimer?.cancel()
+                holdTimer = nil
+                if isPickingColor {
                     onColorPicked?(sampledColor)
+                    isPickingColor = false
                 }
-                isPickingColor = false
             }
+    }
+
+    private func updateSample(at location: CGPoint, image: UIImage, size: CGSize) {
+        pickLocation = location
+        let samplePoint = CGPoint(x: location.x, y: location.y - EyedropperRing.offset)
+        if let color = EyedropperRing.sampleColor(from: image, at: samplePoint, in: size) {
+            sampledColor = color
+        }
     }
 
     // MARK: - Footer
