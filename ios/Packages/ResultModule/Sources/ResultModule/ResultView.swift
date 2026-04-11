@@ -358,17 +358,17 @@ private struct ColorPickerRing: View {
             Canvas { ctx, _ in
                 var topPath = Path()
                 topPath.addArc(center: CGPoint(x: center, y: center), radius: outerR,
-                               startAngle: .degrees(180), endAngle: .degrees(0), clockwise: false)
+                               startAngle: .degrees(180), endAngle: .degrees(0), clockwise: true)
                 topPath.addArc(center: CGPoint(x: center, y: center), radius: innerR,
-                               startAngle: .degrees(0), endAngle: .degrees(180), clockwise: true)
+                               startAngle: .degrees(0), endAngle: .degrees(180), clockwise: false)
                 topPath.closeSubpath()
                 ctx.fill(topPath, with: .color(currentColor))
 
                 var bottomPath = Path()
                 bottomPath.addArc(center: CGPoint(x: center, y: center), radius: outerR,
-                                  startAngle: .degrees(0), endAngle: .degrees(180), clockwise: false)
+                                  startAngle: .degrees(0), endAngle: .degrees(180), clockwise: true)
                 bottomPath.addArc(center: CGPoint(x: center, y: center), radius: innerR,
-                                  startAngle: .degrees(180), endAngle: .degrees(0), clockwise: true)
+                                  startAngle: .degrees(180), endAngle: .degrees(0), clockwise: false)
                 bottomPath.closeSubpath()
                 ctx.fill(bottomPath, with: .color(previousColor))
 
