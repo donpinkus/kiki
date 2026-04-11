@@ -210,7 +210,9 @@ public struct ResultView: View {
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         ) else { return nil }
 
-        ctx.draw(cgImage, in: CGRect(x: -px, y: -py, width: cgImage.width, height: cgImage.height))
+        // CGContext has Y=0 at bottom; flip so screen-coordinate py maps correctly
+        let flippedY = cgImage.height - 1 - py
+        ctx.draw(cgImage, in: CGRect(x: -px, y: -flippedY, width: cgImage.width, height: cgImage.height))
 
         let r = Double(pixel[0]) / 255
         let g = Double(pixel[1]) / 255

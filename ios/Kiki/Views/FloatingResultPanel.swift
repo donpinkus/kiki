@@ -177,7 +177,8 @@ struct FloatingResultPanel: View {
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         ) else { return nil }
 
-        ctx.draw(cgImage, in: CGRect(x: -px, y: -py, width: cgImage.width, height: cgImage.height))
+        let flippedY = cgImage.height - 1 - py
+        ctx.draw(cgImage, in: CGRect(x: -px, y: -flippedY, width: cgImage.width, height: cgImage.height))
 
         let r = Double(pixel[0]) / 255
         let g = Double(pixel[1]) / 255
