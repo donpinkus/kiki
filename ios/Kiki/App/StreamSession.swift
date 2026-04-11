@@ -16,12 +16,6 @@ final class StreamSession {
         case error(String)
     }
 
-    /// Engine-specific configuration passed to the server.
-    enum EngineConfig {
-        case streamDiffusion(tIndexList: [Int])
-        case fluxKlein(mode: String, denoise: Double, guidanceScale: Double, steps: Int, seed: Int?)
-    }
-
     // MARK: - Properties
 
     private let url: URL
@@ -32,17 +26,11 @@ final class StreamSession {
     private var statusTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
 
-    /// How often to capture and send frames (default ~7 FPS).
-    var captureInterval: TimeInterval = 0.150
+    /// How often to capture and send frames (default ~2 FPS for FLUX.2-klein).
+    var captureInterval: TimeInterval = 0.5
 
-    /// Resolution for captured frames sent to the server.
-    var captureSize: CGSize = CGSize(width: 512, height: 512)
-
-    /// Engine-specific parameters (SD t_index_list or FLUX denoise/steps/etc).
-    private var engineConfig: EngineConfig = .streamDiffusion(tIndexList: [20, 30])
-
-    /// Current prompt (cached for reconnection).
-    private var currentPrompt: String?
+    /// Current stream config (cached for reconnection).
+    private var currentConfig: StreamConfig?
 
     /// Current connection state, observed by AppCoordinator.
     private(set) var connectionState: ConnectionState = .disconnected
@@ -64,6 +52,8 @@ final class StreamSession {
     private var framesSent = 0
     private var framesReceived = 0
 
+    private static let captureSize = CGSize(width: 768, height: 768)
+
     // MARK: - Lifecycle
 
     init(url: URL, canvasViewModel: CanvasViewModel) {
@@ -74,10 +64,9 @@ final class StreamSession {
 
     // MARK: - Control
 
-    func start(prompt: String?, engineConfig: EngineConfig) async {
-        print("[Stream] Starting: url=\(url.absoluteString), prompt=\(prompt ?? "(none)"), config=\(engineConfig)")
-        self.engineConfig = engineConfig
-        self.currentPrompt = prompt
+    func start(config: StreamConfig) async {
+        print("[Stream] Starting: url=\(url.absoluteString), prompt=\(config.prompt ?? "(none)")")
+        self.currentConfig = config
         self.isStopped = false
         self.reconnectAttempts = 0
         self.framesSent = 0
@@ -94,11 +83,10 @@ final class StreamSession {
         updateConnectionState(.disconnected)
     }
 
-    func updateConfig(prompt: String?, engineConfig: EngineConfig? = nil) {
-        if let ec = engineConfig { self.engineConfig = ec }
-        if let p = prompt { self.currentPrompt = p }
-        print("[Stream] Config update: prompt=\(currentPrompt ?? "(none)"), config=\(self.engineConfig)")
-        Task { try? await client.sendConfig(buildWireConfig()) }
+    func updateConfig(_ config: StreamConfig) {
+        self.currentConfig = config
+        print("[Stream] Config update: prompt=\(config.prompt ?? "(none)")")
+        Task { try? await client.sendConfig(config) }
     }
 
     // MARK: - Connection
@@ -112,8 +100,10 @@ final class StreamSession {
             print("[Stream] Connected to server")
             updateConnectionState(.connected)
 
-            try await client.sendConfig(buildWireConfig())
-            print("[Stream] Initial config sent")
+            if let config = currentConfig {
+                try await client.sendConfig(config)
+                print("[Stream] Initial config sent")
+            }
 
             startReceiveLoop()
             startCaptureLoop()
@@ -151,12 +141,6 @@ final class StreamSession {
     // MARK: - Capture Loop
 
     private func startCaptureLoop() {
-        // Run on background. Only hop to MainActor for captureSnapshot/resizeImage
-        // (UIGraphicsImageRenderer requires main thread). Task.sleep on background
-        // does NOT block the main thread, so receive loop can process frames freely.
-        //
-        // No inactivity pause — captures continuously while connected.
-        // The server's similarity filter skips redundant frames.
         captureTask = Task.detached { [weak self] in
             print("[Stream] Capture loop started")
             var count = 0
@@ -166,11 +150,9 @@ final class StreamSession {
                 let stopped = await self.isStopped
                 if stopped { break }
 
-                // Capture + resize on main thread
-                let size = await self.captureSize
                 let jpeg: Data? = await MainActor.run {
                     guard let snapshot = self.canvasViewModel.captureSnapshot() else { return nil }
-                    guard let resized = self.resizeImage(snapshot.image, to: size) else { return nil }
+                    guard let resized = self.resizeImage(snapshot.image, to: Self.captureSize) else { return nil }
                     return resized.jpegData(compressionQuality: 0.7)
                 }
 
@@ -271,22 +253,5 @@ final class StreamSession {
         print("[Stream] State: \(state)")
         connectionState = state
         onConnectionStateChanged?(state)
-    }
-
-    /// Builds the engine-appropriate wire config (Encodable) for the current state.
-    private func buildWireConfig() -> any Encodable & Sendable {
-        switch engineConfig {
-        case .streamDiffusion(let tIndexList):
-            return StreamConfig(prompt: currentPrompt, tIndexList: tIndexList)
-        case .fluxKlein(let mode, let denoise, let guidanceScale, let steps, let seed):
-            return FluxStreamConfig(
-                prompt: currentPrompt,
-                mode: mode,
-                denoise: denoise,
-                guidanceScale: guidanceScale,
-                steps: steps,
-                seed: seed
-            )
-        }
     }
 }

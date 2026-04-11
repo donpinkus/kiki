@@ -4,7 +4,6 @@ import CanvasModule
 struct DrawingTopBar: View {
     @Environment(AppCoordinator.self) private var coordinator
     @State private var showAdvancedParameters = false
-    @State private var isSpinning = false
 
     var body: some View {
         @Bindable var coordinator = coordinator
@@ -20,14 +19,7 @@ struct DrawingTopBar: View {
 
             Spacer()
 
-            // MARK: Center — Engine Toggle, Style, Prompt, Generate, Settings
-            Picker("Engine", selection: $coordinator.generationEngine) {
-                Text("Standard").tag(GenerationEngine.standard)
-                Label("Stream", systemImage: "bolt.fill").tag(GenerationEngine.stream)
-            }
-            .pickerStyle(.segmented)
-            .frame(width: 170)
-
+            // MARK: Center — Style, Prompt, Stream Status, Settings
             Button {
                 coordinator.showStylePicker = true
             } label: {
@@ -44,59 +36,12 @@ struct DrawingTopBar: View {
                 .font(.subheadline)
                 .frame(minWidth: 120, maxWidth: 400)
 
-            if coordinator.generationEngine == .standard {
-                // Standard mode: Generate button
-                Button {
-                    coordinator.generate()
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "apple.intelligence")
-                            .font(.system(size: 14, weight: .semibold))
-                            .rotationEffect(.degrees(isSpinning ? 360 : 0))
-                        Text(coordinator.isGenerating ? "Generating…" : "Generate")
-                            .font(.subheadline.weight(.medium))
-                    }
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .background(
-                        coordinator.canvasViewModel.isEmpty || coordinator.isGenerating
-                            ? Color.accentColor.opacity(0.4)
-                            : Color.accentColor,
-                        in: Capsule()
-                    )
-                    .overlay(alignment: .topTrailing) {
-                        if coordinator.hasUnsavedChanges && !coordinator.isGenerating {
-                            Circle()
-                                .fill(.orange)
-                                .frame(width: 8, height: 8)
-                                .offset(x: 2, y: -2)
-                        }
-                    }
-                }
-                .disabled(coordinator.canvasViewModel.isEmpty || coordinator.isGenerating)
-                .onChange(of: coordinator.isGenerating) { _, generating in
-                    if generating {
-                        withAnimation(.linear(duration: 2).repeatForever(autoreverses: false)) {
-                            isSpinning = true
-                        }
-                    } else {
-                        withAnimation(.default) {
-                            isSpinning = false
-                        }
-                    }
-                }
-            } else {
-                // Stream mode: update button / status indicator
-                streamActionButton
-            }
+            streamActionButton
 
             Button {
                 showAdvancedParameters = true
             } label: {
-                Image(systemName: coordinator.advancedParameters.isDefault
-                    ? "slider.horizontal.3"
-                    : "slider.horizontal.2.gobackward")
+                Image(systemName: "slider.horizontal.3")
                     .font(.system(size: 18, weight: .medium))
                     .foregroundStyle(.primary)
                     .frame(width: 36, height: 36)
@@ -141,7 +86,6 @@ struct DrawingTopBar: View {
     private var streamActionButton: some View {
         Group {
             if coordinator.streamHasPendingUpdate {
-                // Pending changes — show Update button
                 Button {
                     coordinator.applyStreamUpdate()
                 } label: {
@@ -157,7 +101,6 @@ struct DrawingTopBar: View {
                     .background(Color.accentColor, in: Capsule())
                 }
             } else {
-                // No pending changes — show connection status
                 HStack(spacing: 6) {
                     Circle()
                         .fill(streamStatusColor)

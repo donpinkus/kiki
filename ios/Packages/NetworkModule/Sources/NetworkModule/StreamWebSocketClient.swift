@@ -1,6 +1,6 @@
 import Foundation
 
-/// WebSocket client for real-time streaming communication with the StreamDiffusion backend.
+/// WebSocket client for real-time streaming communication with the generation backend.
 /// Uses native `URLSessionWebSocketTask` — no third-party dependencies.
 public actor StreamWebSocketClient {
 

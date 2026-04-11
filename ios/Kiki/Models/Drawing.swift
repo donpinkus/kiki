@@ -1,6 +1,5 @@
 import SwiftData
 import SwiftUI
-import NetworkModule
 
 @Model
 final class Drawing {
@@ -19,7 +18,6 @@ final class Drawing {
     // MARK: - Generation Results
 
     @Attribute(.externalStorage) var generatedImageData: Data?
-    @Attribute(.externalStorage) var lineartImageData: Data?
 
     // MARK: - Thumbnail
 
@@ -29,8 +27,6 @@ final class Drawing {
 
     var promptText: String
     var stylePresetRawValue: String
-    var advancedParametersJSON: Data?
-    var isSeedLocked: Bool
 
     // MARK: - Init
 
@@ -39,15 +35,13 @@ final class Drawing {
         createdAt: Date = Date(),
         updatedAt: Date = Date(),
         promptText: String = "",
-        stylePresetRawValue: String = PromptStyle.default.id,
-        isSeedLocked: Bool = false
+        stylePresetRawValue: String = PromptStyle.default.id
     ) {
         self.id = id
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.promptText = promptText
         self.stylePresetRawValue = stylePresetRawValue
-        self.isSeedLocked = isSeedLocked
     }
 }
 
@@ -58,16 +52,6 @@ extension Drawing {
     var styleId: String {
         get { stylePresetRawValue }
         set { stylePresetRawValue = newValue }
-    }
-
-    var advancedParameters: AdvancedParameters {
-        get {
-            guard let data = advancedParametersJSON else { return AdvancedParameters() }
-            return (try? JSONDecoder().decode(AdvancedParameters.self, from: data)) ?? AdvancedParameters()
-        }
-        set {
-            advancedParametersJSON = try? JSONEncoder().encode(newValue)
-        }
     }
 
     var canvasThumbnail: UIImage? {
@@ -81,8 +65,6 @@ extension Drawing {
     }
 
     /// True when the drawing has no meaningful content.
-    /// Uses canvasThumbnailData as the canvas indicator because drawing data
-    /// may contain serialization overhead even for an empty canvas.
     var isContentEmpty: Bool {
         canvasThumbnailData == nil && promptText.isEmpty && generatedImageData == nil
     }

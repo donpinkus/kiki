@@ -3,16 +3,10 @@ import ResultModule
 
 struct FloatingResultPanel: View {
     let resultState: ResultState
-    let showingLineart: Bool
-    let hasLineart: Bool
-    let isGenerating: Bool
-    let isStreamMode: Bool
     let canSwapStream: Bool
     let containerSize: CGSize
     let currentBrushColor: Color
     let onClose: () -> Void
-    let onToggleLineart: () -> Void
-    let onSwapToCanvas: () -> Void
     let onSwapStreamToCanvas: () -> Void
     let onColorPicked: ((Color) -> Void)?
     var onInteraction: (() -> Void)? = nil
@@ -69,7 +63,7 @@ struct FloatingResultPanel: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .clipped()
 
-            // Footer — lineart toggle + swap + resize handle
+            // Footer
             footer
         }
         .frame(width: effectiveSize.width, height: effectiveSize.height)
@@ -188,31 +182,7 @@ struct FloatingResultPanel: View {
 
     private var footer: some View {
         HStack(spacing: 8) {
-            if !isStreamMode && hasLineart && !isGenerating {
-                Button { if showingLineart { onToggleLineart() } } label: {
-                    Text("Generated")
-                        .font(.caption.weight(showingLineart ? .regular : .semibold))
-                        .foregroundStyle(showingLineart ? .secondary : .primary)
-                }
-                .buttonStyle(.plain)
-
-                Button { if !showingLineart { onToggleLineart() } } label: {
-                    Text("Line art")
-                        .font(.caption.weight(showingLineart ? .semibold : .regular))
-                        .foregroundStyle(showingLineart ? .primary : .secondary)
-                }
-                .buttonStyle(.plain)
-
-                if showingLineart {
-                    Spacer()
-                    Button(action: onSwapToCanvas) {
-                        Text("Send to canvas")
-                            .font(.caption)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.mini)
-                }
-            } else if isStreamMode && canSwapStream {
+            if canSwapStream {
                 Button(action: onSwapStreamToCanvas) {
                     Text("Send to canvas")
                         .font(.caption)

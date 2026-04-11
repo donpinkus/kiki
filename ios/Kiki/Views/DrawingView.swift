@@ -5,7 +5,6 @@ import ResultModule
 
 struct DrawingView: View {
     @Environment(AppCoordinator.self) private var coordinator
-    @State private var showDebugModal = false
     @State private var panelReturnTask: Task<Void, Never>?
     @State private var errorDismissTask: Task<Void, Never>?
 
@@ -46,16 +45,12 @@ struct DrawingView: View {
             }
 
             GeometryReader { geometry in
-                // Square canvas — side length is the smaller of half-width and full-height,
-                // so the canvas fits perfectly in either half of the split-screen layout.
-                // Stays the same size in fullscreen for consistency.
                 let canvasSide = min(
                     geometry.size.width * coordinator.dividerPosition,
                     geometry.size.height
                 )
 
                 ZStack(alignment: .topLeading) {
-                    // Canvas — square, trailing-aligned in split-screen, centered in fullscreen.
                     CanvasView(viewModel: coordinator.canvasViewModel)
                         .frame(width: canvasSide, height: canvasSide)
                         .frame(
@@ -66,29 +61,21 @@ struct DrawingView: View {
                         .ignoresSafeArea(.keyboard)
                         .zIndex(coordinator.canvasOnTop ? 2 : 0)
 
-                    // Canvas sidebar — always on top of both canvas and panel
                     CanvasSidebar()
                         .padding(.leading, 12)
                         .frame(maxHeight: .infinity, alignment: .leading)
                         .zIndex(3)
 
-                    // Layout-specific result display
                     if coordinator.drawingLayout == .splitScreen {
                         splitScreenResultPane(geometry: geometry)
                             .zIndex(2)
                     } else if coordinator.showFloatingPanel {
                         FloatingResultPanel(
-                            resultState: effectiveResultState,
-                            showingLineart: coordinator.showingLineart,
-                            hasLineart: coordinator.lastGeneratedLineartImage != nil,
-                            isGenerating: coordinator.isGenerating,
-                            isStreamMode: coordinator.generationEngine == .stream,
+                            resultState: coordinator.resultState,
                             canSwapStream: coordinator.canSwapStreamImageToCanvas,
                             containerSize: geometry.size,
                             currentBrushColor: coordinator.currentColor,
                             onClose: { coordinator.showFloatingPanel = false },
-                            onToggleLineart: { coordinator.showingLineart.toggle() },
-                            onSwapToCanvas: { coordinator.swapLineartToCanvas() },
                             onSwapStreamToCanvas: { coordinator.swapStreamImageToCanvas() },
                             onColorPicked: { coordinator.currentColor = $0 },
                             onInteraction: {
@@ -122,25 +109,9 @@ struct DrawingView: View {
             }
         }
         .animation(.easeInOut(duration: 0.3), value: coordinator.generationError != nil)
-        .fullScreenCover(isPresented: $showDebugModal) {
-            if let data = coordinator.comparisonData {
-                DebugComparisonModal(data: data)
-            }
-        }
         .fullScreenCover(isPresented: $coordinator.showStylePicker) {
             StylePickerView()
                 .environment(coordinator)
-        }
-        .alert(
-            "Comparison Failed",
-            isPresented: Binding(
-                get: { coordinator.comparisonError != nil },
-                set: { if !$0 { coordinator.comparisonError = nil } }
-            )
-        ) {
-            Button("OK") { coordinator.comparisonError = nil }
-        } message: {
-            Text(coordinator.comparisonError ?? "")
         }
     }
 
@@ -149,31 +120,12 @@ struct DrawingView: View {
     private func splitScreenResultPane(geometry: GeometryProxy) -> some View {
         HStack(spacing: 0) {
             ResultView(
-                state: effectiveResultState,
+                state: coordinator.resultState,
                 currentBrushColor: coordinator.currentColor,
                 onColorPicked: { coordinator.currentColor = $0 }
             )
-                .overlay(alignment: .topTrailing) {
-                    if coordinator.compareWithoutControlNet || coordinator.comparisonData != nil {
-                        Button { if coordinator.comparisonData != nil { showDebugModal = true } } label: {
-                            Image(systemName: "square.grid.2x2")
-                                .font(.system(size: 14))
-                                .foregroundStyle(.white)
-                                .padding(8)
-                                .background(.ultraThinMaterial, in: Circle())
-                        }
-                        .disabled(coordinator.comparisonData == nil)
-                        .opacity(coordinator.comparisonData != nil ? 1 : 0.4)
-                        .padding(12)
-                    }
-                }
                 .overlay(alignment: .bottom) {
-                    if coordinator.generationEngine == .standard
-                        && coordinator.lastGeneratedLineartImage != nil
-                        && !coordinator.isGenerating {
-                        lineartToggleBar
-                            .padding(.bottom, 16)
-                    } else if coordinator.canSwapStreamImageToCanvas {
+                    if coordinator.canSwapStreamImageToCanvas {
                         streamSwapBar
                             .padding(.bottom, 16)
                     }
@@ -183,7 +135,6 @@ struct DrawingView: View {
                 .fill(Color(.separator))
                 .frame(width: 1)
 
-            // Transparent spacer over the canvas area (on the right)
             Color.clear
                 .frame(width: geometry.size.width * coordinator.dividerPosition)
                 .contentShape(Rectangle())
@@ -192,42 +143,6 @@ struct DrawingView: View {
     }
 
     // MARK: - Private
-
-    private var effectiveResultState: ResultState {
-        if coordinator.showingLineart,
-           let lineart = coordinator.lastGeneratedLineartImage,
-           case .preview = coordinator.resultState {
-            return .preview(image: lineart)
-        }
-        return coordinator.resultState
-    }
-
-    private var lineartToggleBar: some View {
-        @Bindable var coordinator = coordinator
-        return HStack(spacing: 12) {
-            Picker("View", selection: $coordinator.showingLineart) {
-                Text("Generated").tag(false)
-                Text("Lineart").tag(true)
-            }
-            .pickerStyle(.segmented)
-            .frame(width: 200)
-
-            if coordinator.showingLineart {
-                Button {
-                    coordinator.swapLineartToCanvas()
-                } label: {
-                    Label("Swap to Canvas", systemImage: "arrow.left.arrow.right")
-                        .font(.caption)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .background(.ultraThinMaterial, in: Capsule())
-        .shadow(color: .black.opacity(0.15), radius: 8, y: 4)
-    }
 
     private var streamSwapBar: some View {
         Button {

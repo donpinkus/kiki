@@ -4,7 +4,6 @@ import websocket from '@fastify/websocket';
 import { config } from './config/index.js';
 import { AppError, RateLimitedError } from './errors.js';
 import { healthRoute } from './routes/health.js';
-import { generateRoute } from './routes/generate.js';
 import { streamRoute } from './routes/stream.js';
 import { authPlugin } from './modules/auth/index.js';
 
@@ -35,7 +34,6 @@ await app.register(authPlugin);
 
 // --- Routes ---
 await app.register(healthRoute);
-await app.register(generateRoute);
 await app.register(streamRoute);
 
 // --- Error handler ---
