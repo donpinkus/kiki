@@ -70,12 +70,13 @@ jobs:
             }
 
             # Phase 1: Try existing volume datacenters
+            # GPU-first loop: prefer the best GPU across all DCs before falling back
             POD_ID=""
             if [ -n "$EXISTING_DCS" ]; then
               echo "Trying existing datacenters: $EXISTING_DCS"
-              for DC in $EXISTING_DCS; do
-                VOL_ID=$(echo "$VOLUMES" | jq -r ".data.myself.networkVolumes[] | select(.dataCenterId == \"$DC\") | .id" | head -1)
-                for GPU in "${GPU_TYPES[@]}"; do
+              for GPU in "${GPU_TYPES[@]}"; do
+                for DC in $EXISTING_DCS; do
+                  VOL_ID=$(echo "$VOLUMES" | jq -r ".data.myself.networkVolumes[] | select(.dataCenterId == \"$DC\") | .id" | head -1)
                   if try_create_pod "$GPU" "$DC" "$VOL_ID"; then
                     break 2
                   fi
