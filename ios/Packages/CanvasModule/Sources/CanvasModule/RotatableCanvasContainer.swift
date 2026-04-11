@@ -232,10 +232,8 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
         case .began:
             let containerPoint = gesture.location(in: self)
             let ringCenter = CGPoint(x: containerPoint.x, y: containerPoint.y - Self.ringFingerOffset)
-            // Sample at the crosshair position (center of the ring), not the finger
-            let samplePoint = canvasView.convert(ringCenter, from: self)
             ringView.previousColor = currentBrushColorProvider?() ?? .black
-            if let sampled = sampleColor(at: samplePoint) {
+            if let sampled = sampleColorInContainer(at: ringCenter) {
                 ringView.currentColor = sampled
             }
             ringView.center = ringCenter
@@ -244,8 +242,7 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
         case .changed:
             let containerPoint = gesture.location(in: self)
             let ringCenter = CGPoint(x: containerPoint.x, y: containerPoint.y - Self.ringFingerOffset)
-            let samplePoint = canvasView.convert(ringCenter, from: self)
-            if let sampled = sampleColor(at: samplePoint) {
+            if let sampled = sampleColorInContainer(at: ringCenter) {
                 ringView.currentColor = sampled
             }
             ringView.center = ringCenter
@@ -263,32 +260,42 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
         }
     }
 
-    /// Sample the color of the canvas composite at the given point in canvas view coordinates.
-    /// Uses a 1x1 renderer with a translated context so only the target pixel is rendered.
-    private func sampleColor(at point: CGPoint) -> UIColor? {
-        let size = canvasView.bounds.size
+    /// Sample the displayed pixel at a point in the container's coordinate system.
+    /// Snapshots the transformView (which holds background + canvas at their displayed
+    /// positions/transforms) and reads the pixel directly — no coordinate conversion needed.
+    private func sampleColorInContainer(at point: CGPoint) -> UIColor? {
+        let size = bounds.size
         guard size.width > 0, size.height > 0 else { return nil }
         guard point.x >= 0, point.y >= 0, point.x < size.width, point.y < size.height else {
-            // Outside canvas bounds — nothing to sample
             return .white
         }
 
-        let format = UIGraphicsImageRendererFormat()
-        format.scale = 1
-        format.opaque = true
-        let renderer = UIGraphicsImageRenderer(
-            size: CGSize(width: 1, height: 1),
-            format: format
-        )
-        let image = renderer.image { ctx in
-            ctx.cgContext.translateBy(x: -point.x, y: -point.y)
-            let fullRect = CGRect(origin: .zero, size: size)
-            UIColor.white.setFill()
-            UIRectFill(fullRect)
-            backgroundImageView.image?.draw(in: fullRect)
-            canvasView.drawHierarchy(in: fullRect, afterScreenUpdates: false)
-        }
-        return image.pixelColor()
+        // Render a 1x1 snapshot of the container at the target point.
+        // drawHierarchy on self captures the transformView (background + canvas)
+        // exactly as displayed, including any rotation/scale transforms.
+        var pixel: [UInt8] = [0, 0, 0, 0]
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        guard let ctx = CGContext(
+            data: &pixel, width: 1, height: 1,
+            bitsPerComponent: 8, bytesPerRow: 4,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+
+        // Translate so the target point maps to (0,0)
+        ctx.translateBy(x: -point.x, y: -point.y)
+        // Fill white background (canvas area outside content)
+        ctx.setFillColor(UIColor.white.cgColor)
+        ctx.fill(CGRect(origin: .zero, size: size))
+        // Render the transform view (contains background image + canvas)
+        transformView.layer.render(in: ctx)
+
+        let r = CGFloat(pixel[0]) / 255
+        let g = CGFloat(pixel[1]) / 255
+        let b = CGFloat(pixel[2]) / 255
+        let a = CGFloat(pixel[3]) / 255
+        guard a > 0 else { return UIColor(red: r, green: g, blue: b, alpha: 0) }
+        return UIColor(red: r / a, green: g / a, blue: b / a, alpha: a)
     }
 
     public func gestureRecognizer(
