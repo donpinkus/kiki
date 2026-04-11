@@ -9,6 +9,11 @@ Protocol:
   Server -> Client:
     - Text frame (JSON): { "type": "status", "status": "ready" | "warmup" | "error", "message": "..." }
     - Binary frame: Generated JPEG bytes
+
+Frame dropping:
+  The client may send frames faster than the server can generate (~1 FPS).
+  Only the latest frame is kept; older frames are dropped. This prevents
+  frame queue buildup and keeps the output responsive to the current sketch.
 """
 
 import asyncio
@@ -84,73 +89,125 @@ async def websocket_stream(ws: WebSocket):
         "seed": None,
     }
 
+    # Single-slot frame buffer: only the latest frame is kept.
+    # The receiver task writes here; the processor task reads.
+    latest_frame: bytes | None = None
+    frame_event = asyncio.Event()
+    frames_received = 0
     frames_processed = 0
+    frames_dropped = 0
     session_start = time.time()
+    done = False
 
-    try:
-        while True:
-            message = await ws.receive()
+    async def receive_loop():
+        """Read messages from the client. Keep only the latest binary frame."""
+        nonlocal latest_frame, frames_received, frames_dropped, done, current_config
 
-            if message.get("type") == "websocket.disconnect":
+        try:
+            while not done:
+                message = await ws.receive()
+
+                if message.get("type") == "websocket.disconnect":
+                    done = True
+                    frame_event.set()
+                    break
+
+                # Text frame: config update
+                if "text" in message:
+                    try:
+                        data = json.loads(message["text"])
+                        if data.get("type") == "config":
+                            if "prompt" in data:
+                                current_config["prompt"] = data["prompt"]
+                            if "mode" in data and data["mode"] in ("reference", "denoise"):
+                                current_config["mode"] = data["mode"]
+                            if "denoise" in data:
+                                current_config["denoise"] = max(0.0, min(1.0, float(data["denoise"])))
+                            if "guidanceScale" in data:
+                                current_config["guidanceScale"] = max(0.0, min(20.0, float(data["guidanceScale"])))
+                            if "steps" in data:
+                                current_config["steps"] = max(1, min(50, int(data["steps"])))
+                            if "seed" in data:
+                                current_config["seed"] = int(data["seed"]) if data["seed"] is not None else None
+
+                            logger.info(
+                                "Client %d config: prompt='%s', mode=%s, steps=%d",
+                                client_id,
+                                str(current_config["prompt"])[:50],
+                                current_config["mode"],
+                                current_config["steps"],
+                            )
+                    except json.JSONDecodeError:
+                        logger.warning("Client %d sent invalid JSON", client_id)
+                    continue
+
+                # Binary frame: input image — replace buffer (drop old frame)
+                if "bytes" in message:
+                    if latest_frame is not None:
+                        frames_dropped += 1
+                    latest_frame = message["bytes"]
+                    frames_received += 1
+                    frame_event.set()
+
+        except WebSocketDisconnect:
+            done = True
+            frame_event.set()
+        except Exception as e:
+            logger.error("Client %d receive error: %s", client_id, e)
+            done = True
+            frame_event.set()
+
+    async def process_loop():
+        """Process the latest frame whenever one is available."""
+        nonlocal latest_frame, frames_processed, done
+
+        while not done:
+            # Wait for a frame to arrive
+            await frame_event.wait()
+            frame_event.clear()
+
+            if done:
                 break
 
-            # Text frame: config update
-            if "text" in message:
-                try:
-                    data = json.loads(message["text"])
-                    if data.get("type") == "config":
-                        if "prompt" in data:
-                            current_config["prompt"] = data["prompt"]
-                        if "mode" in data and data["mode"] in ("reference", "denoise"):
-                            current_config["mode"] = data["mode"]
-                        if "denoise" in data:
-                            current_config["denoise"] = max(0.0, min(1.0, float(data["denoise"])))
-                        if "guidanceScale" in data:
-                            current_config["guidanceScale"] = max(0.0, min(20.0, float(data["guidanceScale"])))
-                        if "steps" in data:
-                            current_config["steps"] = max(1, min(50, int(data["steps"])))
-                        if "seed" in data:
-                            current_config["seed"] = int(data["seed"]) if data["seed"] is not None else None
+            # Grab the latest frame and clear the buffer
+            jpeg_data = latest_frame
+            latest_frame = None
 
-                        logger.info(
-                            "Client %d config: prompt='%s', mode=%s, steps=%d",
-                            client_id,
-                            str(current_config["prompt"])[:50],
-                            current_config["mode"],
-                            current_config["steps"],
-                        )
-                except json.JSONDecodeError:
-                    logger.warning("Client %d sent invalid JSON", client_id)
+            if jpeg_data is None:
                 continue
 
-            # Binary frame: input image (JPEG)
-            if "bytes" in message:
-                jpeg_data = message["bytes"]
-                try:
-                    result_jpeg = await asyncio.to_thread(
-                        _process_frame, jpeg_data, current_config
-                    )
+            try:
+                # Snapshot config so it doesn't change mid-generation
+                cfg = dict(current_config)
+                result_jpeg = await asyncio.to_thread(
+                    _process_frame, jpeg_data, cfg
+                )
+                if not done:
                     await ws.send_bytes(result_jpeg)
                     frames_processed += 1
+            except Exception as e:
+                logger.error("Frame processing error: %s", e, exc_info=True)
+                if not done:
+                    try:
+                        await ws.send_text(json.dumps({
+                            "type": "status",
+                            "status": "error",
+                            "message": str(e),
+                        }))
+                    except Exception:
+                        pass
 
-                except Exception as e:
-                    logger.error("Frame processing error: %s", e, exc_info=True)
-                    await ws.send_text(json.dumps({
-                        "type": "status",
-                        "status": "error",
-                        "message": str(e),
-                    }))
-
-    except WebSocketDisconnect:
-        pass
+    # Run both loops concurrently
+    try:
+        await asyncio.gather(receive_loop(), process_loop())
     except Exception as e:
         logger.error("WebSocket error for client %d: %s", client_id, e, exc_info=True)
     finally:
         elapsed = time.time() - session_start
         fps = frames_processed / elapsed if elapsed > 0 else 0
         logger.info(
-            "Client %d disconnected. Processed %d frames, %.1f FPS over %.1fs",
-            client_id, frames_processed, fps, elapsed,
+            "Client %d disconnected. Received %d, processed %d, dropped %d, %.1f FPS over %.1fs",
+            client_id, frames_received, frames_processed, frames_dropped, fps, elapsed,
         )
 
 
