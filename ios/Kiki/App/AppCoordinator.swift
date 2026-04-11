@@ -109,6 +109,7 @@ final class AppCoordinator {
     // MARK: - Stream State
 
     private var isSwitchingEngine = false
+    private var streamWasActiveBeforeBackground = false
     private var streamSession: StreamSession?
     private(set) var streamConnectionState: StreamSession.ConnectionState = .disconnected
     private(set) var streamFrameCount = 0
@@ -602,6 +603,30 @@ final class AppCoordinator {
 
         if let image = lastSuccessfulImage {
             resultState = .preview(image: image)
+        }
+    }
+
+    // MARK: - App Lifecycle
+
+    func handleScenePhaseChange(_ phase: ScenePhase) {
+        switch phase {
+        case .background:
+            if streamSession != nil {
+                streamWasActiveBeforeBackground = true
+                stopStream()
+            }
+        case .active:
+            if streamWasActiveBeforeBackground
+                && currentScreen == .drawing
+                && generationEngine == .stream
+                && streamSession == nil {
+                streamWasActiveBeforeBackground = false
+                startStream()
+            }
+        case .inactive:
+            break
+        @unknown default:
+            break
         }
     }
 
