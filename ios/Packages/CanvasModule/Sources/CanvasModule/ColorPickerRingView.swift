@@ -42,25 +42,29 @@ final class ColorPickerRingView: UIView {
         let outerRadius = (rect.width - 4) / 2  // 2pt inset for shadow room
         let innerRadius = outerRadius - Self.ringWidth
 
-        // -- Top half of ring: sampled color --
+        // NOTE on arc directions: UIBezierPath uses screen-relative clockwise
+        // (Y-down). clockwise:true from π→0 visually goes OVER the top.
+        // This is the OPPOSITE of CGContext.addArc (which uses math coords).
+
+        // -- Top half: sampled color --
         ctx.saveGState()
         let topRing = UIBezierPath()
         topRing.addArc(withCenter: center, radius: outerRadius, startAngle: .pi, endAngle: 0, clockwise: true)
         topRing.addArc(withCenter: center, radius: innerRadius, startAngle: 0, endAngle: .pi, clockwise: false)
         topRing.close()
         ctx.addPath(topRing.cgPath)
-        ctx.setFillColor(previousColor.cgColor)
+        ctx.setFillColor(currentColor.cgColor)
         ctx.fillPath()
         ctx.restoreGState()
 
-        // -- Bottom half of ring: current brush color --
+        // -- Bottom half: current brush color --
         ctx.saveGState()
         let bottomRing = UIBezierPath()
         bottomRing.addArc(withCenter: center, radius: outerRadius, startAngle: 0, endAngle: .pi, clockwise: true)
         bottomRing.addArc(withCenter: center, radius: innerRadius, startAngle: .pi, endAngle: 0, clockwise: false)
         bottomRing.close()
         ctx.addPath(bottomRing.cgPath)
-        ctx.setFillColor(currentColor.cgColor)
+        ctx.setFillColor(previousColor.cgColor)
         ctx.fillPath()
         ctx.restoreGState()
 

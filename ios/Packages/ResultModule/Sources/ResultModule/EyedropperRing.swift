@@ -23,23 +23,26 @@ public struct EyedropperRing: View {
             let outerR = (size - 4) / 2
             let innerR = outerR - ringWidth
 
-            // Top half — sampled color (clockwise:true = CW on screen in SwiftUI)
+            // NOTE on arc directions: SwiftUI Path uses screen-relative clockwise
+            // (Y-down). clockwise:true from 180°→0° visually goes OVER the top.
+
+            // Top half — current brush color
             var topPath = Path()
             topPath.addArc(center: CGPoint(x: center, y: center), radius: outerR,
                            startAngle: .degrees(180), endAngle: .degrees(0), clockwise: true)
             topPath.addArc(center: CGPoint(x: center, y: center), radius: innerR,
                            startAngle: .degrees(0), endAngle: .degrees(180), clockwise: false)
             topPath.closeSubpath()
-            ctx.fill(topPath, with: .color(sampledColor))
+            ctx.fill(topPath, with: .color(brushColor))
 
-            // Bottom half — current brush color
+            // Bottom half — sampled color
             var bottomPath = Path()
             bottomPath.addArc(center: CGPoint(x: center, y: center), radius: outerR,
                               startAngle: .degrees(0), endAngle: .degrees(180), clockwise: true)
             bottomPath.addArc(center: CGPoint(x: center, y: center), radius: innerR,
                               startAngle: .degrees(180), endAngle: .degrees(0), clockwise: false)
             bottomPath.closeSubpath()
-            ctx.fill(bottomPath, with: .color(brushColor))
+            ctx.fill(bottomPath, with: .color(sampledColor))
 
             // Ring borders
             let outerCircle = Path(ellipseIn: CGRect(x: center - outerR, y: center - outerR,
