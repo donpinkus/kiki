@@ -129,6 +129,8 @@ struct FloatingResultPanel: View {
 
     // MARK: - Eyedropper
 
+    private static let ringOffset: CGFloat = 80
+
     private func eyedropperGesture(image: UIImage, size: CGSize) -> some Gesture {
         LongPressGesture(minimumDuration: 0.5, maximumDistance: 10)
             .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .local))
@@ -140,7 +142,8 @@ struct FloatingResultPanel: View {
                     guard longPressComplete, let drag = dragValue else { return }
                     isPickingColor = true
                     pickLocation = drag.location
-                    if let color = sampleColor(from: image, at: drag.location, in: size) {
+                    let samplePoint = CGPoint(x: drag.location.x, y: drag.location.y - Self.ringOffset)
+                    if let color = sampleColor(from: image, at: samplePoint, in: size) {
                         sampledColor = color
                     }
                 }
@@ -156,9 +159,7 @@ struct FloatingResultPanel: View {
     private func sampleColor(from image: UIImage, at point: CGPoint, in displaySize: CGSize) -> Color? {
         guard let cgImage = image.cgImage,
               cgImage.width > 0, cgImage.height > 0,
-              displaySize.width > 0, displaySize.height > 0,
-              let data = cgImage.dataProvider?.data,
-              let bytes = CFDataGetBytePtr(data) else {
+              displaySize.width > 0, displaySize.height > 0 else {
             return nil
         }
 
@@ -167,15 +168,23 @@ struct FloatingResultPanel: View {
         let px = max(0, min(cgImage.width - 1, Int(point.x * scaleX)))
         let py = max(0, min(cgImage.height - 1, Int(point.y * scaleY)))
 
-        let bytesPerPixel = cgImage.bitsPerPixel / 8
-        guard bytesPerPixel >= 3 else { return nil }
+        var pixel: [UInt8] = [0, 0, 0, 0]
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        guard let ctx = CGContext(
+            data: &pixel, width: 1, height: 1,
+            bitsPerComponent: 8, bytesPerRow: 4,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
 
-        let index = py * cgImage.bytesPerRow + px * bytesPerPixel
-        let r = Double(bytes[index]) / 255
-        let g = Double(bytes[index + 1]) / 255
-        let b = Double(bytes[index + 2]) / 255
-        let a: Double = bytesPerPixel >= 4 ? Double(bytes[index + 3]) / 255 : 1.0
-        return Color(red: r, green: g, blue: b, opacity: a)
+        ctx.draw(cgImage, in: CGRect(x: -px, y: -py, width: cgImage.width, height: cgImage.height))
+
+        let r = Double(pixel[0]) / 255
+        let g = Double(pixel[1]) / 255
+        let b = Double(pixel[2]) / 255
+        let a = Double(pixel[3]) / 255
+        guard a > 0 else { return Color(red: r, green: g, blue: b, opacity: 0) }
+        return Color(red: r / a, green: g / a, blue: b / a, opacity: a)
     }
 
     // MARK: - Footer
