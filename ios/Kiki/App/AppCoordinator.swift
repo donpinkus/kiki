@@ -181,7 +181,9 @@ final class AppCoordinator {
 
         isSuppressingObservation = true
 
-        let drawing = Drawing()
+        // Generate a stable seed for this drawing
+        let seed = Int.random(in: 0...Int(UInt32.max))
+        let drawing = Drawing(streamSeed: seed)
         modelContext.insert(drawing)
         try? modelContext.save()
         currentDrawingId = drawing.id
@@ -189,6 +191,7 @@ final class AppCoordinator {
         // Reset all state
         promptText = ""
         selectedStyle = .default
+        streamSeed = seed
         lastSuccessfulImage = nil
         showFloatingPanel = false
         resultState = .empty
@@ -209,6 +212,7 @@ final class AppCoordinator {
         // Restore settings
         promptText = drawing.promptText
         selectedStyle = PromptStyle.from(id: drawing.styleId)
+        streamSeed = drawing.streamSeed
 
         // Restore generated image
         if let imgData = drawing.generatedImageData {
@@ -278,6 +282,7 @@ final class AppCoordinator {
         drawing.canvasThumbnailData = canvasViewModel.generateThumbnail()?.jpegData(compressionQuality: 0.7)
         drawing.promptText = promptText
         drawing.styleId = selectedStyle.id
+        drawing.streamSeed = streamSeed
 
         drawing.updatedAt = Date()
         try? modelContext.save()

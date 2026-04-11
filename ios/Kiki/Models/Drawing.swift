@@ -28,6 +28,10 @@ final class Drawing {
     var promptText: String
     var stylePresetRawValue: String
 
+    /// Fixed seed for generation. Persists across sessions so reopening a
+    /// drawing produces the same output.
+    var streamSeed: Int?
+
     // MARK: - Init
 
     init(
@@ -35,13 +39,15 @@ final class Drawing {
         createdAt: Date = Date(),
         updatedAt: Date = Date(),
         promptText: String = "",
-        stylePresetRawValue: String = PromptStyle.default.id
+        stylePresetRawValue: String = PromptStyle.default.id,
+        streamSeed: Int? = nil
     ) {
         self.id = id
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.promptText = promptText
         self.stylePresetRawValue = stylePresetRawValue
+        self.streamSeed = streamSeed
     }
 }
 
