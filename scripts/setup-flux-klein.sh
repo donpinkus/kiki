@@ -1,6 +1,8 @@
 #!/bin/bash
 # Run this ON a RunPod pod (via SSH) to set up the FLUX.2-klein stream server.
 # Uses a virtual environment to isolate dependencies.
+# On first run: creates venv, installs deps, downloads model (~10 min).
+# On subsequent runs: reuses venv + cached model, just restarts server (~10s).
 set -euo pipefail
 
 VOLUME_MODELS="/workspace/kiki-models"
@@ -17,68 +19,78 @@ echo "System python: $PYTHON ($($PYTHON --version 2>&1))"
 echo ""
 echo "==> Setting up virtual environment..."
 
-# Always recreate — previous venvs may have stale/incompatible packages.
-# No --system-site-packages: we install our own torch to avoid the base
-# image's 2.4.0 leaking through and breaking diffusers imports.
-if [ -d "$FK_VENV" ]; then
-  echo "  Removing stale venv..."
-  rm -rf "$FK_VENV"
+NEEDS_INSTALL=false
+if [ -d "$FK_VENV" ] && [ -f "$FK_VENV/bin/python" ]; then
+  # Quick sanity check: can we import torch and diffusers?
+  if "$FK_VENV/bin/python" -c "import torch; import diffusers" 2>/dev/null; then
+    echo "  Reusing existing venv at $FK_VENV"
+  else
+    echo "  Existing venv is broken, recreating..."
+    rm -rf "$FK_VENV"
+    NEEDS_INSTALL=true
+  fi
+else
+  NEEDS_INSTALL=true
 fi
-echo "  Creating clean venv at $FK_VENV..."
-$PYTHON -m venv "$FK_VENV"
-echo "  ✓ venv created (isolated)"
+
+if [ "$NEEDS_INSTALL" = "true" ]; then
+  echo "  Creating clean venv at $FK_VENV..."
+  $PYTHON -m venv "$FK_VENV"
+  echo "  ✓ venv created (isolated)"
+fi
 
 VENV_PYTHON="$FK_VENV/bin/python"
 VENV_PIP="$FK_VENV/bin/pip"
 
-# ── Step 2: Install dependencies ──
+# ── Step 2: Install dependencies (skip if venv already has them) ──
 
 echo ""
-echo "==> Installing dependencies in venv..."
+if [ "$NEEDS_INSTALL" = "true" ]; then
+  echo "==> Installing dependencies in venv..."
 
-# Install PyTorch with CUDA 12.4 — need >=2.5 for diffusers' custom_op flash attention
-# NOTE: no -q flag — pip output keeps SSH alive during large downloads
-echo "  Installing PyTorch (cu124)..."
-$VENV_PIP install --no-cache-dir --progress-bar on \
-    torch torchvision --index-url https://download.pytorch.org/whl/cu124
-echo "  ✓ PyTorch installed ($($VENV_PYTHON -c 'import torch; print(torch.__version__)'))"
+  # Install PyTorch with CUDA 12.4 — need >=2.5 for diffusers' custom_op flash attention
+  # NOTE: no -q flag — pip output keeps SSH alive during large downloads
+  echo "  Installing PyTorch (cu124)..."
+  $VENV_PIP install --no-cache-dir --progress-bar on \
+      torch torchvision --index-url https://download.pytorch.org/whl/cu124
+  echo "  ✓ PyTorch installed ($($VENV_PYTHON -c 'import torch; print(torch.__version__)'))"
 
-# Diffusers from git (required for Flux2KleinPipeline)
-echo "  Installing diffusers (from git)..."
-$VENV_PIP install --no-cache-dir \
-    "git+https://github.com/huggingface/diffusers.git"
-echo "  ✓ diffusers installed"
+  # Diffusers from git (required for Flux2KleinPipeline)
+  echo "  Installing diffusers (from git)..."
+  $VENV_PIP install --no-cache-dir \
+      "git+https://github.com/huggingface/diffusers.git"
+  echo "  ✓ diffusers installed"
 
-# Transformers, accelerate, sentencepiece for FLUX text encoder
-echo "  Installing transformers, accelerate..."
-$VENV_PIP install --no-cache-dir \
-    "transformers>=4.40.0" \
-    "accelerate>=0.28.0" \
-    "sentencepiece>=0.2.0"
-echo "  ✓ ML dependencies installed"
+  # Transformers, accelerate, sentencepiece for FLUX text encoder
+  echo "  Installing transformers, accelerate..."
+  $VENV_PIP install --no-cache-dir \
+      "transformers>=4.40.0" \
+      "accelerate>=0.28.0" \
+      "sentencepiece>=0.2.0"
+  echo "  ✓ ML dependencies installed"
 
-# Server deps
-echo "  Installing server dependencies..."
-$VENV_PIP install --no-cache-dir \
-    "fastapi>=0.108.0" \
-    "uvicorn[standard]>=0.25.0" \
-    "websockets>=12.0" \
-    "Pillow>=10.0.0"
-echo "  ✓ Server dependencies installed"
+  # Server deps
+  echo "  Installing server dependencies..."
+  $VENV_PIP install --no-cache-dir \
+      "fastapi>=0.108.0" \
+      "uvicorn[standard]>=0.25.0" \
+      "websockets>=12.0" \
+      "Pillow>=10.0.0"
+  echo "  ✓ Server dependencies installed"
+else
+  echo "==> Dependencies already installed, skipping."
+fi
 
 # ── Step 3: Pre-download model to network volume ──
 
 echo ""
-echo "==> Checking/downloading FLUX.2-klein model..."
-mkdir -p "$FK_MODELS_DIR"
-
 export HF_HOME="${FK_MODELS_DIR}/huggingface"
 mkdir -p "$HF_HOME"
 
 if [ -d "${HF_HOME}/hub/models--black-forest-labs--FLUX.2-klein-4B" ]; then
-  echo "  Model already cached on network volume"
+  echo "==> Model already cached on network volume, skipping download."
 else
-  echo "  Downloading FLUX.2-klein-4B (~8 GB, this will take a few minutes)..."
+  echo "==> Downloading FLUX.2-klein-4B (~8 GB, this will take a few minutes)..."
   $VENV_PYTHON -c "
 import os
 os.environ['HF_HOME'] = '${HF_HOME}'
@@ -121,10 +133,11 @@ FK_PID=$!
 echo "  FLUX.2-klein started (PID: $FK_PID, venv: $FK_VENV)"
 
 # ── Step 7: Wait for health check ──
-# Model loading + warmup takes longer than StreamDiffusion (~3-5 min)
+# First run: model loading + warmup (~3-5 min)
+# Subsequent runs: model loading from cache + warmup (~1-2 min)
 
 echo ""
-echo "==> Waiting for FLUX.2-klein to be ready (model loading + warmup)..."
+echo "==> Waiting for FLUX.2-klein to be ready..."
 FK_READY=false
 for i in $(seq 1 120); do
   HEALTH=$(curl -s http://localhost:8766/health 2>/dev/null || echo "")
