@@ -230,22 +230,25 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
     @objc private func handleLongPress(_ gesture: UILongPressGestureRecognizer) {
         switch gesture.state {
         case .began:
-            let canvasPoint = gesture.location(in: canvasView)
             let containerPoint = gesture.location(in: self)
+            let ringCenter = CGPoint(x: containerPoint.x, y: containerPoint.y - Self.ringFingerOffset)
+            // Sample at the crosshair position (center of the ring), not the finger
+            let samplePoint = canvasView.convert(ringCenter, from: self)
             ringView.previousColor = currentBrushColorProvider?() ?? .black
-            if let sampled = sampleColor(at: canvasPoint) {
+            if let sampled = sampleColor(at: samplePoint) {
                 ringView.currentColor = sampled
             }
-            ringView.center = CGPoint(x: containerPoint.x, y: containerPoint.y - Self.ringFingerOffset)
+            ringView.center = ringCenter
             ringView.isHidden = false
 
         case .changed:
-            let canvasPoint = gesture.location(in: canvasView)
             let containerPoint = gesture.location(in: self)
-            if let sampled = sampleColor(at: canvasPoint) {
+            let ringCenter = CGPoint(x: containerPoint.x, y: containerPoint.y - Self.ringFingerOffset)
+            let samplePoint = canvasView.convert(ringCenter, from: self)
+            if let sampled = sampleColor(at: samplePoint) {
                 ringView.currentColor = sampled
             }
-            ringView.center = CGPoint(x: containerPoint.x, y: containerPoint.y - Self.ringFingerOffset)
+            ringView.center = ringCenter
 
         case .ended:
             let committed = ringView.currentColor
