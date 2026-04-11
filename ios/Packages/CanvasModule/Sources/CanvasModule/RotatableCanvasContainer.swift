@@ -290,6 +290,17 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
 
     public func gestureRecognizer(
         _ gestureRecognizer: UIGestureRecognizer,
+        shouldReceive touch: UITouch
+    ) -> Bool {
+        // Eyedropper long-press: finger only, not Apple Pencil
+        if gestureRecognizer is UILongPressGestureRecognizer {
+            return touch.type != .pencil
+        }
+        return true
+    }
+
+    public func gestureRecognizer(
+        _ gestureRecognizer: UIGestureRecognizer,
         shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer
     ) -> Bool {
         // Touch tracker always coexists with everything (drawing, pinch, rotation, long-press)
