@@ -30,8 +30,16 @@ struct AdvancedParametersPanel: View {
                         coordinator.advancedParameters = AdvancedParameters()
                         coordinator.isSeedLocked = false
                         coordinator.compareWithoutControlNet = false
+                        // SD defaults
                         coordinator.streamTIndexListText = "20,30"
-                        coordinator.streamCaptureFPS = 7
+                        // FLUX defaults
+                        coordinator.fluxMode = "reference"
+                        coordinator.fluxDenoiseStrength = 0.6
+                        coordinator.fluxGuidanceScale = 4.0
+                        coordinator.fluxSteps = 4
+                        coordinator.fluxSeed = nil
+                        // Capture FPS
+                        coordinator.streamCaptureFPS = coordinator.streamEngine.defaultFPS
                     }
                 }
             }
@@ -45,11 +53,45 @@ struct AdvancedParametersPanel: View {
     private var streamParametersSection: some View {
         @Bindable var coordinator = coordinator
 
-        return Section("Stream Settings") {
+        return Group {
+            Section("Stream Engine") {
+                Picker("Engine", selection: $coordinator.streamEngine) {
+                    ForEach(StreamEngine.allCases, id: \.self) { engine in
+                        Text(engine.displayName).tag(engine)
+                    }
+                }
+                .pickerStyle(.segmented)
+            }
+
+            if coordinator.streamEngine == .streamDiffusion {
+                sdStreamSection
+            } else {
+                fluxStreamSection
+            }
+
+            Section("Capture") {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("Capture FPS")
+                            .font(.subheadline)
+                        Spacer()
+                        Text("\(Int(coordinator.streamCaptureFPS))")
+                            .font(.subheadline.monospacedDigit())
+                    }
+                    Slider(value: $coordinator.streamCaptureFPS, in: 1...10, step: 1)
+                }
+            }
+        }
+    }
+
+    private var sdStreamSection: some View {
+        @Bindable var coordinator = coordinator
+
+        return Section("StreamDiffusion") {
             VStack(alignment: .leading, spacing: 4) {
                 Text("t_index_list")
                     .font(.subheadline)
-                Text("Lower = more creative, higher = more faithful to input. Tap Update in toolbar to apply.")
+                Text("Lower = more creative, higher = more faithful to input.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 TextField("e.g. 15,25", text: $coordinator.streamTIndexListText)
@@ -58,16 +100,84 @@ struct AdvancedParametersPanel: View {
                     .keyboardType(.numbersAndPunctuation)
                     .autocorrectionDisabled()
             }
+        }
+    }
+
+    private var fluxStreamSection: some View {
+        @Bindable var coordinator = coordinator
+
+        return Section("FLUX Klein") {
+            Picker("Mode", selection: $coordinator.fluxMode) {
+                Text("Reference").tag("reference")
+                Text("Denoise").tag("denoise")
+            }
+            .pickerStyle(.segmented)
+
+            if coordinator.fluxMode == "reference" {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("Guidance Scale")
+                            .font(.subheadline)
+                        Spacer()
+                        Text(String(format: "%.1f", coordinator.fluxGuidanceScale))
+                            .font(.subheadline.monospacedDigit())
+                    }
+                    Slider(value: $coordinator.fluxGuidanceScale, in: 1...10, step: 0.5)
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("Denoise Strength")
+                            .font(.subheadline)
+                        Spacer()
+                        Text(String(format: "%.2f", coordinator.fluxDenoiseStrength))
+                            .font(.subheadline.monospacedDigit())
+                    }
+                    Slider(value: $coordinator.fluxDenoiseStrength, in: 0.1...1.0, step: 0.05)
+                    Text("Lower = more sketch fidelity, higher = more model freedom.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
-                    Text("Capture FPS")
+                    Text("Steps")
                         .font(.subheadline)
                     Spacer()
-                    Text("\(Int(coordinator.streamCaptureFPS))")
+                    Text("\(coordinator.fluxSteps)")
                         .font(.subheadline.monospacedDigit())
                 }
-                Slider(value: $coordinator.streamCaptureFPS, in: 3...10, step: 1)
+                Slider(
+                    value: Binding(
+                        get: { Double(coordinator.fluxSteps) },
+                        set: { coordinator.fluxSteps = Int($0) }
+                    ),
+                    in: 1...8,
+                    step: 1
+                )
+            }
+
+            HStack {
+                Text("Seed")
+                    .font(.subheadline)
+                TextField(
+                    "Random",
+                    text: Binding(
+                        get: { coordinator.fluxSeed.map { String($0) } ?? "" },
+                        set: { text in
+                            if text.isEmpty {
+                                coordinator.fluxSeed = nil
+                            } else if let value = Int(text) {
+                                coordinator.fluxSeed = value
+                            }
+                        }
+                    )
+                )
+                .font(.subheadline.monospacedDigit())
+                .textFieldStyle(.roundedBorder)
+                .keyboardType(.numberPad)
+                .frame(maxWidth: 120)
             }
         }
     }

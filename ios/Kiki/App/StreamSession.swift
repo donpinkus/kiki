@@ -16,6 +16,12 @@ final class StreamSession {
         case error(String)
     }
 
+    /// Engine-specific configuration passed to the server.
+    enum EngineConfig {
+        case streamDiffusion(tIndexList: [Int])
+        case fluxKlein(mode: String, denoise: Double, guidanceScale: Double, steps: Int, seed: Int?)
+    }
+
     // MARK: - Properties
 
     private let url: URL
@@ -29,8 +35,11 @@ final class StreamSession {
     /// How often to capture and send frames (default ~7 FPS).
     var captureInterval: TimeInterval = 0.150
 
-    /// t_index_list controlling creativity vs fidelity.
-    var tIndexList: [Int] = [20, 30]
+    /// Resolution for captured frames sent to the server.
+    var captureSize: CGSize = CGSize(width: 512, height: 512)
+
+    /// Engine-specific parameters (SD t_index_list or FLUX denoise/steps/etc).
+    private var engineConfig: EngineConfig = .streamDiffusion(tIndexList: [20, 30])
 
     /// Current prompt (cached for reconnection).
     private var currentPrompt: String?
@@ -65,9 +74,9 @@ final class StreamSession {
 
     // MARK: - Control
 
-    func start(prompt: String?, tIndexList: [Int]) async {
-        print("[Stream] Starting: url=\(url.absoluteString), prompt=\(prompt ?? "(none)"), tIndexList=\(tIndexList)")
-        self.tIndexList = tIndexList
+    func start(prompt: String?, engineConfig: EngineConfig) async {
+        print("[Stream] Starting: url=\(url.absoluteString), prompt=\(prompt ?? "(none)"), config=\(engineConfig)")
+        self.engineConfig = engineConfig
         self.currentPrompt = prompt
         self.isStopped = false
         self.reconnectAttempts = 0
@@ -85,12 +94,11 @@ final class StreamSession {
         updateConnectionState(.disconnected)
     }
 
-    func updateConfig(prompt: String?, tIndexList: [Int]? = nil) {
-        if let t = tIndexList { self.tIndexList = t }
+    func updateConfig(prompt: String?, engineConfig: EngineConfig? = nil) {
+        if let ec = engineConfig { self.engineConfig = ec }
         if let p = prompt { self.currentPrompt = p }
-        let config = StreamConfig(prompt: currentPrompt, tIndexList: self.tIndexList)
-        print("[Stream] Config update: prompt=\(currentPrompt ?? "(none)"), tIndexList=\(self.tIndexList)")
-        Task { try? await client.sendConfig(config) }
+        print("[Stream] Config update: prompt=\(currentPrompt ?? "(none)"), config=\(self.engineConfig)")
+        Task { try? await client.sendConfig(buildWireConfig()) }
     }
 
     // MARK: - Connection
@@ -104,8 +112,7 @@ final class StreamSession {
             print("[Stream] Connected to server")
             updateConnectionState(.connected)
 
-            let config = StreamConfig(prompt: currentPrompt, tIndexList: tIndexList)
-            try await client.sendConfig(config)
+            try await client.sendConfig(buildWireConfig())
             print("[Stream] Initial config sent")
 
             startReceiveLoop()
@@ -160,9 +167,10 @@ final class StreamSession {
                 if stopped { break }
 
                 // Capture + resize on main thread
+                let size = await self.captureSize
                 let jpeg: Data? = await MainActor.run {
                     guard let snapshot = self.canvasViewModel.captureSnapshot() else { return nil }
-                    guard let resized = self.resizeImage(snapshot.image, to: CGSize(width: 512, height: 512)) else { return nil }
+                    guard let resized = self.resizeImage(snapshot.image, to: size) else { return nil }
                     return resized.jpegData(compressionQuality: 0.7)
                 }
 
@@ -263,5 +271,22 @@ final class StreamSession {
         print("[Stream] State: \(state)")
         connectionState = state
         onConnectionStateChanged?(state)
+    }
+
+    /// Builds the engine-appropriate wire config (Encodable) for the current state.
+    private func buildWireConfig() -> any Encodable & Sendable {
+        switch engineConfig {
+        case .streamDiffusion(let tIndexList):
+            return StreamConfig(prompt: currentPrompt, tIndexList: tIndexList)
+        case .fluxKlein(let mode, let denoise, let guidanceScale, let steps, let seed):
+            return FluxStreamConfig(
+                prompt: currentPrompt,
+                mode: mode,
+                denoise: denoise,
+                guidanceScale: guidanceScale,
+                steps: steps,
+                seed: seed
+            )
+        }
     }
 }

@@ -3,6 +3,7 @@ export interface AppConfig {
   readonly HOST: string;
   readonly COMFYUI_URL: string;
   readonly STREAMDIFFUSION_URL: string;
+  readonly FLUX_KLEIN_URL: string;
   readonly NODE_ENV: 'development' | 'production' | 'test';
   readonly LOG_LEVEL: 'fatal' | 'error' | 'warn' | 'info' | 'debug' | 'trace';
 }
@@ -46,6 +47,7 @@ function validateConfig(): AppConfig {
     HOST: process.env['HOST'] ?? '0.0.0.0',
     COMFYUI_URL: comfyuiUrl,
     STREAMDIFFUSION_URL: process.env['STREAMDIFFUSION_URL'] ?? '',
+    FLUX_KLEIN_URL: process.env['FLUX_KLEIN_URL'] ?? '',
     NODE_ENV: nodeEnv,
     LOG_LEVEL: logLevel,
   };

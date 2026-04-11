@@ -73,7 +73,7 @@ export class StreamDiffusionRelay {
     });
   }
 
-  sendConfig(config: StreamConfig): void {
+  sendConfig(config: Record<string, unknown>): void {
     if (this.upstream?.readyState === WebSocket.OPEN) {
       this.upstream.send(JSON.stringify(config));
     }

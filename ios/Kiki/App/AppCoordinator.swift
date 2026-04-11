@@ -114,8 +114,20 @@ final class AppCoordinator {
     private(set) var streamConnectionState: StreamSession.ConnectionState = .disconnected
     private(set) var streamFrameCount = 0
 
-    /// t_index_list for stream mode — controls creativity vs fidelity.
-    /// Raw comma-separated string edited in UI, parsed to [Int] for the server.
+    /// Which stream server to connect to.
+    var streamEngine: StreamEngine = .fluxKlein {
+        didSet {
+            UserDefaults.standard.set(streamEngine.rawValue, forKey: "streamEngine")
+            if generationEngine == .stream {
+                stopStream()
+                startStream()
+            }
+        }
+    }
+
+    // -- StreamDiffusion parameters --
+
+    /// t_index_list for SD stream mode — controls creativity vs fidelity.
     var streamTIndexListText: String = "20,30"
 
     var parsedTIndexList: [Int] {
@@ -123,6 +135,25 @@ final class AppCoordinator {
             .split(separator: ",")
             .compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
     }
+
+    // -- FLUX.2-klein parameters --
+
+    /// Img2img mode: "reference" (native conditioning) or "denoise" (latent noise).
+    var fluxMode: String = "reference"
+
+    /// Denoise strength for FLUX denoise mode (0.0-1.0).
+    var fluxDenoiseStrength: Double = 0.6
+
+    /// Guidance scale for FLUX reference mode.
+    var fluxGuidanceScale: Double = 4.0
+
+    /// Number of inference steps for FLUX.
+    var fluxSteps: Int = 4
+
+    /// Fixed seed for FLUX (nil = random).
+    var fluxSeed: Int?
+
+    // -- Shared stream parameters --
 
     /// Capture FPS for stream mode (exposed to UI).
     var streamCaptureFPS: Double = 7 {
@@ -132,11 +163,23 @@ final class AppCoordinator {
     /// Tracks what was last sent to the server so we know if there are pending changes.
     private var lastSentPrompt: String?
     private var lastSentTIndexList: [Int] = []
+    private var lastSentFluxConfig: (mode: String, denoise: Double, guidanceScale: Double, steps: Int, seed: Int?)? = nil
 
-    /// True when prompt or t_index_list differs from what the server currently has.
+    /// True when config differs from what the server currently has.
     var streamHasPendingUpdate: Bool {
         guard generationEngine == .stream, streamSession != nil else { return false }
-        return composedPrompt != lastSentPrompt || parsedTIndexList != lastSentTIndexList
+        if composedPrompt != lastSentPrompt { return true }
+        switch streamEngine {
+        case .streamDiffusion:
+            return parsedTIndexList != lastSentTIndexList
+        case .fluxKlein:
+            guard let last = lastSentFluxConfig else { return true }
+            return fluxMode != last.mode
+                || fluxDenoiseStrength != last.denoise
+                || fluxGuidanceScale != last.guidanceScale
+                || fluxSteps != last.steps
+                || fluxSeed != last.seed
+        }
     }
 
     // MARK: - Generation State
@@ -168,6 +211,10 @@ final class AppCoordinator {
         if let stored = UserDefaults.standard.string(forKey: "generationEngine"),
            let engine = GenerationEngine(rawValue: stored) {
             self.generationEngine = engine
+        }
+        if let stored = UserDefaults.standard.string(forKey: "streamEngine"),
+           let engine = StreamEngine(rawValue: stored) {
+            self.streamEngine = engine
         }
         if let stored = UserDefaults.standard.string(forKey: "drawingLayout"),
            let layout = DrawingLayout(rawValue: stored) {
@@ -549,16 +596,17 @@ final class AppCoordinator {
     private func startStream() {
         var components = URLComponents(url: backendURL, resolvingAgainstBaseURL: false)!
         components.scheme = backendURL.scheme == "https" ? "wss" : "ws"
-        components.path = "/v1/stream"
+        components.path = streamEngine.streamPath
         guard let wsURL = components.url else {
             streamLog.error("Failed to construct WebSocket URL from \(self.backendURL.absoluteString)")
             return
         }
 
-        streamLog.info("Starting stream to \(wsURL.absoluteString)")
+        streamLog.info("Starting stream (\(self.streamEngine.rawValue)) to \(wsURL.absoluteString)")
 
         let session = StreamSession(url: wsURL, canvasViewModel: canvasViewModel)
         session.captureInterval = 1.0 / streamCaptureFPS
+        session.captureSize = streamEngine.captureSize
 
         session.onImageReceived = { [weak self] image in
             guard let self else { return }
@@ -587,10 +635,11 @@ final class AppCoordinator {
 
         self.streamSession = session
         self.lastSentPrompt = composedPrompt
-        self.lastSentTIndexList = parsedTIndexList
+        let engineConfig = buildStreamEngineConfig()
+        recordSentConfig(engineConfig)
 
         Task {
-            await session.start(prompt: composedPrompt, tIndexList: self.parsedTIndexList)
+            await session.start(prompt: composedPrompt, engineConfig: engineConfig)
         }
     }
 
@@ -630,16 +679,42 @@ final class AppCoordinator {
         }
     }
 
-    /// Explicitly apply pending prompt / t_index_list changes to the stream server.
+    /// Explicitly apply pending config changes to the stream server.
     /// Called by the "Update" button in the toolbar.
     func applyStreamUpdate() {
         guard generationEngine == .stream else { return }
         let prompt = composedPrompt
-        let tIndexList = parsedTIndexList
-        print("[Stream] Applying update: prompt='\(prompt ?? "(none)")', tIndexList=\(tIndexList)")
+        let engineConfig = buildStreamEngineConfig()
+        print("[Stream] Applying update: prompt='\(prompt ?? "(none)")', engine=\(streamEngine.rawValue)")
         lastSentPrompt = prompt
-        lastSentTIndexList = tIndexList
-        streamSession?.updateConfig(prompt: prompt, tIndexList: tIndexList)
+        recordSentConfig(engineConfig)
+        streamSession?.updateConfig(prompt: prompt, engineConfig: engineConfig)
+    }
+
+    /// Build the appropriate engine config for the current stream engine.
+    private func buildStreamEngineConfig() -> StreamSession.EngineConfig {
+        switch streamEngine {
+        case .streamDiffusion:
+            return .streamDiffusion(tIndexList: parsedTIndexList)
+        case .fluxKlein:
+            return .fluxKlein(
+                mode: fluxMode,
+                denoise: fluxDenoiseStrength,
+                guidanceScale: fluxGuidanceScale,
+                steps: fluxSteps,
+                seed: fluxSeed
+            )
+        }
+    }
+
+    /// Record what was sent so we can detect pending changes.
+    private func recordSentConfig(_ config: StreamSession.EngineConfig) {
+        switch config {
+        case .streamDiffusion(let tIndexList):
+            lastSentTIndexList = tIndexList
+        case .fluxKlein(let mode, let denoise, let guidanceScale, let steps, let seed):
+            lastSentFluxConfig = (mode, denoise, guidanceScale, steps, seed)
+        }
     }
 
     // MARK: - Private

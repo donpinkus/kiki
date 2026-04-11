@@ -1,0 +1,17 @@
+# FLUX.2-klein requires latest diffusers from git
+# pip install git+https://github.com/huggingface/diffusers.git
+
+# Server
+fastapi>=0.108.0
+uvicorn[standard]>=0.25.0
+websockets>=12.0
+
+# Image processing
+Pillow>=10.0.0
+
+# ML (installed separately — see Dockerfile)
+# torch>=2.2.0
+# diffusers (from git)
+# transformers>=4.40.0
+# accelerate>=0.28.0
+# sentencepiece>=0.2.0

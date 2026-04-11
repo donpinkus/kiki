@@ -108,7 +108,7 @@ public actor StreamWebSocketClient {
 
     // MARK: - Sending
 
-    public func sendConfig(_ config: StreamConfig) async throws {
+    public func sendConfig<C: Encodable & Sendable>(_ config: C) async throws {
         guard state == .connected, let task else {
             print("[StreamWS] sendConfig skipped: state=\(state)")
             return
