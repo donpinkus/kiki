@@ -33,6 +33,13 @@ VENV_PIP="$FK_VENV/bin/pip"
 echo ""
 echo "==> Installing dependencies in venv..."
 
+# Upgrade PyTorch — base image has 2.4.0 but latest diffusers needs >=2.5
+# for torch._custom_op flash attention support
+echo "  Upgrading PyTorch (base image 2.4 is too old for latest diffusers)..."
+$VENV_PIP install -q --no-cache-dir \
+    torch torchvision --index-url https://download.pytorch.org/whl/cu124 2>&1 | tail -5
+echo "  ✓ PyTorch upgraded ($($VENV_PYTHON -c 'import torch; print(torch.__version__)'))"
+
 # Diffusers from git (required for Flux2KleinPipeline)
 echo "  Installing diffusers (from git)..."
 $VENV_PIP install -q --no-cache-dir \
