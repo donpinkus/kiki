@@ -95,12 +95,15 @@ public enum ToolState: Sendable {
 /// An undoable action on the canvas.
 public enum CanvasAction {
     case stroke(Stroke)
-    case erase(preEraseSnapshot: CGImage)
+    case erase(preEraseSnapshot: CGImage, postEraseSnapshot: CGImage)
     /// Lineart swap: stores previous state to undo, and the new background to redo.
     case lineartSwap(
-        prevStrokes: [Stroke], prevPersistent: CGImage?, prevBackground: UIImage?,
-        newBackground: UIImage?
+        prevStrokes: [Stroke], prevPersistent: CGImage?, prevBaseImage: CGImage?,
+        prevBackground: UIImage?, newBackground: UIImage?
     )
     /// Clear: stores previous state to undo. Redo just clears everything.
-    case clear(prevStrokes: [Stroke], prevPersistent: CGImage?, prevBackground: UIImage?)
+    case clear(
+        prevStrokes: [Stroke], prevPersistent: CGImage?, prevBaseImage: CGImage?,
+        prevBackground: UIImage?
+    )
 }

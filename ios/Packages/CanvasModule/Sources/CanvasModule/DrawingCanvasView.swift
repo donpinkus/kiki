@@ -17,7 +17,7 @@ public final class DrawingCanvasView: UIView {
     public var currentTool: ToolState = .brush(.defaultPen)
 
     public var isEmpty: Bool {
-        strokes.isEmpty && persistentImage == nil
+        strokes.isEmpty && persistentImage == nil && bakedBaseImage == nil
     }
 
     // MARK: - Callbacks
@@ -30,6 +30,10 @@ public final class DrawingCanvasView: UIView {
 
     /// Flattened bitmap of all completed strokes (transparent background).
     private var persistentImage: CGImage?
+
+    /// Base image baked into the canvas via "Send to Canvas".
+    /// Composited below strokes in rebuildPersistent so stroke undo doesn't lose it.
+    private var bakedBaseImage: CGImage?
 
     /// Stroke currently being drawn — nil when not actively drawing.
     private var activeStroke: Stroke?
@@ -228,9 +232,9 @@ public final class DrawingCanvasView: UIView {
 
         case .eraser:
             // Erasing was already applied incrementally during touchesMoved.
-            // Push undo action with the pre-erase snapshot.
-            if let snapshot = preEraseSnapshot {
-                undoStack.push(.erase(preEraseSnapshot: snapshot))
+            // Push undo action with both pre- and post-erase snapshots.
+            if let pre = preEraseSnapshot, let post = persistentImage {
+                undoStack.push(.erase(preEraseSnapshot: pre, postEraseSnapshot: post))
             }
         }
 
@@ -295,21 +299,25 @@ public final class DrawingCanvasView: UIView {
         persistentImage = image.cgImage
     }
 
-    /// Re-render the persistent bitmap from all current strokes.
+    /// Re-render the persistent bitmap from the baked base image (if any) plus all current strokes.
     private func rebuildPersistent() {
         let size = bounds.size
         guard size.width > 0, size.height > 0 else {
             persistentImage = nil
             return
         }
-        guard !strokes.isEmpty else {
+        guard !strokes.isEmpty || bakedBaseImage != nil else {
             persistentImage = nil
             return
         }
 
+        let rect = CGRect(origin: .zero, size: size)
         let renderer = UIGraphicsImageRenderer(size: size)
         let image = renderer.image { ctx in
             let cgCtx = ctx.cgContext
+            if let base = bakedBaseImage {
+                UIImage(cgImage: base).draw(in: rect)
+            }
             for stroke in strokes {
                 let path = StrokeTessellator.tessellate(points: stroke.points, brush: stroke.brush)
                 cgCtx.setFillColor(stroke.brush.color.uiColor.cgColor)
@@ -332,16 +340,18 @@ public final class DrawingCanvasView: UIView {
             strokes.removeAll { $0.id == stroke.id }
             rebuildPersistent()
 
-        case .erase(let snapshot):
+        case .erase(let snapshot, _):
             persistentImage = snapshot
 
-        case .lineartSwap(let prevStrokes, let prevPersistent, _, _):
+        case .lineartSwap(let prevStrokes, let prevPersistent, let prevBase, _, _):
             strokes = prevStrokes
             persistentImage = prevPersistent
+            bakedBaseImage = prevBase
 
-        case .clear(let prevStrokes, let prevPersistent, _):
+        case .clear(let prevStrokes, let prevPersistent, let prevBase, _):
             strokes = prevStrokes
             persistentImage = prevPersistent
+            bakedBaseImage = prevBase
         }
         onDrawingChanged?()
         setNeedsDisplay()
@@ -357,16 +367,19 @@ public final class DrawingCanvasView: UIView {
             strokes.append(stroke)
             flattenStroke(stroke)
 
-        case .erase:
-            // Re-applying an erase would need the original erase path which we don't store.
-            // Rebuild from stroke data — the erase won't be replayed. Acceptable for Phase 1.
-            rebuildPersistent()
+        case .erase(_, let postSnapshot):
+            persistentImage = postSnapshot
 
-        case .lineartSwap, .clear:
-            // These operations result in an empty canvas (strokes cleared).
-            // Background image is handled by the CanvasViewModel.
+        case .lineartSwap:
+            // Strokes cleared; CanvasViewModel will re-bake the image via bakeImageIntoCanvas.
             strokes.removeAll()
             persistentImage = nil
+            bakedBaseImage = nil
+
+        case .clear:
+            strokes.removeAll()
+            persistentImage = nil
+            bakedBaseImage = nil
         }
         onDrawingChanged?()
         setNeedsDisplay()
@@ -375,14 +388,31 @@ public final class DrawingCanvasView: UIView {
 
     // MARK: - Public API
 
+    /// Render an external image into the persistent bitmap at the canvas's current size.
+    /// Used by "Send to Canvas" so the image lives on the same erasable layer as strokes.
+    public func bakeImage(_ image: UIImage) {
+        let size = bounds.size
+        guard size.width > 0, size.height > 0 else { return }
+        let renderer = UIGraphicsImageRenderer(size: size)
+        let result = renderer.image { _ in
+            image.draw(in: CGRect(origin: .zero, size: size))
+        }
+        let cgImg = result.cgImage
+        bakedBaseImage = cgImg
+        persistentImage = cgImg
+        setNeedsDisplay()
+    }
+
     /// Clear all strokes and the persistent bitmap. Returns previous state for undo.
-    public func clearAll() -> (strokes: [Stroke], persistent: CGImage?) {
+    public func clearAll() -> (strokes: [Stroke], persistent: CGImage?, baseImage: CGImage?) {
         let prevStrokes = strokes
         let prevPersistent = persistentImage
+        let prevBase = bakedBaseImage
         strokes.removeAll()
         persistentImage = nil
+        bakedBaseImage = nil
         setNeedsDisplay()
-        return (prevStrokes, prevPersistent)
+        return (prevStrokes, prevPersistent, prevBase)
     }
 
     /// Load strokes from saved data and rebuild the persistent bitmap.

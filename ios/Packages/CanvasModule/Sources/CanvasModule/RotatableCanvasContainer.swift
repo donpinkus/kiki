@@ -313,6 +313,13 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
         backgroundImageView.image = image
     }
 
+    /// Bake the image into the canvas's persistent bitmap (making it erasable)
+    /// and clear the background image layer.
+    public func bakeImageIntoCanvas(_ image: UIImage) {
+        canvasView.bakeImage(image)
+        backgroundImageView.image = nil
+    }
+
     public var backgroundImage: UIImage? {
         backgroundImageView.image
     }

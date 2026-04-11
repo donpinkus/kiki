@@ -100,9 +100,9 @@ public final class CanvasViewModel {
         guard let action = canvasView?.performUndo() else { return }
         // Restore background image for actions that modify it
         switch action {
-        case .lineartSwap(_, _, let prevBackground, _):
+        case .lineartSwap(_, _, _, let prevBackground, _):
             container?.setBackgroundImage(prevBackground)
-        case .clear(_, _, let prevBackground):
+        case .clear(_, _, _, let prevBackground):
             container?.setBackgroundImage(prevBackground)
         default:
             break
@@ -114,8 +114,10 @@ public final class CanvasViewModel {
         guard let action = canvasView?.performRedo() else { return }
         // Re-apply background changes for actions that modify it
         switch action {
-        case .lineartSwap(_, _, _, let newBackground):
-            container?.setBackgroundImage(newBackground)
+        case .lineartSwap(_, _, _, _, let newBackground):
+            if let img = newBackground {
+                container?.bakeImageIntoCanvas(img)
+            }
         case .clear:
             container?.setBackgroundImage(nil)
         default:
@@ -131,6 +133,7 @@ public final class CanvasViewModel {
         canvasView.undoStack.push(.clear(
             prevStrokes: prev.strokes,
             prevPersistent: prev.persistent,
+            prevBaseImage: prev.baseImage,
             prevBackground: prevBg
         ))
         container?.setBackgroundImage(nil)
@@ -146,17 +149,18 @@ public final class CanvasViewModel {
     public func swapLineart(image: UIImage) {
         guard let canvasView else { return }
         let prevStrokes = canvasView.strokes
-        let prevPersistent = canvasView.clearAll().persistent
+        let prev = canvasView.clearAll()
         let prevBgImage = container?.backgroundImage
 
         canvasView.undoStack.push(.lineartSwap(
             prevStrokes: prevStrokes,
-            prevPersistent: prevPersistent,
+            prevPersistent: prev.persistent,
+            prevBaseImage: prev.baseImage,
             prevBackground: prevBgImage,
             newBackground: image
         ))
 
-        container?.setBackgroundImage(image)
+        container?.bakeImageIntoCanvas(image)
         updateState()
     }
 
