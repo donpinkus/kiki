@@ -118,8 +118,8 @@ struct FloatingResultPanel: View {
                                 currentColor: sampledColor,
                                 previousColor: currentBrushColor
                             )
-                            .frame(width: 60, height: 60)
-                            .position(x: pickLocation.x, y: pickLocation.y - 40)
+                            .frame(width: 120, height: 120)
+                            .position(x: pickLocation.x, y: pickLocation.y - 80)
                             .allowsHitTesting(false)
                         }
                     }
@@ -234,26 +234,64 @@ struct FloatingResultPanel: View {
 
 // MARK: - Color Picker Ring
 
+/// Procreate-style eyedropper ring: outer ring split top (sampled) / bottom
+/// (previous), transparent center with crosshair.
 private struct FloatingColorPickerRing: View {
     let currentColor: Color
     let previousColor: Color
 
+    private let ringWidth: CGFloat = 20
+
     var body: some View {
-        ZStack {
-            Circle().fill(previousColor)
-            Circle()
-                .fill(currentColor)
-                .mask(
-                    GeometryReader { proxy in
-                        Rectangle()
-                            .frame(width: proxy.size.width, height: proxy.size.height / 2)
-                    }
-                )
-            Circle()
-                .strokeBorder(Color.black.opacity(0.6), lineWidth: 2)
-            Circle()
-                .strokeBorder(Color.white.opacity(0.8), lineWidth: 1)
-                .padding(1)
+        GeometryReader { geo in
+            let size = min(geo.size.width, geo.size.height)
+            let center = size / 2
+            let outerR = (size - 4) / 2
+            let innerR = outerR - ringWidth
+
+            Canvas { ctx, _ in
+                // Top half — sampled color
+                var topPath = Path()
+                topPath.addArc(center: CGPoint(x: center, y: center), radius: outerR,
+                               startAngle: .degrees(180), endAngle: .degrees(0), clockwise: false)
+                topPath.addArc(center: CGPoint(x: center, y: center), radius: innerR,
+                               startAngle: .degrees(0), endAngle: .degrees(180), clockwise: true)
+                topPath.closeSubpath()
+                ctx.fill(topPath, with: .color(currentColor))
+
+                // Bottom half — previous color
+                var bottomPath = Path()
+                bottomPath.addArc(center: CGPoint(x: center, y: center), radius: outerR,
+                                  startAngle: .degrees(0), endAngle: .degrees(180), clockwise: false)
+                bottomPath.addArc(center: CGPoint(x: center, y: center), radius: innerR,
+                                  startAngle: .degrees(180), endAngle: .degrees(0), clockwise: true)
+                bottomPath.closeSubpath()
+                ctx.fill(bottomPath, with: .color(previousColor))
+
+                // Ring borders
+                let outerCircle = Path(ellipseIn: CGRect(x: center - outerR, y: center - outerR,
+                                                          width: outerR * 2, height: outerR * 2))
+                let innerCircle = Path(ellipseIn: CGRect(x: center - innerR, y: center - innerR,
+                                                          width: innerR * 2, height: innerR * 2))
+                ctx.stroke(outerCircle, with: .color(.black.opacity(0.4)), lineWidth: 1.5)
+                ctx.stroke(innerCircle, with: .color(.black.opacity(0.4)), lineWidth: 1.5)
+
+                // Crosshair
+                let ch: CGFloat = 8
+                var hLine = Path()
+                hLine.move(to: CGPoint(x: center - ch, y: center))
+                hLine.addLine(to: CGPoint(x: center + ch, y: center))
+                var vLine = Path()
+                vLine.move(to: CGPoint(x: center, y: center - ch))
+                vLine.addLine(to: CGPoint(x: center, y: center + ch))
+
+                // White outline then dark line
+                ctx.stroke(hLine, with: .color(.white.opacity(0.8)), lineWidth: 3)
+                ctx.stroke(vLine, with: .color(.white.opacity(0.8)), lineWidth: 3)
+                ctx.stroke(hLine, with: .color(.black.opacity(0.7)), lineWidth: 1.5)
+                ctx.stroke(vLine, with: .color(.black.opacity(0.7)), lineWidth: 1.5)
+            }
+            .frame(width: size, height: size)
         }
         .shadow(color: .black.opacity(0.35), radius: 6, y: 3)
     }

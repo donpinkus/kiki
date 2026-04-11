@@ -26,7 +26,7 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
     private let cursorView = CursorOverlayView()
     private let ringView = ColorPickerRingView()
     /// Vertical offset applied so the ring sits above the finger instead of being covered.
-    private static let ringFingerOffset: CGFloat = 40
+    private static let ringFingerOffset: CGFloat = 80
     private var cursorBaseWidth: CGFloat = 5
     private var cursorDivisor: CGFloat = 3.0
     private static let snapThreshold: CGFloat = 0.15 // ~8.6 degrees
