@@ -4,6 +4,7 @@ import CanvasModule
 struct CanvasSidebar: View {
     @Environment(AppCoordinator.self) private var coordinator
     @State private var isDraggingSlider = false
+    @State private var showColorPicker = false
 
     private let widthRange = BrushConfig.widthRange
 
@@ -11,10 +12,19 @@ struct CanvasSidebar: View {
         @Bindable var coordinator = coordinator
 
         VStack(spacing: 12) {
-            // Color picker (only meaningful for brush, but always visible for quick access)
-            ColorPicker("", selection: $coordinator.currentColor, supportsOpacity: false)
-                .labelsHidden()
-                .frame(width: 36, height: 36)
+            // Color swatch — tap to show disk picker popover
+            Button {
+                showColorPicker.toggle()
+            } label: {
+                Circle()
+                    .fill(coordinator.currentColor)
+                    .frame(width: 30, height: 30)
+                    .overlay(Circle().stroke(.primary.opacity(0.3), lineWidth: 1.5))
+            }
+            .popover(isPresented: $showColorPicker) {
+                DiskColorPicker(color: $coordinator.currentColor)
+            }
+            .frame(width: 36, height: 36)
 
             Divider()
                 .frame(width: 24)

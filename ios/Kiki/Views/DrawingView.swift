@@ -124,12 +124,17 @@ struct DrawingView: View {
                 currentBrushColor: coordinator.currentColor,
                 onColorPicked: { coordinator.currentColor = $0 }
             )
-                .overlay(alignment: .bottom) {
-                    if coordinator.canSwapStreamImageToCanvas {
-                        streamSwapBar
-                            .padding(.bottom, 16)
-                    }
+            .overlay(alignment: .top) {
+                PromptTitleBar()
+                    .padding(.top, 8)
+                    .padding(.horizontal, 24)
+            }
+            .overlay(alignment: .bottom) {
+                if coordinator.canSwapStreamImageToCanvas {
+                    streamSwapBar
+                        .padding(.bottom, 16)
                 }
+            }
 
             Rectangle()
                 .fill(Color(.separator))
@@ -157,6 +162,44 @@ struct DrawingView: View {
         .padding(.vertical, 10)
         .background(.ultraThinMaterial, in: Capsule())
         .shadow(color: .black.opacity(0.15), radius: 8, y: 4)
+    }
+}
+
+private struct PromptTitleBar: View {
+    @Environment(AppCoordinator.self) private var coordinator
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        @Bindable var coordinator = coordinator
+
+        VStack(spacing: 10) {
+            Button {
+                coordinator.showStylePicker = true
+            } label: {
+                Text(coordinator.selectedStyle.name.uppercased())
+                    .font(.caption2.weight(.semibold))
+                    .tracking(1.4)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(Color.accentColor.opacity(0.12), in: Capsule())
+                    .foregroundStyle(Color.accentColor)
+            }
+
+            TextField("Describe your image…", text: $coordinator.promptText)
+                .textFieldStyle(.plain)
+                .font(.title3.weight(.medium))
+                .multilineTextAlignment(.center)
+                .focused($isFocused)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .overlay(alignment: .bottom) {
+                    Rectangle()
+                        .fill(isFocused ? Color.accentColor : Color.secondary.opacity(0.35))
+                        .frame(height: isFocused ? 1.5 : 1)
+                        .animation(.easeInOut(duration: 0.15), value: isFocused)
+                }
+                .frame(maxWidth: 520)
+        }
     }
 }
 
