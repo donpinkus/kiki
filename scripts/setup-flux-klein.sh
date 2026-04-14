@@ -1,15 +1,14 @@
 #!/bin/bash
 # Run this ON a RunPod pod (via SSH) to set up the FLUX.2-klein stream server.
-# Uses a virtual environment to isolate dependencies.
-# On first run: creates venv, installs deps, downloads model (~10 min).
-# On subsequent runs: reuses venv + cached model, just restarts server (~10s).
+# Spot pod = ephemeral, container-disk only. Fresh model download every boot (~13GB, 2-3 min).
+# Base image: runpod/pytorch:1.0.3-cu1300-torch291-ubuntu2404 (CUDA 13 + torch 2.9.1, required for NVFP4).
 set -euo pipefail
 
-VOLUME_MODELS="/workspace/kiki-models"
-FK_MODELS_DIR="${VOLUME_MODELS}/flux-klein"
-FK_SERVER_DIR="/workspace/flux-klein-server"
-FK_VENV="/workspace/flux-klein-venv"
-FK_LOG="/workspace/flux-klein.log"
+# All state lives on the container disk — no network volume.
+MODELS_DIR="/root/kiki-models"
+FK_SERVER_DIR="/root/flux-klein-server"
+FK_VENV="/root/flux-klein-venv"
+FK_LOG="/root/flux-klein.log"
 
 PYTHON=$(command -v python3)
 echo "System python: $PYTHON ($($PYTHON --version 2>&1))"
@@ -34,9 +33,9 @@ else
 fi
 
 if [ "$NEEDS_INSTALL" = "true" ]; then
-  echo "  Creating clean venv at $FK_VENV..."
-  $PYTHON -m venv "$FK_VENV"
-  echo "  ✓ venv created (isolated)"
+  echo "  Creating venv at $FK_VENV (system-site-packages so we inherit the image's torch)..."
+  $PYTHON -m venv --system-site-packages "$FK_VENV"
+  echo "  ✓ venv created"
 fi
 
 VENV_PYTHON="$FK_VENV/bin/python"
@@ -48,12 +47,10 @@ echo ""
 if [ "$NEEDS_INSTALL" = "true" ]; then
   echo "==> Installing dependencies in venv..."
 
-  # Install PyTorch with CUDA 12.4 — need >=2.5 for diffusers' custom_op flash attention
-  # NOTE: no -q flag — pip output keeps SSH alive during large downloads
-  echo "  Installing PyTorch (cu124)..."
-  $VENV_PIP install --no-cache-dir --progress-bar on \
-      torch torchvision --index-url https://download.pytorch.org/whl/cu124
-  echo "  ✓ PyTorch installed ($($VENV_PYTHON -c 'import torch; print(torch.__version__)'))"
+  # Torch already present from the base image (2.9.1 + CUDA 13). Verify, don't reinstall.
+  TORCH_VER=$($VENV_PYTHON -c 'import torch; print(torch.__version__)')
+  CUDA_AVAIL=$($VENV_PYTHON -c 'import torch; print(torch.cuda.is_available())')
+  echo "  Torch: $TORCH_VER, CUDA available: $CUDA_AVAIL"
 
   # Diffusers from git (required for Flux2KleinPipeline)
   echo "  Installing diffusers (from git)..."
@@ -66,7 +63,8 @@ if [ "$NEEDS_INSTALL" = "true" ]; then
   $VENV_PIP install --no-cache-dir \
       "transformers>=4.40.0" \
       "accelerate>=0.28.0" \
-      "sentencepiece>=0.2.0"
+      "sentencepiece>=0.2.0" \
+      "safetensors>=0.4.0"
   echo "  ✓ ML dependencies installed"
 
   # Server deps
@@ -81,25 +79,13 @@ else
   echo "==> Dependencies already installed, skipping."
 fi
 
-# ── Step 3: Pre-download model to network volume ──
+# ── Step 3: Model weights are downloaded lazily by the pipeline on first load ──
+# Cache lives on container disk — ephemeral, but matches spot pod lifecycle.
 
 echo ""
-export HF_HOME="${FK_MODELS_DIR}/huggingface"
+export HF_HOME="${MODELS_DIR}/huggingface"
 mkdir -p "$HF_HOME"
-
-if [ -d "${HF_HOME}/hub/models--black-forest-labs--FLUX.2-klein-4B" ]; then
-  echo "==> Model already cached on network volume, skipping download."
-else
-  echo "==> Downloading FLUX.2-klein-4B (~8 GB, this will take a few minutes)..."
-  $VENV_PYTHON -c "
-import os
-os.environ['HF_HOME'] = '${HF_HOME}'
-from diffusers import Flux2KleinPipeline
-print('  Downloading black-forest-labs/FLUX.2-klein-4B...')
-Flux2KleinPipeline.from_pretrained('black-forest-labs/FLUX.2-klein-4B')
-print('  ✓ FLUX.2-klein-4B downloaded and cached')
-"
-fi
+echo "==> HF_HOME=$HF_HOME (model downloads happen on pipeline load)"
 
 # ── Step 4: Copy server files into place ──
 
@@ -127,14 +113,13 @@ sleep 2
 cd "$FK_SERVER_DIR"
 export FLUX_HOST="0.0.0.0"
 export FLUX_PORT="8766"
-export HF_HOME="${FK_MODELS_DIR}/huggingface"
+export HF_HOME="${MODELS_DIR}/huggingface"
 nohup "$VENV_PYTHON" server.py > "$FK_LOG" 2>&1 &
 FK_PID=$!
 echo "  FLUX.2-klein started (PID: $FK_PID, venv: $FK_VENV)"
 
 # ── Step 7: Wait for health check ──
-# First run: model loading + warmup (~3-5 min)
-# Subsequent runs: model loading from cache + warmup (~1-2 min)
+# Fresh boot: model download (~2-3 min) + load + warmup → total can be 5-8 min.
 
 echo ""
 echo "==> Waiting for FLUX.2-klein to be ready..."

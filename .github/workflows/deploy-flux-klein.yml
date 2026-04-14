@@ -10,7 +10,7 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Find or create pod
+      - name: Find or rent spot pod
         id: find_pod
         env:
           RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
@@ -18,17 +18,17 @@ jobs:
           set -euo pipefail
           API_URL="https://api.runpod.io/graphql?api_key=${RUNPOD_API_KEY}"
           POD_NAME="kiki-flux-klein"
-          # FLUX.2-klein needs ~13GB VRAM — wider GPU range than ComfyUI's ~25GB
-          GPU_TYPES=("NVIDIA H100 80GB HBM3" "NVIDIA H100 NVL" "NVIDIA H100 PCIe" "NVIDIA L40S" "NVIDIA GeForce RTX 4090" "NVIDIA A100 80GB PCIe")
-          IMAGE="runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04"
+          GPU_ID="NVIDIA GeForce RTX 5090"
+          # CUDA 13.0 + PyTorch 2.9.1 — required for FLUX.2-klein NVFP4 on Blackwell.
+          IMAGE="runpod/pytorch:1.0.3-cu1300-torch291-ubuntu2404"
           PORTS="8766/http,22/tcp"
-          MAX_VOLUMES=10
+          BID_HEADROOM="0.02"
 
-          # ── Check for existing running pod ──
+          # ── Reuse existing running pod if one is already up ──
           echo "Looking for running $POD_NAME pod..."
           PODS=$(curl -sf "$API_URL" \
             -H 'Content-Type: application/json' \
-            -d '{"query": "query { myself { pods { id name desiredStatus runtime { uptimeInSeconds ports { ip isIpPublic privatePort publicPort type } } } } }"}')
+            -d '{"query": "query { myself { pods { id name desiredStatus gpuDisplayName } } }"}')
 
           POD_ID=$(echo "$PODS" | jq -r "
             .data.myself.pods[]
@@ -38,103 +38,49 @@ jobs:
           if [ -n "$POD_ID" ] && [ "$POD_ID" != "null" ]; then
             echo "Found existing pod: $POD_ID"
           else
-            echo "No running $POD_NAME pod. Creating one..."
+            echo "No running $POD_NAME pod. Discovering spot bid for $GPU_ID..."
 
-            # ── Discover network volumes ──
-            VOLUMES=$(curl -sf "$API_URL" \
+            # ── Discover current spot price (secure cloud only — community has no spot for 5090) ──
+            PRICE_RESP=$(curl -sf "$API_URL" \
               -H 'Content-Type: application/json' \
-              -d '{"query": "query { myself { networkVolumes { id name dataCenterId size } } }"}')
-            VOLUME_COUNT=$(echo "$VOLUMES" | jq '.data.myself.networkVolumes | length')
-            EXISTING_DCS=$(echo "$VOLUMES" | jq -r '.data.myself.networkVolumes[] | .dataCenterId' | sort -u)
+              -d "{\"query\": \"query { gpuTypes(input: { id: \\\"${GPU_ID}\\\" }) { lowestPrice(input: { gpuCount: 1, secureCloud: true }) { minimumBidPrice stockStatus } } }\"}")
 
-            # Helper: try creating a pod in a datacenter with a volume
-            try_create_pod() {
-              local gpu="$1" dc="$2" vol="$3"
-              echo "  Trying $gpu on-demand in $dc..."
-              local resp
-              resp=$(curl -sf "$API_URL" \
-                -H 'Content-Type: application/json' \
-                -d "{
-                  \"query\": \"mutation { podFindAndDeployOnDemand(input: { name: \\\"${POD_NAME}\\\", imageName: \\\"${IMAGE}\\\", gpuTypeId: \\\"${gpu}\\\", gpuCount: 1, volumeInGb: 0, containerDiskInGb: 20, networkVolumeId: \\\"${vol}\\\", volumeMountPath: \\\"/workspace\\\", ports: \\\"${PORTS}\\\", dataCenterId: \\\"${dc}\\\", startSsh: true }) { id } }\"
-                }" || true)
+            MIN_BID=$(echo "$PRICE_RESP" | jq -r '.data.gpuTypes[0].lowestPrice.minimumBidPrice // empty')
+            STOCK=$(echo "$PRICE_RESP" | jq -r '.data.gpuTypes[0].lowestPrice.stockStatus // "Unknown"')
 
-              POD_ID=$(echo "$resp" | jq -r '.data.podFindAndDeployOnDemand.id // empty')
-              if [ -n "$POD_ID" ]; then
-                echo "  ✓ Pod $POD_ID with $gpu in $dc"
-                return 0
-              fi
-              local err
-              err=$(echo "$resp" | jq -r '.errors[0].message // empty' 2>/dev/null)
-              echo "  Failed: ${err:-unknown}"
-              return 1
-            }
-
-            # Phase 1: Try existing volume datacenters
-            # GPU-first loop: prefer the best GPU across all DCs before falling back
-            POD_ID=""
-            if [ -n "$EXISTING_DCS" ]; then
-              echo "Trying existing datacenters: $EXISTING_DCS"
-              for GPU in "${GPU_TYPES[@]}"; do
-                for DC in $EXISTING_DCS; do
-                  VOL_ID=$(echo "$VOLUMES" | jq -r ".data.myself.networkVolumes[] | select(.dataCenterId == \"$DC\") | .id" | head -1)
-                  if try_create_pod "$GPU" "$DC" "$VOL_ID"; then
-                    break 2
-                  fi
-                done
-              done
-            fi
-
-            # Phase 2: Discover new datacenters if needed
-            if [ -z "$POD_ID" ]; then
-              echo ""
-              echo "No GPU available in existing DCs. Discovering new datacenters..."
-
-              if [ "$VOLUME_COUNT" -ge "$MAX_VOLUMES" ]; then
-                echo "::error::Cannot create new volume — at $VOLUME_COUNT/$MAX_VOLUMES limit"
-                exit 1
-              fi
-
-              ALL_DCS=$(curl -sf "$API_URL" \
-                -H 'Content-Type: application/json' \
-                -d '{"query": "query { dataCenters { id name location } }"}' \
-                | jq -r '.data.dataCenters[].id')
-
-              for DC in $ALL_DCS; do
-                # Skip DCs we already tried
-                echo "$EXISTING_DCS" | grep -qw "$DC" && continue
-
-                echo "Trying new DC: $DC"
-
-                # Create a volume here
-                DC_LOWER="${DC,,}"
-                VOL_RESP=$(curl -sf "$API_URL" \
-                  -H 'Content-Type: application/json' \
-                  -d "{
-                    \"query\": \"mutation { createNetworkVolume(input: { name: \\\"kiki-${DC_LOWER}\\\", size: 100, dataCenterId: \\\"${DC}\\\" }) { id } }\"
-                  }" || true)
-                VOL_ID=$(echo "$VOL_RESP" | jq -r '.data.createNetworkVolume.id // empty')
-                if [ -z "$VOL_ID" ]; then
-                  echo "  Could not create volume in $DC"
-                  continue
-                fi
-                echo "  Created volume $VOL_ID in $DC"
-
-                for GPU in "${GPU_TYPES[@]}"; do
-                  if try_create_pod "$GPU" "$DC" "$VOL_ID"; then
-                    break 2
-                  fi
-                done
-              done
-            fi
-
-            if [ -z "$POD_ID" ]; then
-              echo "::error::Could not create pod with any GPU in any datacenter"
+            if [ -z "$MIN_BID" ] || [ "$MIN_BID" = "null" ]; then
+              echo "::error::No spot pricing available for $GPU_ID in secure cloud right now. Stock status: $STOCK"
               exit 1
             fi
+            if [ "$STOCK" = "None" ] || [ "$STOCK" = "Low" ]; then
+              echo "::error::Spot 5090 stock status is '$STOCK' — aborting rather than risk an unfillable bid"
+              exit 1
+            fi
+
+            # Bid = min bid + headroom (ensures we clear the floor without overpaying)
+            BID=$(jq -nr --argjson a "$MIN_BID" --argjson b "$BID_HEADROOM" '($a + $b) | . * 100 | round / 100')
+            echo "Spot discovery: minimumBidPrice=\$${MIN_BID}/hr, stock=$STOCK, our bid=\$${BID}/hr"
+
+            # ── Rent interruptable (spot) pod ──
+            RENT_RESP=$(curl -sf "$API_URL" \
+              -H 'Content-Type: application/json' \
+              -d "{
+                \"query\": \"mutation { podRentInterruptable(input: { name: \\\"${POD_NAME}\\\", imageName: \\\"${IMAGE}\\\", gpuTypeId: \\\"${GPU_ID}\\\", gpuCount: 1, bidPerGpu: ${BID}, cloudType: SECURE, volumeInGb: 0, containerDiskInGb: 40, minMemoryInGb: 16, minVcpuCount: 4, ports: \\\"${PORTS}\\\", startSsh: true }) { id desiredStatus costPerHr } }\"
+              }" || true)
+
+            POD_ID=$(echo "$RENT_RESP" | jq -r '.data.podRentInterruptable.id // empty')
+            COST=$(echo "$RENT_RESP" | jq -r '.data.podRentInterruptable.costPerHr // empty')
+
+            if [ -z "$POD_ID" ]; then
+              ERR=$(echo "$RENT_RESP" | jq -r '.errors[0].message // "unknown error"')
+              echo "::error::Failed to rent spot 5090: $ERR"
+              echo "Response: $(echo "$RENT_RESP" | jq -c .)"
+              exit 1
+            fi
+            echo "✓ Rented spot pod $POD_ID @ \$${COST}/hr"
           fi
 
           # ── Wait for pod to boot and get SSH info ──
-          # Check uptimeInSeconds first — runtime and ports are null while booting
           echo ""
           echo "Waiting for pod $POD_ID to boot..."
           SSH_IP=""
@@ -143,11 +89,12 @@ jobs:
           for i in $(seq 1 60); do
             POD_INFO=$(curl -sf "$API_URL" \
               -H 'Content-Type: application/json' \
-              -d "{\"query\": \"query { pod(input: {podId: \\\"${POD_ID}\\\"}) { id desiredStatus runtime { uptimeInSeconds ports { ip isIpPublic privatePort publicPort type } } } }\"}")
+              -d "{\"query\": \"query { pod(input: {podId: \\\"${POD_ID}\\\"}) { id desiredStatus machine { dataCenterId } runtime { uptimeInSeconds ports { ip isIpPublic privatePort publicPort type } } } }\"}")
 
             UPTIME=$(echo "$POD_INFO" | jq -r '.data.pod.runtime.uptimeInSeconds // 0')
             if [ "$UPTIME" -gt 5 ] 2>/dev/null; then
-              echo "Pod is running (uptime: ${UPTIME}s)"
+              DC=$(echo "$POD_INFO" | jq -r '.data.pod.machine.dataCenterId // "unknown"')
+              echo "Pod is running (uptime: ${UPTIME}s, datacenter: $DC)"
               SSH_IP=$(echo "$POD_INFO" | jq -r '.data.pod.runtime.ports[] | select(.privatePort == 22) | .ip')
               SSH_PORT=$(echo "$POD_INFO" | jq -r '.data.pod.runtime.ports[] | select(.privatePort == 22) | .publicPort')
 
@@ -267,7 +214,7 @@ jobs:
           FLUX_URL="${{ steps.find_pod.outputs.flux_url }}"
           HEALTH_URL="${{ steps.find_pod.outputs.health_url }}"
 
-          echo "## FLUX.2-klein Deployed" >> "$GITHUB_STEP_SUMMARY"
+          echo "## FLUX.2-klein Deployed (RTX 5090 Spot)" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "| | |" >> "$GITHUB_STEP_SUMMARY"
           echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
