@@ -60,6 +60,44 @@ async def health():
     }
 
 
+@app.get("/benchmark")
+async def benchmark(n: int = 5):
+    """Run N back-to-back generations with no WebSocket traffic.
+
+    Diagnostic: compare median per-frame time here to the ~1000ms we see
+    during live streaming. If this endpoint shows faster per-frame times,
+    then streaming/asyncio/GIL activity is stealing GPU orchestration
+    time. If it shows the same time, the cost is intrinsic to this shape.
+    """
+    if not pipeline.ready:
+        return {"error": "pipeline not ready"}
+
+    import numpy as np
+
+    # Neutral test image — same shape as streaming uses.
+    rng = np.random.default_rng(42)
+    arr = rng.integers(0, 255, (config.DEFAULT_HEIGHT, config.DEFAULT_WIDTH, 3), dtype=np.uint8)
+    dummy = Image.fromarray(arr)
+
+    runs_ms = []
+    for i in range(n):
+        t0 = time.perf_counter()
+        _ = await asyncio.to_thread(
+            pipeline.generate_reference,
+            dummy, "a cat", config.STEPS, config.GUIDANCE_SCALE, 42 + i,
+        )
+        runs_ms.append(round((time.perf_counter() - t0) * 1000, 1))
+
+    runs_ms_sorted = sorted(runs_ms)
+    return {
+        "n": n,
+        "runs_ms": runs_ms,
+        "median_ms": runs_ms_sorted[len(runs_ms_sorted) // 2],
+        "min_ms": runs_ms_sorted[0],
+        "max_ms": runs_ms_sorted[-1],
+    }
+
+
 @app.websocket("/ws")
 async def websocket_stream(ws: WebSocket):
     await ws.accept()
