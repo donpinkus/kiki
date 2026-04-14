@@ -159,17 +159,21 @@ class FluxKleinPipeline:
           → vae.decode → (1,3,768,768)
           → image_processor.postprocess → PIL
         """
-        # Import here: avoids paying the import cost on reference-mode frames,
-        # and makes the dependency obvious if this path is ever hit without
-        # diffusers' helpers available.
+        # Wrap everything in no_grad. The public pipe.__call__ has this as
+        # a decorator — without it, transformer activations are retained
+        # for autograd and pin ~30GB on the 5090, OOM'ing after step 1.
+        with torch.no_grad():
+            return FluxKleinPipeline._denoise_inner(
+                pipe, image, prompt, denoise_strength, steps, generator,
+                config.DEFAULT_HEIGHT, config.DEFAULT_WIDTH, pipe._execution_device,
+            )
+
+    @staticmethod
+    def _denoise_inner(pipe, image, prompt, denoise_strength, steps, generator, H, W, device):
         from diffusers.pipelines.flux2.pipeline_flux2_klein import (
             compute_empirical_mu,
             retrieve_timesteps,
         )
-
-        H = config.DEFAULT_HEIGHT
-        W = config.DEFAULT_WIDTH
-        device = pipe._execution_device
 
         # 1. Preprocess sketch into tensor (B, 3, H, W).
         image_tensor = pipe.image_processor.preprocess(
