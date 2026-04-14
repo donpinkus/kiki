@@ -128,25 +128,13 @@ class FluxKleinPipeline:
         generator = self._make_generator(seed)
 
         with self._lock:
-            pipe = self.pipe
-
-            try:
-                return self._denoise_impl(pipe, image, prompt, denoise_strength, steps, generator)
-            except Exception as e:
-                logger.warning(
-                    "Denoise mode failed (%s), falling back to reference mode", e,
-                )
-                # Fallback: use reference mode instead
-                result = pipe(
-                    prompt=prompt,
-                    image=image,
-                    height=config.DEFAULT_HEIGHT,
-                    width=config.DEFAULT_WIDTH,
-                    num_inference_steps=steps,
-                    guidance_scale=config.GUIDANCE_SCALE,
-                    generator=generator,
-                )
-                return result.images[0]
+            # No silent fallback — if denoise is broken, surface it. The prior
+            # fallback caused a phantom "mode switch" effect: denoise consumed
+            # RNG via pipe.vae.encode → .sample(generator), then fell back to
+            # reference with an advanced generator, producing visibly different
+            # output for the same seed. That looked like denoise "worked" when
+            # it was actually reference-mode output with perturbed noise.
+            return self._denoise_impl(self.pipe, image, prompt, denoise_strength, steps, generator)
 
     @staticmethod
     def _denoise_impl(pipe, image, prompt, denoise_strength, steps, generator):
