@@ -24,6 +24,9 @@ backend/.env
 # Local secrets
 .env.local
 
+# FLUX test-client debug output
+flux-klein-server/output.jpg
+
 # IDE
 .idea/
 .vscode/

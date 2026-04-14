@@ -67,13 +67,6 @@ if [ "$NEEDS_INSTALL" = "true" ]; then
       "safetensors>=0.4.0"
   echo "  ✓ ML dependencies installed"
 
-  # torchvision: pinned to match the base image's torch 2.9.1 + cu128.
-  # Used by pipeline.py's denoise-mode image preprocessing.
-  echo "  Installing torchvision (cu128, matches torch 2.9.1)..."
-  $VENV_PIP install --no-cache-dir \
-      "torchvision==0.24.1" --index-url https://download.pytorch.org/whl/cu128
-  echo "  ✓ torchvision installed"
-
   # Server deps
   echo "  Installing server dependencies..."
   $VENV_PIP install --no-cache-dir \

@@ -17,11 +17,11 @@ jobs:
           # Get all pods
           PODS=$(curl -sf "$API_URL" \
             -H 'Content-Type: application/json' \
-            -d '{"query": "query { myself { pods { id name desiredStatus gpuDisplayName runtime { uptimeInSeconds } } } }"}')
+            -d '{"query": "query { myself { pods { id name desiredStatus machine { gpuDisplayName } runtime { uptimeInSeconds } } } }"}')
 
           POD_COUNT=$(echo "$PODS" | jq '.data.myself.pods | length')
           echo "Found $POD_COUNT pod(s):"
-          echo "$PODS" | jq '.data.myself.pods[] | {id, name, status: .desiredStatus, gpu: .gpuDisplayName}'
+          echo "$PODS" | jq '.data.myself.pods[] | {id, name, status: .desiredStatus, gpu: .machine.gpuDisplayName}'
 
           if [ "$POD_COUNT" -eq 0 ]; then
             echo "No pods to stop."
