@@ -58,6 +58,10 @@ class FluxKleinPipeline:
 
         logger.info("Model loaded in %.1fs (quantization=%s)", time.time() - t0, self._quantization)
 
+        # One-off: wrap VAE + text-encoder + transformer forward passes with
+        # cuda-synchronized timers so we can break down the 985ms pipe cost.
+        self._instrument_for_benchmark()
+
         # Warmup with a dummy txt2img generation
         logger.info("Warming up...")
         t1 = time.time()
@@ -220,6 +224,45 @@ class FluxKleinPipeline:
         if seed is not None:
             return torch.Generator(device="cuda").manual_seed(seed)
         return None
+
+    def _instrument_for_benchmark(self) -> None:
+        """Wrap pipeline sub-components with cuda-synced timing logs.
+
+        Logs one line per invocation: `component=X duration_ms=Y`.
+        Transformer fires once per diffusion step; VAE encode/decode and
+        text-encoder fire once per frame. Drop this method once we're done
+        benchmarking — it's not free, but adds maybe 1ms per frame from syncs.
+        """
+
+        def wrap(name: str, fn):
+            def wrapped(*args, **kwargs):
+                torch.cuda.synchronize()
+                t = time.perf_counter()
+                result = fn(*args, **kwargs)
+                torch.cuda.synchronize()
+                dur_ms = (time.perf_counter() - t) * 1000
+                logger.info("pipe_component name=%s duration_ms=%.1f", name, dur_ms)
+                return result
+            return wrapped
+
+        pipe = self.pipe
+        # VAE encode/decode: always present
+        if hasattr(pipe, "vae") and pipe.vae is not None:
+            pipe.vae.encode = wrap("vae_encode", pipe.vae.encode)
+            pipe.vae.decode = wrap("vae_decode", pipe.vae.decode)
+
+        # Text encoder(s): FLUX.2 uses Qwen3-8B. Diffusers exposes it at
+        # pipe.text_encoder and/or via pipe.encode_prompt().
+        if hasattr(pipe, "encode_prompt"):
+            pipe.encode_prompt = wrap("encode_prompt", pipe.encode_prompt)
+
+        # Transformer fires per step; lets us see diffusion-step wall-clock.
+        if hasattr(pipe, "transformer") and pipe.transformer is not None:
+            # Wrap __call__ on the module by wrapping .forward.
+            orig_forward = pipe.transformer.forward
+            pipe.transformer.forward = wrap("transformer_step", orig_forward)
+
+        logger.info("Instrumentation attached (vae.encode/decode, encode_prompt, transformer.forward)")
 
     def _try_load_nvfp4(self) -> None:
         """Overwrite transformer weights with BFL's NVFP4 checkpoint.
