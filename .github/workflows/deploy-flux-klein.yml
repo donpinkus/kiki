@@ -28,7 +28,7 @@ jobs:
           echo "Looking for running $POD_NAME pod..."
           PODS=$(curl -sf "$API_URL" \
             -H 'Content-Type: application/json' \
-            -d '{"query": "query { myself { pods { id name desiredStatus gpuDisplayName } } }"}')
+            -d '{"query": "query { myself { pods { id name desiredStatus } } }"}')
 
           POD_ID=$(echo "$PODS" | jq -r "
             .data.myself.pods[]
