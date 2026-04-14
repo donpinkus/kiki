@@ -37,20 +37,30 @@ struct GalleryView: View {
                     }
                 }
             }
-            .padding(24)
+            .padding(.horizontal, 24)
+            .padding(.bottom, 24)
+            .padding(.top, 80)
         }
-        .overlay(alignment: .topTrailing) {
-            Button {
-                isDeleteMode = false
-                coordinator.newDrawing()
-            } label: {
-                Label("New", systemImage: "plus")
-                    .font(.subheadline.weight(.medium))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .background(.ultraThinMaterial, in: Capsule())
+        .overlay(alignment: .top) {
+            HStack {
+                Text("Kiki")
+                    .font(.largeTitle.weight(.bold))
+
+                Spacer()
+
+                Button {
+                    isDeleteMode = false
+                    coordinator.newDrawing()
+                } label: {
+                    Label("New", systemImage: "plus")
+                        .font(.subheadline.weight(.medium))
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(.ultraThinMaterial, in: Capsule())
+                }
             }
-            .padding(24)
+            .padding(.horizontal, 24)
+            .padding(.top, 16)
         }
         .onChange(of: drawings.count) { _, newCount in
             if newCount == 0 {
