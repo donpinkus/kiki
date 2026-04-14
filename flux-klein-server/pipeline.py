@@ -138,75 +138,151 @@ class FluxKleinPipeline:
 
     @staticmethod
     def _denoise_impl(pipe, image, prompt, denoise_strength, steps, generator):
-        """Internal denoise implementation — may raise if pipeline internals differ."""
-        import numpy as np
-        from torchvision import transforms
+        """True img2img denoise for FLUX.2 klein.
 
-        image_resized = image.resize(
-            (config.DEFAULT_WIDTH, config.DEFAULT_HEIGHT), Image.LANCZOS,
+        Reuses the pipeline's own primitives (`_encode_vae_image`, `encode_prompt`,
+        `prepare_latents`, scheduler, transformer, VAE decode) but orchestrates
+        them in an inline loop so we can slice the scheduler's timesteps and
+        inject noise at the chosen sigma. Does NOT pass `image=` to the
+        transformer — no reference tokens, so transformer runs at txt2img speed
+        (~117ms/step on 5090+NVFP4) vs reference mode's ~217ms/step.
+
+        Shape progression (for 768×768, 4 steps, denoise_strength=0.6):
+          sketch PIL → tensor (1,3,768,768)
+          → _encode_vae_image → (1,128,48,48) BN-normalized
+          → _pack_latents → (1,2304,128) packed
+          → noise-injected at sigma of first sliced timestep
+          → loop over 2-3 timesteps running transformer + scheduler.step
+          → _unpack_latents_with_ids → (1,128,48,48)
+          → reverse BN → (1,128,48,48) raw-latent space
+          → _unpatchify_latents → (1,32,96,96)
+          → vae.decode → (1,3,768,768)
+          → image_processor.postprocess → PIL
+        """
+        # Import here: avoids paying the import cost on reference-mode frames,
+        # and makes the dependency obvious if this path is ever hit without
+        # diffusers' helpers available.
+        from diffusers.pipelines.flux2.pipeline_flux2_klein import (
+            compute_empirical_mu,
+            retrieve_timesteps,
         )
 
-        # Encode to tensor
-        to_tensor = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize([0.5], [0.5]),  # Scale to [-1, 1]
-        ])
-        image_tensor = to_tensor(image_resized).unsqueeze(0)
-        image_tensor = image_tensor.to(device="cuda", dtype=pipe.dtype)
+        H = config.DEFAULT_HEIGHT
+        W = config.DEFAULT_WIDTH
+        device = pipe._execution_device
 
-        # VAE encode
-        with torch.no_grad():
-            latent_dist = pipe.vae.encode(image_tensor)
-            latents = latent_dist.latent_dist.sample(generator)
+        # 1. Preprocess sketch into tensor (B, 3, H, W).
+        image_tensor = pipe.image_processor.preprocess(
+            image, height=H, width=W, resize_mode="crop",
+        ).to(device=device, dtype=pipe.vae.dtype)
+        logger.debug("denoise: image_tensor shape=%s", tuple(image_tensor.shape))
 
-        # Normalize latents using VAE batch norm if available,
-        # otherwise use scaling_factor
-        if hasattr(pipe.vae, "bn") and pipe.vae.bn is not None:
-            bn_mean = pipe.vae.bn.running_mean.view(1, -1, 1, 1).to(latents.device)
-            bn_var = pipe.vae.bn.running_var.to(latents.device)
-            bn_eps = getattr(pipe.vae.config, "batch_norm_eps", 1e-5)
-            bn_std = torch.sqrt(bn_var + bn_eps).view(1, -1, 1, 1)
-            latents = (latents - bn_mean) / bn_std
-        elif hasattr(pipe.vae.config, "scaling_factor"):
-            latents = latents * pipe.vae.config.scaling_factor
+        # 2. VAE-encode into normalized latent space. Returns (1, 128, H/16, W/16).
+        image_latents = pipe._encode_vae_image(image=image_tensor, generator=generator)
+        logger.debug("denoise: image_latents shape=%s", tuple(image_latents.shape))
 
-        # Patchify if the pipeline requires it
-        if hasattr(pipe, "_pack_latents"):
-            latents = pipe._pack_latents(
-                latents,
-                latents.shape[0],
-                latents.shape[1],
-                latents.shape[2],
-                latents.shape[3],
-            )
-
-        # Set up scheduler and compute noise
-        pipe.scheduler.set_timesteps(steps, device="cuda")
-        timesteps = pipe.scheduler.timesteps
-
-        # Skip early steps based on denoise_strength
-        skip = int(round(len(timesteps) * (1.0 - denoise_strength)))
-        timesteps = timesteps[skip:]
-
-        if len(timesteps) == 0:
-            return image_resized
-
-        # Add noise at the first remaining timestep
-        noise = torch.randn_like(latents, generator=generator)
-        sigma = timesteps[0].float() / pipe.scheduler.config.num_train_timesteps
-        noisy_latents = (1.0 - sigma) * latents + sigma * noise
-
-        # Run pipeline from pre-noised latents
-        result = pipe(
+        # 3. Prompt embeddings.
+        prompt_embeds, text_ids = pipe.encode_prompt(
             prompt=prompt,
-            height=config.DEFAULT_HEIGHT,
-            width=config.DEFAULT_WIDTH,
-            num_inference_steps=steps,
-            latents=noisy_latents,
-            guidance_scale=1.0,
-            generator=generator,
+            device=device,
+            num_images_per_prompt=1,
+            max_sequence_length=512,
         )
-        return result.images[0]
+
+        # 4. Use the pipeline's own prepare_latents to pack our image_latents
+        # and get matching latent_ids. num_latents_channels = transformer.in_channels // 4.
+        num_latents_channels = pipe.transformer.config.in_channels // 4
+        packed_latents, latent_ids = pipe.prepare_latents(
+            batch_size=1,
+            num_latents_channels=num_latents_channels,
+            height=H,
+            width=W,
+            dtype=prompt_embeds.dtype,
+            device=device,
+            generator=generator,
+            latents=image_latents,  # reuse our sketch-derived latents instead of randn
+        )
+        logger.debug(
+            "denoise: packed_latents shape=%s, latent_ids shape=%s",
+            tuple(packed_latents.shape), tuple(latent_ids.shape),
+        )
+
+        # 5. Ask the scheduler for the full schedule. Flow-matching schedulers
+        # use `mu` derived from image sequence length.
+        image_seq_len = packed_latents.shape[1]
+        mu = compute_empirical_mu(image_seq_len=image_seq_len, num_steps=steps)
+        timesteps, num_inference_steps = retrieve_timesteps(
+            pipe.scheduler, steps, device, sigmas=None, mu=mu,
+        )
+
+        # 6. Slice to the last `denoise_strength` fraction of steps.
+        start_idx = int(round(num_inference_steps * (1.0 - denoise_strength)))
+        timesteps = timesteps[start_idx:]
+        if len(timesteps) == 0:
+            # denoise_strength == 0 → just VAE-roundtrip the sketch through decode.
+            timesteps = timesteps[-1:]
+
+        # 7. Inject noise at the starting sigma. Flow-matching scale_noise:
+        # noisy = (1 - sigma)*x0 + sigma*noise
+        noise = torch.randn(
+            packed_latents.shape,
+            generator=generator,
+            device=device,
+            dtype=packed_latents.dtype,
+        )
+        # scale_noise wants scalar-index timesteps; pass a length-1 tensor.
+        latents = pipe.scheduler.scale_noise(
+            packed_latents, timesteps[:1], noise,
+        )
+        logger.debug("denoise: noisy latents ready, sliced steps=%d", len(timesteps))
+
+        # 8. Inline denoising loop. Mirrors pipeline_flux2_klein.__call__'s inner loop
+        # but WITHOUT the image_latents concat path — this is img2img denoise, not
+        # reference. `guidance=None` because klein is step-wise distilled.
+        pipe.scheduler.set_begin_index(0)
+        for t in timesteps:
+            timestep = t.expand(latents.shape[0]).to(latents.dtype)
+            latent_model_input = latents.to(pipe.transformer.dtype)
+
+            with pipe.transformer.cache_context("cond"):
+                noise_pred = pipe.transformer(
+                    hidden_states=latent_model_input,
+                    timestep=timestep / 1000,
+                    guidance=None,
+                    encoder_hidden_states=prompt_embeds,
+                    txt_ids=text_ids,
+                    img_ids=latent_ids,
+                    joint_attention_kwargs=None,
+                    return_dict=False,
+                )[0]
+            # Klein is distilled → no CFG. noise_pred is already the right size.
+
+            latents_dtype = latents.dtype
+            latents = pipe.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+            if latents.dtype != latents_dtype:
+                latents = latents.to(latents_dtype)
+
+        # 9. Unpack: (1, H_lat*W_lat, 128) → (1, 128, H_lat/2, W_lat/2).
+        latent_h = 2 * (H // (pipe.vae_scale_factor * 2))
+        latent_w = 2 * (W // (pipe.vae_scale_factor * 2))
+        latents = pipe._unpack_latents_with_ids(
+            latents, latent_ids, latent_h // 2, latent_w // 2,
+        )
+
+        # 10. Reverse the VAE batch-norm that _encode_vae_image applied.
+        bn_mean = pipe.vae.bn.running_mean.view(1, -1, 1, 1).to(latents.device, latents.dtype)
+        bn_std = torch.sqrt(
+            pipe.vae.bn.running_var.view(1, -1, 1, 1) + pipe.vae.config.batch_norm_eps,
+        ).to(latents.device, latents.dtype)
+        latents = latents * bn_std + bn_mean
+
+        # 11. Reverse the 2×2 patchify → raw VAE latent shape (1, 32, H/8, W/8).
+        latents = pipe._unpatchify_latents(latents)
+
+        # 12. Decode to pixels and return PIL.
+        image_out = pipe.vae.decode(latents, return_dict=False)[0]
+        pil_images = pipe.image_processor.postprocess(image_out, output_type="pil")
+        return pil_images[0] if isinstance(pil_images, list) else pil_images
 
     def _make_generator(self, seed: int | None) -> torch.Generator | None:
         if seed is not None:
