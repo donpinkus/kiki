@@ -19,8 +19,12 @@ jobs:
           API_URL="https://api.runpod.io/graphql?api_key=${RUNPOD_API_KEY}"
           POD_NAME="kiki-flux-klein"
           GPU_ID="NVIDIA GeForce RTX 5090"
-          # CUDA 13.0 + PyTorch 2.9.1 — required for FLUX.2-klein NVFP4 on Blackwell.
-          IMAGE="runpod/pytorch:1.0.3-cu1300-torch291-ubuntu2404"
+          # CUDA 12.8.1 + PyTorch 2.9.1 — Blackwell-native and compatible with the
+          # widest range of RunPod host drivers. CUDA 13 images require driver
+          # 570+ which many hosts lack, surfacing as "forward compatibility"
+          # failures at container start. Blackwell + torch 2.9 still includes
+          # NVFP4 tensor support for our quantized-weight inference path.
+          IMAGE="runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404"
           PORTS="8766/http,22/tcp"
           BID_HEADROOM="0.02"
 
