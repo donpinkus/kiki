@@ -89,15 +89,6 @@ final class AppCoordinator {
 
     // -- Stream parameters --
 
-    /// Img2img mode: "reference" (native conditioning) or "denoise" (latent noise).
-    var streamMode: String = "reference" { didSet { syncStreamConfig() } }
-
-    /// Denoise strength for denoise mode (0.0-1.0).
-    var streamDenoise: Double = 0.6 { didSet { syncStreamConfig() } }
-
-    /// Guidance scale for reference mode.
-    var streamGuidanceScale: Double = 4.0 { didSet { syncStreamConfig() } }
-
     /// Number of inference steps.
     var streamSteps: Int = 4 { didSet { syncStreamConfig() } }
 
@@ -410,9 +401,6 @@ final class AppCoordinator {
     private func buildStreamConfig() -> StreamConfig {
         StreamConfig(
             prompt: composedPrompt,
-            mode: streamMode,
-            denoise: streamDenoise,
-            guidanceScale: streamGuidanceScale,
             steps: streamSteps,
             seed: streamSeed
         )

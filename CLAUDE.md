@@ -34,7 +34,7 @@ cd backend && npm run lint         # Lint
 
 **Backend:** TypeScript + Fastify — no Express. Railway for hosting. Backend acts as a WebSocket relay between the iPad client and the FLUX.2-klein inference server on RunPod.
 
-**Generation:** FLUX.2-klein-4B on RunPod H100. Real-time img2img streaming over WebSocket. Canvas captured at ~2 FPS, sent as JPEG, generated images returned ~1 FPS. Two img2img modes: "reference" (native token conditioning) and "denoise" (traditional latent noise injection). Server uses frame dropping (single-slot buffer) to prevent queue buildup.
+**Generation:** FLUX.2-klein-4B on RunPod RTX 5090 spot, with BFL's NVFP4 transformer checkpoint loaded on top of the BF16 pipeline. Real-time img2img streaming over WebSocket. Canvas captured at ~2 FPS, sent as JPEG, generated images returned ~1 FPS. Reference-mode only: the sketch is VAE-encoded and concatenated with generation latents as conditioning tokens. Server uses frame dropping (single-slot buffer) to prevent queue buildup.
 
 ## Navigation & Persistence
 

@@ -9,15 +9,11 @@ struct AdvancedParametersPanel: View {
 
         NavigationStack {
             Form {
-                streamModeSection
                 streamParametersSection
                 captureSection
 
                 Section {
                     Button("Reset All to Defaults", role: .destructive) {
-                        coordinator.streamMode = "reference"
-                        coordinator.streamDenoise = 0.6
-                        coordinator.streamGuidanceScale = 4.0
                         coordinator.streamSteps = 4
                         coordinator.streamSeed = nil
                         coordinator.streamCaptureFPS = 2
@@ -31,49 +27,10 @@ struct AdvancedParametersPanel: View {
 
     // MARK: - Sections
 
-    private var streamModeSection: some View {
-        @Bindable var coordinator = coordinator
-
-        return Section("Mode") {
-            Picker("Mode", selection: $coordinator.streamMode) {
-                Text("Reference").tag("reference")
-                Text("Denoise").tag("denoise")
-            }
-            .pickerStyle(.segmented)
-        }
-    }
-
     private var streamParametersSection: some View {
         @Bindable var coordinator = coordinator
 
         return Section("Parameters") {
-            if coordinator.streamMode == "reference" {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text("Guidance Scale")
-                            .font(.subheadline)
-                        Spacer()
-                        Text(String(format: "%.1f", coordinator.streamGuidanceScale))
-                            .font(.subheadline.monospacedDigit())
-                    }
-                    Slider(value: $coordinator.streamGuidanceScale, in: 1...10, step: 0.5)
-                }
-            } else {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text("Denoise Strength")
-                            .font(.subheadline)
-                        Spacer()
-                        Text(String(format: "%.2f", coordinator.streamDenoise))
-                            .font(.subheadline.monospacedDigit())
-                    }
-                    Slider(value: $coordinator.streamDenoise, in: 0.1...1.0, step: 0.05)
-                    Text("Lower = more sketch fidelity, higher = more model freedom.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
                     Text("Steps")

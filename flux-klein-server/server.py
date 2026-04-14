@@ -2,8 +2,7 @@
 
 Protocol:
   Client -> Server:
-    - Text frame (JSON): { "type": "config", "prompt": "...", "mode": "reference"|"denoise",
-                           "denoise": 0.6, "guidanceScale": 4.0, "steps": 4, "seed": 42 }
+    - Text frame (JSON): { "type": "config", "prompt": "...", "steps": 4, "seed": 42 }
     - Binary frame: Raw JPEG bytes of input sketch
 
   Server -> Client:
@@ -20,6 +19,7 @@ import asyncio
 import io
 import json
 import logging
+import random
 import time
 from contextlib import asynccontextmanager
 
@@ -60,52 +60,6 @@ async def health():
     }
 
 
-@app.get("/benchmark")
-async def benchmark(n: int = 5, mode: str = "reference"):
-    """Run N back-to-back generations with no WebSocket traffic.
-
-    mode=reference | denoise — lets us isolate per-mode cost without
-    streaming or async concurrency. Emits timing via the normal logger
-    so you can cross-reference with pipe_component logs.
-    """
-    if not pipeline.ready:
-        return {"error": "pipeline not ready"}
-
-    import numpy as np
-
-    rng = np.random.default_rng(42)
-    arr = rng.integers(0, 255, (config.DEFAULT_HEIGHT, config.DEFAULT_WIDTH, 3), dtype=np.uint8)
-    dummy = Image.fromarray(arr)
-
-    if mode not in ("reference", "denoise"):
-        return {"error": f"invalid mode: {mode}"}
-
-    runs_ms = []
-    for i in range(n):
-        t0 = time.perf_counter()
-        if mode == "denoise":
-            _ = await asyncio.to_thread(
-                pipeline.generate_denoise,
-                dummy, "a cat", config.DENOISE_STRENGTH, config.STEPS, 42 + i,
-            )
-        else:
-            _ = await asyncio.to_thread(
-                pipeline.generate_reference,
-                dummy, "a cat", config.STEPS, config.GUIDANCE_SCALE, 42 + i,
-            )
-        runs_ms.append(round((time.perf_counter() - t0) * 1000, 1))
-
-    runs_ms_sorted = sorted(runs_ms)
-    return {
-        "n": n,
-        "mode": mode,
-        "runs_ms": runs_ms,
-        "median_ms": runs_ms_sorted[len(runs_ms_sorted) // 2],
-        "min_ms": runs_ms_sorted[0],
-        "max_ms": runs_ms_sorted[-1],
-    }
-
-
 @app.websocket("/ws")
 async def websocket_stream(ws: WebSocket):
     await ws.accept()
@@ -125,16 +79,11 @@ async def websocket_stream(ws: WebSocket):
             await asyncio.sleep(0.5)
         await ws.send_text(json.dumps({"type": "status", "status": "ready"}))
 
-    # Per-connection state
-    # Default seed is random-per-session (not per-frame) so output is
-    # stable when the sketch doesn't change. Client can override.
-    import random
+    # Per-connection state. Default seed is random-per-session (not per-frame)
+    # so output is stable when the sketch doesn't change. Client can override.
     session_seed = random.randint(0, 2**32 - 1)
     current_config = {
         "prompt": "",
-        "mode": config.MODE,
-        "denoise": config.DENOISE_STRENGTH,
-        "guidanceScale": config.GUIDANCE_SCALE,
         "steps": config.STEPS,
         "seed": session_seed,
     }
@@ -169,22 +118,15 @@ async def websocket_stream(ws: WebSocket):
                         if data.get("type") == "config":
                             if "prompt" in data:
                                 current_config["prompt"] = data["prompt"]
-                            if "mode" in data and data["mode"] in ("reference", "denoise"):
-                                current_config["mode"] = data["mode"]
-                            if "denoise" in data:
-                                current_config["denoise"] = max(0.0, min(1.0, float(data["denoise"])))
-                            if "guidanceScale" in data:
-                                current_config["guidanceScale"] = max(0.0, min(20.0, float(data["guidanceScale"])))
                             if "steps" in data:
                                 current_config["steps"] = max(1, min(50, int(data["steps"])))
                             if "seed" in data and data["seed"] is not None:
                                 current_config["seed"] = int(data["seed"])
 
                             logger.info(
-                                "Client %d config: prompt='%s', mode=%s, steps=%d",
+                                "Client %d config: prompt='%s', steps=%d",
                                 client_id,
                                 str(current_config["prompt"])[:50],
-                                current_config["mode"],
                                 current_config["steps"],
                             )
                     except json.JSONDecodeError:
@@ -212,14 +154,12 @@ async def websocket_stream(ws: WebSocket):
         nonlocal latest_frame, frames_processed, done
 
         while not done:
-            # Wait for a frame to arrive
             await frame_event.wait()
             frame_event.clear()
 
             if done:
                 break
 
-            # Grab the latest frame and clear the buffer
             jpeg_data = latest_frame
             latest_frame = None
 
@@ -227,24 +167,11 @@ async def websocket_stream(ws: WebSocket):
                 continue
 
             try:
-                # Snapshot config so it doesn't change mid-generation
                 cfg = dict(current_config)
-                t_frame_start = time.perf_counter()
-                result_jpeg = await asyncio.to_thread(
-                    _process_frame, jpeg_data, cfg
-                )
-                t_process_done = time.perf_counter()
+                result_jpeg = await asyncio.to_thread(_process_frame, jpeg_data, cfg)
                 if not done:
                     await ws.send_bytes(result_jpeg)
-                    t_sent = time.perf_counter()
                     frames_processed += 1
-                    logger.info(
-                        "frame client=%d process_ms=%.0f send_ms=%.0f total_ms=%.0f",
-                        client_id,
-                        (t_process_done - t_frame_start) * 1000,
-                        (t_sent - t_process_done) * 1000,
-                        (t_sent - t_frame_start) * 1000,
-                    )
             except Exception as e:
                 logger.error("Frame processing error: %s", e, exc_info=True)
                 if not done:
@@ -276,53 +203,19 @@ def _process_frame(jpeg_data: bytes, cfg: dict) -> bytes:
 
     Runs in a thread to avoid blocking the event loop.
     """
-    # Decode input
-    t0 = time.perf_counter()
     image = Image.open(io.BytesIO(jpeg_data)).convert("RGB")
-    t_decode = time.perf_counter()
     image = image.resize((config.DEFAULT_WIDTH, config.DEFAULT_HEIGHT), Image.LANCZOS)
-    t_resize = time.perf_counter()
 
-    # Generate based on mode
-    mode = cfg.get("mode", config.MODE)
-    prompt = cfg.get("prompt", "")
-    steps = cfg.get("steps", config.STEPS)
-    seed = cfg.get("seed")
+    output = pipeline.generate_reference(
+        image=image,
+        prompt=cfg.get("prompt", ""),
+        steps=cfg.get("steps", config.STEPS),
+        seed=cfg.get("seed"),
+    )
 
-    if mode == "denoise":
-        output = pipeline.generate_denoise(
-            image=image,
-            prompt=prompt,
-            denoise_strength=cfg.get("denoise", config.DENOISE_STRENGTH),
-            steps=steps,
-            seed=seed,
-        )
-    else:
-        output = pipeline.generate_reference(
-            image=image,
-            prompt=prompt,
-            steps=steps,
-            guidance_scale=cfg.get("guidanceScale", config.GUIDANCE_SCALE),
-            seed=seed,
-        )
-    t_pipe = time.perf_counter()
-
-    # Encode as JPEG
     buffer = io.BytesIO()
     output.save(buffer, format="JPEG", quality=config.OUTPUT_JPEG_QUALITY)
-    jpeg = buffer.getvalue()
-    t_encode = time.perf_counter()
-
-    logger.info(
-        "frame_breakdown decode_ms=%.0f resize_ms=%.0f pipe_ms=%.0f encode_ms=%.0f in_bytes=%d out_bytes=%d",
-        (t_decode - t0) * 1000,
-        (t_resize - t_decode) * 1000,
-        (t_pipe - t_resize) * 1000,
-        (t_encode - t_pipe) * 1000,
-        len(jpeg_data),
-        len(jpeg),
-    )
-    return jpeg
+    return buffer.getvalue()
 
 
 if __name__ == "__main__":

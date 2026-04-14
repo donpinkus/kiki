@@ -1,16 +1,13 @@
 """Test client for the FLUX.2-klein WebSocket server.
 
 Usage:
-    # Reference mode (native img2img)
-    python test_client.py --image sketch.png --prompt "a cat" --mode reference
-
-    # Denoise mode (traditional img2img)
-    python test_client.py --image sketch.png --prompt "a cat" --mode denoise --denoise 0.6
+    # Single frame
+    python test_client.py --image sketch.png --prompt "a cat"
 
     # Burst mode: send N frames and measure throughput
     python test_client.py --image sketch.png --prompt "a cat" --burst 10
 
-    # With fixed seed for consistency
+    # With fixed seed for reproducibility
     python test_client.py --image sketch.png --prompt "a cat" --seed 42
 
     # Connect to remote server
@@ -31,7 +28,6 @@ async def run_test(args):
     print(f"Connecting to {args.url}...")
 
     async with websockets.connect(args.url, max_size=10 * 1024 * 1024) as ws:
-        # Wait for ready status
         msg = await ws.recv()
         status = json.loads(msg)
         print(f"Server status: {status}")
@@ -45,23 +41,16 @@ async def run_test(args):
                     break
             print("Server ready.")
 
-        # Send config
         config = {
             "type": "config",
             "prompt": args.prompt,
-            "mode": args.mode,
             "steps": args.steps,
             "seed": args.seed,
         }
-        if args.mode == "denoise":
-            config["denoise"] = args.denoise
-        else:
-            config["guidanceScale"] = args.guidance_scale
 
         await ws.send(json.dumps(config))
-        print(f"Config sent: mode={args.mode}, prompt='{args.prompt}', steps={args.steps}")
+        print(f"Config sent: prompt='{args.prompt}', steps={args.steps}")
 
-        # Load and encode input image
         image = Image.open(args.image).convert("RGB").resize((768, 768))
         buffer = io.BytesIO()
         image.save(buffer, format="JPEG", quality=70)
@@ -130,12 +119,6 @@ def main():
     parser.add_argument("--url", default="ws://localhost:8766/ws", help="WebSocket URL")
     parser.add_argument("--image", required=True, help="Input image path")
     parser.add_argument("--prompt", default="", help="Generation prompt")
-    parser.add_argument("--mode", default="reference", choices=["reference", "denoise"],
-                        help="Img2img mode: reference (native) or denoise (traditional)")
-    parser.add_argument("--denoise", type=float, default=0.6,
-                        help="Denoise strength for denoise mode (0.0-1.0)")
-    parser.add_argument("--guidance-scale", type=float, default=4.0,
-                        help="Guidance scale for reference mode")
     parser.add_argument("--steps", type=int, default=4, help="Number of inference steps")
     parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility")
     parser.add_argument("--burst", type=int, default=0, help="Number of frames to send (0=single)")

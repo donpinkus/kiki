@@ -9,17 +9,10 @@ PORT = int(os.getenv("FLUX_PORT", "8766"))
 # Model
 MODEL_ID = os.getenv("FLUX_MODEL", "black-forest-labs/FLUX.2-klein-4B")
 
-# Pipeline defaults
-MODE = os.getenv("FLUX_MODE", "reference")  # "reference" or "denoise"
+# Pipeline defaults — reference mode only. klein is step-wise distilled and
+# ignores guidance_scale; denoise mode proved architecturally incompatible
+# with the distilled trajectory.
 STEPS = int(os.getenv("FLUX_STEPS", "4"))
-# Denoise mode gets its own step count because the 4-step klein distillation
-# falls apart when you try to run fewer than 4 steps on a partially-noised
-# latent (distilled models assume a specific full trajectory). 8 steps gives
-# the model finer-grained movement per step to recover from the off-trajectory
-# start, at the cost of more transformer forwards.
-DENOISE_STEPS = int(os.getenv("FLUX_DENOISE_STEPS", "8"))
-GUIDANCE_SCALE = float(os.getenv("FLUX_GUIDANCE_SCALE", "4.0"))
-DENOISE_STRENGTH = float(os.getenv("FLUX_DENOISE", "0.6"))
 
 # Resolution
 DEFAULT_WIDTH = int(os.getenv("FLUX_WIDTH", "768"))

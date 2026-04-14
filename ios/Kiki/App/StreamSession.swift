@@ -5,7 +5,7 @@ import NetworkModule
 /// Orchestrates real-time streaming generation: captures canvas frames,
 /// sends them over WebSocket, and delivers generated images back.
 ///
-/// Config changes (prompt, mode, denoise, etc.) are applied automatically —
+/// Config changes (prompt, steps, seed) are applied automatically —
 /// the capture loop sends a config update before the next frame whenever it
 /// detects a change.
 @MainActor
