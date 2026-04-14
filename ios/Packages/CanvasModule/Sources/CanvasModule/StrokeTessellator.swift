@@ -13,14 +13,36 @@ enum StrokeTessellator {
             return singlePointPath(points: points, brush: brush)
         }
 
+        // Precompute cumulative arc-length distances for taper
+        var distances: [CGFloat] = [0]
+        for i in 1..<points.count {
+            let dx = points[i].position.x - points[i - 1].position.x
+            let dy = points[i].position.y - points[i - 1].position.y
+            distances.append(distances[i - 1] + hypot(dx, dy))
+        }
+        let totalLength = distances.last ?? 0
+
         let path = CGMutablePath()
         var leftEdge: [CGPoint] = []
         var rightEdge: [CGPoint] = []
 
         for i in 0..<points.count {
             let point = points[i]
-            let width = brush.effectiveWidth(force: point.force)
-            let halfWidth = width / 2
+            var width = brush.effectiveWidth(force: point.force, altitude: point.altitude)
+
+            // Taper in
+            if brush.taperIn > 0 && distances[i] < brush.taperIn {
+                width *= distances[i] / brush.taperIn
+            }
+            // Taper out
+            if brush.taperOut > 0 {
+                let distFromEnd = totalLength - distances[i]
+                if distFromEnd < brush.taperOut {
+                    width *= distFromEnd / brush.taperOut
+                }
+            }
+
+            let halfWidth = max(width / 2, 0.1)
 
             // Compute stroke direction at this point
             let direction = strokeDirection(at: i, in: points)
@@ -46,8 +68,10 @@ enum StrokeTessellator {
 
         // Round end cap at the end
         if let lastPoint = points.last {
-            let endWidth = brush.effectiveWidth(force: lastPoint.force)
-            addRoundCap(to: path, center: lastPoint.position, radius: endWidth / 2,
+            let endWidth = brush.effectiveWidth(force: lastPoint.force, altitude: lastPoint.altitude)
+            var capRadius = endWidth / 2
+            if brush.taperOut > 0 { capRadius = 0.1 }
+            addRoundCap(to: path, center: lastPoint.position, radius: capRadius,
                         from: leftEdge[leftEdge.count - 1], to: rightEdge[rightEdge.count - 1])
         }
 
@@ -58,8 +82,10 @@ enum StrokeTessellator {
 
         // Round end cap at the start
         if let firstPoint = points.first {
-            let startWidth = brush.effectiveWidth(force: firstPoint.force)
-            addRoundCap(to: path, center: firstPoint.position, radius: startWidth / 2,
+            let startWidth = brush.effectiveWidth(force: firstPoint.force, altitude: firstPoint.altitude)
+            var capRadius = startWidth / 2
+            if brush.taperIn > 0 { capRadius = 0.1 }
+            addRoundCap(to: path, center: firstPoint.position, radius: capRadius,
                         from: rightEdge[0], to: leftEdge[0])
         }
 
@@ -73,7 +99,7 @@ enum StrokeTessellator {
     private static func singlePointPath(points: [StrokePoint], brush: BrushConfig) -> CGPath {
         let path = CGMutablePath()
         guard let point = points.first else { return path }
-        let width = brush.effectiveWidth(force: point.force)
+        let width = brush.effectiveWidth(force: point.force, altitude: point.altitude)
         let rect = CGRect(
             x: point.position.x - width / 2,
             y: point.position.y - width / 2,

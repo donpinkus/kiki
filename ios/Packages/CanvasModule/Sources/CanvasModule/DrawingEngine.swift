@@ -47,13 +47,40 @@ public struct CodableColor: Codable, Sendable, Equatable {
 public struct BrushConfig: Codable, Sendable {
     public var color: CodableColor
     public var baseWidth: CGFloat
+    public var opacity: CGFloat
     /// Pressure-to-width gamma curve. <1 = heavy feel (wider early), >1 = light feel (narrow early).
     public var pressureGamma: CGFloat
+    /// How much stroke opacity varies with average pressure (0 = constant, 1 = fully pressure-driven).
+    public var pressureOpacity: CGFloat
+    /// Path stabilization strength (0 = raw input, higher = smoother/laggier).
+    public var streamline: CGFloat
+    /// Start taper distance in screen points.
+    public var taperIn: CGFloat
+    /// End taper distance in screen points.
+    public var taperOut: CGFloat
+    /// How much Apple Pencil tilt widens the stroke (0 = none, 1 = dramatic).
+    public var tiltSensitivity: CGFloat
 
-    public init(color: CodableColor, baseWidth: CGFloat, pressureGamma: CGFloat) {
+    public init(
+        color: CodableColor,
+        baseWidth: CGFloat,
+        opacity: CGFloat = 1.0,
+        pressureGamma: CGFloat = 0.7,
+        pressureOpacity: CGFloat = 0.0,
+        streamline: CGFloat = 0.0,
+        taperIn: CGFloat = 0.0,
+        taperOut: CGFloat = 0.0,
+        tiltSensitivity: CGFloat = 0.0
+    ) {
         self.color = color
         self.baseWidth = baseWidth
+        self.opacity = opacity
         self.pressureGamma = pressureGamma
+        self.pressureOpacity = pressureOpacity
+        self.streamline = streamline
+        self.taperIn = taperIn
+        self.taperOut = taperOut
+        self.tiltSensitivity = tiltSensitivity
     }
 
     public static let defaultPen = BrushConfig(color: .black, baseWidth: 5, pressureGamma: 0.7)
@@ -61,9 +88,53 @@ public struct BrushConfig: Codable, Sendable {
     /// Valid width range for the pen and eraser tools.
     public static let widthRange: ClosedRange<CGFloat> = 1...100
 
-    /// Compute effective stroke width for a given pressure value.
-    public func effectiveWidth(force: CGFloat) -> CGFloat {
-        baseWidth * pow(max(force, 0.01), pressureGamma)
+    /// Compute effective stroke width for a given pressure and tilt.
+    public func effectiveWidth(force: CGFloat, altitude: CGFloat = .pi / 2) -> CGFloat {
+        var width = baseWidth * pow(max(force, 0.01), pressureGamma)
+        if tiltSensitivity > 0 {
+            let tiltFactor = 1.0 + tiltSensitivity * (1.0 - altitude / (.pi / 2)) * 2.0
+            width *= tiltFactor
+        }
+        return width
+    }
+
+    /// Multiplier for base opacity based on average stroke pressure.
+    public func pressureAlpha(force: CGFloat) -> CGFloat {
+        let pa = pow(max(force, 0.01), 0.7)
+        return 1.0 - pressureOpacity + pressureOpacity * pa
+    }
+
+    // MARK: - Backward-compatible Codable
+
+    enum CodingKeys: String, CodingKey {
+        case color, baseWidth, opacity, pressureGamma, pressureOpacity
+        case streamline, taperIn, taperOut, tiltSensitivity
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        color = try container.decode(CodableColor.self, forKey: .color)
+        baseWidth = try container.decode(CGFloat.self, forKey: .baseWidth)
+        pressureGamma = try container.decode(CGFloat.self, forKey: .pressureGamma)
+        opacity = try container.decodeIfPresent(CGFloat.self, forKey: .opacity) ?? 1.0
+        pressureOpacity = try container.decodeIfPresent(CGFloat.self, forKey: .pressureOpacity) ?? 0.0
+        streamline = try container.decodeIfPresent(CGFloat.self, forKey: .streamline) ?? 0.0
+        taperIn = try container.decodeIfPresent(CGFloat.self, forKey: .taperIn) ?? 0.0
+        taperOut = try container.decodeIfPresent(CGFloat.self, forKey: .taperOut) ?? 0.0
+        tiltSensitivity = try container.decodeIfPresent(CGFloat.self, forKey: .tiltSensitivity) ?? 0.0
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(color, forKey: .color)
+        try container.encode(baseWidth, forKey: .baseWidth)
+        try container.encode(opacity, forKey: .opacity)
+        try container.encode(pressureGamma, forKey: .pressureGamma)
+        try container.encode(pressureOpacity, forKey: .pressureOpacity)
+        try container.encode(streamline, forKey: .streamline)
+        try container.encode(taperIn, forKey: .taperIn)
+        try container.encode(taperOut, forKey: .taperOut)
+        try container.encode(tiltSensitivity, forKey: .tiltSensitivity)
     }
 }
 

@@ -44,6 +44,9 @@ final class AppCoordinator {
     var toolSize: CGFloat = 5.0 {
         didSet { applyTool() }
     }
+    var toolOpacity: CGFloat = 1.0 {
+        didSet { applyTool() }
+    }
     var currentColor: Color = .black {
         didSet { applyTool() }
     }
@@ -427,7 +430,18 @@ final class AppCoordinator {
     private func applyTool() {
         switch currentTool {
         case .brush:
-            canvasViewModel.selectBrush(width: toolSize, color: currentColor.codable)
+            let config = BrushConfig(
+                color: currentColor.codable,
+                baseWidth: toolSize,
+                opacity: toolOpacity,
+                pressureGamma: 0.35,
+                pressureOpacity: 0.0,
+                streamline: 0.0,
+                taperIn: 8,
+                taperOut: 8,
+                tiltSensitivity: 1.0
+            )
+            canvasViewModel.selectBrush(config)
         case .eraser:
             canvasViewModel.selectEraser(width: toolSize)
         }

@@ -3,7 +3,8 @@ import CanvasModule
 
 struct CanvasSidebar: View {
     @Environment(AppCoordinator.self) private var coordinator
-    @State private var isDraggingSlider = false
+    @State private var isDraggingSize = false
+    @State private var isDraggingOpacity = false
     @State private var showColorPicker = false
 
     private let widthRange = BrushConfig.widthRange
@@ -26,18 +27,17 @@ struct CanvasSidebar: View {
             }
             .frame(width: 36, height: 36)
 
-            Divider()
-                .frame(width: 24)
+            Divider().frame(width: 24)
 
             // Vertical size slider
             Slider(value: $coordinator.toolSize, in: widthRange) { editing in
-                isDraggingSlider = editing
+                isDraggingSize = editing
             }
             .frame(width: 120)
             .rotationEffect(.degrees(-90))
             .frame(width: 30, height: 120)
             .overlay(alignment: .trailing) {
-                if isDraggingSlider {
+                if isDraggingSize {
                     let divisor = CanvasViewModel.penCursorDivisor
                     let displaySize = max(coordinator.toolSize / divisor, 4)
                     let containerSize = max(displaySize + 16, 32)
@@ -50,8 +50,29 @@ struct CanvasSidebar: View {
                 }
             }
 
-            Divider()
-                .frame(width: 24)
+            Divider().frame(width: 24)
+
+            // Opacity slider (brush only)
+            Slider(value: $coordinator.toolOpacity, in: 0.05...1.0) { editing in
+                isDraggingOpacity = editing
+            }
+            .frame(width: 100)
+            .rotationEffect(.degrees(-90))
+            .frame(width: 30, height: 100)
+            .overlay(alignment: .trailing) {
+                if isDraggingOpacity {
+                    Text("\(Int(coordinator.toolOpacity * 100))%")
+                        .font(.caption2.weight(.medium).monospacedDigit())
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 6))
+                        .offset(x: 50)
+                }
+            }
+            .disabled(coordinator.currentTool == .eraser)
+            .opacity(coordinator.currentTool == .eraser ? 0.3 : 1)
+
+            Divider().frame(width: 24)
 
             actionButton(
                 icon: "arrow.uturn.backward",

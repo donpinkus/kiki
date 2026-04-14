@@ -85,10 +85,9 @@ public final class CanvasViewModel {
         }
     }
 
-    public func selectBrush(width: CGFloat = 5, color: CodableColor = .black) {
-        let config = BrushConfig(color: color, baseWidth: width, pressureGamma: 0.7)
+    public func selectBrush(_ config: BrushConfig) {
         canvasView?.currentTool = .brush(config)
-        container?.updateCursorSize(diameter: width, divisor: Self.penCursorDivisor)
+        container?.updateCursorSize(diameter: config.baseWidth, divisor: Self.penCursorDivisor)
     }
 
     public func selectEraser(width: CGFloat = 5) {

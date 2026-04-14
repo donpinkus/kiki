@@ -97,13 +97,10 @@ public final class DrawingCanvasView: UIView {
         }
 
         // Draw active pen stroke in progress (eraser has no overlay — it modifies persistent directly)
-        if let path = activeStrokePath, isCurrentToolBrush {
+        if let stroke = activeStroke, let path = activeStrokePath, isCurrentToolBrush {
             guard let ctx = UIGraphicsGetCurrentContext() else { return }
-            if case .brush(let config) = currentTool {
-                ctx.setFillColor(config.color.uiColor.cgColor)
-            }
-            ctx.addPath(path)
-            ctx.fillPath()
+            let avgForce = averageForce(stroke.points)
+            renderStrokePath(ctx: ctx, path: path, brush: stroke.brush, averageForce: avgForce)
         }
     }
 
@@ -222,6 +219,7 @@ public final class DrawingCanvasView: UIView {
         switch currentTool {
         case .brush:
             // Smooth the final stroke
+            stroke.points = StrokeSmoother.applyStreamline(stroke.points, strength: stroke.brush.streamline)
             stroke.points = StrokeSmoother.smooth(stroke.points)
             if stroke.points.count >= 2 {
                 stroke.points = StrokeSmoother.interpolate(stroke.points, segmentsPerInterval: 2)
@@ -250,9 +248,38 @@ public final class DrawingCanvasView: UIView {
             return
         }
 
-        // Smooth in real-time (lightweight — moving average only, no interpolation)
-        let smoothed = StrokeSmoother.smooth(stroke.points)
+        var smoothed = StrokeSmoother.applyStreamline(stroke.points, strength: stroke.brush.streamline)
+        smoothed = StrokeSmoother.smooth(smoothed)
         activeStrokePath = StrokeTessellator.tessellate(points: smoothed, brush: stroke.brush)
+    }
+
+    // MARK: - Rendering
+
+    /// Render a tessellated stroke path with the brush's opacity, modulated by average pressure.
+    /// Uses a transparency layer when effective opacity < 1 so self-overlap doesn't darken.
+    private func renderStrokePath(ctx: CGContext, path: CGPath, brush: BrushConfig, averageForce: CGFloat) {
+        let pressureMod = brush.pressureAlpha(force: averageForce)
+        let effectiveOpacity = brush.opacity * pressureMod
+
+        if effectiveOpacity < 0.999 {
+            ctx.saveGState()
+            ctx.setAlpha(effectiveOpacity)
+            ctx.beginTransparencyLayer(auxiliaryInfo: nil)
+            ctx.setFillColor(brush.color.uiColor.cgColor)
+            ctx.addPath(path)
+            ctx.fillPath()
+            ctx.endTransparencyLayer()
+            ctx.restoreGState()
+        } else {
+            ctx.setFillColor(brush.color.uiColor.cgColor)
+            ctx.addPath(path)
+            ctx.fillPath()
+        }
+    }
+
+    private func averageForce(_ points: [StrokePoint]) -> CGFloat {
+        guard !points.isEmpty else { return 0.5 }
+        return points.reduce(0) { $0 + $1.force } / CGFloat(points.count)
     }
 
     // MARK: - Persistent Bitmap Operations
@@ -263,6 +290,7 @@ public final class DrawingCanvasView: UIView {
         guard size.width > 0, size.height > 0 else { return }
 
         let path = StrokeTessellator.tessellate(points: stroke.points, brush: stroke.brush)
+        let avgForce = averageForce(stroke.points)
 
         let renderer = UIGraphicsImageRenderer(size: size)
         let image = renderer.image { ctx in
@@ -270,10 +298,7 @@ public final class DrawingCanvasView: UIView {
             if let existing = persistentImage {
                 UIImage(cgImage: existing).draw(in: CGRect(origin: .zero, size: size))
             }
-            // Draw the new stroke on top
-            ctx.cgContext.setFillColor(stroke.brush.color.uiColor.cgColor)
-            ctx.cgContext.addPath(path)
-            ctx.cgContext.fillPath()
+            renderStrokePath(ctx: ctx.cgContext, path: path, brush: stroke.brush, averageForce: avgForce)
         }
         persistentImage = image.cgImage
     }
@@ -320,9 +345,8 @@ public final class DrawingCanvasView: UIView {
             }
             for stroke in strokes {
                 let path = StrokeTessellator.tessellate(points: stroke.points, brush: stroke.brush)
-                cgCtx.setFillColor(stroke.brush.color.uiColor.cgColor)
-                cgCtx.addPath(path)
-                cgCtx.fillPath()
+                let avgForce = averageForce(stroke.points)
+                renderStrokePath(ctx: cgCtx, path: path, brush: stroke.brush, averageForce: avgForce)
             }
         }
         persistentImage = image.cgImage

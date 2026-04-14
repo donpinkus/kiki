@@ -7,6 +7,24 @@ import CoreGraphics
 /// to add intermediate points between sparse touch samples.
 enum StrokeSmoother {
 
+    // MARK: - Streamline (EMA)
+
+    /// Exponential moving average for path stabilization.
+    /// `strength` 0 = raw input, 1 = maximum smoothing (heavy lag).
+    static func applyStreamline(_ points: [StrokePoint], strength: CGFloat) -> [StrokePoint] {
+        guard points.count > 1, strength > 0.01 else { return points }
+        var result = points
+        for i in 1..<points.count {
+            let prev = result[i - 1].position
+            let curr = points[i].position
+            result[i].position = CGPoint(
+                x: prev.x * strength + curr.x * (1 - strength),
+                y: prev.y * strength + curr.y * (1 - strength)
+            )
+        }
+        return result
+    }
+
     // MARK: - Moving Average
 
     /// Smooth positions using a simple moving-average filter.
