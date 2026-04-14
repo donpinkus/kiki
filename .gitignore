@@ -19,7 +19,6 @@ ios/.swiftpm/
 # Backend
 backend/node_modules/
 backend/dist/
-backend/runtime-assets/
 backend/.env
 
 # Local secrets

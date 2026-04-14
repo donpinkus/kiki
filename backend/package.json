@@ -5,7 +5,7 @@
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
-    "copy-assets": "mkdir -p runtime-assets/flux-klein-server && cp ../flux-klein-server/server.py ../flux-klein-server/pipeline.py ../flux-klein-server/config.py ../flux-klein-server/requirements.txt runtime-assets/flux-klein-server/ && cp ../scripts/setup-flux-klein.sh runtime-assets/setup-flux-klein.sh",
+    "copy-assets": "mkdir -p runtime-assets/flux-klein-server && if [ -f ../flux-klein-server/server.py ]; then cp ../flux-klein-server/server.py ../flux-klein-server/pipeline.py ../flux-klein-server/config.py ../flux-klein-server/requirements.txt runtime-assets/flux-klein-server/ && cp ../scripts/setup-flux-klein.sh runtime-assets/setup-flux-klein.sh; else echo 'Source assets not reachable (Railway build); using committed runtime-assets/'; fi",
     "predev": "npm run copy-assets",
     "prebuild": "npm run copy-assets",
     "dev": "tsx watch src/index.ts",
