@@ -6,6 +6,7 @@ import { AppError, RateLimitedError } from './errors.js';
 import { healthRoute } from './routes/health.js';
 import { streamRoute } from './routes/stream.js';
 import { authPlugin } from './modules/auth/index.js';
+import { start as startOrchestrator } from './modules/orchestrator/orchestrator.js';
 
 const app = Fastify({
   bodyLimit: 10 * 1024 * 1024, // 10 MB — composited lineart snapshots are larger than plain sketches
@@ -80,6 +81,10 @@ app.setErrorHandler((error, request, reply) => {
 // --- Start ---
 const start = async () => {
   try {
+    // Orchestrator boots before the server accepts connections: reconciles any
+    // orphan pods from a prior run and arms the idle reaper.
+    await startOrchestrator(app.log);
+
     await app.listen({ port: config.PORT, host: config.HOST });
     app.log.info(`Server listening on ${config.HOST}:${config.PORT}`);
   } catch (err) {

@@ -10,6 +10,7 @@ private let streamLog = Logger(subsystem: "com.kiki.app", category: "StreamCoord
 enum DrawingTool: String, CaseIterable {
     case brush
     case eraser
+    case lasso
 }
 
 enum AppScreen: Equatable {
@@ -39,7 +40,18 @@ final class AppCoordinator {
     // MARK: - UI State
 
     var currentTool: DrawingTool = .brush {
-        didSet { applyTool() }
+        didSet {
+            if canvasViewModel.hasLassoSelection {
+                if oldValue == .lasso && currentTool != .lasso {
+                    // Phase A → Phase B: commit floating, keep clip mask
+                    canvasViewModel.transitionToClipMode()
+                } else if currentTool == .lasso && oldValue != .lasso {
+                    // Phase B → ready for new lasso: clear clip
+                    canvasViewModel.clearLassoClipOnly()
+                }
+            }
+            applyTool()
+        }
     }
     var toolSize: CGFloat = 5.0 {
         didSet { applyTool() }
@@ -146,6 +158,10 @@ final class AppCoordinator {
     // MARK: - Actions
 
     func undo() {
+        if canvasViewModel.hasLassoSelection {
+            canvasViewModel.cancelLassoSelection()
+            return
+        }
         canvasViewModel.undo()
     }
 
@@ -312,6 +328,7 @@ final class AppCoordinator {
         var components = URLComponents(url: backendURL, resolvingAgainstBaseURL: false)!
         components.scheme = backendURL.scheme == "https" ? "wss" : "ws"
         components.path = "/v1/stream"
+        components.queryItems = [URLQueryItem(name: "session", value: SessionIdentity.load())]
         guard let wsURL = components.url else {
             streamLog.error("Failed to construct WebSocket URL from \(self.backendURL.absoluteString)")
             return
@@ -432,6 +449,8 @@ final class AppCoordinator {
             canvasViewModel.selectBrush(config)
         case .eraser:
             canvasViewModel.selectEraser(width: toolSize)
+        case .lasso:
+            canvasViewModel.selectLasso()
         }
     }
 }

@@ -1,10 +1,15 @@
 import type { FastifyPluginAsync } from 'fastify';
 import WebSocket from 'ws';
-import { config } from '../config/index.js';
+import { getOrProvisionPod, touch, sessionClosed } from '../modules/orchestrator/orchestrator.js';
 
 /**
- * WebSocket relay to upstream FLUX.2-klein server.
- * Forwards binary frames (JPEG) and text frames (config) bidirectionally.
+ * WebSocket relay to a per-session FLUX.2-klein pod.
+ *
+ * Client connects with `?session=<uuid>`. If the session doesn't have a
+ * running pod, we provision one (blocking the client WebSocket with status
+ * messages for ~3–5 min). Once ready, we relay frames bidirectionally and
+ * touch the session on every frame so the idle reaper can distinguish active
+ * from abandoned sessions.
  */
 class StreamRelay {
   private upstream: WebSocket | null = null;
@@ -90,84 +95,120 @@ class StreamRelay {
   }
 }
 
+function extractSessionId(rawUrl: string | undefined): string | null {
+  if (!rawUrl) return null;
+  try {
+    const url = new URL(rawUrl, 'http://placeholder');
+    return url.searchParams.get('session');
+  } catch {
+    return null;
+  }
+}
+
 export const streamRoute: FastifyPluginAsync = async (fastify) => {
   fastify.get('/v1/stream', { websocket: true }, (socket, request) => {
-    if (!config.FLUX_KLEIN_URL) {
-      request.log.error('FLUX_KLEIN_URL not configured');
-      socket.send(JSON.stringify({
-        type: 'error',
-        message: 'Stream server not configured',
-      }));
-      socket.close(1011, 'Server not configured');
+    const sessionId = extractSessionId(request.url);
+    if (!sessionId) {
+      socket.send(JSON.stringify({ type: 'error', message: 'missing session query param' }));
+      socket.close(1008, 'missing session');
       return;
     }
 
-    const clientId = Math.random().toString(36).slice(2, 8);
-    request.log.info({ clientId }, 'Stream client connected');
+    request.log.info({ sessionId }, 'Stream client connected');
 
-    const relay = new StreamRelay(config.FLUX_KLEIN_URL);
+    // Fire-and-forget async flow: provision, then proxy.
+    void (async () => {
+      let relay: StreamRelay | null = null;
+      try {
+        const { podUrl } = await getOrProvisionPod(sessionId, (msg) => {
+          if (socket.readyState === socket.OPEN) {
+            socket.send(
+              JSON.stringify({ type: 'status', status: 'provisioning', message: msg }),
+            );
+          }
+        });
 
-    relay.onMessage((data, isBinary) => {
-      if (socket.readyState === socket.OPEN) {
-        if (isBinary) {
-          const base64 = (data as Buffer).toString('base64');
-          socket.send(JSON.stringify({ type: 'frame', data: base64 }));
-        } else {
-          socket.send(data);
+        if (socket.readyState !== socket.OPEN) {
+          request.log.info({ sessionId }, 'Client disconnected during provisioning');
+          return;
         }
-      }
-    });
 
-    relay.onClose((code, reason) => {
-      request.log.info({ clientId, code, reason }, 'Upstream closed');
-      if (socket.readyState === socket.OPEN) {
-        socket.send(JSON.stringify({ type: 'error', message: 'Upstream connection lost' }));
-        socket.close(1001, 'Upstream closed');
-      }
-    });
+        relay = new StreamRelay(podUrl);
 
-    relay.onError((err) => {
-      request.log.error({ clientId, err }, 'Upstream error');
-    });
+        relay.onMessage((data, isBinary) => {
+          if (socket.readyState !== socket.OPEN) return;
+          // Any upstream frame counts as activity (the pod is doing work for this user).
+          touch(sessionId);
+          if (isBinary) {
+            const base64 = (data as Buffer).toString('base64');
+            socket.send(JSON.stringify({ type: 'frame', data: base64 }));
+          } else {
+            socket.send(data);
+          }
+        });
 
-    relay.connect()
-      .then(() => {
-        request.log.info({ clientId }, 'Upstream connected');
+        relay.onClose((code, reason) => {
+          request.log.info({ sessionId, code, reason }, 'Upstream closed');
+          if (socket.readyState === socket.OPEN) {
+            socket.send(
+              JSON.stringify({ type: 'error', message: 'Pod terminated (possible spot preemption)' }),
+            );
+            socket.close(1001, 'Upstream closed');
+          }
+        });
+
+        relay.onError((err) => {
+          request.log.error({ sessionId, err }, 'Upstream error');
+        });
+
+        await relay.connect();
+        request.log.info({ sessionId }, 'Upstream connected, relaying');
+
+        // Send a final "ready" status so the client can transition UI out of provisioning.
+        if (socket.readyState === socket.OPEN) {
+          socket.send(JSON.stringify({ type: 'status', status: 'ready' }));
+        }
 
         socket.on('message', (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
           const buf = Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data as ArrayBuffer);
+          touch(sessionId);
           if (isBinary) {
-            relay.sendFrame(buf);
+            relay!.sendFrame(buf);
           } else {
             const text = buf.toString('utf-8');
             try {
               const parsed = JSON.parse(text);
               if (parsed.type === 'config') {
-                relay.sendConfig(parsed);
+                relay!.sendConfig(parsed);
               }
             } catch {
-              request.log.warn({ clientId }, 'Invalid JSON from client');
+              request.log.warn({ sessionId }, 'Invalid JSON from client');
             }
           }
         });
-      })
-      .catch((err: unknown) => {
-        request.log.error({ clientId, err }, 'Failed to connect to upstream');
-        socket.send(JSON.stringify({
-          type: 'error',
-          message: `Cannot connect to stream server: ${err instanceof Error ? err.message : String(err)}`,
-        }));
-        socket.close(1011, 'Upstream unavailable');
+      } catch (err) {
+        request.log.error({ sessionId, err }, 'Provisioning or relay failed');
+        if (socket.readyState === socket.OPEN) {
+          socket.send(
+            JSON.stringify({
+              type: 'error',
+              message: `Provisioning failed: ${err instanceof Error ? err.message : String(err)}`,
+            }),
+          );
+          socket.close(1011, 'Provisioning failed');
+        }
+      }
+
+      socket.on('close', () => {
+        request.log.info({ sessionId }, 'Stream client disconnected');
+        sessionClosed(sessionId);
+        relay?.close();
       });
 
-    socket.on('close', () => {
-      request.log.info({ clientId }, 'Stream client disconnected');
-      relay.close();
-    });
-
-    socket.on('error', (err: Error) => {
-      request.log.error({ clientId, err }, 'Client socket error');
-      relay.close();
-    });
+      socket.on('error', (err: Error) => {
+        request.log.error({ sessionId, err }, 'Client socket error');
+        relay?.close();
+      });
+    })();
   });
 };

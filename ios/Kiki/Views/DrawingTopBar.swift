@@ -66,9 +66,10 @@ struct DrawingTopBar: View {
 
             Spacer()
 
-            // MARK: Right — Pen, Eraser, Reset Transform
+            // MARK: Right — Pen, Eraser, Lasso, Reset Transform
             toolButton(icon: "pencil.tip", tool: .brush)
             toolButton(icon: "eraser", tool: .eraser)
+            toolButton(icon: "lasso", tool: .lasso)
 
             if !coordinator.canvasViewModel.isDefaultTransform {
                 actionButton(
@@ -101,7 +102,7 @@ struct DrawingTopBar: View {
     private var streamStatusColor: Color {
         switch coordinator.streamConnectionState {
         case .connected: return .green
-        case .connecting: return .orange
+        case .connecting, .provisioning: return .orange
         case .disconnected: return .gray
         case .error: return .red
         }
@@ -111,6 +112,7 @@ struct DrawingTopBar: View {
         switch coordinator.streamConnectionState {
         case .connected: return "Streaming"
         case .connecting: return "Connecting…"
+        case .provisioning(let message): return message
         case .disconnected: return "Disconnected"
         case .error: return "Error"
         }

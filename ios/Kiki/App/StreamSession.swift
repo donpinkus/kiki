@@ -16,6 +16,11 @@ final class StreamSession {
     enum ConnectionState {
         case disconnected
         case connecting
+        /// Backend is provisioning a dedicated GPU pod for this session.
+        /// `message` is a human-readable progress string like
+        /// "Creating pod..." or "Downloading model...". Shown to the user
+        /// during the ~3–5 min cold-start wait.
+        case provisioning(message: String)
         case connected
         case error(String)
     }
@@ -229,8 +234,12 @@ final class StreamSession {
             for await status in statuses {
                 guard !Task.isCancelled else { break }
                 print("[Stream] Server status: \(status.status) \(status.message ?? "")")
-                if status.type == "status" && status.status == "error" {
-                    await MainActor.run {
+                await MainActor.run {
+                    if status.type == "status" && status.status == "provisioning" {
+                        self.updateConnectionState(.provisioning(message: status.message ?? "Provisioning GPU..."))
+                    } else if status.type == "status" && status.status == "ready" {
+                        self.updateConnectionState(.connected)
+                    } else if (status.type == "status" && status.status == "error") || status.type == "error" {
                         self.updateConnectionState(.error(status.message ?? "Server error"))
                     }
                 }
