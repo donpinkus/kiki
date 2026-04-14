@@ -183,12 +183,22 @@ async def websocket_stream(ws: WebSocket):
             try:
                 # Snapshot config so it doesn't change mid-generation
                 cfg = dict(current_config)
+                t_frame_start = time.perf_counter()
                 result_jpeg = await asyncio.to_thread(
                     _process_frame, jpeg_data, cfg
                 )
+                t_process_done = time.perf_counter()
                 if not done:
                     await ws.send_bytes(result_jpeg)
+                    t_sent = time.perf_counter()
                     frames_processed += 1
+                    logger.info(
+                        "frame client=%d process_ms=%.0f send_ms=%.0f total_ms=%.0f",
+                        client_id,
+                        (t_process_done - t_frame_start) * 1000,
+                        (t_sent - t_process_done) * 1000,
+                        (t_sent - t_frame_start) * 1000,
+                    )
             except Exception as e:
                 logger.error("Frame processing error: %s", e, exc_info=True)
                 if not done:
@@ -221,8 +231,11 @@ def _process_frame(jpeg_data: bytes, cfg: dict) -> bytes:
     Runs in a thread to avoid blocking the event loop.
     """
     # Decode input
+    t0 = time.perf_counter()
     image = Image.open(io.BytesIO(jpeg_data)).convert("RGB")
+    t_decode = time.perf_counter()
     image = image.resize((config.DEFAULT_WIDTH, config.DEFAULT_HEIGHT), Image.LANCZOS)
+    t_resize = time.perf_counter()
 
     # Generate based on mode
     mode = cfg.get("mode", config.MODE)
@@ -246,11 +259,24 @@ def _process_frame(jpeg_data: bytes, cfg: dict) -> bytes:
             guidance_scale=cfg.get("guidanceScale", config.GUIDANCE_SCALE),
             seed=seed,
         )
+    t_pipe = time.perf_counter()
 
     # Encode as JPEG
     buffer = io.BytesIO()
     output.save(buffer, format="JPEG", quality=config.OUTPUT_JPEG_QUALITY)
-    return buffer.getvalue()
+    jpeg = buffer.getvalue()
+    t_encode = time.perf_counter()
+
+    logger.info(
+        "frame_breakdown decode_ms=%.0f resize_ms=%.0f pipe_ms=%.0f encode_ms=%.0f in_bytes=%d out_bytes=%d",
+        (t_decode - t0) * 1000,
+        (t_resize - t_decode) * 1000,
+        (t_pipe - t_resize) * 1000,
+        (t_encode - t_pipe) * 1000,
+        len(jpeg_data),
+        len(jpeg),
+    )
+    return jpeg
 
 
 if __name__ == "__main__":
