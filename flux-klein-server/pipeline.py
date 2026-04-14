@@ -127,6 +127,12 @@ class FluxKleinPipeline:
         """
         generator = self._make_generator(seed)
 
+        # Override steps with the denoise-specific count. Klein's 4-step
+        # distillation produces unusable output when partial-denoise runs
+        # fewer than 4 steps; giving it more steps helps the model recover
+        # from the off-trajectory starting latent.
+        denoise_steps = config.DENOISE_STEPS
+
         with self._lock:
             # No silent fallback — if denoise is broken, surface it. The prior
             # fallback caused a phantom "mode switch" effect: denoise consumed
@@ -134,7 +140,7 @@ class FluxKleinPipeline:
             # reference with an advanced generator, producing visibly different
             # output for the same seed. That looked like denoise "worked" when
             # it was actually reference-mode output with perturbed noise.
-            return self._denoise_impl(self.pipe, image, prompt, denoise_strength, steps, generator)
+            return self._denoise_impl(self.pipe, image, prompt, denoise_strength, denoise_steps, generator)
 
     @staticmethod
     def _denoise_impl(pipe, image, prompt, denoise_strength, steps, generator):
