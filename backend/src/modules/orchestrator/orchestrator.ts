@@ -271,20 +271,24 @@ async function provision(sessionId: string, onStatus: (msg: string) => void): Pr
   // 1 + 2. Create a pod — spot first, on-demand fallback if capacity exhausted
   const { podId, podType } = await createPodWithFallback(sessionId, onStatus);
 
-  // 3. Wait for SSH
-  onStatus('Waiting for pod to boot...');
-  const sshInfo = await waitForSsh(podId);
-  log.info({ sessionId, podId, ssh: `${sshInfo.ip}:${sshInfo.port}` }, 'Pod SSH ready');
+  // 3. In ssh mode, wait for sshd and run setup-flux-klein.sh. In baked mode,
+  // the container image already has deps + weights so we skip straight to
+  // polling /health. Baked mode should see ~60-90s cold starts vs ssh's 3-5min.
+  if (config.FLUX_PROVISION_MODE === 'baked') {
+    onStatus('Waiting for pod to boot...');
+  } else {
+    onStatus('Waiting for pod to boot...');
+    const sshInfo = await waitForSsh(podId);
+    log.info({ sessionId, podId, ssh: `${sshInfo.ip}:${sshInfo.port}` }, 'Pod SSH ready');
 
-  // 4. SCP server files + run setup
-  onStatus('Installing server code...');
-  await scpFiles(sshInfo);
-  onStatus('Installing dependencies & downloading model (~3 min)...');
-  await runSetup(sshInfo, (line) => {
-    // Surface a few meaningful milestones from setup output.
-    if (line.includes('Downloading') && line.includes('FLUX.2-klein')) onStatus('Downloading model...');
-    else if (line.includes('Warming up')) onStatus('Warming up...');
-  });
+    onStatus('Installing server code...');
+    await scpFiles(sshInfo);
+    onStatus('Installing dependencies & downloading model (~3 min)...');
+    await runSetup(sshInfo, (line) => {
+      if (line.includes('Downloading') && line.includes('FLUX.2-klein')) onStatus('Downloading model...');
+      else if (line.includes('Warming up')) onStatus('Warming up...');
+    });
+  }
 
   // 5. Poll /health via RunPod proxy until ready
   onStatus('Checking server health...');
@@ -293,7 +297,7 @@ async function provision(sessionId: string, onStatus: (msg: string) => void): Pr
 
   // 6. Build WebSocket URL and return
   const podUrl = `wss://${podId}-8766.proxy.runpod.net/ws`;
-  log.info({ sessionId, podId, podUrl, podType }, 'Pod ready');
+  log.info({ sessionId, podId, podUrl, podType, mode: config.FLUX_PROVISION_MODE }, 'Pod ready');
   onStatus('Ready');
   return { podId, podUrl, podType };
 }
@@ -308,7 +312,16 @@ async function createPodWithFallback(
   onStatus: (msg: string) => void,
 ): Promise<{ podId: string; podType: PodType }> {
   const podName = `${POD_PREFIX}${sessionId.slice(0, 16)}`;
-  const authId = config.RUNPOD_REGISTRY_AUTH_ID || undefined;
+
+  // Image + registry auth depend on provision mode.
+  // ssh mode: stock runpod/pytorch base (Docker Hub, RUNPOD_REGISTRY_AUTH_ID).
+  // baked mode: GHCR image with deps + weights baked in (RUNPOD_GHCR_AUTH_ID).
+  const imageName = config.FLUX_PROVISION_MODE === 'baked'
+    ? (config.FLUX_IMAGE || (() => { throw new Error('FLUX_IMAGE env var required when FLUX_PROVISION_MODE=baked'); })())
+    : IMAGE_NAME;
+  const authId = config.FLUX_PROVISION_MODE === 'baked'
+    ? (config.RUNPOD_GHCR_AUTH_ID || undefined)
+    : (config.RUNPOD_REGISTRY_AUTH_ID || undefined);
 
   // ─── Try spot ─────────────────────────────────────────────────────────
   onStatus('Discovering spot bid...');
@@ -347,7 +360,7 @@ async function createPodWithFallback(
     try {
       const { id: podId, costPerHr } = await createSpotPod({
         name: podName,
-        imageName: IMAGE_NAME,
+        imageName,
         gpuTypeId: GPU_TYPE_ID,
         bidPerGpu: bid,
         ...(authId ? { containerRegistryAuthId: authId } : {}),
@@ -395,7 +408,7 @@ async function createPodWithFallback(
   try {
     const { id: podId, costPerHr } = await createOnDemandPod({
       name: podName,
-      imageName: IMAGE_NAME,
+      imageName,
       gpuTypeId: GPU_TYPE_ID,
       cloudType: 'SECURE',
       ...(authId ? { containerRegistryAuthId: authId } : {}),

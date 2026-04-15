@@ -29,6 +29,14 @@ export interface AppConfig {
    * is exhausted. Default false so the flag can be flipped on per deploy. */
   readonly ONDEMAND_FALLBACK_ENABLED: boolean;
 
+  // ─── Pre-baked Docker image (Workstream 3) ────────────────────────────
+  /** 'ssh' = run setup-flux-klein.sh over SSH (legacy); 'baked' = use FLUX_IMAGE */
+  readonly FLUX_PROVISION_MODE: 'ssh' | 'baked';
+  /** Full image reference (e.g. ghcr.io/owner/kiki-flux-klein:sha-abc). Required when FLUX_PROVISION_MODE=baked. */
+  readonly FLUX_IMAGE: string;
+  /** RunPod registry credential ID for authenticated GHCR pulls. */
+  readonly RUNPOD_GHCR_AUTH_ID: string;
+
   readonly NODE_ENV: 'development' | 'production' | 'test';
   readonly LOG_LEVEL: 'fatal' | 'error' | 'warn' | 'info' | 'debug' | 'trace';
 }
@@ -97,6 +105,10 @@ function validateConfig(): AppConfig {
     AUTH_REQUIRED: process.env['AUTH_REQUIRED'] === 'true',
     FREE_TIER_SECONDS: Number(process.env['FREE_TIER_SECONDS'] ?? 3600),
     ONDEMAND_FALLBACK_ENABLED: process.env['ONDEMAND_FALLBACK_ENABLED'] === 'true',
+    FLUX_PROVISION_MODE:
+      (process.env['FLUX_PROVISION_MODE'] as 'ssh' | 'baked' | undefined) ?? 'ssh',
+    FLUX_IMAGE: process.env['FLUX_IMAGE'] ?? '',
+    RUNPOD_GHCR_AUTH_ID: process.env['RUNPOD_GHCR_AUTH_ID'] ?? '',
     NODE_ENV: nodeEnv,
     LOG_LEVEL: logLevel,
   };
