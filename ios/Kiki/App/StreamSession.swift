@@ -28,6 +28,7 @@ final class StreamSession {
     // MARK: - Properties
 
     private let url: URL
+    private let request: URLRequest
     private var client: StreamWebSocketClient
     private let canvasViewModel: CanvasViewModel
     private var captureTask: Task<Void, Never>?
@@ -71,7 +72,17 @@ final class StreamSession {
 
     init(url: URL, canvasViewModel: CanvasViewModel, config: StreamConfig) {
         self.url = url
+        self.request = URLRequest(url: url)
         self.client = StreamWebSocketClient(url: url)
+        self.canvasViewModel = canvasViewModel
+        self.config = config
+    }
+
+    /// Init with a URLRequest — use this to pass auth headers (Authorization: Bearer).
+    init(request: URLRequest, canvasViewModel: CanvasViewModel, config: StreamConfig) {
+        self.url = request.url ?? URL(string: "about:blank")!
+        self.request = request
+        self.client = StreamWebSocketClient(request: request)
         self.canvasViewModel = canvasViewModel
         self.config = config
     }
@@ -140,7 +151,7 @@ final class StreamSession {
         try? await Task.sleep(for: .seconds(delay))
         guard !isStopped, !Task.isCancelled else { return }
 
-        self.client = StreamWebSocketClient(url: url)
+        self.client = StreamWebSocketClient(request: request)
         await connectAndRun()
     }
 

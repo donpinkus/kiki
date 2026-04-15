@@ -22,7 +22,7 @@ public actor StreamWebSocketClient {
 
     // MARK: - Properties
 
-    private let url: URL
+    private let request: URLRequest
     private let session: URLSession
     private var task: URLSessionWebSocketTask?
     private var receiveLoopTask: Task<Void, Never>?
@@ -37,8 +37,9 @@ public actor StreamWebSocketClient {
 
     // MARK: - Lifecycle
 
+    /// Create a client for a URL (no auth headers).
     public init(url: URL) {
-        self.url = url
+        self.request = URLRequest(url: url)
         self.session = URLSession(configuration: .default)
 
         var frameCont: AsyncStream<Data>.Continuation!
@@ -52,12 +53,27 @@ public actor StreamWebSocketClient {
 
     // MARK: - Connection
 
+    /// Create a client for a URLRequest — use this to pass auth headers
+    /// (Authorization: Bearer <jwt>) on the WebSocket upgrade.
+    public init(request: URLRequest) {
+        self.request = request
+        self.session = URLSession(configuration: .default)
+
+        var frameCont: AsyncStream<Data>.Continuation!
+        self.receivedFrames = AsyncStream { frameCont = $0 }
+        self.framesContinuation = frameCont
+
+        var statusCont: AsyncStream<ServerStatus>.Continuation!
+        self.serverStatuses = AsyncStream { statusCont = $0 }
+        self.statusContinuation = statusCont
+    }
+
     public func connect() async throws {
         guard state == .disconnected else { return }
         state = .connecting
-        print("[StreamWS] Connecting to \(url.absoluteString)")
+        print("[StreamWS] Connecting to \(request.url?.absoluteString ?? "<nil>")")
 
-        let wsTask = session.webSocketTask(with: url)
+        let wsTask = session.webSocketTask(with: request)
         self.task = wsTask
         wsTask.resume()
 

@@ -7,13 +7,15 @@ import ResultModule
 
 private let streamLog = Logger(subsystem: "com.kiki.app", category: "StreamCoordinator")
 
-enum DrawingTool: String, CaseIterable {
+enum DrawingTool: String, CaseIterable, Hashable {
     case brush
     case eraser
+    case smudge
     case lasso
 }
 
 enum AppScreen: Equatable {
+    case signIn
     case gallery
     case drawing
 }
@@ -50,14 +52,51 @@ final class AppCoordinator {
                     canvasViewModel.clearLassoClipOnly()
                 }
             }
+            // Stash the outgoing tool's size/opacity and load the incoming tool's.
+            // This gives each tool its own persistent settings.
+            swapToolValues(from: oldValue, to: currentTool)
             applyTool()
         }
     }
     var toolSize: CGFloat = 5.0 {
-        didSet { applyTool() }
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
     }
     var toolOpacity: CGFloat = 1.0 {
-        didSet { applyTool() }
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+
+    // MARK: - Per-tool stored settings
+
+    /// While true, toolSize / toolOpacity didSet should skip applyTool()
+    /// (used when swapping values on a tool change).
+    private var isSwappingToolValues = false
+    private var storedToolSizes: [DrawingTool: CGFloat] = [
+        .brush: 5,
+        .eraser: 5,
+        .smudge: 30,
+        .lasso: 5
+    ]
+    private var storedToolOpacities: [DrawingTool: CGFloat] = [
+        .brush: 1.0,
+        .eraser: 1.0,
+        .smudge: 0.5,
+        .lasso: 1.0
+    ]
+
+    private func swapToolValues(from oldTool: DrawingTool, to newTool: DrawingTool) {
+        guard oldTool != newTool else { return }
+        storedToolSizes[oldTool] = toolSize
+        storedToolOpacities[oldTool] = toolOpacity
+        isSwappingToolValues = true
+        toolSize = storedToolSizes[newTool] ?? toolSize
+        toolOpacity = storedToolOpacities[newTool] ?? toolOpacity
+        isSwappingToolValues = false
     }
     var currentColor: Color = .black {
         didSet { applyTool() }
@@ -91,6 +130,11 @@ final class AppCoordinator {
 
     let canvasViewModel = CanvasViewModel()
     private let backendURL: URL
+    private let authService: AuthService
+
+    // MARK: - Auth
+
+    var signedInUserId: String?
 
     // MARK: - Stream State
 
@@ -125,21 +169,30 @@ final class AppCoordinator {
     ) {
         self.modelContext = modelContext
         self.backendURL = backendURL
+        self.authService = AuthService(backendURL: backendURL)
 
         if let stored = UserDefaults.standard.string(forKey: "drawingLayout"),
            let layout = DrawingLayout(rawValue: stored) {
             self.drawingLayout = layout
         }
 
-        // If no drawings exist, go directly to a new drawing
-        let descriptor = FetchDescriptor<Drawing>(sortBy: [SortDescriptor(\.updatedAt, order: .reverse)])
-        let count = (try? modelContext.fetchCount(descriptor)) ?? 0
-        if count == 0 {
-            let drawing = Drawing()
-            modelContext.insert(drawing)
-            try? modelContext.save()
-            currentDrawingId = drawing.id
-            currentScreen = .drawing
+        // Gate on auth: if no Keychain token, show sign-in. Otherwise the
+        // normal gallery/drawing flow resumes.
+        let initialUserId = KeychainStore.default.get("userId")
+        self.signedInUserId = initialUserId
+        if initialUserId == nil {
+            currentScreen = .signIn
+        } else {
+            // If no drawings exist, go directly to a new drawing
+            let descriptor = FetchDescriptor<Drawing>(sortBy: [SortDescriptor(\.updatedAt, order: .reverse)])
+            let count = (try? modelContext.fetchCount(descriptor)) ?? 0
+            if count == 0 {
+                let drawing = Drawing()
+                modelContext.insert(drawing)
+                try? modelContext.save()
+                currentDrawingId = drawing.id
+                currentScreen = .drawing
+            }
         }
 
         applyTool()
@@ -152,6 +205,42 @@ final class AppCoordinator {
         // Supply the current brush color to the canvas ring preview
         canvasViewModel.currentBrushColorProvider = { [weak self] in
             UIColor(self?.currentColor ?? .black)
+        }
+    }
+
+    // MARK: - Auth
+
+    /// Exchange an Apple identity token for a backend JWT pair, then navigate
+    /// to the main app. Called from SignInView.
+    func signInWithApple(identityToken: String) async throws {
+        try await authService.signInWithApple(identityToken: identityToken, nonce: nil)
+        let userId = await authService.userId
+        await MainActor.run {
+            self.signedInUserId = userId
+
+            // After sign-in, route to gallery (or create a new drawing if none exist).
+            let descriptor = FetchDescriptor<Drawing>(sortBy: [SortDescriptor(\.updatedAt, order: .reverse)])
+            let count = (try? self.modelContext.fetchCount(descriptor)) ?? 0
+            if count == 0 {
+                let drawing = Drawing()
+                self.modelContext.insert(drawing)
+                try? self.modelContext.save()
+                self.currentDrawingId = drawing.id
+                self.currentScreen = .drawing
+            } else {
+                self.currentScreen = .gallery
+            }
+        }
+    }
+
+    func signOut() {
+        Task {
+            await authService.signOut()
+            await MainActor.run {
+                self.signedInUserId = nil
+                self.currentScreen = .signIn
+                self.stopStream()
+            }
         }
     }
 
@@ -328,7 +417,6 @@ final class AppCoordinator {
         var components = URLComponents(url: backendURL, resolvingAgainstBaseURL: false)!
         components.scheme = backendURL.scheme == "https" ? "wss" : "ws"
         components.path = "/v1/stream"
-        components.queryItems = [URLQueryItem(name: "session", value: SessionIdentity.load())]
         guard let wsURL = components.url else {
             streamLog.error("Failed to construct WebSocket URL from \(self.backendURL.absoluteString)")
             return
@@ -336,8 +424,31 @@ final class AppCoordinator {
 
         streamLog.info("Starting stream to \(wsURL.absoluteString)")
 
+        // Kick off the async flow to fetch a fresh access token, then connect.
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let token = try await authService.currentAccessToken()
+                var request = URLRequest(url: wsURL)
+                request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+                await MainActor.run {
+                    self.startStreamSession(request: request, backendWsURL: wsURL)
+                }
+            } catch {
+                await MainActor.run {
+                    streamLog.error("Auth token fetch failed: \(error.localizedDescription)")
+                    self.streamConnectionState = .error("Please sign in again")
+                    self.generationError = "Please sign in again"
+                    self.signOut()
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private func startStreamSession(request: URLRequest, backendWsURL: URL) {
         let session = StreamSession(
-            url: wsURL,
+            request: request,
             canvasViewModel: canvasViewModel,
             config: buildStreamConfig()
         )
@@ -449,6 +560,8 @@ final class AppCoordinator {
             canvasViewModel.selectBrush(config)
         case .eraser:
             canvasViewModel.selectEraser(width: toolSize)
+        case .smudge:
+            canvasViewModel.selectSmudge(width: toolSize, strength: toolOpacity)
         case .lasso:
             canvasViewModel.selectLasso()
         }

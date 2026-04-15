@@ -7,6 +7,8 @@ struct RootView: View {
     var body: some View {
         Group {
             switch coordinator.currentScreen {
+            case .signIn:
+                SignInView()
             case .gallery:
                 GalleryView()
             case .drawing:
