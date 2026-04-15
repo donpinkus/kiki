@@ -3,6 +3,10 @@ export interface AppConfig {
   readonly HOST: string;
   readonly RUNPOD_API_KEY: string;
   readonly RUNPOD_SSH_PRIVATE_KEY: string;
+  /** Optional RunPod container registry credential ID for authenticated Docker
+   * Hub pulls. Strongly recommended in production to bypass anonymous rate
+   * limits (100 pulls/6hr per IP). */
+  readonly RUNPOD_REGISTRY_AUTH_ID: string;
   readonly NODE_ENV: 'development' | 'production' | 'test';
   readonly LOG_LEVEL: 'fatal' | 'error' | 'warn' | 'info' | 'debug' | 'trace';
 }
@@ -38,6 +42,7 @@ function validateConfig(): AppConfig {
     HOST: process.env['HOST'] ?? '0.0.0.0',
     RUNPOD_API_KEY: runpodApiKey,
     RUNPOD_SSH_PRIVATE_KEY: runpodSshKey,
+    RUNPOD_REGISTRY_AUTH_ID: process.env['RUNPOD_REGISTRY_AUTH_ID'] ?? '',
     NODE_ENV: nodeEnv,
     LOG_LEVEL: logLevel,
   };

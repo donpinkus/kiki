@@ -73,6 +73,9 @@ export interface CreateSpotPodInput {
   containerDiskInGb?: number;
   minMemoryInGb?: number;
   minVcpuCount?: number;
+  /** RunPod container registry credential ID for authenticated Docker Hub pulls.
+   * Without this, pulls are anonymous and hit Docker Hub's 100-pull/6hr/IP rate limit. */
+  containerRegistryAuthId?: string;
 }
 
 export interface PodCreateResult {
@@ -90,7 +93,11 @@ export async function createSpotPod(input: CreateSpotPodInput): Promise<PodCreat
     containerDiskInGb = 40,
     minMemoryInGb = 16,
     minVcpuCount = 4,
+    containerRegistryAuthId,
   } = input;
+  const authField = containerRegistryAuthId
+    ? `, containerRegistryAuthId: "${containerRegistryAuthId}"`
+    : '';
   const query = `mutation {
     podRentInterruptable(input: {
       name: "${name}",
@@ -104,7 +111,7 @@ export async function createSpotPod(input: CreateSpotPodInput): Promise<PodCreat
       minMemoryInGb: ${minMemoryInGb},
       minVcpuCount: ${minVcpuCount},
       ports: "${ports}",
-      startSsh: true
+      startSsh: true${authField}
     }) { id desiredStatus costPerHr }
   }`;
   const data = await gql<{ podRentInterruptable: { id: string; costPerHr: number } | null }>(query);

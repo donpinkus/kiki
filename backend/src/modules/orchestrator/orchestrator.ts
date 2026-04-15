@@ -268,13 +268,15 @@ async function provision(sessionId: string, onStatus: (msg: string) => void): Pr
   // 2. Create pod
   onStatus('Creating pod...');
   const podName = `${POD_PREFIX}${sessionId.slice(0, 16)}`;
+  const authId = config.RUNPOD_REGISTRY_AUTH_ID || undefined;
   const { id: podId } = await createSpotPod({
     name: podName,
     imageName: IMAGE_NAME,
     gpuTypeId: GPU_TYPE_ID,
     bidPerGpu: bid,
+    ...(authId ? { containerRegistryAuthId: authId } : {}),
   });
-  log.info({ sessionId, podId }, 'Pod created');
+  log.info({ sessionId, podId, authenticated: !!authId }, 'Pod created');
 
   // 3. Wait for SSH
   onStatus('Waiting for pod to boot...');
