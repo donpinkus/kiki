@@ -1,15 +1,34 @@
 import type { FastifyPluginAsync } from 'fastify';
 import WebSocket from 'ws';
-import { getOrProvisionPod, touch, sessionClosed } from '../modules/orchestrator/orchestrator.js';
+
+import { config } from '../config/index.js';
+import { extractBearer } from '../modules/auth/index.js';
+import { verifyAccess } from '../modules/auth/jwt.js';
+import {
+  getOrProvisionPod,
+  touch,
+  sessionClosed,
+} from '../modules/orchestrator/orchestrator.js';
+import {
+  checkProvisionQuota,
+  registerProvision,
+  releaseActivePod,
+} from '../modules/auth/rateLimiter.js';
+import { checkEntitlement } from '../modules/entitlement/index.js';
 
 /**
- * WebSocket relay to a per-session FLUX.2-klein pod.
+ * WebSocket relay to a per-user FLUX.2-klein pod.
  *
- * Client connects with `?session=<uuid>`. If the session doesn't have a
- * running pod, we provision one (blocking the client WebSocket with status
- * messages for ~3–5 min). Once ready, we relay frames bidirectionally and
- * touch the session on every frame so the idle reaper can distinguish active
- * from abandoned sessions.
+ * Identity resolution (in order):
+ *   1. `Authorization: Bearer <jwt>` — preferred. Extracts userId from access
+ *      token, subject to entitlement + rate-limit gates.
+ *   2. `?session=<uuid>` legacy query param — accepted only when
+ *      `AUTH_REQUIRED=false`. Skips auth/entitlement/rate-limit checks.
+ *      Will be removed once the iOS client ships JWT auth.
+ *
+ * After identity is resolved, we provision (or reuse) a pod and relay frames
+ * bidirectionally. `touch()` on every relayed frame keeps the idle reaper
+ * honest.
  */
 class StreamRelay {
   private upstream: WebSocket | null = null;
@@ -63,9 +82,9 @@ class StreamRelay {
     });
   }
 
-  sendConfig(config: Record<string, unknown>): void {
+  sendConfig(configPayload: Record<string, unknown>): void {
     if (this.upstream?.readyState === WebSocket.OPEN) {
-      this.upstream.send(JSON.stringify(config));
+      this.upstream.send(JSON.stringify(configPayload));
     }
   }
 
@@ -95,32 +114,109 @@ class StreamRelay {
   }
 }
 
-function extractSessionId(rawUrl: string | undefined): string | null {
+function extractQueryParam(rawUrl: string | undefined, name: string): string | null {
   if (!rawUrl) return null;
   try {
     const url = new URL(rawUrl, 'http://placeholder');
-    return url.searchParams.get('session');
+    return url.searchParams.get(name);
   } catch {
     return null;
   }
 }
 
+interface Identity {
+  userId: string;
+  source: 'jwt' | 'legacy_session';
+}
+
+async function resolveIdentity(
+  request: { url?: string; headers: { authorization?: string } },
+): Promise<Identity | { error: string; code: number }> {
+  // Try Bearer first.
+  const token = extractBearer(request.headers.authorization);
+  if (token) {
+    try {
+      const claims = await verifyAccess(token);
+      return { userId: claims.sub, source: 'jwt' };
+    } catch {
+      return { error: 'invalid_token', code: 1008 };
+    }
+  }
+
+  // Fallback to legacy ?session= if auth is not required yet.
+  if (!config.AUTH_REQUIRED) {
+    const sessionId = extractQueryParam(request.url, 'session');
+    if (sessionId) {
+      return { userId: sessionId, source: 'legacy_session' };
+    }
+  }
+
+  return {
+    error: config.AUTH_REQUIRED ? 'authentication_required' : 'missing_identity',
+    code: 1008,
+  };
+}
+
 export const streamRoute: FastifyPluginAsync = async (fastify) => {
   fastify.get('/v1/stream', { websocket: true }, (socket, request) => {
-    const sessionId = extractSessionId(request.url);
-    if (!sessionId) {
-      socket.send(JSON.stringify({ type: 'error', message: 'missing session query param' }));
-      socket.close(1008, 'missing session');
-      return;
-    }
-
-    request.log.info({ sessionId }, 'Stream client connected');
-
-    // Fire-and-forget async flow: provision, then proxy.
     void (async () => {
+      const identity = await resolveIdentity({
+        url: request.url,
+        headers: { authorization: request.headers.authorization },
+      });
+
+      if ('error' in identity) {
+        socket.send(JSON.stringify({ type: 'error', message: identity.error }));
+        socket.close(identity.code, identity.error);
+        return;
+      }
+
+      const { userId, source } = identity;
+      request.log.info({ userId, source }, 'Stream client connected');
+
+      // Entitlement check — only applies when authenticated via JWT. Legacy
+      // sessions bypass entitlement to keep the old iPad binaries working
+      // during the rollout window.
+      if (source === 'jwt') {
+        const entitlement = checkEntitlement(userId);
+        if (!entitlement.allowed) {
+          socket.send(
+            JSON.stringify({
+              type: 'error',
+              code: entitlement.reason,
+              message: 'Subscription required to continue',
+            }),
+          );
+          socket.close(1008, entitlement.reason);
+          return;
+        }
+
+        const quota = checkProvisionQuota(userId);
+        if (!quota.allowed) {
+          socket.send(
+            JSON.stringify({
+              type: 'error',
+              code: quota.reason,
+              message: 'Too many sessions — try again shortly',
+              retryAfterSec: quota.retryAfterSec,
+            }),
+          );
+          socket.close(1008, quota.reason ?? 'rate_limited');
+          return;
+        }
+      }
+
       let relay: StreamRelay | null = null;
+      let provisionRegistered = false;
+
       try {
-        const { podUrl } = await getOrProvisionPod(sessionId, (msg) => {
+        // Only count against the per-user quota for JWT-authed sessions.
+        if (source === 'jwt') {
+          registerProvision(userId);
+          provisionRegistered = true;
+        }
+
+        const { podUrl } = await getOrProvisionPod(userId, (msg) => {
           if (socket.readyState === socket.OPEN) {
             socket.send(
               JSON.stringify({ type: 'status', status: 'provisioning', message: msg }),
@@ -129,7 +225,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         });
 
         if (socket.readyState !== socket.OPEN) {
-          request.log.info({ sessionId }, 'Client disconnected during provisioning');
+          request.log.info({ userId }, 'Client disconnected during provisioning');
           return;
         }
 
@@ -137,8 +233,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
 
         relay.onMessage((data, isBinary) => {
           if (socket.readyState !== socket.OPEN) return;
-          // Any upstream frame counts as activity (the pod is doing work for this user).
-          touch(sessionId);
+          touch(userId);
           if (isBinary) {
             const base64 = (data as Buffer).toString('base64');
             socket.send(JSON.stringify({ type: 'frame', data: base64 }));
@@ -148,7 +243,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         });
 
         relay.onClose((code, reason) => {
-          request.log.info({ sessionId, code, reason }, 'Upstream closed');
+          request.log.info({ userId, code, reason }, 'Upstream closed');
           if (socket.readyState === socket.OPEN) {
             socket.send(
               JSON.stringify({ type: 'error', message: 'Pod terminated (possible spot preemption)' }),
@@ -158,23 +253,20 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         });
 
         relay.onError((err) => {
-          request.log.error({ sessionId, err }, 'Upstream error');
+          request.log.error({ userId, err }, 'Upstream error');
         });
 
         await relay.connect();
-        request.log.info({ sessionId }, 'Upstream connected, relaying');
+        request.log.info({ userId }, 'Upstream connected, relaying');
 
-        // Send a final "ready" status so the client can transition UI out of provisioning.
         if (socket.readyState === socket.OPEN) {
           socket.send(JSON.stringify({ type: 'status', status: 'ready' }));
         }
 
-        // Capture a non-null local so the message handler closure doesn't
-        // need non-null assertions on the outer-scoped `relay`.
         const activeRelay = relay;
         socket.on('message', (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
           const buf = Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data as ArrayBuffer);
-          touch(sessionId);
+          touch(userId);
           if (isBinary) {
             activeRelay.sendFrame(buf);
           } else {
@@ -185,12 +277,16 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
                 activeRelay.sendConfig(parsed);
               }
             } catch {
-              request.log.warn({ sessionId }, 'Invalid JSON from client');
+              request.log.warn({ userId }, 'Invalid JSON from client');
             }
           }
         });
       } catch (err) {
-        request.log.error({ sessionId, err }, 'Provisioning or relay failed');
+        request.log.error({ userId, err }, 'Provisioning or relay failed');
+        if (provisionRegistered) {
+          releaseActivePod(userId);
+          provisionRegistered = false;
+        }
         if (socket.readyState === socket.OPEN) {
           socket.send(
             JSON.stringify({
@@ -203,13 +299,17 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       }
 
       socket.on('close', () => {
-        request.log.info({ sessionId }, 'Stream client disconnected');
-        sessionClosed(sessionId);
+        request.log.info({ userId }, 'Stream client disconnected');
+        sessionClosed(userId);
+        if (provisionRegistered) {
+          releaseActivePod(userId);
+          provisionRegistered = false;
+        }
         relay?.close();
       });
 
       socket.on('error', (err: Error) => {
-        request.log.error({ sessionId, err }, 'Client socket error');
+        request.log.error({ userId, err }, 'Client socket error');
         relay?.close();
       });
     })();
