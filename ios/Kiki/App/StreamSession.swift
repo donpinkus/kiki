@@ -239,6 +239,9 @@ final class StreamSession {
                         self.updateConnectionState(.provisioning(message: status.message ?? "Provisioning GPU..."))
                     } else if status.type == "status" && status.status == "ready" {
                         self.updateConnectionState(.connected)
+                        // Re-send config now that the server is ready to accept it.
+                        // The initial config may have been sent during provisioning.
+                        self.lastSentConfig = nil
                     } else if (status.type == "status" && status.status == "error") || status.type == "error" {
                         self.updateConnectionState(.error(status.message ?? "Server error"))
                     }
