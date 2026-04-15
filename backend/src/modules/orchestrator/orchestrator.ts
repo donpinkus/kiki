@@ -410,13 +410,14 @@ function runCommand(cmd: string, args: string[], opts: RunCommandOpts = {}): Pro
       reject(new Error(`${cmd} timed out after ${timeoutMs}ms`));
     }, timeoutMs);
 
-    if (opts.onStdoutLine && proc.stdout) {
+    const onStdoutLine = opts.onStdoutLine;
+    if (onStdoutLine && proc.stdout) {
       let buf = '';
       proc.stdout.on('data', (chunk: Buffer) => {
         buf += chunk.toString('utf8');
         let idx: number;
         while ((idx = buf.indexOf('\n')) !== -1) {
-          opts.onStdoutLine!(buf.slice(0, idx));
+          onStdoutLine(buf.slice(0, idx));
           buf = buf.slice(idx + 1);
         }
       });

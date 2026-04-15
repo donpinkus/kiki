@@ -169,17 +169,20 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
           socket.send(JSON.stringify({ type: 'status', status: 'ready' }));
         }
 
+        // Capture a non-null local so the message handler closure doesn't
+        // need non-null assertions on the outer-scoped `relay`.
+        const activeRelay = relay;
         socket.on('message', (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
           const buf = Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data as ArrayBuffer);
           touch(sessionId);
           if (isBinary) {
-            relay!.sendFrame(buf);
+            activeRelay.sendFrame(buf);
           } else {
             const text = buf.toString('utf-8');
             try {
               const parsed = JSON.parse(text);
               if (parsed.type === 'config') {
-                relay!.sendConfig(parsed);
+                activeRelay.sendConfig(parsed);
               }
             } catch {
               request.log.warn({ sessionId }, 'Invalid JSON from client');
