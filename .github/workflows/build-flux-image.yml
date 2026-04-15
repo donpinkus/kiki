@@ -1,0 +1,68 @@
+name: Build FLUX.2-klein image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'flux-klein-server/**'
+      - '.github/workflows/build-flux-image.yml'
+  workflow_dispatch:
+    inputs:
+      flux_model_rev:
+        description: 'HF revision for FLUX.2-klein-4B'
+        default: 'main'
+      nvfp4_rev:
+        description: 'HF revision for NVFP4 weights'
+        default: 'main'
+
+concurrency:
+  group: build-flux-image
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # GitHub-hosted runners ship with ~14 GB free on disk. The image we're
+      # building is ~28 GB compressed → needs ~30 GB+ staging. Aggressively
+      # prune preinstalled SDKs/toolchains to free space.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /opt/hostedtoolcache /usr/local/lib/android
+          sudo docker system prune -af
+          df -h
+
+      - name: Build & push
+        uses: docker/build-push-action@v6
+        with:
+          context: ./flux-klein-server
+          file: ./flux-klein-server/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/kiki-flux-klein:latest
+            ghcr.io/${{ github.repository_owner }}/kiki-flux-klein:sha-${{ github.sha }}
+          build-args: |
+            FLUX_MODEL_REV=${{ inputs.flux_model_rev || 'main' }}
+            NVFP4_REV=${{ inputs.nvfp4_rev || 'main' }}
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/kiki-flux-klein:buildcache
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/kiki-flux-klein:buildcache,mode=max
+
+      - name: Report pushed tags
+        run: |
+          echo "Pushed:"
+          echo "  ghcr.io/${{ github.repository_owner }}/kiki-flux-klein:latest"
+          echo "  ghcr.io/${{ github.repository_owner }}/kiki-flux-klein:sha-${{ github.sha }}"
