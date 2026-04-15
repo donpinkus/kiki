@@ -32,9 +32,9 @@ cd backend && npm run lint         # Lint
 
 **iOS:** SwiftUI for UI. PencilKit for drawing. Swift Concurrency (actors, async/await) — no Combine except PencilKit delegate bridging. URLSession for networking — no third-party HTTP libs. SwiftData for persistence. Core Image + vImage for image processing. 3 local Swift packages via SPM. AppCoordinator (@Observable) injected via environment.
 
-**Backend:** TypeScript + Fastify — no Express. Railway for hosting. Backend acts as a WebSocket relay between the iPad client and the FLUX.2-klein inference server on RunPod.
+**Backend:** TypeScript + Fastify — no Express. Railway for hosting. Backend is both a WebSocket relay AND a pod orchestrator: it provisions a dedicated RTX 5090 spot pod per session (`session=<uuid>` query param), relays frames to that pod, and terminates pods idle > 10 min. In-memory session registry, semaphore caps concurrent cold starts. See `documents/references/provider-config.md` for the full ops picture.
 
-**Generation:** FLUX.2-klein-4B on RunPod RTX 5090 spot, with BFL's NVFP4 transformer checkpoint loaded on top of the BF16 pipeline. Real-time img2img streaming over WebSocket. Canvas captured at ~2 FPS, sent as JPEG, generated images returned ~1 FPS. Reference-mode only: the sketch is VAE-encoded and concatenated with generation latents as conditioning tokens. Server uses frame dropping (single-slot buffer) to prevent queue buildup.
+**Generation:** FLUX.2-klein-4B on RunPod RTX 5090 spot, with BFL's NVFP4 transformer checkpoint loaded on top of the BF16 pipeline. Real-time img2img streaming over WebSocket. Canvas captured at ~2 FPS, sent as JPEG, generated images returned ~1 FPS. Reference-mode only: the sketch is VAE-encoded and concatenated with generation latents as conditioning tokens. Server uses frame dropping (single-slot buffer) to prevent queue buildup. ~3–5 min cold start per fresh session.
 
 ## Navigation & Persistence
 

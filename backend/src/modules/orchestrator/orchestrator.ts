@@ -73,9 +73,9 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const RUNTIME_ASSETS_DIR = findRuntimeAssets(__dirname);
 
 function findRuntimeAssets(startDir: string): string {
-  // Walk up from this file looking for a `runtime-assets/` sibling.
-  // In dev (tsx): backend/src/modules/orchestrator/ → backend/runtime-assets/
-  // In prod: backend/dist/modules/orchestrator/ → backend/dist/runtime-assets/
+  // Walk up from this file's directory looking for a `runtime-assets/` folder.
+  // In dev (tsx): backend/src/modules/orchestrator/ → finds backend/runtime-assets/
+  // In prod Docker image: /app/dist/modules/orchestrator/ → finds /app/runtime-assets/
   let dir = startDir;
   for (let i = 0; i < 6; i++) {
     const candidate = join(dir, 'runtime-assets');

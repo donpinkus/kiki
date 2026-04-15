@@ -1,7 +1,7 @@
 /**
  * Thin async wrapper around RunPod's GraphQL API for pod lifecycle management.
- * Exactly mirrors the patterns used in .github/workflows/deploy-flux-klein.yml
- * so that behavior is identical to the manual-deploy flow we already know works.
+ * Used by orchestrator.ts to provision, monitor, and terminate per-session
+ * pods. All calls are authenticated with RUNPOD_API_KEY from config.
  */
 
 import { config } from '../../config/index.js';
@@ -39,8 +39,9 @@ export interface SpotBidInfo {
 
 /**
  * Returns the current minimum bid price and stock availability for a GPU type
- * on secure cloud. The 5090 has no spot tier on community cloud, so we always
- * query secure — see memory: reference_runpod_spot_api.md.
+ * on secure cloud. NOTE: the 5090 has no spot tier on community cloud, so we
+ * always query secure. The `lowestPrice` RunPod query returns null for
+ * `minimumBidPrice` if you don't pass `secureCloud: true`.
  */
 export async function getSpotBid(gpuTypeId: string): Promise<SpotBidInfo> {
   const query = `query {
