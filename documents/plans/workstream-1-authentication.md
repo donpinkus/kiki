@@ -132,9 +132,7 @@ Modify `AppCoordinator.swift:365-382` to:
 
 Update `StreamWebSocketClient.init` to accept a `URLRequest` instead of `URL`. Delete `SessionIdentity.swift`.
 
-### 3.6 Two-devices-per-Apple-ID question
-
-**Recommendation: one pod per user, last-connect wins.**
+### 3.6 Two-devices-per-Apple-ID — DECIDED: one pod per user, last-connect wins
 
 When device B opens a WebSocket for a userId that already has an active session:
 1. Look up existing `Session`; if `status === 'ready'`, close device A's relay socket with `1000 "replaced by newer session"`.
@@ -180,6 +178,46 @@ Rename `sessionId` → `userId` throughout:
 - Rename log field `sessionId` → `userId` throughout
 
 **Migration:** there's no persistent state. In-memory registry drops every redeploy; `reconcileOrphanPods()` kills `kiki-session-*` pods at boot. So deploying the auth-gated backend = clean slate. Users re-auth silently (Apple Sign In is silent after first consent). Announce in beta Slack.
+
+## 5.5 Paid tier entitlement (NEW — decided during planning)
+
+Users get **1 free hour of GPU time**, then must subscribe to `Kiki+` at **$5/month** via Apple IAP (StoreKit 2) to continue. Full billing integration lives in Workstream 8 — this section covers only what Workstream 1 needs to provide.
+
+### Backend entitlement check
+
+`getOrProvisionPod` calls a new `entitlement.check(userId)` gate before acquiring the semaphore:
+
+```ts
+// backend/src/modules/entitlement/index.ts (new)
+export interface EntitlementStatus {
+  allowed: boolean;
+  reason?: 'free_exhausted' | 'subscription_expired' | 'account_disabled';
+  freeHoursRemaining?: number;
+  subscriptionActive?: boolean;
+}
+export async function checkEntitlement(userId: string): Promise<EntitlementStatus>;
+```
+
+Gate logic:
+- If user has `> 0` free hours remaining → allow, note `free_tier`
+- Else if user has active subscription → allow, note `subscription`
+- Else → deny with `reason: 'free_exhausted'`, client shows paywall modal
+
+### Per-user hour tracking
+
+Track cumulative GPU-seconds consumed per user. On pod termination (reaper or replacement), compute `uptimeSeconds` × `1/3600` → subtract from free-hour budget or log against subscription.
+
+Storage: in-memory Map<userId, { totalSeconds, freeHoursGrantedAt, subscriptionId? }> for v1 (lives in entitlement module). When Workstream 5 lands, this moves to Redis alongside session data.
+
+### Interface with IAP (Workstream 8)
+
+Apple sends StoreKit 2 server-side notifications (`APP_STORE_SERVER_NOTIFICATIONS_V2`) to a webhook we'll add in WS8. Webhook updates the entitlement map with `subscriptionActive: true/false`.
+
+For this workstream: just stub the subscription side — `subscriptionActive` always returns `false` so the gate only honors the free hour. WS8 wires the real subscription check.
+
+### Env knob for adjustability
+
+`FREE_TIER_SECONDS` env var, default `3600` (1 hour). Lets you bump the free tier to 2 hours etc. without a code change.
 
 ## 6. Per-user rate limiting
 
@@ -254,13 +292,17 @@ Phase 3 — Flip:
 
 ## 9. Open questions
 
-1. **Anonymous fallback (DeviceCheck/AppAttest): ship or defer?** Recommend defer; hard-require Apple Sign In for 100-user beta.
-2. **Email collection.** Apple optionally returns email on first consent. Recommend no for beta (simpler privacy story).
-3. **Session UUID persistence for analytics.** Today's UUID doubles as install ID. Recommend delete; userId is a superset.
-4. **Refresh token biometric protection?** Keychain with `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` is fine for beta; skip biometric for v1.
-5. **Age gate threshold — 13+ or higher?** CLAUDE.md says age gate is required but doesn't specify. Decision needed before consent screen finalized.
-6. **Logout semantics.** Immediate pod terminate or let idle out? Recommend immediate terminate — explicit user intent.
-7. **Device B takeover UX copy.** Confirm message text for device A ("Kiki is now active on another iPad" or similar).
+### DECIDED
+- **Anonymous fallback:** ❌ Apple Sign In only for v1. Hard-require.
+- **Age gate:** 17+.
+- **Device policy:** One pod per user, last-connect wins.
+
+### Still open
+1. **Email collection.** Apple optionally returns email on first consent. Recommend no for beta (simpler privacy story).
+2. **Session UUID persistence for analytics.** Today's UUID doubles as install ID. Recommend delete; userId is a superset.
+3. **Refresh token biometric protection?** Keychain with `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` is fine for beta; skip biometric for v1.
+4. **Logout semantics.** Immediate pod terminate or let idle out? Recommend immediate terminate — explicit user intent.
+5. **Device B takeover UX copy.** Confirm message text for device A ("Kiki is now active on another iPad" or similar).
 
 ## 10. Dependencies
 

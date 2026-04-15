@@ -192,17 +192,18 @@ Deploys become safe: sessions with live pod survive restart. New process adopts;
 
 Edge case: pod was provisioning when backend restarted. Row says `status: provisioning`. No live Promise. Resolution: step 4 treats `provisioning` rows older than `PROVISION_TIMEOUT_MS` as dead — delete row and (if podId exists) terminate. Newer rows left; if owner was another up-replica, resolves normally. Otherwise client eventual retry/timeout flushes.
 
-### 3.7 Schema migration / zero-downtime rollout
+### 3.7 Rollout — DECIDED: Redis default from first deploy
 
-Scary part: migration without dropping users. Plan:
+**No feature flag.** Ship Redis-only code. First deploy with this change makes Redis authoritative immediately.
 
-1. **Land refactor behind feature flag** (`SESSION_REGISTRY=redis|memory`, default `memory`). Both paths coexist.
-2. **Deploy with flag off.** Nothing changes runtime. Verify Redis connection up; registry still in-memory.
-3. **At quiet moment, flip to `redis` and redeploy.** In-memory sessions lost this once (same as today). One destructive deploy; future deploys non-destructive.
-4. **Monitor days.** Nasty bug → flip back to `memory`; lose in-flight Redis sessions but back to current behavior.
-5. **After stable week, remove `memory` path.**
+Rationale (per product decision): simpler code (one path), faster iteration on the new design. Accepts that any Redis-plugin hiccup on deploy day is a full outage with no instant rollback. Railway's Redis plugin is stable; we've validated it works in staging before merging.
 
-No clever migration avoids the one-time drop on cutover — time it for low usage.
+Pre-deploy checklist (MUST verify before merge):
+- Redis plugin provisioned on Railway, `REDIS_URL` env var set.
+- Local `docker-compose` Redis ran green through all integration tests (§7).
+- Staging Railway has Redis + backend deployed together and confirmed working for ≥2 hours under a single-user smoke test.
+
+Rollback: revert the merge commit and deploy. No env flag gives instant recovery; code revert + redeploy is the path.
 
 ## 4. Failure modes
 
@@ -292,11 +293,14 @@ Local `.env`: `REDIS_URL=redis://localhost:6379`.
 
 ## 9. Open questions
 
+### DECIDED
+- **Rollout:** Redis default from first deploy (no feature flag).
+- **Key schema:** key by `userId` immediately (since WS1 auth is confirmed). `session:<userId>` is the schema from day one; no migration later.
+
+### Still open
 1. **Railway region for Redis.** Backend `us-west`. Put Redis same region — ~1ms RTT vs 70ms cross-region. Railway should co-locate; confirm.
-2. **Post-crash adoption vs just post-deploy?** Graceful deploy easy; hard crash has same plumbing but depends on Redis persistence. Railway's Redis is AOF default; confirm. If RDB-only, lose up to 60s of registry on crash — not terrible.
-3. **Redis key by sessionId or userId now?** Today UUID; after WS1 it's userId. Parameterize `sessionKey()` now; pass `sessionId` until WS1 flips. Lean: yes.
-4. **Feature-flag default.** Ship `memory`-default and flip in prod, or `redis` with fallback? Lean `memory` — blast radius small, can flip one replica's env var and watch.
-5. **Lua vs JS round-trips.** Two Lua scripts proposed (`claimSession`, `reapOneIfIdle`). Keep JS-only with weaker atomicity? Strong recommend Lua — 20 lines total, atomicity is the whole point.
+2. **Post-crash adoption vs just post-deploy?** Graceful deploy easy; hard crash depends on Redis persistence. Railway's Redis is AOF default; confirm. If RDB-only, lose up to 60s of registry on crash — not terrible.
+3. **Lua vs JS round-trips.** Two Lua scripts proposed (`claimSession`, `reapOneIfIdle`). Keep JS-only with weaker atomicity? Strong recommend Lua — 20 lines total, atomicity is the whole point.
 
 ## 10. Dependencies and sequencing
 

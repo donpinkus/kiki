@@ -173,23 +173,39 @@ These are real concerns at 1000+ users but overkill for 100:
 - Per-region pod affinity (e.g. US users get US pods for lower RTT).
 - A customer-support tool for session inspection / reset.
 
-## Open questions
+## Open questions (answered during cross-plan review)
 
-1. **What's the monthly cost cap we're willing to pay during beta?** Informs whether we need hard per-user monthly quotas. If the answer is "<$1k/mo", we probably need user-level rate limits earlier than planned.
-2. **Same user on two devices — one pod or two?** Two pods means 2× cost but better UX. One pod means the second device's WebSocket replaces the first. Lean one-pod; revisit if beta testers complain.
-3. **Is "100 concurrent" a soft target or a hard KPI?** Affects sequencing. If 100 is aspirational, we can skip some hardening and ship features faster.
-4. **Do we want auto-upgrade to on-demand for paying users** (future tier), or always bid spot first? Affects how Workstream 2 decides when to upgrade.
+### Product decisions (answered)
+
+1. **Monthly cost cap during beta**: **$5,000/mo hard cap**, easily adjustable via env var. Cost monitor trips a provision gate when hit (WS4).
+2. **Monetization model**: **1 free hour per user, then $5/mo subscription via Apple IAP**. Adds Workstream 8 (billing + entitlements).
+3. **Same user on two devices**: **one pod, last-connect wins**. Device B takeover closes device A's socket with a polite banner.
+4. **Is 100 concurrent a hard KPI or aspirational?**: **hard KPI with a deadline**. Sequence aggressively.
+5. **Age gate**: **17+** (standard for generative AI apps).
+6. **Auth scope**: **Apple Sign In only**, hard require. No anonymous fallback for v1.
+7. **Docker registry**: **`ghcr.io/donpinkus`** (personal account).
+8. **Cost alert destination**: **Discord webhook**.
+9. **Redis rollout**: **no feature flag** — Redis default from first deploy (accepts deploy-day risk for simpler code).
+10. **On-demand fallback message**: **silent** — user sees normal "Ready" path.
+11. **On-demand cloud**: **secure only** for v1. Don't risk NVFP4 compat on community hosts.
+12. **Preemption recovery**: **hold WS open** + "Replacing GPU…" banner during replacement.
+13. **Max replacement attempts**: **2** before escalating to user.
+
+### Per-workstream open questions remain
+
+Each plan doc's "Still open" section lists narrower decisions (thresholds, copy, optional-flag defaults) that are either recommended-with-reasoning or surfaced for the respective implementation PR.
 
 ## Rough effort sizing
 
 | Workstream | Effort | Unblocks |
 |---|---|---|
-| 1. Authentication | 1–2 days | Cost control, TestFlight |
+| 1. Authentication | 1–2 days | Cost control, TestFlight, entitlement gate for WS8 |
 | 2. On-demand fallback | 0.5 day | 50+ user stability |
 | 3. Pre-baked Docker image | 1–2 days | Fast cold starts |
-| 4. Cost monitoring | 0.5 day | Operational safety |
-| 5. Redis registry | 1 day | Deploy-safe sessions, horizontal scale |
+| 4. Cost monitoring | 0.5 day | Operational safety, $5k/mo hard cap circuit breaker |
+| 5. Redis registry | 1 day | Deploy-safe sessions, horizontal scale, durable hour ledger |
 | 6. Observability | 0.5 day | Debuggability at scale |
 | 7. Graceful preemption | 1 day | Seamless mid-session recovery |
+| 8. Paid tier + billing (Apple IAP) | 2–3 days | Monetization, free-hour enforcement |
 
-**Total: ~6–8 focused engineering days** to get cleanly to 100 concurrent users with good UX and cost visibility.
+**Total: ~8–11 focused engineering days** to get cleanly to 100 concurrent users with good UX, cost visibility, and subscription revenue.

@@ -171,10 +171,17 @@ Starting defaults, all env-overridable:
 | Threshold | Default | Rationale |
 |---|---|---|
 | `COST_ALERT_MAX_ACTIVE_PODS` | 50 | Half the 100-user target. Earlier signal = more reaction time. |
-| `COST_ALERT_MAX_24H_SPEND` | $50 | ~2× normal day at 20 concurrent. Easy to bump once we know baseline. |
+| `COST_ALERT_MAX_24H_SPEND` | 200 | USD. Roughly linear with 100-user target × 8h active × $0.55/hr ≈ $440; half = worry line. |
+| `COST_ALERT_MAX_MONTHLY_SPEND` | 5000 | USD. Hard cap from product. When hit, alert loudly AND return errors to new provisions (circuit-break) so we don't overshoot. Env-adjustable so you can raise as growth justifies. |
 | `COST_ALERT_MAX_POD_AGE_SECONDS` | 3600 | Normal idle-reap at 10 min; past 1h is a stuck pod. |
 | `COST_ALERT_COOLDOWN_SECONDS` | 1800 | 30 min between same-breach alerts. |
 | `COST_MONITOR_INTERVAL_MS` | 300000 | 5 min. Sub-1-hour detection budget on all three breaches. |
+
+The `MAX_MONTHLY_SPEND` threshold is unique because it's a **hard cap** (per product decision: $5k/mo during beta). When breached, the cost monitor:
+1. Fires the webhook alert (one-time, not rate-limited — the whole point is urgency).
+2. Flips an in-memory `costGateOpen=false` flag that `getOrProvisionPod` checks *before* acquiring the semaphore.
+3. New provisions fail with `{ type: 'error', code: 'monthly_cap_reached', message: '...' }`; client shows a "Kiki is full for the month" state.
+4. Flag stays tripped until you manually raise the cap via `railway variables --set COST_ALERT_MAX_MONTHLY_SPEND=<new>` (or wait for the month to roll over).
 
 Tuning is operational chore; ship and adjust on first false alarm.
 
@@ -244,11 +251,14 @@ No client changes. No migration. No downtime.
 
 ## 10. Open questions
 
-1. **Starting thresholds.** $50/24h + 50 pods are guesses. First real alert we recalibrate — expect to double both within a week of 100-user push.
-2. **Alert destination.** Slack obvious default. Email fallback for Slack downtime? Probably overkill; start Slack-only.
-3. **Ops auth scheme.** Shared secret fine for two people. Once WS1 lands, do endpoints gate on admin-user list? Or keep ops key for machines (cron/monitors)? Lean: both. `OPS_API_KEY` stays for machines; admin userIds unlock same endpoints for humans.
-4. **Per-pod vs account-total.** Are there non-`kiki-session-*` pods we should count? Today: no. If changes, extend query; for now only track orchestrator-spawned. Add startup warning if `myself.pods` has non-matching pods.
-5. **Should monitor write back to orchestrator?** E.g. "max pods reached, pause new provisions." Tempting but mixes concerns; this PR is observability only. Circuit breaker is separate (probably WS5 + per-user limits from WS1).
+### DECIDED
+- **Alert destination:** Discord webhook (Slack-compatible format, same payload shape).
+- **Monthly cap circuit breaker:** YES — $5k/mo hard cap trips a provision gate (product decision). Implemented in §5 above.
+
+### Still open
+1. **Starting 24h threshold.** $200/24h is a guess informed by the $5k/mo cap (~$167/day steady). First real alert we recalibrate.
+2. **Ops auth scheme post-WS1.** Shared secret fine for two people. Once WS1 lands, gate on admin-user list, or keep ops key for machines (cron/monitors)? Lean: both. `OPS_API_KEY` stays for machines; admin userIds unlock same endpoints for humans.
+3. **Per-pod vs account-total.** Are there non-`kiki-session-*` pods we should count? Today: no. Add startup warning if `myself.pods` has non-matching pods.
 
 ## 11. Dependencies
 

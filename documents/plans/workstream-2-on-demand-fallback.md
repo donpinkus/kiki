@@ -109,9 +109,9 @@ export function isCapacityError(err: unknown): boolean
 
 Unmatched errors re-throw untouched — don't mask auth/SSH failures as "capacity" and silently switch.
 
-### 3.4 Community vs secure for on-demand
+### 3.4 Community vs secure for on-demand — DECIDED: secure only for v1
 
-**Default: secure cloud.** Reasons:
+**Secure cloud only.** Reasons:
 
 - Blackwell 5090 NVFP4 requires CUDA 12.8+ and current drivers; secure cloud has the broadest newest driver fleet. Community nodes are a long tail — some still on older CUDA where NVFP4 falls back to slow paths or fails.
 - Secure networking more predictable for the ~13 GB HF model download during cold start.
@@ -138,15 +138,11 @@ Orchestrator imports a module-level `policy: ProvisionPolicy` defaulting to `all
 
 Default: **allow** for v1. Rationale: during beta we'd rather spend $0.30/hr extra than lose a user to provisioning failure. Policy hook gives us the knob to tighten later.
 
-### 3.6 Status message copy
+### 3.6 Status message copy — DECIDED: silent fallback
 
-Surface via existing `onStatus` callback. Ordered messages:
+No user-facing message during on-demand fallback. Client sees the normal `"Ready"` path. Fall-through is an operational concern, not a user concern — the user pays a flat $5/mo regardless of our provider cost.
 
-- Normal spot flow: unchanged
-- On capacity detection, before on-demand attempt: `"Spot unavailable — switching to on-demand (+~$0.45/hr)"` (showing the secure on-demand delta over spot). Alternative (if dollars feel off-putting to beta users): `"High demand — using on-demand GPU"`. See Open Questions.
-- After on-demand pod ready: `"Ready (on-demand)"` — distinguishable in the status log.
-
-Client `stream.ts` already forwards as `{type: "status", message: ...}` — no client change required.
+Backend **still logs structured event** `provision.fallback.triggered` with reason so we can see the rate in Workstream 4's cost monitoring. Silent to the user, loud in our logs.
 
 ## 4. Metrics to emit
 
@@ -192,11 +188,14 @@ Day-7: Metrics clean → remove flag and dead branch. Keep `policy.allowsOnDeman
 
 ## 7. Open questions
 
-1. **How explicit should the cost message be?** `"+$0.45/hr"` is maximally honest but could spook beta testers. `"High demand — using premium GPU"` hides the delta but implies the user pays (they don't). Lean honest for beta — we want testers calibrating us on cost-vs-UX.
-2. **Community on-demand as cost lever — yes or no for v1?** $0.30/hr savings is real at 100 users, but one NVFP4-incompatible community host could burn months of savings in debug time. **Recommend: secure-only for v1.**
-3. **Should `BID_HEADROOM` (orchestrator.ts:54) be bumped before shipping?** Currently 0.02. At 100 users, 2-cent headroom gets outbid often and triggers fallback unnecessarily. Bumping to 0.05-0.07 costs ~$0.03/hr × spot-hours, probably less than the on-demand delta we'd otherwise pay. **Recommend: bump to 0.05 in same PR.**
-4. **"Prefer on-demand" knob for paying users?** Policy interface supports it. Ship the hook, don't wire paid tier until auth lands.
-5. **Does `5090 spot stock is 'Low'` still warrant fallthrough, or only `'None'`?** "Low" means spot works but may be preempted quickly; on-demand won't preempt. **Recommend: fall through on both.** "Low" + rapid preemption worse UX than on-demand at +$0.45/hr.
+### DECIDED
+- **Cost message:** silent fallback, no user-facing message.
+- **Community on-demand:** secure-only for v1.
+
+### Still open
+1. **Should `BID_HEADROOM` (orchestrator.ts:54) be bumped before shipping?** Currently 0.02. At 100 users, 2-cent headroom gets outbid often and triggers fallback unnecessarily. Bumping to 0.05–0.07 costs ~$0.03/hr × spot-hours, probably less than the on-demand delta we'd otherwise pay. **Recommend: bump to 0.05 in same PR.**
+2. **"Prefer on-demand" knob for paying users** (all beta users are on $5/mo). With user's subscription confirmed, there's little reason NOT to prefer on-demand for subscribers to avoid preemption entirely. Trade-off: preemption replacement is now fast (~90s) post-WS3, and on-demand adds ~$0.45/hr. **Lean: keep spot-first for everyone, let WS7 handle preemption transparently.**
+3. **Does `5090 spot stock is 'Low'` still warrant fallthrough, or only `'None'`?** "Low" means spot works but may be preempted quickly. **Recommend: fall through on both.**
 
 ## 8. Dependencies
 

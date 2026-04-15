@@ -317,11 +317,14 @@ Orchestrator:
 
 ## 9. Open questions
 
-1. **Registry under personal account or new GitHub org?** Affects naming/ownership. Personal OK for now; `kiki-app` org if this becomes a product.
-2. **Self-hosted GH Actions runner?** GH-hosted 50 GB disk + 28 GB image = tight. Mac Studio or `ubuntu-latest-16core` easier. OK with ~$0.08/build on larger runners?
-3. **Keep SSH access post-migration for debugging?** RunPod base has `openssh-server`. Retaining `RUNPOD_SSH_PRIVATE_KEY` lets us `ssh` into broken pod. Would delete orchestrator SSH code either way.
-4. **Monthly rebuild for weight refresh?** No upstream changes expected, but monthly `workflow_dispatch` catches silent drift. Or: rebuild only on code change.
-5. **Docker `HEALTHCHECK` in image?** Adds Docker-level health RunPod can surface. Marginal vs our HTTP proxy polling.
+### DECIDED
+- **Registry:** personal account (`ghcr.io/donpinkus`). Can move later if Kiki incorporates / adds collaborators.
+
+### Still open
+1. **Self-hosted GH Actions runner?** GH-hosted 50 GB disk + 28 GB image = tight. Mac Studio or `ubuntu-latest-16core` easier. OK with ~$0.08/build on larger runners?
+2. **Keep SSH access post-migration for debugging?** RunPod base has `openssh-server`. Retaining `RUNPOD_SSH_PRIVATE_KEY` lets us `ssh` into broken pod. Would delete orchestrator SSH code either way.
+3. **Monthly rebuild for weight refresh?** No upstream changes expected, but monthly `workflow_dispatch` catches silent drift. Or: rebuild only on code change.
+4. **Docker `HEALTHCHECK` in image?** Adds Docker-level health RunPod can surface. Marginal vs our HTTP proxy polling.
 
 ## 10. Dependencies
 

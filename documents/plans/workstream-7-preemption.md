@@ -128,9 +128,9 @@ Status forwarder inside this handler reuses lambda pattern from original provisi
 - Cons: client-visible blip (`.connecting` → `.provisioning` → `.connected`). At 100 users generates support questions.
 - Cons: client reconnect has 3 retries over ~7s. 90s replacement = client gives up before pod ready. Require bumping `maxReconnectAttempts` and backoff to ~5 over 120s.
 
-**Decision for v1: Option X.** Hold WS open, dispatch `reprovisioning` status, swap upstream relay in place. Option Y remains fallback if X fails for transport reasons.
+**DECIDED: Option X.** Hold WS open, dispatch `reprovisioning` status, swap upstream relay in place. Option Y remains the fallback if X fails for transport reasons.
 
-### 4.5 Retry bound
+### 4.5 Retry bound — DECIDED: 2 attempts
 
 If replacement pod itself preempted or fails to become healthy, session re-enters `replacing`. Cap at **2 replacement attempts per session lifetime** (env `MAX_SESSION_REPLACEMENTS=2`). Past cap, close client with error and let client do its own reconnect path. Track via `session.replacementCount: number` on `Session`.
 
@@ -191,12 +191,15 @@ Change is additive in orchestrator (new state, new function) and conditional in 
 
 ## 10. Open questions
 
-1. **Hold WS open vs reconnect (§4.4)?** Plan recommends hold-open. Confirm or pick Y.
-2. **Max replacement attempts per session?** Plan recommends 2. Does 1 (one shot) feel safer for v1?
-3. **Buffer canvas frames during replacement, or drop?** Plan recommends drop — stateless generation, nothing lost, buffering adds complexity.
-4. **Distinct "replacing" client state, or reuse existing `.provisioning(message:)`?** Latter reduces iOS changes to zero but message is all user sees. Recommend new case for clarity.
-5. **Bucket-D (network blip) reconnect in v1, or punt to v2?** Detection cost small (one `/health` probe) but reconnect-upstream path is new code. Could ship §4 without D, treat blips as preemptions (one unnecessary replacement per blip); cleaner first PR.
-6. **Client needs to learn new status string `reprovisioning`, or reuse `provisioning`?** Reuse means iOS doesn't ship in lockstep. Plan recommends new string for metrics clarity + letting iOS render different UI when ready.
+### DECIDED
+- **Hold WS open vs reconnect:** hold open (Option X in §4.4).
+- **Max replacement attempts:** 2.
+
+### Still open
+1. **Buffer canvas frames during replacement, or drop?** Recommend drop — stateless generation, nothing lost, buffering adds complexity.
+2. **Distinct "replacing" client state, or reuse existing `.provisioning(message:)`?** Latter reduces iOS changes to zero but message is all user sees. Recommend new case for clarity.
+3. **Bucket-D (network blip) reconnect in v1, or punt to v2?** Detection cost small (one `/health` probe) but reconnect-upstream path is new code. Could ship §4 without D, treat blips as preemptions (one unnecessary replacement per blip); cleaner first PR.
+4. **Client needs to learn new status string `reprovisioning`, or reuse `provisioning`?** Reuse means iOS doesn't ship in lockstep. Plan recommends new string for metrics clarity + letting iOS render different UI when ready.
 
 ## 11. Dependencies and sequencing
 
