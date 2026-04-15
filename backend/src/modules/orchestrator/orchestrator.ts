@@ -26,6 +26,7 @@ import {
   isCapacityError,
   listPodsByPrefix,
   terminatePod,
+  type SpotBidInfo,
 } from './runpodClient.js';
 import { getPolicy } from './policy.js';
 
@@ -303,9 +304,88 @@ async function provision(sessionId: string, onStatus: (msg: string) => void): Pr
 }
 
 /**
+ * A candidate placement: which DC to pin the pod to, and optionally which
+ * pre-populated network volume to attach. `null` for both means "let RunPod
+ * pick any DC, no volume" — legacy ssh-mode behavior.
+ */
+interface PlacementTarget {
+  dataCenterId: string | null;
+  networkVolumeId: string | null;
+  bidInfo: SpotBidInfo | null;
+}
+
+/**
+ * In baked mode with a configured NETWORK_VOLUMES_BY_DC, iterate through each
+ * volume DC and query spot stock. Returns the first DC with Medium/High stock
+ * (with its bid info), or the best-stock DC even if Low (so the caller can
+ * still try spot before falling back to on-demand). Returns `null` only if
+ * every DC returns a hard capacity miss.
+ *
+ * In non-baked mode or with no volumes configured, returns a single unpinned
+ * target (DC = null) and lets RunPod pick.
+ */
+async function selectPlacement(sessionId: string): Promise<PlacementTarget | null> {
+  const volumes = config.NETWORK_VOLUMES_BY_DC;
+  const volumeDcs = Object.keys(volumes);
+  const useVolumes = config.FLUX_PROVISION_MODE === 'baked' && volumeDcs.length > 0;
+
+  if (!useVolumes) {
+    try {
+      const bidInfo = await getSpotBid(GPU_TYPE_ID);
+      return { dataCenterId: null, networkVolumeId: null, bidInfo };
+    } catch (err) {
+      if (isCapacityError(err)) return { dataCenterId: null, networkVolumeId: null, bidInfo: null };
+      throw err;
+    }
+  }
+
+  // Volume-aware path: probe each DC, rank by stock, pick the best.
+  const rank: Record<string, number> = { High: 3, Medium: 2, Low: 1, None: 0 };
+  const probed: Array<{ dc: string; volumeId: string; bid: SpotBidInfo | null }> = [];
+  await Promise.all(
+    volumeDcs.map(async (dc) => {
+      const volumeId = volumes[dc]!;
+      try {
+        const bid = await getSpotBid(GPU_TYPE_ID, { dataCenterId: dc });
+        probed.push({ dc, volumeId, bid });
+      } catch (err) {
+        if (isCapacityError(err)) {
+          probed.push({ dc, volumeId, bid: null });
+        } else {
+          throw err;
+        }
+      }
+    }),
+  );
+
+  // Sort: DCs with stock first (by rank), then null-stock DCs (for on-demand only).
+  probed.sort((a, b) => {
+    const ar = a.bid ? (rank[a.bid.stockStatus] ?? 0) : -1;
+    const br = b.bid ? (rank[b.bid.stockStatus] ?? 0) : -1;
+    return br - ar;
+  });
+
+  log.info(
+    {
+      sessionId,
+      event: 'provision.placement.ranked',
+      dcs: probed.map((p) => ({ dc: p.dc, stock: p.bid?.stockStatus ?? 'none' })),
+    },
+    'DC placement ranked',
+  );
+
+  const top = probed[0];
+  if (!top) return null;
+  return { dataCenterId: top.dc, networkVolumeId: top.volumeId, bidInfo: top.bid };
+}
+
+/**
  * Tries spot first. Falls through to on-demand on capacity exhaustion if
  * `ONDEMAND_FALLBACK_ENABLED` is set and the policy allows it. Emits structured
  * events at each decision point so Workstream 4 can attribute cost by pod type.
+ *
+ * In baked mode with network volumes, pins both spot and on-demand attempts
+ * to the selected volume's DC so the pre-populated weights are reachable.
  */
 async function createPodWithFallback(
   sessionId: string,
@@ -315,7 +395,8 @@ async function createPodWithFallback(
 
   // Image + registry auth depend on provision mode.
   // ssh mode: stock runpod/pytorch base (Docker Hub, RUNPOD_REGISTRY_AUTH_ID).
-  // baked mode: GHCR image with deps + weights baked in (RUNPOD_GHCR_AUTH_ID).
+  // baked mode: GHCR image with deps baked in (RUNPOD_GHCR_AUTH_ID). Weights
+  // come from the attached network volume at /workspace/huggingface.
   const imageName = config.FLUX_PROVISION_MODE === 'baked'
     ? (config.FLUX_IMAGE || (() => { throw new Error('FLUX_IMAGE env var required when FLUX_PROVISION_MODE=baked'); })())
     : IMAGE_NAME;
@@ -323,29 +404,32 @@ async function createPodWithFallback(
     ? (config.RUNPOD_GHCR_AUTH_ID || undefined)
     : (config.RUNPOD_REGISTRY_AUTH_ID || undefined);
 
-  // ─── Try spot ─────────────────────────────────────────────────────────
+  // ─── Pick DC (+ volume if baked) ─────────────────────────────────────
   onStatus('Discovering spot bid...');
+  const target = await selectPlacement(sessionId);
+  if (!target) {
+    throw new Error('No RunPod DC has 5090 capacity right now (all volume-DCs exhausted)');
+  }
+  const bidInfo = target.bidInfo;
+  const dcField = target.dataCenterId ? { dataCenterId: target.dataCenterId } : {};
+  const volField = target.networkVolumeId ? { networkVolumeId: target.networkVolumeId } : {};
+
+  // ─── Try spot ─────────────────────────────────────────────────────────
   let spotCapacityExhausted = false;
   let fallbackReason: string | null = null;
 
-  let bidInfo: { minimumBidPrice: number; stockStatus: string } | null = null;
-  try {
-    bidInfo = await getSpotBid(GPU_TYPE_ID);
-  } catch (err) {
-    if (isCapacityError(err)) {
-      spotCapacityExhausted = true;
-      fallbackReason = 'spot_bid_unavailable';
-      log.info({ sessionId, event: 'provision.spot.capacityMiss', reason: fallbackReason }, 'No spot pricing — will try on-demand');
-    } else {
-      throw err;
-    }
-  }
-
-  if (bidInfo && (bidInfo.stockStatus === 'None' || bidInfo.stockStatus === 'Low')) {
+  if (!bidInfo) {
+    spotCapacityExhausted = true;
+    fallbackReason = 'spot_bid_unavailable';
+    log.info(
+      { sessionId, event: 'provision.spot.capacityMiss', reason: fallbackReason, dc: target.dataCenterId },
+      'No spot pricing — will try on-demand',
+    );
+  } else if (bidInfo.stockStatus === 'None' || bidInfo.stockStatus === 'Low') {
     spotCapacityExhausted = true;
     fallbackReason = `stock_${bidInfo.stockStatus.toLowerCase()}`;
     log.info(
-      { sessionId, event: 'provision.spot.capacityMiss', stockStatus: bidInfo.stockStatus },
+      { sessionId, event: 'provision.spot.capacityMiss', stockStatus: bidInfo.stockStatus, dc: target.dataCenterId },
       'Spot stock low — will try on-demand',
     );
   }
@@ -353,7 +437,15 @@ async function createPodWithFallback(
   if (!spotCapacityExhausted && bidInfo) {
     const bid = Math.round((bidInfo.minimumBidPrice + BID_HEADROOM) * 100) / 100;
     log.info(
-      { sessionId, event: 'provision.spot.attempt', minBid: bidInfo.minimumBidPrice, stockStatus: bidInfo.stockStatus, bid },
+      {
+        sessionId,
+        event: 'provision.spot.attempt',
+        minBid: bidInfo.minimumBidPrice,
+        stockStatus: bidInfo.stockStatus,
+        bid,
+        dc: target.dataCenterId,
+        volumeId: target.networkVolumeId,
+      },
       'Spot bid discovered',
     );
     onStatus('Creating pod...');
@@ -364,9 +456,11 @@ async function createPodWithFallback(
         gpuTypeId: GPU_TYPE_ID,
         bidPerGpu: bid,
         ...(authId ? { containerRegistryAuthId: authId } : {}),
+        ...dcField,
+        ...volField,
       });
       log.info(
-        { sessionId, event: 'provision.spot.success', podId, costPerHr, podType: 'spot' },
+        { sessionId, event: 'provision.spot.success', podId, costPerHr, podType: 'spot', dc: target.dataCenterId },
         'Pod created (spot)',
       );
       return { podId, podType: 'spot' };
@@ -375,7 +469,7 @@ async function createPodWithFallback(
         spotCapacityExhausted = true;
         fallbackReason = 'spot_create_capacity_error';
         log.info(
-          { sessionId, event: 'provision.spot.capacityMiss', err: (err as Error).message },
+          { sessionId, event: 'provision.spot.capacityMiss', err: (err as Error).message, dc: target.dataCenterId },
           'Spot createPod hit capacity error — will try on-demand',
         );
       } else {
@@ -400,7 +494,7 @@ async function createPodWithFallback(
   }
 
   log.info(
-    { sessionId, event: 'provision.fallback.triggered', reason: fallbackReason },
+    { sessionId, event: 'provision.fallback.triggered', reason: fallbackReason, dc: target.dataCenterId },
     'Switching to on-demand pod',
   );
   // Silent to the user — status says "Creating pod..." same as spot path.
@@ -412,15 +506,17 @@ async function createPodWithFallback(
       gpuTypeId: GPU_TYPE_ID,
       cloudType: 'SECURE',
       ...(authId ? { containerRegistryAuthId: authId } : {}),
+      ...dcField,
+      ...volField,
     });
     log.info(
-      { sessionId, event: 'provision.onDemand.success', podId, costPerHr, podType: 'onDemand' },
+      { sessionId, event: 'provision.onDemand.success', podId, costPerHr, podType: 'onDemand', dc: target.dataCenterId },
       'Pod created (on-demand)',
     );
     return { podId, podType: 'onDemand' };
   } catch (err) {
     log.error(
-      { sessionId, event: 'provision.onDemand.failed', err: (err as Error).message },
+      { sessionId, event: 'provision.onDemand.failed', err: (err as Error).message, dc: target.dataCenterId },
       'On-demand fallback also failed',
     );
     throw err;

@@ -1,18 +1,21 @@
-# Pre-baked FLUX.2-klein server image.
+# FLUX.2-klein server image (slim, weights-on-volume).
 #
-# Contains: torch 2.9.1 + cu128 (from base), diffusers from git, the full
-# FLUX.2-klein-4B BF16 safetensors tree (~13 GB), BFL's NVFP4 transformer
-# weights (~7 GB), and the server.py entrypoint.
+# Contains: torch 2.9.1 + cu128 (from base), diffusers from git, and the
+# server.py entrypoint. Weights are NOT baked — the orchestrator attaches a
+# pre-populated RunPod network volume at /workspace, so HF_HOME points there
+# and diffusers finds the FLUX.2-klein BF16 + NVFP4 weights from volume cache.
 #
-# Goal: cold start at ~60-90s (pod pull + server start + warmup) instead of
-# the 3-5 min that setup-flux-klein.sh took.
+# Result: ~2-3 GB compressed image (vs 28 GB when weights were baked). Pod
+# pulls in ~30-60s on a fresh host instead of timing out after 10 min.
 #
 # Published via .github/workflows/build-flux-image.yml to ghcr.io.
 
 FROM runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404
 
 ENV DEBIAN_FRONTEND=noninteractive
-ENV HF_HOME=/opt/huggingface
+# HF cache lives on the mounted network volume. See scripts/populate-volume.ts
+# for the one-time populate flow.
+ENV HF_HOME=/workspace/huggingface
 ENV HF_HUB_DISABLE_TELEMETRY=1
 
 # ─── Layer 1: OS deps ───────────────────────────────────────────────────
@@ -22,36 +25,16 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 # ─── Layer 2: Python deps ───────────────────────────────────────────────
-# requirements.txt is small and changes rarely; kept near the bottom of the
-# stack so edits to server.py don't invalidate it.
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt \
  && rm /tmp/requirements.txt
 
-# ─── Layer 3: FLUX.2-klein-4B BF16 weights (~13 GB) ─────────────────────
-# allow_patterns is critical — the HF repo has multiple transformer variants
-# (fp8, bnb, etc.). Without the allowlist we'd pull all of them (~40 GB).
-ARG FLUX_MODEL_REV=main
-RUN python -c "\
-from huggingface_hub import snapshot_download; \
-snapshot_download('black-forest-labs/FLUX.2-klein-4B', revision='${FLUX_MODEL_REV}', \
-  allow_patterns=['*.json','*.safetensors','*.txt','tokenizer*/*','text_encoder*/*','transformer/*','vae/*','scheduler/*','model_index.json']); \
-print('FLUX.2-klein-4B base weights cached')"
-
-# ─── Layer 4: NVFP4 transformer weights (~7 GB) ─────────────────────────
-ARG NVFP4_REV=main
-RUN python -c "\
-from huggingface_hub import hf_hub_download; \
-hf_hub_download('black-forest-labs/FLUX.2-klein-4b-nvfp4', 'flux-2-klein-4b-nvfp4.safetensors', revision='${NVFP4_REV}'); \
-print('NVFP4 weights cached')"
-
-# ─── Layer 5: server code ───────────────────────────────────────────────
-# Changes most often; last layer → fast incremental rebuilds.
+# ─── Layer 3: server code ───────────────────────────────────────────────
 WORKDIR /app
 COPY server.py pipeline.py config.py /app/
 
-# Offline mode — refuse network lookups once we're baked. Prevents a transient
-# DNS issue from triggering a re-download.
+# Offline mode — weights are on the network volume; refuse network lookups so
+# a transient DNS issue doesn't trigger a silent re-download.
 ENV HF_HUB_OFFLINE=1
 
 ENV FLUX_HOST=0.0.0.0

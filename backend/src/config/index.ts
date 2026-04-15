@@ -36,9 +36,37 @@ export interface AppConfig {
   readonly FLUX_IMAGE: string;
   /** RunPod registry credential ID for authenticated GHCR pulls. */
   readonly RUNPOD_GHCR_AUTH_ID: string;
+  /** Map of RunPod datacenter ID → network volume ID, each pre-populated with
+   * FLUX weights at /workspace/huggingface. Baked mode uses this to skip the
+   * 2-3 min model download on cold start. Parse from JSON env var, e.g.
+   * `{"EUR-NO-1":"49n6i3twuw","US-NC-1":"5vz7ubospw"}`. Empty = no volume path. */
+  readonly NETWORK_VOLUMES_BY_DC: Readonly<Record<string, string>>;
 
   readonly NODE_ENV: 'development' | 'production' | 'test';
   readonly LOG_LEVEL: 'fatal' | 'error' | 'warn' | 'info' | 'debug' | 'trace';
+}
+
+function parseVolumesMap(raw: string | undefined): Readonly<Record<string, string>> {
+  if (!raw) return Object.freeze({});
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(
+      `NETWORK_VOLUMES_BY_DC must be valid JSON (got: ${raw.slice(0, 60)}...)`,
+    );
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('NETWORK_VOLUMES_BY_DC must be a JSON object { "DC-ID": "volumeId" }');
+  }
+  const out: Record<string, string> = {};
+  for (const [dc, vol] of Object.entries(parsed)) {
+    if (typeof vol !== 'string' || !vol) {
+      throw new Error(`NETWORK_VOLUMES_BY_DC[${dc}] must be a non-empty string`);
+    }
+    out[dc] = vol;
+  }
+  return Object.freeze(out);
 }
 
 function validateConfig(): AppConfig {
@@ -109,6 +137,7 @@ function validateConfig(): AppConfig {
       (process.env['FLUX_PROVISION_MODE'] as 'ssh' | 'baked' | undefined) ?? 'ssh',
     FLUX_IMAGE: process.env['FLUX_IMAGE'] ?? '',
     RUNPOD_GHCR_AUTH_ID: process.env['RUNPOD_GHCR_AUTH_ID'] ?? '',
+    NETWORK_VOLUMES_BY_DC: parseVolumesMap(process.env['NETWORK_VOLUMES_BY_DC']),
     NODE_ENV: nodeEnv,
     LOG_LEVEL: logLevel,
   };

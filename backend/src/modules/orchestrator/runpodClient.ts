@@ -42,11 +42,19 @@ export interface SpotBidInfo {
  * on secure cloud. NOTE: the 5090 has no spot tier on community cloud, so we
  * always query secure. The `lowestPrice` RunPod query returns null for
  * `minimumBidPrice` if you don't pass `secureCloud: true`.
+ *
+ * When `dataCenterId` is passed, returns stock for just that DC (null if the
+ * DC has no 5090 capacity at the moment). Used by the network-volume path to
+ * pick a DC where both a populated volume AND spot capacity exist.
  */
-export async function getSpotBid(gpuTypeId: string): Promise<SpotBidInfo> {
+export async function getSpotBid(
+  gpuTypeId: string,
+  opts: { dataCenterId?: string } = {},
+): Promise<SpotBidInfo> {
+  const dcField = opts.dataCenterId ? `, dataCenterId: "${opts.dataCenterId}"` : '';
   const query = `query {
     gpuTypes(input: { id: "${gpuTypeId}" }) {
-      lowestPrice(input: { gpuCount: 1, secureCloud: true }) {
+      lowestPrice(input: { gpuCount: 1, secureCloud: true${dcField} }) {
         minimumBidPrice
         stockStatus
       }
@@ -57,7 +65,8 @@ export async function getSpotBid(gpuTypeId: string): Promise<SpotBidInfo> {
   }>(query);
   const lp = data.gpuTypes[0]?.lowestPrice;
   if (!lp || lp.minimumBidPrice == null) {
-    throw new Error(`No spot pricing available for ${gpuTypeId} in secure cloud`);
+    const where = opts.dataCenterId ? ` in ${opts.dataCenterId}` : ' in secure cloud';
+    throw new Error(`No spot pricing available for ${gpuTypeId}${where}`);
   }
   return {
     minimumBidPrice: lp.minimumBidPrice,
@@ -77,6 +86,12 @@ export interface CreateSpotPodInput {
   /** RunPod container registry credential ID for authenticated Docker Hub pulls.
    * Without this, pulls are anonymous and hit Docker Hub's 100-pull/6hr/IP rate limit. */
   containerRegistryAuthId?: string;
+  /** Pin placement to this datacenter. Required when networkVolumeId is set
+   * (volumes are DC-locked). */
+  dataCenterId?: string;
+  /** Attach this network volume at /workspace. Pre-populated with FLUX weights
+   * so the server skips the 2-3 min model download on cold start. */
+  networkVolumeId?: string;
 }
 
 export interface PodCreateResult {
@@ -96,6 +111,8 @@ export interface CreateOnDemandPodInput {
   minMemoryInGb?: number;
   minVcpuCount?: number;
   containerRegistryAuthId?: string;
+  dataCenterId?: string;
+  networkVolumeId?: string;
 }
 
 /**
@@ -114,9 +131,18 @@ export async function createOnDemandPod(input: CreateOnDemandPodInput): Promise<
     minMemoryInGb = 16,
     minVcpuCount = 4,
     containerRegistryAuthId,
+    dataCenterId,
+    networkVolumeId,
   } = input;
   const authField = containerRegistryAuthId
     ? `, containerRegistryAuthId: "${containerRegistryAuthId}"`
+    : '';
+  const dcField = dataCenterId ? `, dataCenterId: "${dataCenterId}"` : '';
+  // When a network volume is attached, RunPod requires an explicit mount path
+  // or container create fails with "field Target must not be empty". We always
+  // mount at /workspace — the Dockerfile's HF_HOME points into it.
+  const volField = networkVolumeId
+    ? `, networkVolumeId: "${networkVolumeId}", volumeMountPath: "/workspace"`
     : '';
   const query = `mutation {
     podFindAndDeployOnDemand(input: {
@@ -130,7 +156,7 @@ export async function createOnDemandPod(input: CreateOnDemandPodInput): Promise<
       minMemoryInGb: ${minMemoryInGb},
       minVcpuCount: ${minVcpuCount},
       ports: "${ports}",
-      startSsh: true${authField}
+      startSsh: true${authField}${dcField}${volField}
     }) { id desiredStatus costPerHr }
   }`;
   const data = await gql<{ podFindAndDeployOnDemand: { id: string; costPerHr: number } | null }>(query);
@@ -167,9 +193,18 @@ export async function createSpotPod(input: CreateSpotPodInput): Promise<PodCreat
     minMemoryInGb = 16,
     minVcpuCount = 4,
     containerRegistryAuthId,
+    dataCenterId,
+    networkVolumeId,
   } = input;
   const authField = containerRegistryAuthId
     ? `, containerRegistryAuthId: "${containerRegistryAuthId}"`
+    : '';
+  const dcField = dataCenterId ? `, dataCenterId: "${dataCenterId}"` : '';
+  // When a network volume is attached, RunPod requires an explicit mount path
+  // or container create fails with "field Target must not be empty". We always
+  // mount at /workspace — the Dockerfile's HF_HOME points into it.
+  const volField = networkVolumeId
+    ? `, networkVolumeId: "${networkVolumeId}", volumeMountPath: "/workspace"`
     : '';
   const query = `mutation {
     podRentInterruptable(input: {
@@ -184,7 +219,7 @@ export async function createSpotPod(input: CreateSpotPodInput): Promise<PodCreat
       minMemoryInGb: ${minMemoryInGb},
       minVcpuCount: ${minVcpuCount},
       ports: "${ports}",
-      startSsh: true${authField}
+      startSsh: true${authField}${dcField}${volField}
     }) { id desiredStatus costPerHr }
   }`;
   const data = await gql<{ podRentInterruptable: { id: string; costPerHr: number } | null }>(query);
