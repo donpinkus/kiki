@@ -36,10 +36,13 @@ public final class CanvasViewModel {
 
     public var hasBackgroundContent: Bool { container?.backgroundImage != nil }
     public private(set) var isInteracting = false
+    public private(set) var hasLassoSelection = false
 
     private weak var canvasView: DrawingCanvasView?
     private weak var container: RotatableCanvasContainer?
     private var pendingState: CanvasState?
+    private var preLassoSnapshot: CGImage?
+    private var lassoClosedPath: CGPath?
 
     public let canvasChanges: AsyncStream<SketchSnapshot>
     private let changesContinuation: AsyncStream<SketchSnapshot>.Continuation
@@ -93,6 +96,85 @@ public final class CanvasViewModel {
     public func selectEraser(width: CGFloat = 5) {
         canvasView?.currentTool = .eraser(width: width)
         container?.updateCursorSize(diameter: width, divisor: Self.penCursorDivisor)
+    }
+
+    public func selectLasso() {
+        canvasView?.currentTool = .lasso
+        container?.updateCursorSize(diameter: 0)
+    }
+
+    // MARK: - Lasso Selection
+
+    func handleLassoCompleted(path: CGPath, image: UIImage, bounds: CGRect, preSnapshot: CGImage?) {
+        preLassoSnapshot = preSnapshot
+        lassoClosedPath = path
+        container?.showLassoSelection(image: image, bounds: bounds, path: path)
+        hasLassoSelection = true
+    }
+
+    /// Transition from Phase A (floating selection) to Phase B (clip mask).
+    /// Called when switching from lasso tool to pen/eraser.
+    public func transitionToClipMode() {
+        guard let container, let canvasView else { return }
+        guard let result = container.commitLassoSelection() else { return }
+        canvasView.compositeSelectionImage(result.image, at: result.bounds, transform: result.transform)
+        if let path = lassoClosedPath {
+            canvasView.lassoClipPath = path
+            canvasView.setNeedsDisplay()
+        }
+        // hasLassoSelection stays true — clip mask is active
+    }
+
+    /// Clear the lasso entirely. Commits floating selection if active, removes clip mask.
+    /// Called by the "Clear Lasso" button.
+    public func clearLasso() {
+        guard let container, let canvasView else { return }
+
+        if container.hasActiveLassoSelection {
+            // Phase A: commit floating selection back to canvas
+            if let result = container.commitLassoSelection() {
+                canvasView.compositeSelectionImage(result.image, at: result.bounds, transform: result.transform)
+            }
+        }
+
+        // Push undo with pre/post snapshots
+        let postSnapshot = canvasView.persistentImageSnapshot
+        if let pre = preLassoSnapshot {
+            canvasView.undoStack.push(.lassoMove(preMoveSnapshot: pre, postMoveSnapshot: postSnapshot))
+        }
+
+        canvasView.lassoClipPath = nil
+        canvasView.setNeedsDisplay()
+        preLassoSnapshot = nil
+        lassoClosedPath = nil
+        hasLassoSelection = false
+        updateState()
+        handleDrawingChanged()
+    }
+
+    /// Cancel the lasso selection, restoring the original persistent bitmap.
+    public func cancelLassoSelection() {
+        guard let container, let canvasView else { return }
+        if container.hasActiveLassoSelection {
+            container.clearLassoSelection()
+        }
+        if let preSnapshot = preLassoSnapshot {
+            canvasView.restorePersistentImage(preSnapshot)
+        }
+        canvasView.lassoClipPath = nil
+        canvasView.setNeedsDisplay()
+        preLassoSnapshot = nil
+        lassoClosedPath = nil
+        hasLassoSelection = false
+        updateState()
+    }
+
+    /// Clear only the clip path (not the floating selection). Used when switching back to lasso tool.
+    public func clearLassoClipOnly() {
+        canvasView?.lassoClipPath = nil
+        canvasView?.setNeedsDisplay()
+        lassoClosedPath = nil
+        hasLassoSelection = false
     }
 
     public func undo() {
@@ -179,12 +261,21 @@ public final class CanvasViewModel {
 
         let rect = CGRect(origin: .zero, size: outputSize)
         let renderer = UIGraphicsImageRenderer(size: outputSize)
-        let image = renderer.image { _ in
+        let image = renderer.image { ctx in
             // Composite: white base → background image → custom canvas strokes
             UIColor.white.setFill()
             UIRectFill(rect)
             container?.backgroundImage?.draw(in: rect)
             canvasView.drawHierarchy(in: rect, afterScreenUpdates: true)
+
+            // Include floating lasso selection in stream capture
+            if let lasso = container?.lassoSelectionSnapshot() {
+                let cgCtx = ctx.cgContext
+                cgCtx.saveGState()
+                cgCtx.concatenate(lasso.transform)
+                lasso.image.draw(in: lasso.bounds)
+                cgCtx.restoreGState()
+            }
         }
 
         let strokeCount = canvasView.strokes.count

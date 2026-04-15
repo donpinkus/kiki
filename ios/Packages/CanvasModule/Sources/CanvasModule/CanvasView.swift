@@ -29,6 +29,12 @@ public struct CanvasView: UIViewRepresentable {
             }
         }
 
+        canvasView.onLassoCompleted = { [weak viewModel] path, image, bounds, preSnapshot in
+            Task { @MainActor in
+                viewModel?.handleLassoCompleted(path: path, image: image, bounds: bounds, preSnapshot: preSnapshot)
+            }
+        }
+
         // Wire container callbacks
         container.onTransformChanged = { [weak viewModel] in
             Task { @MainActor in

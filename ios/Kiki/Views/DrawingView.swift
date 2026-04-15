@@ -66,6 +66,25 @@ struct DrawingView: View {
                         .frame(maxHeight: .infinity, alignment: .leading)
                         .zIndex(3)
 
+                    if coordinator.canvasViewModel.hasLassoSelection {
+                        let topMargin = (geometry.size.height - canvasSide) / 2
+                        Button {
+                            coordinator.canvasViewModel.clearLasso()
+                        } label: {
+                            Label("Clear Lasso", systemImage: "xmark.circle.fill")
+                                .font(.subheadline.weight(.medium))
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.secondary)
+                        .controlSize(.small)
+                        .frame(width: canvasSide, height: max(topMargin, 0), alignment: .center)
+                        .frame(
+                            maxWidth: .infinity,
+                            alignment: coordinator.drawingLayout == .splitScreen ? .trailing : .center
+                        )
+                        .zIndex(10)
+                    }
+
                     if coordinator.drawingLayout == .splitScreen {
                         splitScreenResultPane(geometry: geometry)
                             .zIndex(2)

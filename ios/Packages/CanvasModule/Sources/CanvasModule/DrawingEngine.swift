@@ -159,6 +159,7 @@ public struct Stroke: Codable, Sendable, Identifiable {
 public enum ToolState: Sendable {
     case brush(BrushConfig)
     case eraser(width: CGFloat)
+    case lasso
 }
 
 // MARK: - Canvas Action (Undo)
@@ -177,4 +178,6 @@ public enum CanvasAction {
         prevStrokes: [Stroke], prevPersistent: CGImage?, prevBaseImage: CGImage?,
         prevBackground: UIImage?
     )
+    /// Lasso move: stores persistent bitmap before/after the move.
+    case lassoMove(preMoveSnapshot: CGImage?, postMoveSnapshot: CGImage?)
 }

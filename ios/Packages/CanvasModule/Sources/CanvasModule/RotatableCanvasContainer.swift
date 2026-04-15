@@ -27,6 +27,7 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
     private let ringView = ColorPickerRingView()
     /// Vertical offset applied so the ring sits above the finger instead of being covered.
     private static let ringFingerOffset: CGFloat = 80
+    private var lassoSelectionView: LassoSelectionView?
     private var cursorBaseWidth: CGFloat = 5
     private var cursorDivisor: CGFloat = 3.0
     private static let snapThreshold: CGFloat = 0.15 // ~8.6 degrees
@@ -74,6 +75,11 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
         cursorView.frame = CGRect(x: 0, y: 0, width: 5, height: 5)
         cursorView.isHidden = true
         transformView.addSubview(cursorView)
+
+        // Supply background image for lasso compositing
+        canvasView.backgroundImageProvider = { [weak self] in
+            self?.backgroundImageView.image
+        }
 
         // Color picker ring — sits on the container (not transformView) so it stays in screen-space
         // during canvas rotation/zoom. Hidden until the long-press fires.
@@ -228,6 +234,9 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
     }
 
     @objc private func handleLongPress(_ gesture: UILongPressGestureRecognizer) {
+        // No eyedropper during lasso selection
+        guard lassoSelectionView == nil else { return }
+
         switch gesture.state {
         case .began:
             let containerPoint = gesture.location(in: self)
@@ -348,6 +357,44 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
     public func updateCursorSize(diameter: CGFloat, divisor: CGFloat = 3.0) {
         cursorBaseWidth = diameter
         cursorDivisor = divisor
+    }
+
+    // MARK: - Lasso Selection
+
+    public func showLassoSelection(image: UIImage, bounds: CGRect, path: CGPath) {
+        let selectionView = LassoSelectionView(
+            selectionImage: image,
+            selectionBounds: bounds,
+            lassoPath: path
+        )
+        selectionView.frame = canvasView.frame
+        selectionView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        transformView.insertSubview(selectionView, aboveSubview: canvasView)
+        canvasView.isUserInteractionEnabled = false
+        lassoSelectionView = selectionView
+    }
+
+    public func commitLassoSelection() -> (image: UIImage, transform: CGAffineTransform, bounds: CGRect)? {
+        guard let selectionView = lassoSelectionView else { return nil }
+        let result = selectionView.commitTransform()
+        selectionView.removeFromSuperview()
+        lassoSelectionView = nil
+        canvasView.isUserInteractionEnabled = true
+        return result
+    }
+
+    public func clearLassoSelection() {
+        lassoSelectionView?.removeFromSuperview()
+        lassoSelectionView = nil
+        canvasView.isUserInteractionEnabled = true
+    }
+
+    public var hasActiveLassoSelection: Bool { lassoSelectionView != nil }
+
+    /// Non-destructive read of the current floating selection state for stream capture.
+    public func lassoSelectionSnapshot() -> (image: UIImage, transform: CGAffineTransform, bounds: CGRect)? {
+        guard let selectionView = lassoSelectionView else { return nil }
+        return selectionView.commitTransform()
     }
 
     public func resetTransform() {
