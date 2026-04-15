@@ -5,6 +5,7 @@ import { config } from './config/index.js';
 import { AppError, RateLimitedError } from './errors.js';
 import { healthRoute } from './routes/health.js';
 import { streamRoute } from './routes/stream.js';
+import { authRoute } from './routes/auth.js';
 import { authPlugin } from './modules/auth/index.js';
 import { start as startOrchestrator } from './modules/orchestrator/orchestrator.js';
 
@@ -35,6 +36,7 @@ await app.register(authPlugin);
 
 // --- Routes ---
 await app.register(healthRoute);
+await app.register(authRoute);
 await app.register(streamRoute);
 
 // --- Error handler ---

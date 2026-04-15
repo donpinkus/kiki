@@ -1,23 +1,56 @@
 import type { FastifyPluginAsync } from 'fastify';
 
+import { verifyAccess, type AccessClaims } from './jwt.js';
+
 /**
- * Mock auth plugin for Phase 1 prototype.
- *
- * In production this will validate JWTs from Sign in with Apple.
- * For now it passes through all requests with a placeholder user ID.
+ * Auth plugin — verifies Bearer tokens on HTTP routes. WebSocket handshake
+ * is authed explicitly inside the /v1/stream handler because @fastify/websocket
+ * + preHandler hooks interact awkwardly.
  */
+
+const PUBLIC_PATHS = new Set<string>([
+  '/health',
+  '/v1/auth/apple',
+  '/v1/auth/refresh',
+]);
+
+function isPublic(url: string): boolean {
+  // Strip query string before matching
+  const path = url.split('?')[0] ?? url;
+  return PUBLIC_PATHS.has(path);
+}
+
+export function extractBearer(authHeader: string | undefined): string | null {
+  if (!authHeader) return null;
+  const match = authHeader.match(/^Bearer\s+(.+)$/i);
+  return match?.[1] ?? null;
+}
+
 export const authPlugin: FastifyPluginAsync = async (fastify) => {
   fastify.decorateRequest('userId', '');
+  fastify.decorateRequest('authClaims', null);
 
-  fastify.addHook('onRequest', async (request, _reply) => {
-    // Skip auth for health check
-    if (request.url === '/health') {
+  fastify.addHook('preHandler', async (request, reply) => {
+    if (isPublic(request.url)) return;
+
+    // WebSocket upgrades also go through this hook. The /v1/stream route
+    // handles its own auth because we need to send an error message over
+    // the socket before closing, not just return a 401. Skip here.
+    if (request.url.startsWith('/v1/stream')) return;
+
+    const token = extractBearer(request.headers.authorization);
+    if (!token) {
+      await reply.code(401).send({ error: 'missing_token' });
       return;
     }
-
-    // TODO: Phase 2 — validate JWT from Authorization: Bearer <token>
-    // For now, assign a placeholder user ID
-    request.userId = 'mock-user-id';
+    try {
+      const claims = await verifyAccess(token);
+      request.userId = claims.sub;
+      request.authClaims = claims;
+    } catch {
+      await reply.code(401).send({ error: 'invalid_token' });
+      return;
+    }
   });
 };
 
@@ -25,5 +58,6 @@ export const authPlugin: FastifyPluginAsync = async (fastify) => {
 declare module 'fastify' {
   interface FastifyRequest {
     userId: string;
+    authClaims: AccessClaims | null;
   }
 }
