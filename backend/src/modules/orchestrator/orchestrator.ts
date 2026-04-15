@@ -19,12 +19,15 @@ import type { FastifyBaseLogger } from 'fastify';
 
 import { config } from '../../config/index.js';
 import {
+  createOnDemandPod,
   createSpotPod,
   getPod,
   getSpotBid,
+  isCapacityError,
   listPodsByPrefix,
   terminatePod,
 } from './runpodClient.js';
+import { getPolicy } from './policy.js';
 
 // ────────────────────────────────────────────────────────────────────────────
 // Types
@@ -32,10 +35,13 @@ import {
 
 export type SessionStatus = 'provisioning' | 'ready' | 'terminated';
 
+export type PodType = 'spot' | 'onDemand';
+
 export interface Session {
   sessionId: string;
   podId: string | null; // null while provisioning
   podUrl: string | null; // wss URL, set once ready
+  podType: PodType | null; // null while provisioning
   status: SessionStatus;
   createdAt: number;
   lastActivityAt: number;
@@ -51,7 +57,10 @@ const registry = new Map<string, Session>();
 const POD_PREFIX = 'kiki-session-';
 const GPU_TYPE_ID = 'NVIDIA GeForce RTX 5090';
 const IMAGE_NAME = 'runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404';
-const BID_HEADROOM = 0.02;
+// Headroom above the current spot floor. Larger headroom = fewer outbids =
+// fewer needless fallbacks to on-demand. 0.05 costs ~$0.03/hr more than the
+// 0.02 default on a typical bid, cheaper than one on-demand fallback.
+const BID_HEADROOM = 0.05;
 
 const IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 const REAPER_INTERVAL_MS = 60 * 1000;
@@ -121,6 +130,7 @@ export async function getOrProvisionPod(
     sessionId,
     podId: null,
     podUrl: null,
+    podType: null,
     status: 'provisioning',
     createdAt: Date.now(),
     lastActivityAt: Date.now(),
@@ -135,6 +145,7 @@ export async function getOrProvisionPod(
         const result = await provision(sessionId, onStatus);
         session.podId = result.podId;
         session.podUrl = result.podUrl;
+        session.podType = result.podType;
         session.status = 'ready';
         session.lastActivityAt = Date.now();
         session.provisionPromise = null;
@@ -253,30 +264,12 @@ async function reconcileOrphanPods(): Promise<void> {
 interface ProvisionResult {
   podId: string;
   podUrl: string;
+  podType: PodType;
 }
 
 async function provision(sessionId: string, onStatus: (msg: string) => void): Promise<ProvisionResult> {
-  // 1. Discover current spot bid
-  onStatus('Discovering spot bid...');
-  const bidInfo = await getSpotBid(GPU_TYPE_ID);
-  if (bidInfo.stockStatus === 'None' || bidInfo.stockStatus === 'Low') {
-    throw new Error(`5090 spot stock is '${bidInfo.stockStatus}' — try again shortly`);
-  }
-  const bid = Math.round((bidInfo.minimumBidPrice + BID_HEADROOM) * 100) / 100;
-  log.info({ sessionId, minBid: bidInfo.minimumBidPrice, bid }, 'Spot bid discovered');
-
-  // 2. Create pod
-  onStatus('Creating pod...');
-  const podName = `${POD_PREFIX}${sessionId.slice(0, 16)}`;
-  const authId = config.RUNPOD_REGISTRY_AUTH_ID || undefined;
-  const { id: podId } = await createSpotPod({
-    name: podName,
-    imageName: IMAGE_NAME,
-    gpuTypeId: GPU_TYPE_ID,
-    bidPerGpu: bid,
-    ...(authId ? { containerRegistryAuthId: authId } : {}),
-  });
-  log.info({ sessionId, podId, authenticated: !!authId }, 'Pod created');
+  // 1 + 2. Create a pod — spot first, on-demand fallback if capacity exhausted
+  const { podId, podType } = await createPodWithFallback(sessionId, onStatus);
 
   // 3. Wait for SSH
   onStatus('Waiting for pod to boot...');
@@ -300,9 +293,125 @@ async function provision(sessionId: string, onStatus: (msg: string) => void): Pr
 
   // 6. Build WebSocket URL and return
   const podUrl = `wss://${podId}-8766.proxy.runpod.net/ws`;
-  log.info({ sessionId, podId, podUrl }, 'Pod ready');
+  log.info({ sessionId, podId, podUrl, podType }, 'Pod ready');
   onStatus('Ready');
-  return { podId, podUrl };
+  return { podId, podUrl, podType };
+}
+
+/**
+ * Tries spot first. Falls through to on-demand on capacity exhaustion if
+ * `ONDEMAND_FALLBACK_ENABLED` is set and the policy allows it. Emits structured
+ * events at each decision point so Workstream 4 can attribute cost by pod type.
+ */
+async function createPodWithFallback(
+  sessionId: string,
+  onStatus: (msg: string) => void,
+): Promise<{ podId: string; podType: PodType }> {
+  const podName = `${POD_PREFIX}${sessionId.slice(0, 16)}`;
+  const authId = config.RUNPOD_REGISTRY_AUTH_ID || undefined;
+
+  // ─── Try spot ─────────────────────────────────────────────────────────
+  onStatus('Discovering spot bid...');
+  let spotCapacityExhausted = false;
+  let fallbackReason: string | null = null;
+
+  let bidInfo: { minimumBidPrice: number; stockStatus: string } | null = null;
+  try {
+    bidInfo = await getSpotBid(GPU_TYPE_ID);
+  } catch (err) {
+    if (isCapacityError(err)) {
+      spotCapacityExhausted = true;
+      fallbackReason = 'spot_bid_unavailable';
+      log.info({ sessionId, event: 'provision.spot.capacityMiss', reason: fallbackReason }, 'No spot pricing — will try on-demand');
+    } else {
+      throw err;
+    }
+  }
+
+  if (bidInfo && (bidInfo.stockStatus === 'None' || bidInfo.stockStatus === 'Low')) {
+    spotCapacityExhausted = true;
+    fallbackReason = `stock_${bidInfo.stockStatus.toLowerCase()}`;
+    log.info(
+      { sessionId, event: 'provision.spot.capacityMiss', stockStatus: bidInfo.stockStatus },
+      'Spot stock low — will try on-demand',
+    );
+  }
+
+  if (!spotCapacityExhausted && bidInfo) {
+    const bid = Math.round((bidInfo.minimumBidPrice + BID_HEADROOM) * 100) / 100;
+    log.info(
+      { sessionId, event: 'provision.spot.attempt', minBid: bidInfo.minimumBidPrice, stockStatus: bidInfo.stockStatus, bid },
+      'Spot bid discovered',
+    );
+    onStatus('Creating pod...');
+    try {
+      const { id: podId, costPerHr } = await createSpotPod({
+        name: podName,
+        imageName: IMAGE_NAME,
+        gpuTypeId: GPU_TYPE_ID,
+        bidPerGpu: bid,
+        ...(authId ? { containerRegistryAuthId: authId } : {}),
+      });
+      log.info(
+        { sessionId, event: 'provision.spot.success', podId, costPerHr, podType: 'spot' },
+        'Pod created (spot)',
+      );
+      return { podId, podType: 'spot' };
+    } catch (err) {
+      if (isCapacityError(err)) {
+        spotCapacityExhausted = true;
+        fallbackReason = 'spot_create_capacity_error';
+        log.info(
+          { sessionId, event: 'provision.spot.capacityMiss', err: (err as Error).message },
+          'Spot createPod hit capacity error — will try on-demand',
+        );
+      } else {
+        throw err;
+      }
+    }
+  }
+
+  // ─── Fall through to on-demand ───────────────────────────────────────
+  if (!config.ONDEMAND_FALLBACK_ENABLED) {
+    throw new Error(
+      `5090 spot capacity exhausted (${fallbackReason ?? 'unknown'}); on-demand fallback disabled`,
+    );
+  }
+
+  // Policy gate — v1 allows everyone. Post-WS8, free-tier users may stay spot-only.
+  const allowed = await getPolicy().allowsOnDemand({ userId: sessionId, source: 'jwt' });
+  if (!allowed) {
+    throw new Error(
+      `5090 spot capacity exhausted (${fallbackReason ?? 'unknown'}); on-demand not allowed by policy`,
+    );
+  }
+
+  log.info(
+    { sessionId, event: 'provision.fallback.triggered', reason: fallbackReason },
+    'Switching to on-demand pod',
+  );
+  // Silent to the user — status says "Creating pod..." same as spot path.
+  onStatus('Creating pod...');
+  try {
+    const { id: podId, costPerHr } = await createOnDemandPod({
+      name: podName,
+      imageName: IMAGE_NAME,
+      gpuTypeId: GPU_TYPE_ID,
+      cloudType: 'SECURE',
+      ...(authId ? { containerRegistryAuthId: authId } : {}),
+    });
+    log.info(
+      { sessionId, event: 'provision.onDemand.success', podId, costPerHr, podType: 'onDemand' },
+      'Pod created (on-demand)',
+    );
+    return { podId, podType: 'onDemand' };
+  } catch (err) {
+    log.error(
+      { sessionId, event: 'provision.onDemand.failed', err: (err as Error).message },
+      'On-demand fallback also failed',
+    );
+    throw err;
+  }
 }
 
 interface SshInfo {

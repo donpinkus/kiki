@@ -84,6 +84,78 @@ export interface PodCreateResult {
   costPerHr: number;
 }
 
+export interface CreateOnDemandPodInput {
+  name: string;
+  imageName: string;
+  gpuTypeId: string;
+  /** SECURE is Blackwell-reliable (newest drivers). COMMUNITY is cheaper
+   * (~$0.69/hr vs $0.99/hr) but older driver fleet → NVFP4 compat risk. */
+  cloudType?: 'SECURE' | 'COMMUNITY';
+  ports?: string;
+  containerDiskInGb?: number;
+  minMemoryInGb?: number;
+  minVcpuCount?: number;
+  containerRegistryAuthId?: string;
+}
+
+/**
+ * On-demand equivalent of `createSpotPod` — uses `podFindAndDeploy` so the pod
+ * is billed at on-demand rate and will not be preempted by capacity shifts.
+ * Called by the orchestrator as a fallback when spot capacity is exhausted.
+ */
+export async function createOnDemandPod(input: CreateOnDemandPodInput): Promise<PodCreateResult> {
+  const {
+    name,
+    imageName,
+    gpuTypeId,
+    cloudType = 'SECURE',
+    ports = '8766/http,22/tcp',
+    containerDiskInGb = 40,
+    minMemoryInGb = 16,
+    minVcpuCount = 4,
+    containerRegistryAuthId,
+  } = input;
+  const authField = containerRegistryAuthId
+    ? `, containerRegistryAuthId: "${containerRegistryAuthId}"`
+    : '';
+  const query = `mutation {
+    podFindAndDeployOnDemand(input: {
+      name: "${name}",
+      imageName: "${imageName}",
+      gpuTypeId: "${gpuTypeId}",
+      gpuCount: 1,
+      cloudType: ${cloudType},
+      volumeInGb: 0,
+      containerDiskInGb: ${containerDiskInGb},
+      minMemoryInGb: ${minMemoryInGb},
+      minVcpuCount: ${minVcpuCount},
+      ports: "${ports}",
+      startSsh: true${authField}
+    }) { id desiredStatus costPerHr }
+  }`;
+  const data = await gql<{ podFindAndDeployOnDemand: { id: string; costPerHr: number } | null }>(query);
+  if (!data.podFindAndDeployOnDemand) {
+    throw new Error(`RunPod returned no pod (on-demand ${cloudType.toLowerCase()} capacity also unavailable)`);
+  }
+  return data.podFindAndDeployOnDemand;
+}
+
+/**
+ * True if the error message looks like a RunPod capacity-exhaustion signal,
+ * which is distinct from auth errors, 500s, or user bugs. Used by the
+ * orchestrator to decide whether to fall through from spot to on-demand.
+ */
+export function isCapacityError(err: unknown): boolean {
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  return (
+    msg.includes('no longer any instances available') ||
+    msg.includes('no instances available') ||
+    msg.includes('no pod (spot capacity likely unavailable)') ||
+    msg.includes('no spot pricing available') ||
+    msg.includes('stock')
+  );
+}
+
 export async function createSpotPod(input: CreateSpotPodInput): Promise<PodCreateResult> {
   const {
     name,

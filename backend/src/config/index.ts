@@ -24,6 +24,11 @@ export interface AppConfig {
   /** Free GPU-seconds granted per user before they must subscribe. */
   readonly FREE_TIER_SECONDS: number;
 
+  // ─── On-demand fallback (Workstream 2) ────────────────────────────────
+  /** When true, orchestrator falls back to on-demand pods when spot capacity
+   * is exhausted. Default false so the flag can be flipped on per deploy. */
+  readonly ONDEMAND_FALLBACK_ENABLED: boolean;
+
   readonly NODE_ENV: 'development' | 'production' | 'test';
   readonly LOG_LEVEL: 'fatal' | 'error' | 'warn' | 'info' | 'debug' | 'trace';
 }
@@ -91,6 +96,7 @@ function validateConfig(): AppConfig {
     APPLE_BUNDLE_ID: appleBundleId,
     AUTH_REQUIRED: process.env['AUTH_REQUIRED'] === 'true',
     FREE_TIER_SECONDS: Number(process.env['FREE_TIER_SECONDS'] ?? 3600),
+    ONDEMAND_FALLBACK_ENABLED: process.env['ONDEMAND_FALLBACK_ENABLED'] === 'true',
     NODE_ENV: nodeEnv,
     LOG_LEVEL: logLevel,
   };
