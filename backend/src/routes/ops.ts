@@ -1,5 +1,5 @@
 /**
- * Ops endpoints for cost monitoring (WS4) and future observability (WS6).
+ * Ops endpoints for cost monitoring (WS4) and observability (WS6).
  *
  * All endpoints gated by `X-Ops-Key` shared-secret header. If OPS_API_KEY
  * is unset, the route plugin registers but every request returns 401.
@@ -12,6 +12,7 @@ import {
   getHistory,
   isValidOpsKey,
 } from '../modules/orchestrator/costMonitor.js';
+import { snapshot as metricsSnapshot } from '../modules/orchestrator/metrics.js';
 
 export async function opsRoute(app: FastifyInstance): Promise<void> {
   // Shared auth preHandler for all ops endpoints
@@ -35,5 +36,9 @@ export async function opsRoute(app: FastifyInstance): Promise<void> {
 
   app.get('/v1/ops/cost/history', async (_request, reply) => {
     return reply.send(getHistory());
+  });
+
+  app.get('/v1/ops/metrics', async (_request, reply) => {
+    return reply.send(metricsSnapshot());
   });
 }

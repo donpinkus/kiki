@@ -31,6 +31,7 @@ import {
 } from './runpodClient.js';
 import { getPolicy } from './policy.js';
 import { notifyPodCreated, notifyPodProgress, notifyPodTerminated } from './costMonitor.js';
+import { incrementCounter, observeHistogram, setGauge, classifyProvisionError } from './metrics.js';
 
 // ────────────────────────────────────────────────────────────────────────────
 // Types
@@ -187,6 +188,7 @@ export async function getOrProvisionPod(
 
   // 4. Fresh provision — claim in Redis + start
   const now = Date.now();
+  incrementCounter('provision_start_total');
   await writeSession({
     sessionId,
     podId: null,
@@ -205,6 +207,9 @@ export async function getOrProvisionPod(
       try {
         const result = await provision(sessionId, onStatus);
         provisionedPodId = result.podId;
+        const elapsedMs = Date.now() - now;
+        incrementCounter('provision_success_total');
+        observeHistogram('provision_total_ms', elapsedMs);
         await writeSession({
           sessionId,
           podId: result.podId,
@@ -219,7 +224,11 @@ export async function getOrProvisionPod(
         releaseSemaphore();
       }
     } catch (err) {
-      log.error({ sessionId, err }, 'Provision failed');
+      const elapsedMs = Date.now() - now;
+      const category = classifyProvisionError(err as Error);
+      incrementCounter('provision_failed_total', { category });
+      observeHistogram('provision_failed_ms', elapsedMs);
+      log.error({ sessionId, err, category, elapsedMs }, 'Provision failed');
       if (provisionedPodId) {
         notifyPodProgress(provisionedPodId, `❌ **Failed:** ${(err as Error).message}`);
         terminatePod(provisionedPodId).catch((e) =>
@@ -273,14 +282,24 @@ export async function start(logger: FastifyBaseLogger): Promise<void> {
 // ────────────────────────────────────────────────────────────────────────────
 
 async function acquireSemaphore(onStatus: (msg: string) => void): Promise<void> {
+  setGauge('semaphore_active', activeProvisions);
+  setGauge('semaphore_queue_depth', semaphoreWaiters.length);
   if (activeProvisions < MAX_CONCURRENT_PROVISIONS) {
     activeProvisions++;
+    setGauge('semaphore_active', activeProvisions);
     return;
   }
-  log.info({ active: activeProvisions, cap: MAX_CONCURRENT_PROVISIONS }, 'Provision queued');
-  onStatus(`Waiting for GPU (${activeProvisions - MAX_CONCURRENT_PROVISIONS + 1} in queue)...`);
+  const queuedAt = Date.now();
+  const queueDepth = semaphoreWaiters.length + 1;
+  log.info({ active: activeProvisions, cap: MAX_CONCURRENT_PROVISIONS, queueDepth }, 'Provision queued');
+  onStatus(`Waiting for GPU (${queueDepth} in queue)...`);
   await new Promise<void>((resolve) => semaphoreWaiters.push(resolve));
   activeProvisions++;
+  const waitedMs = Date.now() - queuedAt;
+  incrementCounter('semaphore_wait_total');
+  observeHistogram('semaphore_wait_ms', waitedMs);
+  setGauge('semaphore_active', activeProvisions);
+  setGauge('semaphore_queue_depth', semaphoreWaiters.length);
 }
 
 function releaseSemaphore(): void {
@@ -317,7 +336,11 @@ async function runReaper(): Promise<void> {
 
         const podId = data['podId']!;
         const sessionId = data['sessionId']!;
-        log.info({ sessionId, podId, idleMs }, 'Reaping idle pod');
+        const createdAt = Number(data['createdAt'] ?? 0);
+        const lifetimeMs = createdAt > 0 ? now - createdAt : 0;
+        log.info({ sessionId, podId, idleMs, lifetimeMs }, 'Reaping idle pod');
+        incrementCounter('session_reaped_total');
+        if (lifetimeMs > 0) observeHistogram('session_lifetime_ms', lifetimeMs);
         notifyPodTerminated(podId, `idle ${Math.round(idleMs / 1000)}s`);
         terminatePod(podId)
           .then(() => redis.del(key))
@@ -403,19 +426,23 @@ interface ProvisionResult {
 }
 
 async function provision(sessionId: string, onStatus: (msg: string) => void): Promise<ProvisionResult> {
+  const t0 = Date.now();
+
   // 1 + 2. Create a pod — spot first, on-demand fallback if capacity exhausted
   const { podId, podType } = await createPodWithFallback(sessionId, onStatus);
-
-  const provisionStart = Date.now();
+  const podCreateMs = Date.now() - t0;
+  incrementCounter('pod_created_total', { type: podType });
+  observeHistogram('pod_creation_ms', podCreateMs);
 
   // 3. Wait for the container to boot. In baked mode the image is slim (~2-3
   // GB) but the very first pull to a host in a DC can still take a few minutes.
-  // Split the wait so the user sees "Pulling container image..." (runtime null)
-  // vs "Loading AI model..." (container up, server initializing).
+  const pullStart = Date.now();
   onStatus('Pulling container image...');
   notifyPodProgress(podId, '⏳ Pulling container image...');
   await waitForRuntime(podId, onStatus);
-  notifyPodProgress(podId, `📦 Container runtime up (${Math.round((Date.now() - provisionStart) / 1000)}s)`);
+  const pullMs = Date.now() - pullStart;
+  observeHistogram('container_pull_ms', pullMs);
+  notifyPodProgress(podId, `📦 Container runtime up (${Math.round(pullMs / 1000)}s)`);
 
   if (config.FLUX_PROVISION_MODE !== 'baked') {
     const sshInfo = await waitForSsh(podId);
@@ -433,18 +460,20 @@ async function provision(sessionId: string, onStatus: (msg: string) => void): Pr
   }
 
   // 4. Poll /health via RunPod proxy until the FLUX server reports ready
+  const healthStart = Date.now();
   onStatus('Loading AI model & warming up...');
   notifyPodProgress(podId, '🧠 Loading AI model & warming up...');
   const healthUrl = `https://${podId}-8766.proxy.runpod.net/health`;
   await waitForHealth(healthUrl);
+  observeHistogram('health_ready_ms', Date.now() - healthStart);
 
-  const totalSeconds = Math.round((Date.now() - provisionStart) / 1000);
+  const totalMs = Date.now() - t0;
 
   // 5. Build WebSocket URL and return
   const podUrl = `wss://${podId}-8766.proxy.runpod.net/ws`;
-  log.info({ sessionId, podId, podUrl, podType, mode: config.FLUX_PROVISION_MODE }, 'Pod ready');
+  log.info({ sessionId, podId, podUrl, podType, totalMs, mode: config.FLUX_PROVISION_MODE }, 'Pod ready');
   onStatus('Ready');
-  notifyPodProgress(podId, `✅ **Pod ready** (${totalSeconds}s total)`);
+  notifyPodProgress(podId, `✅ **Pod ready** (${Math.round(totalMs / 1000)}s total)`);
   return { podId, podUrl, podType };
 }
 

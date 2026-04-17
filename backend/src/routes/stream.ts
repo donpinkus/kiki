@@ -15,6 +15,7 @@ import {
   releaseActivePod,
 } from '../modules/auth/rateLimiter.js';
 import { checkEntitlement } from '../modules/entitlement/index.js';
+import { incrementCounter } from '../modules/orchestrator/metrics.js';
 
 /**
  * WebSocket relay to a per-user FLUX.2-klein pod.
@@ -244,6 +245,12 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
 
         relay.onClose((code, reason) => {
           request.log.info({ userId, code, reason }, 'Upstream closed');
+          // Preemption heuristic: abnormal close codes from upstream while session
+          // was ready suggest RunPod preempted the spot pod.
+          const preemptionCodes = [1006, 1011, 1012, 1013, 1014];
+          if (preemptionCodes.includes(code)) {
+            incrementCounter('session_preempted_total');
+          }
           if (socket.readyState === socket.OPEN) {
             socket.send(
               JSON.stringify({ type: 'error', message: 'Pod terminated (possible spot preemption)' }),
@@ -300,6 +307,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
 
       socket.on('close', () => {
         request.log.info({ userId }, 'Stream client disconnected');
+        incrementCounter('session_client_disconnect_total');
         sessionClosed(userId);
         if (provisionRegistered) {
           releaseActivePod(userId);
