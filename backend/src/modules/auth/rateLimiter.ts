@@ -15,9 +15,9 @@ interface ProvisionHistory {
   activePodCount: number;
 }
 
-const MAX_ACTIVE_PODS_PER_USER = 1;
-const MAX_PROVISIONS_PER_HOUR = 5;
-const MAX_PROVISIONS_PER_24H = 30;
+const MAX_ACTIVE_PODS_PER_USER = Number(process.env['RATE_LIMIT_MAX_ACTIVE_PODS'] ?? 1);
+const MAX_PROVISIONS_PER_HOUR = Number(process.env['RATE_LIMIT_MAX_PER_HOUR'] ?? 20);
+const MAX_PROVISIONS_PER_24H = Number(process.env['RATE_LIMIT_MAX_PER_DAY'] ?? 100);
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;

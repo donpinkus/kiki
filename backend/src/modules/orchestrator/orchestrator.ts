@@ -256,6 +256,12 @@ export function touch(sessionId: string): void {
     .catch((err) => log.warn({ err: (err as Error).message, sessionId }, 'touch failed'));
 }
 
+/** Check if a user already has a ready pod — used to skip rate limiting on reconnect. */
+export async function hasReadySession(sessionId: string): Promise<boolean> {
+  const session = await readSession(sessionId);
+  return session?.status === 'ready' && !!session.podUrl;
+}
+
 export function sessionClosed(sessionId: string): void {
   // Don't terminate — user may reconnect. Just log. Reaper handles the timeout.
   log.info(

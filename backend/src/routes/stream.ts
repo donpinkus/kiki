@@ -6,6 +6,7 @@ import { extractBearer } from '../modules/auth/index.js';
 import { verifyAccess } from '../modules/auth/jwt.js';
 import {
   getOrProvisionPod,
+  hasReadySession,
   touch,
   sessionClosed,
 } from '../modules/orchestrator/orchestrator.js';
@@ -178,7 +179,11 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       // Entitlement check — only applies when authenticated via JWT. Legacy
       // sessions bypass entitlement to keep the old iPad binaries working
       // during the rollout window.
-      if (source === 'jwt') {
+      // Skip rate limiting if the user is reconnecting to an existing ready pod.
+      // Only apply rate limits + register provision for genuinely new provisions.
+      const isReconnect = await hasReadySession(userId);
+
+      if (source === 'jwt' && !isReconnect) {
         const entitlement = checkEntitlement(userId);
         if (!entitlement.allowed) {
           socket.send(
@@ -211,8 +216,8 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       let provisionRegistered = false;
 
       try {
-        // Only count against the per-user quota for JWT-authed sessions.
-        if (source === 'jwt') {
+        // Only count against the per-user quota for genuinely new provisions.
+        if (source === 'jwt' && !isReconnect) {
           registerProvision(userId);
           provisionRegistered = true;
         }
