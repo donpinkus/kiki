@@ -38,6 +38,8 @@ public final class MetalCanvasView: UIView {
     /// True when loadStrokes was called before the canvas texture was ready.
     /// layoutSubviews checks this flag and replays after resizeCanvas.
     private var needsStrokeReplay = false
+    /// Canvas bitmap deferred from loadDrawingData until layout is ready.
+    private var pendingCanvasImage: CGImage?
 
     // MARK: - Stroke State
 
@@ -127,9 +129,11 @@ public final class MetalCanvasView: UIView {
         metalLayer.drawableSize = CGSize(width: pixelW, height: pixelH)
         renderer.resizeCanvas(width: pixelW, height: pixelH)
 
-        // If loadStrokes was called before layout (canvas texture didn't exist
-        // yet), replay the strokes now that the texture is allocated.
-        if needsStrokeReplay {
+        // If drawing data was loaded before layout (canvas texture didn't exist
+        // yet), apply it now that the texture is allocated.
+        if pendingCanvasImage != nil {
+            applyPendingCanvasImage()
+        } else if needsStrokeReplay {
             replayPendingStrokes()
         }
 
@@ -346,7 +350,8 @@ public final class MetalCanvasView: UIView {
         if case .eraser = currentTool {
             // Eraser stamps were already applied directly to canvas during touchesMoved.
             // Undo snapshot was pushed at touchesBegan. Nothing to flatten.
-            strokes.append(stroke)
+            // Don't append to strokes — eraser operations are baked into the canvas
+            // bitmap and saved/restored via PNG, not stroke replay.
             hasContent = true
             onDrawingChanged?()
             isDirty = true
@@ -438,23 +443,26 @@ public final class MetalCanvasView: UIView {
         isDirty = true
     }
 
-    /// Export stroke data as JSON for persistence.
+    /// Export the canvas as PNG data for persistence. This captures the exact
+    /// pixel state including eraser holes and blended edges — no stroke replay
+    /// needed on restore.
     public func exportStrokeData() -> Data? {
-        guard !strokes.isEmpty else { return nil }
-        return try? JSONEncoder().encode(strokes)
+        guard hasContent || !strokes.isEmpty else { return nil }
+        guard let cgImage = renderer.canvasToCGImage() else { return nil }
+        return UIImage(cgImage: cgImage).pngData()
     }
 
-    /// Load strokes from saved data and replay them into the canvas texture.
-    /// If the Metal canvas texture isn't allocated yet (view not laid out),
-    /// replay is deferred to `layoutSubviews`.
+    /// Load strokes from saved data. Accepts either:
+    /// - Canvas bitmap PNG (current format — pixel-perfect restore via bakeImage)
+    /// - Stroke JSON (legacy format — replayed through stamp pipeline)
     public func loadStrokes(_ savedStrokes: [Stroke]) {
+        // This method is kept for API compat but the primary persistence path
+        // now saves/loads canvas PNG via exportStrokeData/loadDrawingData.
         strokes = savedStrokes
         hasContent = !strokes.isEmpty
         needsStrokeReplay = hasContent
 
         guard renderer.hasCanvas else {
-            // Canvas texture doesn't exist yet — layoutSubviews will call
-            // replayPendingStrokes() after resizeCanvas().
             isDirty = true
             return
         }
@@ -462,8 +470,39 @@ public final class MetalCanvasView: UIView {
         replayPendingStrokes()
     }
 
-    /// Replay all stored strokes into the canvas texture. Called from
-    /// loadStrokes (if canvas is ready) or layoutSubviews (deferred case).
+    /// Load canvas from PNG bitmap data (primary persistence path).
+    /// If the canvas texture isn't allocated yet, defers to layoutSubviews.
+    public func loadDrawingData(_ data: Data) {
+        guard let image = UIImage(data: data)?.cgImage else {
+            // Not a valid image — try legacy stroke JSON path.
+            if let strokes = try? JSONDecoder().decode([Stroke].self, from: data) {
+                loadStrokes(strokes)
+            }
+            return
+        }
+        pendingCanvasImage = image
+        hasContent = true
+        needsStrokeReplay = false // bitmap load, not stroke replay
+
+        guard renderer.hasCanvas else {
+            isDirty = true
+            return
+        }
+
+        applyPendingCanvasImage()
+    }
+
+    /// Apply a deferred canvas bitmap load.
+    private func applyPendingCanvasImage() {
+        guard let image = pendingCanvasImage else { return }
+        pendingCanvasImage = nil
+        renderer.loadImageIntoCanvas(image)
+        undoSnapshots.removeAll()
+        redoSnapshots.removeAll()
+        isDirty = true
+    }
+
+    /// Replay all stored strokes into the canvas texture (legacy path).
     private func replayPendingStrokes() {
         guard needsStrokeReplay, !strokes.isEmpty, renderer.hasCanvas else { return }
         needsStrokeReplay = false

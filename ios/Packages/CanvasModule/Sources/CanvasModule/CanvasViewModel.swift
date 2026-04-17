@@ -77,8 +77,9 @@ public final class CanvasViewModel {
         // Apply pending state from a saved drawing (set via setPendingState before navigation).
         // This runs BEFORE callbacks are wired in makeUIView, so no handleDrawingChanged fires.
         if let state = pendingState {
-            if let strokes = try? JSONDecoder().decode([Stroke].self, from: state.drawingData) {
-                canvasView.loadStrokes(strokes)
+            if !state.drawingData.isEmpty {
+                // loadDrawingData auto-detects format: PNG bitmap (current) or stroke JSON (legacy).
+                canvasView.loadDrawingData(state.drawingData)
             }
             if let bgData = state.backgroundImageData, let bgImage = UIImage(data: bgData) {
                 container.setBackgroundImage(bgImage)
