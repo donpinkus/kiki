@@ -66,47 +66,15 @@ Ranked by impact, worst first:
 - When spot returns "None", a pod still provisions within 5 min.
 - On-demand usage is distinguishable from spot in logs (`podType: "spot" | "onDemand"`).
 
-### 3. Pre-baked Docker image with model
+### 3. Fast cold start (network volumes) — DONE
 
-**Why:** Today's 3–5 min cold start is dominated by pip install (~30s) + model download (~2–3 min). Both can be baked into a custom image.
+**Shipped:** Slim GHCR image (~2-3 GB, deps only) + pre-populated RunPod network volumes (5 DCs, 50 GB each) holding FLUX.2-klein BF16 + NVFP4 weights. Orchestrator's `selectPlacement()` probes all volume-DCs in parallel, pins pod to best-stocked DC with volume attached at `/workspace`. Originally planned as baked-weights image (28 GB) but pivoted to network volumes after the large image exceeded RunPod's 10-min pull timeout.
 
-**Approach:**
-- Write a proper `Dockerfile` in `flux-klein-server/` (the old one was deleted — obsolete — so start fresh):
-  - Base `runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404`.
-  - `pip install diffusers@git transformers accelerate sentencepiece safetensors`.
-  - `python -c "from diffusers import Flux2KleinPipeline; Flux2KleinPipeline.from_pretrained('black-forest-labs/FLUX.2-klein-4B')"` to bake the BF16 checkpoint (~13 GB) into a layer.
-  - Similarly cache the NVFP4 safetensors via `huggingface_hub.hf_hub_download` at build time.
-  - `COPY` the server code, set `ENTRYPOINT` to launch it.
-- Push to GHCR (`ghcr.io/donpinkus/kiki-flux-klein:latest`) via a GH Action on push to `main` when `flux-klein-server/**` changes.
-- Orchestrator swaps `imageName` to the GHCR image. Authenticated pulls via a GHCR credential (same pattern as Docker Hub).
-- Skip setup-flux-klein.sh entirely for new pods — the server starts automatically on container boot.
+**Result:** ~110-150s cold start (down from 3-5 min). Faster on hosts with cached images.
 
-**Target cold start:** 60–90s (Docker pull of ~20 GB image + warmup). Actual image size will dominate; aggressive squashing helps.
+### 4. Cost monitoring + alerting — DONE
 
-**Effort:** Medium (~1–2 days). Dockerfile iteration + GH Action for builds + orchestrator swap + test.
-
-**Success criteria:**
-- Fresh pod → `/health` returns `ok` in under 90s at p50.
-- No pip install during provision; no HF model download during provision.
-
-### 4. Cost monitoring + alerting
-
-**Why:** Without visibility we'll catch cost spikes after the fact. At 100 users * $0.55/hr * bad day, we could be looking at 4-figure losses in hours.
-
-**Approach:**
-- Hourly cron-like job on the backend: list all `kiki-session-*` pods via `myself.pods`, sum `costPerHr` → current burn rate.
-- Expose at `/v1/ops/cost` (auth-protected once Workstream 1 is done; for now, a secret env-based check).
-- Log daily totals at midnight UTC.
-- Webhook alert (Slack incoming webhook or sendgrid/email) when:
-  - Active pod count > 50
-  - 24h rolling spend > $X (configurable; $50 starting threshold)
-  - Single session's pod age > 1 hour (stuck state indicator)
-
-**Effort:** Small-to-medium (~half day). setInterval + fetch + webhook call.
-
-**Success criteria:**
-- `/v1/ops/cost` returns accurate current-burn JSON.
-- Trigger a test alert by temporarily lowering the threshold; confirm message delivery.
+**Shipped:** `costMonitor.ts` with 5-min periodic tick, `/v1/ops/cost` + `/v1/ops/cost/history` endpoints (X-Ops-Key auth), Discord webhook alerts (threshold breaches + $5k/mo hard cap circuit breaker), hourly cost digest, and per-pod lifecycle threads in a Discord Forum channel showing stage-by-stage progress (image pull → container up → model loading → ready → terminated).
 
 ### 5. Redis-backed session registry
 
