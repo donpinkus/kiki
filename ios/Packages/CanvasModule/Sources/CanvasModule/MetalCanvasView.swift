@@ -194,6 +194,8 @@ public final class MetalCanvasView: UIView {
             let path = CGMutablePath()
             path.move(to: point)
             lassoPath = path
+            // Snapshot for undo/cancel before lasso extraction modifies the canvas.
+            pushUndoSnapshot()
         }
 
         isDirty = true
@@ -374,15 +376,130 @@ public final class MetalCanvasView: UIView {
     }
 
     private func finishLasso() {
-        // Phase 2: Lasso selection extraction requires reading the canvas texture
-        // into a CGImage, clipping to the lasso path, and presenting a floating
-        // selection via LassoSelectionView. The onLassoCompleted callback should
-        // fire here with the extracted selection image + bounds + pre-snapshot.
-        // For now the lasso tool draws a path preview but doesn't extract.
-        drawingTouch = nil
-        lassoPoints.removeAll()
-        lassoPath = nil
-        onInteractionEnded?()
+        defer {
+            drawingTouch = nil
+            lassoPoints.removeAll()
+            lassoPath = nil
+            onInteractionEnded?()
+        }
+
+        guard lassoPoints.count >= 3 else {
+            // Too few points — cancel. Pop the undo snapshot we pushed at touchesBegan.
+            if !undoSnapshots.isEmpty { undoSnapshots.removeLast() }
+            isDirty = true
+            return
+        }
+
+        // Close the lasso path.
+        let closedPath = CGMutablePath()
+        closedPath.move(to: lassoPoints[0])
+        for i in 1..<lassoPoints.count {
+            closedPath.addLine(to: lassoPoints[i])
+        }
+        closedPath.closeSubpath()
+
+        let pathBounds = closedPath.boundingBox
+        guard pathBounds.width >= 4, pathBounds.height >= 4 else {
+            if !undoSnapshots.isEmpty { undoSnapshots.removeLast() }
+            isDirty = true
+            return
+        }
+
+        let size = bounds.size
+        guard size.width > 0, size.height > 0 else {
+            if !undoSnapshots.isEmpty { undoSnapshots.removeLast() }
+            isDirty = true
+            return
+        }
+
+        // 1. Get the canvas as a CGImage (CIImage path — correct colors).
+        guard let canvasCGImage = renderer.canvasToCGImage() else {
+            if !undoSnapshots.isEmpty { undoSnapshots.removeLast() }
+            isDirty = true
+            return
+        }
+
+        let fullRect = CGRect(origin: .zero, size: size)
+
+        // 2. Composite white + background + canvas into one image.
+        let compositeRenderer = UIGraphicsImageRenderer(size: size)
+        let composite = compositeRenderer.image { _ in
+            UIColor.white.setFill()
+            UIRectFill(fullRect)
+            backgroundImageProvider?()?.draw(in: fullRect)
+            UIImage(cgImage: canvasCGImage).draw(in: fullRect)
+        }
+
+        // 3. Extract pixels inside the lasso path, crop to bounding box.
+        let extractionRenderer = UIGraphicsImageRenderer(size: size)
+        let fullExtraction = extractionRenderer.image { ctx in
+            let cgCtx = ctx.cgContext
+            cgCtx.addPath(closedPath)
+            cgCtx.clip()
+            composite.draw(in: fullRect)
+        }
+
+        let cropRect = pathBounds.intersection(fullRect)
+        guard !cropRect.isEmpty,
+              let croppedCG = fullExtraction.cgImage?.cropping(to: CGRect(
+                  x: cropRect.origin.x * fullExtraction.scale,
+                  y: cropRect.origin.y * fullExtraction.scale,
+                  width: cropRect.width * fullExtraction.scale,
+                  height: cropRect.height * fullExtraction.scale
+              )) else {
+            if !undoSnapshots.isEmpty { undoSnapshots.removeLast() }
+            isDirty = true
+            return
+        }
+        let croppedImage = UIImage(cgImage: croppedCG, scale: fullExtraction.scale, orientation: .up)
+
+        // 4. Clear the lasso area from the canvas texture.
+        let clearRenderer = UIGraphicsImageRenderer(size: size)
+        let clearedImage = clearRenderer.image { ctx in
+            let cgCtx = ctx.cgContext
+            UIImage(cgImage: canvasCGImage).draw(in: fullRect)
+            cgCtx.addPath(closedPath)
+            cgCtx.setBlendMode(.clear)
+            cgCtx.fillPath()
+        }
+        if let clearedCG = clearedImage.cgImage {
+            renderer.loadImageIntoCanvas(clearedCG)
+        }
+
+        isDirty = true
+
+        // 5. Fire callback — CanvasViewModel shows the floating selection.
+        onLassoCompleted?(closedPath, croppedImage, cropRect, nil)
+    }
+
+    // MARK: - Lasso Public API
+
+    /// Composite a transformed selection image back onto the canvas.
+    /// Called when committing a lasso selection (Phase A → canvas).
+    public func compositeSelectionImage(_ image: UIImage, at rect: CGRect, transform: CGAffineTransform) {
+        guard let canvasCGImage = renderer.canvasToCGImage() else { return }
+        let size = bounds.size
+        guard size.width > 0, size.height > 0 else { return }
+
+        let compositeRenderer = UIGraphicsImageRenderer(size: size)
+        let result = compositeRenderer.image { ctx in
+            UIImage(cgImage: canvasCGImage).draw(in: CGRect(origin: .zero, size: size))
+            let cgCtx = ctx.cgContext
+            cgCtx.saveGState()
+            cgCtx.concatenate(transform)
+            image.draw(in: rect)
+            cgCtx.restoreGState()
+        }
+        if let resultCG = result.cgImage {
+            renderer.loadImageIntoCanvas(resultCG)
+        }
+        isDirty = true
+    }
+
+    /// Restore the canvas to a previous state (used by lasso cancel).
+    public func restorePersistentImage(_ image: CGImage?) {
+        guard let image else { return }
+        renderer.loadImageIntoCanvas(image)
         isDirty = true
     }
 

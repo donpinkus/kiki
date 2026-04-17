@@ -116,21 +116,23 @@ public final class CanvasViewModel {
     /// Transition from Phase A (floating selection) to Phase B (clip mask).
     /// Called when switching from lasso tool to pen/eraser.
     public func transitionToClipMode() {
-        // TODO: Phase 2 — lasso clip mode on Metal canvas
-        guard let container else { return }
+        guard let container, let canvasView else { return }
         guard let result = container.commitLassoSelection() else { return }
+        canvasView.compositeSelectionImage(result.image, at: result.bounds, transform: result.transform)
         if let path = lassoClosedPath {
-            canvasView?.lassoClipPath = path
+            canvasView.lassoClipPath = path
         }
     }
 
     /// Clear the lasso entirely. Commits floating selection if active, removes clip mask.
     public func clearLasso() {
-        guard let container else { return }
+        guard let container, let canvasView else { return }
         if container.hasActiveLassoSelection {
-            _ = container.commitLassoSelection()
+            if let result = container.commitLassoSelection() {
+                canvasView.compositeSelectionImage(result.image, at: result.bounds, transform: result.transform)
+            }
         }
-        canvasView?.lassoClipPath = nil
+        canvasView.lassoClipPath = nil
         preLassoSnapshot = nil
         lassoClosedPath = nil
         hasLassoSelection = false
@@ -140,11 +142,13 @@ public final class CanvasViewModel {
 
     /// Cancel the lasso selection, restoring the original persistent bitmap.
     public func cancelLassoSelection() {
-        guard let container else { return }
+        guard let container, let canvasView else { return }
         if container.hasActiveLassoSelection {
             container.clearLassoSelection()
         }
-        canvasView?.lassoClipPath = nil
+        // Undo to the pre-lasso state.
+        canvasView.performUndo()
+        canvasView.lassoClipPath = nil
         preLassoSnapshot = nil
         lassoClosedPath = nil
         hasLassoSelection = false
