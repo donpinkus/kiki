@@ -6,14 +6,14 @@ This doc captures the bottlenecks and the work to clear them. Each workstream is
 
 ## Baseline (current state)
 
-As of commit `31cfc9f`:
+As of WS3 completion (2026-04-17):
 
-- Railway backend orchestrator provisions a dedicated RTX 5090 spot pod per session and terminates it after 10 min of inactivity. See `documents/references/provider-config.md` for ops.
-- In-memory session registry (`Map<sessionId, Session>`) on a single Railway instance.
+- Railway backend orchestrator provisions a dedicated RTX 5090 pod per user and terminates it after 10 min of inactivity. See `documents/references/provider-config.md` for ops.
+- **Authentication (WS1 done):** Apple Sign In → JWT. Session registry keyed by `userId`. Per-user rate limiter (1 active pod, 5/hr, 30/day).
+- **On-demand fallback (WS2 done):** Spot first; if capacity exhausted, falls back to on-demand ($0.99/hr) in the same DC.
+- **Fast cold start (WS3 done):** Slim GHCR image (~2-3 GB) + pre-populated network volumes in 5 DCs. ~110–150s cold start (down from 3-5 min). DC-aware placement probes spot stock across all volume-DCs.
+- In-memory session registry (`Map<userId, Session>`) on a single Railway instance.
 - Semaphore caps concurrent cold-start provisions at 5 (env-tunable).
-- Session identity: UUID generated on first app launch, stored in `UserDefaults`, sent as `?session=<uuid>` query param on the WebSocket. **Unauthenticated.**
-- ~3–5 min cold start per fresh session: Docker pull from `runpod/pytorch` (authenticated via `RUNPOD_REGISTRY_AUTH_ID`, so no Docker Hub rate-limit anymore) → `setup-flux-klein.sh` (pip install + HuggingFace model download) → warmup.
-- Spot-only; no on-demand fallback. Provisioning fails fast if `stockStatus` is `Low`/`None`.
 - Observability = Railway logs. No metrics, no dashboards, no cost tracking beyond the RunPod billing page.
 
 ## Bottlenecks at 100 concurrent users

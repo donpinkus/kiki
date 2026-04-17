@@ -207,7 +207,7 @@ async function acquireSemaphore(onStatus: (msg: string) => void): Promise<void> 
     return;
   }
   log.info({ active: activeProvisions, cap: MAX_CONCURRENT_PROVISIONS }, 'Provision queued');
-  onStatus(`Waiting for GPU (${activeProvisions - MAX_CONCURRENT_PROVISIONS + 1} ahead)...`);
+  onStatus(`Waiting for GPU (${activeProvisions - MAX_CONCURRENT_PROVISIONS + 1} in queue)...`);
   await new Promise<void>((resolve) => semaphoreWaiters.push(resolve));
   activeProvisions++;
 }
@@ -272,31 +272,32 @@ async function provision(sessionId: string, onStatus: (msg: string) => void): Pr
   // 1 + 2. Create a pod — spot first, on-demand fallback if capacity exhausted
   const { podId, podType } = await createPodWithFallback(sessionId, onStatus);
 
-  // 3. In ssh mode, wait for sshd and run setup-flux-klein.sh. In baked mode,
-  // the container image already has deps + weights so we skip straight to
-  // polling /health. Baked mode should see ~60-90s cold starts vs ssh's 3-5min.
-  if (config.FLUX_PROVISION_MODE === 'baked') {
-    onStatus('Waiting for pod to boot...');
-  } else {
-    onStatus('Waiting for pod to boot...');
+  // 3. Wait for the container to boot. In baked mode the image is slim (~2-3
+  // GB) but the very first pull to a host in a DC can still take a few minutes.
+  // Split the wait so the user sees "Pulling container image..." (runtime null)
+  // vs "Loading AI model..." (container up, server initializing).
+  onStatus('Pulling container image...');
+  await waitForRuntime(podId, onStatus);
+
+  if (config.FLUX_PROVISION_MODE !== 'baked') {
     const sshInfo = await waitForSsh(podId);
     log.info({ sessionId, podId, ssh: `${sshInfo.ip}:${sshInfo.port}` }, 'Pod SSH ready');
 
-    onStatus('Installing server code...');
+    onStatus('Installing server...');
     await scpFiles(sshInfo);
-    onStatus('Installing dependencies & downloading model (~3 min)...');
+    onStatus('Downloading AI model (~2 min)...');
     await runSetup(sshInfo, (line) => {
-      if (line.includes('Downloading') && line.includes('FLUX.2-klein')) onStatus('Downloading model...');
+      if (line.includes('Downloading') && line.includes('FLUX.2-klein')) onStatus('Downloading AI model...');
       else if (line.includes('Warming up')) onStatus('Warming up...');
     });
   }
 
-  // 5. Poll /health via RunPod proxy until ready
-  onStatus('Checking server health...');
+  // 4. Poll /health via RunPod proxy until the FLUX server reports ready
+  onStatus('Loading AI model & warming up...');
   const healthUrl = `https://${podId}-8766.proxy.runpod.net/health`;
   await waitForHealth(healthUrl);
 
-  // 6. Build WebSocket URL and return
+  // 5. Build WebSocket URL and return
   const podUrl = `wss://${podId}-8766.proxy.runpod.net/ws`;
   log.info({ sessionId, podId, podUrl, podType, mode: config.FLUX_PROVISION_MODE }, 'Pod ready');
   onStatus('Ready');
@@ -405,7 +406,7 @@ async function createPodWithFallback(
     : (config.RUNPOD_REGISTRY_AUTH_ID || undefined);
 
   // ─── Pick DC (+ volume if baked) ─────────────────────────────────────
-  onStatus('Discovering spot bid...');
+  onStatus('Finding available GPU...');
   const target = await selectPlacement(sessionId);
   if (!target) {
     throw new Error('No RunPod DC has 5090 capacity right now (all volume-DCs exhausted)');
@@ -448,7 +449,7 @@ async function createPodWithFallback(
       },
       'Spot bid discovered',
     );
-    onStatus('Creating pod...');
+    onStatus('Provisioning GPU...');
     try {
       const { id: podId, costPerHr } = await createSpotPod({
         name: podName,
@@ -591,6 +592,30 @@ async function runSetup(ssh: SshInfo, onLine: (line: string) => void): Promise<v
     [...sshOpts, `root@${ip}`, 'chmod +x /tmp/setup-flux-klein.sh && /tmp/setup-flux-klein.sh'],
     { onStdoutLine: onLine, timeoutMs: 15 * 60 * 1000 },
   );
+}
+
+/**
+ * Polls the RunPod API until the pod's `runtime` field is non-null, meaning
+ * the container image has been pulled and the container process is running.
+ * Emits a status update when the transition happens so the user sees
+ * "Pulling container image..." → "Starting server..." in real time.
+ */
+async function waitForRuntime(
+  podId: string,
+  onStatus: (msg: string) => void,
+  timeoutMs = 10 * 60 * 1000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const pod = await getPod(podId);
+    if (pod?.runtime) {
+      log.info({ podId, uptimeInSeconds: pod.runtime.uptimeInSeconds }, 'Container runtime up');
+      onStatus('Starting server...');
+      return;
+    }
+    await sleep(5000);
+  }
+  throw new Error(`Pod ${podId} container never started within ${Math.round(timeoutMs / 1000)}s`);
 }
 
 async function waitForHealth(healthUrl: string, timeoutMs = 10 * 60 * 1000): Promise<void> {

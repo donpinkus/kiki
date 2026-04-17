@@ -2,25 +2,64 @@
 
 ## Current Stack
 
-**Each user session gets its own RTX 5090 spot pod.** The Railway backend (`backend/`) provisions pods on demand when a client WebSocket opens, and terminates them after 10 minutes of inactivity. FLUX.2-klein-4B runs on the pod with BFL's NVFP4 transformer checkpoint loaded on top of the BF16 pipeline. Custom FastAPI + WebSocket server at `flux-klein-server/`.
+**Each user session gets its own RTX 5090 pod.** The Railway backend (`backend/`) provisions pods on demand when an authenticated client WebSocket opens, and terminates them after 10 minutes of inactivity. FLUX.2-klein-4B runs on the pod with BFL's NVFP4 transformer checkpoint loaded on top of the BF16 pipeline. Custom FastAPI + WebSocket server at `flux-klein-server/`.
 
 - ~1 FPS generation at 768×768 (reference mode, 4 steps, NVFP4)
-- ~3–5 min cold start per session (pod rent → Docker pull → model download → warmup)
-- ~$0.53–0.55/hr spot bid in secure-cloud datacenters
+- ~110–150s cold start per session (image pull + model load + warmup). Faster when the host has the image cached.
+- ~$0.53–0.58/hr spot bid in secure-cloud datacenters; $0.99/hr on-demand fallback
 - 10-min idle timeout preserves the pod across brief disconnects (reconnect = instant, no cold start)
 
-Base image: `runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404` (CUDA 12.8 + PyTorch 2.9.1, Blackwell-native with broad driver compatibility). Pulled authenticated via a RunPod registry credential — unauthenticated Docker Hub pulls hit the 100/6hr/IP rate limit shared across RunPod tenants.
+Server image: `ghcr.io/donpinkus/kiki-flux-klein:<tag>` — a slim (~2–3 GB) image with Python deps only. Model weights live on pre-populated RunPod network volumes mounted at `/workspace`. Built via `.github/workflows/build-flux-image.yml`.
 
 ## How pod provisioning works
 
-1. iPad opens WebSocket to `wss://kiki-backend.../v1/stream?session=<uuid>`. Session UUID is generated on first app launch and stored in `UserDefaults`.
-2. Backend's `orchestrator.ts` checks its in-memory session registry:
+1. iPad sends Apple Sign In identity token → backend issues JWT. Client opens WebSocket to `wss://kiki-backend.../v1/stream` with `Authorization: Bearer <jwt>`.
+2. Backend's `orchestrator.ts` checks its in-memory session registry keyed by `userId`:
    - **Existing ready pod** → relay immediately.
    - **In-flight provision** → await the existing promise, forward status messages.
-   - **No record** → acquire semaphore slot (cap 5 concurrent), call RunPod API to discover spot bid, `podRentInterruptable`, wait for SSH, SCP `runtime-assets/` to the pod, run `setup-flux-klein.sh`, poll `/health`, then relay.
-3. Every relayed frame calls `touch(sessionId)` to reset the 10-min idle timer.
-4. A `setInterval` reaper scans the registry every 60s and terminates pods idle >10 min.
-5. On backend restart: `reconcileOrphanPods()` lists all `kiki-session-*` pods and terminates them (prevents cost leaks from crashes).
+   - **No record** → acquire semaphore slot (cap 5 concurrent), run placement + provision flow.
+3. Placement: `selectPlacement()` probes all configured volume-DCs in parallel for 5090 spot stock, picks the DC with the best stock level.
+4. Pod creation: tries spot first in the selected DC with the network volume attached. If spot capacity is exhausted and `ONDEMAND_FALLBACK_ENABLED=true`, falls back to on-demand in the same DC.
+5. Boot: polls RunPod API until `runtime` appears (image pull + container start), then polls the pod's `/health` endpoint until the FLUX server reports ready.
+6. Every relayed frame calls `touch(sessionId)` to reset the 10-min idle timer.
+7. A `setInterval` reaper scans the registry every 60s and terminates pods idle >10 min.
+8. On backend restart: `reconcileOrphanPods()` lists all `kiki-session-*` pods and terminates them (prevents cost leaks from crashes).
+
+### Status messages shown to user during provision
+
+1. "Finding available GPU..." — probing DC stock
+2. "Provisioning GPU..." — creating the pod
+3. "Pulling container image..." — waiting for container runtime (image pull)
+4. "Starting server..." — container up, transitioning to health poll
+5. "Loading AI model & warming up..." — FLUX server loading weights + warmup inference
+6. "Ready"
+
+## Network volumes
+
+Model weights (~25 GB: FLUX.2-klein-4B BF16 + NVFP4) are stored on pre-populated RunPod network volumes, one per datacenter. Pods mount them read-shared at `/workspace` so the server reads weights from `/workspace/huggingface` without downloading.
+
+| DC | Volume ID | Size |
+|---|---|---|
+| EUR-NO-1 | 49n6i3twuw | 50 GB |
+| EU-RO-1 | xbiu29htvu | 50 GB |
+| EU-CZ-1 | hhmat30tzx | 50 GB |
+| US-IL-1 | 59plfch67d | 50 GB |
+| US-NC-1 | 5vz7ubospw | 50 GB |
+
+Fixed storage cost: 250 GB × $0.07/GB/mo = ~$17.50/mo.
+
+### Populating a new volume
+
+Use the one-shot script (from `backend/`):
+
+```bash
+RUNPOD_API_KEY=... \
+RUNPOD_SSH_PRIVATE_KEY="$(cat ~/.ssh/id_ed25519)" \
+RUNPOD_REGISTRY_AUTH_ID=cmnzebqxw007pl407z8oij1x8 \
+  npx tsx scripts/populate-volume.ts --dc <DC> --volume-id <id>
+```
+
+This spawns an on-demand pod in the target DC, mounts the volume, downloads weights via `huggingface_hub`, and terminates the pod (~10–15 min, ~$0.20).
 
 ## Required env vars (Railway)
 
@@ -29,22 +68,18 @@ Set via `railway variables --set` or the dashboard:
 | Env | Source | Purpose |
 |---|---|---|
 | `RUNPOD_API_KEY` | RunPod Console → Settings → API Keys | GraphQL auth for pod lifecycle |
-| `RUNPOD_SSH_PRIVATE_KEY` | Contents of `~/.runpod/ssh/RunPod-Key-Go` | SSH into pods to run `setup-flux-klein.sh` |
-| `RUNPOD_REGISTRY_AUTH_ID` | ID from `myself.containerRegistryCreds` | Docker Hub auth credential ID — avoids rate-limited anonymous pulls |
+| `RUNPOD_SSH_PRIVATE_KEY` | Contents of `~/.runpod/ssh/RunPod-Key-Go` | SSH into pods (legacy ssh mode only) |
+| `RUNPOD_REGISTRY_AUTH_ID` | ID from `myself.containerRegistryCreds` | Docker Hub auth credential ID |
+| `RUNPOD_GHCR_AUTH_ID` | ID from `myself.containerRegistryCreds` | GHCR auth credential ID for pulling the slim image |
+| `FLUX_PROVISION_MODE` | `baked` (production) or `ssh` (legacy) | Which provisioning path to use |
+| `FLUX_IMAGE` | e.g. `ghcr.io/donpinkus/kiki-flux-klein:sha-...` | GHCR image ref for baked mode |
+| `NETWORK_VOLUMES_BY_DC` | JSON: `{"EUR-NO-1":"49n6i3twuw",...}` | DC → volume ID map for weight mounts |
+| `ONDEMAND_FALLBACK_ENABLED` | `true` | Allow on-demand when spot exhausted |
+| `JWT_ACCESS_SECRET` | ≥32 byte hex | HS256 secret for access tokens |
+| `JWT_REFRESH_SECRET` | ≥32 byte hex | HS256 secret for refresh tokens |
+| `APPLE_BUNDLE_ID` | iOS bundle ID | Apple identity token audience |
+| `AUTH_REQUIRED` | `true` | Reject unauthenticated connections |
 | `MAX_CONCURRENT_PROVISIONS` | default 5 | Semaphore cap on concurrent cold starts |
-
-### Setting up Docker Hub auth (one-time)
-
-1. Docker Hub → Account settings → Personal access tokens → generate with "Public Repo Read-only".
-2. RunPod Console → Settings → Container Registry Auth → Add credential. Name: `docker-hub`. Username: your Docker Hub username. Password: the token (NOT your DH password).
-3. Get the credential ID:
-   ```bash
-   curl -sS "https://api.runpod.io/graphql?api_key=$RUNPOD_API_KEY" \
-     -H 'Content-Type: application/json' \
-     -d '{"query":"query { myself { containerRegistryCreds { id name } } }"}' \
-     | jq .
-   ```
-4. Set on Railway: `railway variables --set RUNPOD_REGISTRY_AUTH_ID=<id>`.
 
 ## Operations
 
@@ -65,8 +100,10 @@ railway logs    # tail orchestrator activity
 Key log lines:
 - `Orchestrator started idleTimeoutMs=600000 maxConcurrent=5` — boot complete, reaper armed.
 - `Reconcile: no orphan pods found` — clean slate at boot.
-- `Spot bid discovered sessionId=... minBid=0.53 bid=0.55` — provisioning started.
-- `Pod ready sessionId=... podUrl=wss://...` — fully provisioned.
+- `DC placement ranked dcs=[...]` — spot stock probed per DC.
+- `Pod created (spot) podId=... dc=... costPerHr=0.58` — provisioning started.
+- `Container runtime up podId=... uptimeInSeconds=...` — image pulled, container running.
+- `Pod ready podId=... podUrl=wss://... mode=baked` — fully provisioned.
 - `Reaping idle pod sessionId=... podId=... idleMs=...` — 10-min timeout hit.
 
 ### Kill everything (cost panic button)
@@ -89,29 +126,34 @@ curl -sS "https://api.runpod.io/graphql?api_key=$RUNPOD_API_KEY" \
 
 ### Cost
 
-- Spot RTX 5090: ~$0.53/hr bid floor (secure cloud, varies by availability).
-- Worst-case idle tail per user: 10 min × $0.55/hr ≈ **$0.09** per session.
-- No network volumes — pods are ephemeral, models redownload on each fresh boot.
+- Spot RTX 5090: ~$0.53/hr bid floor + $0.05 headroom (secure cloud, varies by availability).
+- On-demand fallback: $0.99/hr (secure cloud).
+- Worst-case idle tail per user: 10 min × $0.58/hr ≈ **$0.10** per session.
+- Network volumes: ~$17.50/mo fixed (250 GB across 5 DCs).
 - Railway backend: ~$5/month flat.
 
 ## Key Files
 
 | File | Purpose |
 |---|---|
-| `backend/src/modules/orchestrator/orchestrator.ts` | Registry, provisioner, reaper, reconcile, semaphore |
-| `backend/src/modules/orchestrator/runpodClient.ts` | RunPod GraphQL wrapper |
-| `backend/src/routes/stream.ts` | WebSocket endpoint: extract `session` query param, provision, relay |
+| `backend/src/modules/orchestrator/orchestrator.ts` | Registry, provisioner (placement + pod creation + waitForRuntime + health), reaper, reconcile, semaphore |
+| `backend/src/modules/orchestrator/runpodClient.ts` | RunPod GraphQL wrapper (spot, on-demand, volume mount) |
+| `backend/src/modules/orchestrator/policy.ts` | Per-user on-demand policy hook |
+| `backend/src/modules/auth/` | JWT signing/verification, Apple identity token verification, rate limiter |
+| `backend/src/routes/stream.ts` | WebSocket endpoint: extract Bearer JWT, provision, relay |
+| `backend/src/routes/auth.ts` | `/v1/auth/apple` and `/v1/auth/refresh` endpoints |
+| `backend/scripts/populate-volume.ts` | One-shot network volume populate script |
 | `backend/Dockerfile` | Railway image — Node 22 + openssh-client |
-| `backend/runtime-assets/` | Committed copy of `flux-klein-server/` + `scripts/setup-flux-klein.sh` for SCP during provision |
-| `scripts/setup-flux-klein.sh` | Pod-side setup (venv, deps, model download, server start). Regenerated into `runtime-assets/` via `npm run copy-assets`. |
+| `flux-klein-server/Dockerfile` | Slim GHCR image — PyTorch deps, no weights |
 | `flux-klein-server/server.py` | WebSocket server entry point on the pod |
 | `flux-klein-server/pipeline.py` | FLUX.2-klein pipeline wrapper (loads BF16 base + NVFP4 transformer) |
 | `flux-klein-server/config.py` | Env-var-backed runtime config on the pod |
+| `.github/workflows/build-flux-image.yml` | Builds + pushes slim GHCR image on `flux-klein-server/` changes |
 | `.github/workflows/stop-pods.yml` | Manual "kill everything" button |
 
 ## Known limitations (v1)
 
-- **Unauthenticated session IDs.** Anyone with a session UUID can use its pod. Beta-only — real auth is Phase 2.
-- **In-memory registry** — lost on backend restart (orphans get reconciled). At horizontal scale we'll need Redis or similar.
-- **~3–5 min cold start per session.** Model download + install is the bottleneck. Future optimization: pre-built Docker image with model baked in.
-- **Spot preemption drops sessions.** Client's existing reconnect logic retries; backend will provision a new pod for the retry.
+- **In-memory registry** — lost on backend restart (orphans get reconciled). At horizontal scale we'll need Redis or similar (WS5).
+- **~110–150s cold start** on fresh hosts. Dominated by GHCR image pull. Faster on hosts with cached images.
+- **Spot preemption drops sessions.** Client's reconnect logic retries; backend provisions a new pod for the retry (WS7 will add graceful preemption handling).
+- **No cost dashboard or alerting.** Spend visibility is RunPod billing page only (WS4).
