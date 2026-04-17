@@ -6,8 +6,10 @@ import { AppError, RateLimitedError } from './errors.js';
 import { healthRoute } from './routes/health.js';
 import { streamRoute } from './routes/stream.js';
 import { authRoute } from './routes/auth.js';
+import { opsRoute } from './routes/ops.js';
 import { authPlugin } from './modules/auth/index.js';
 import { start as startOrchestrator } from './modules/orchestrator/orchestrator.js';
+import { start as startCostMonitor } from './modules/orchestrator/costMonitor.js';
 
 const app = Fastify({
   bodyLimit: 10 * 1024 * 1024, // 10 MB — composited lineart snapshots are larger than plain sketches
@@ -38,6 +40,7 @@ await app.register(authPlugin);
 await app.register(healthRoute);
 await app.register(authRoute);
 await app.register(streamRoute);
+await app.register(opsRoute);
 
 // --- Error handler ---
 app.setErrorHandler((error, request, reply) => {
@@ -86,6 +89,7 @@ const start = async () => {
     // Orchestrator boots before the server accepts connections: reconciles any
     // orphan pods from a prior run and arms the idle reaper.
     await startOrchestrator(app.log);
+    startCostMonitor(app.log);
 
     await app.listen({ port: config.PORT, host: config.HOST });
     app.log.info(`Server listening on ${config.HOST}:${config.PORT}`);

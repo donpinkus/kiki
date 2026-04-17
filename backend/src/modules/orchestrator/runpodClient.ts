@@ -281,3 +281,22 @@ export async function listPodsByPrefix(prefix: string): Promise<PodSummary[]> {
   const data = await gql<{ myself: { pods: PodSummary[] } }>(query);
   return data.myself.pods.filter((p) => p.name.startsWith(prefix));
 }
+
+export interface PodCostInfo {
+  id: string;
+  name: string;
+  desiredStatus: string;
+  costPerHr: number;
+  runtime: { uptimeInSeconds: number } | null;
+}
+
+/**
+ * Like `listPodsByPrefix` but returns `costPerHr` and `runtime.uptimeInSeconds`
+ * for cost monitoring. Used by `costMonitor.ts` to compute burn rate without
+ * depending on orchestrator in-memory state.
+ */
+export async function listPodsWithCost(prefix: string): Promise<PodCostInfo[]> {
+  const query = `query { myself { pods { id name desiredStatus costPerHr runtime { uptimeInSeconds } } } }`;
+  const data = await gql<{ myself: { pods: PodCostInfo[] } }>(query);
+  return data.myself.pods.filter((p) => p.name.startsWith(prefix));
+}
