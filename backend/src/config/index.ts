@@ -47,8 +47,11 @@ export interface AppConfig {
   readonly OPS_API_KEY: string;
   /** Tick interval for cost monitor. Default 5 min. */
   readonly COST_MONITOR_INTERVAL_MS: number;
-  /** Discord/Slack-compatible webhook URL for cost alerts. Unset → log only. */
+  /** Discord webhook URL for cost alerts + hourly digest. Unset → log only. */
   readonly COST_ALERT_WEBHOOK_URL: string;
+  /** Discord Forum channel webhook for per-pod lifecycle threads. Unset → falls
+   * back to COST_ALERT_WEBHOOK_URL (no threads). */
+  readonly COST_POD_LOG_WEBHOOK_URL: string;
   /** Alert when active pod count exceeds this. */
   readonly COST_ALERT_MAX_ACTIVE_PODS: number;
   /** Alert when rolling 24h spend exceeds this (USD). */
@@ -159,6 +162,7 @@ function validateConfig(): AppConfig {
     OPS_API_KEY: process.env['OPS_API_KEY'] ?? '',
     COST_MONITOR_INTERVAL_MS: Number(process.env['COST_MONITOR_INTERVAL_MS'] ?? 300_000),
     COST_ALERT_WEBHOOK_URL: process.env['COST_ALERT_WEBHOOK_URL'] ?? '',
+    COST_POD_LOG_WEBHOOK_URL: process.env['COST_POD_LOG_WEBHOOK_URL'] ?? '',
     COST_ALERT_MAX_ACTIVE_PODS: Number(process.env['COST_ALERT_MAX_ACTIVE_PODS'] ?? 50),
     COST_ALERT_MAX_24H_SPEND: Number(process.env['COST_ALERT_MAX_24H_SPEND'] ?? 200),
     COST_ALERT_MAX_MONTHLY_SPEND: Number(process.env['COST_ALERT_MAX_MONTHLY_SPEND'] ?? 5000),

@@ -61,6 +61,9 @@ let tickTimer: ReturnType<typeof setInterval> | null = null;
 let hourlyTimer: ReturnType<typeof setInterval> | null = null;
 
 const ringBuffer: TickEntry[] = [];
+
+// Pod lifecycle thread tracking: podId → Discord thread (channel) ID
+const podThreads = new Map<string, string>();
 let latestSnapshot: CostSnapshot | null = null;
 let consecutiveFailures = 0;
 let costGateOpen = true;
@@ -110,36 +113,98 @@ export function stop(): void {
   if (hourlyTimer) { clearInterval(hourlyTimer); hourlyTimer = null; }
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// Pod lifecycle threads (Discord Forum channel)
+//
+// Each pod gets a thread in the #pod-logs forum channel. The thread is created
+// on pod creation and updated with progress messages. This avoids spamming
+// the main alerts channel while still giving full visibility.
+// ────────────────────────────────────────────────────────────────────────────
+
+interface WebhookResponse {
+  id: string;
+  channel_id: string;
+}
+
 /**
- * Called by the orchestrator when a pod is created or terminated.
- * Sends a short Discord notification so you see pod churn in real time.
+ * Called when a pod is created. Creates a new thread in the forum channel.
  */
-export function notifyPodEvent(event: {
-  action: 'created' | 'terminated';
+export async function notifyPodCreated(event: {
   podId: string;
-  podType?: string;
+  podType: string;
   dc?: string;
   costPerHr?: number;
-  reason?: string;
-}): void {
-  const webhookUrl = config.COST_ALERT_WEBHOOK_URL;
+}): Promise<void> {
+  const webhookUrl = config.COST_POD_LOG_WEBHOOK_URL || config.COST_ALERT_WEBHOOK_URL;
   if (!webhookUrl) return;
 
-  const emoji = event.action === 'created' ? '🟢' : '🔴';
-  const cost = event.costPerHr != null ? ` ($${event.costPerHr.toFixed(2)}/hr)` : '';
-  const dc = event.dc ? ` in ${event.dc}` : '';
-  const type = event.podType ? ` [${event.podType}]` : '';
-  const reason = event.reason ? ` — ${event.reason}` : '';
-  const content = `${emoji} Pod ${event.action}: \`${event.podId}\`${type}${dc}${cost}${reason}`;
+  const cost = event.costPerHr != null ? `$${event.costPerHr.toFixed(2)}/hr` : '?';
+  const dc = event.dc ?? 'unknown';
+  const shortId = event.podId.slice(0, 12);
+  const threadName = `${event.podType === 'spot' ? '🟢' : '🟡'} ${shortId} · ${dc} · ${cost}`;
+  const content = `Pod \`${event.podId}\` created\n**Type:** ${event.podType}\n**DC:** ${dc}\n**Cost:** ${cost}`;
 
-  fetch(webhookUrl, {
+  try {
+    const res = await fetch(`${webhookUrl}?wait=true`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        content,
+        thread_name: threadName,
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (res.ok) {
+      const body = (await res.json()) as WebhookResponse;
+      // In a forum channel, the thread ID is the channel_id of the response
+      podThreads.set(event.podId, body.channel_id);
+    } else {
+      log.warn({ status: res.status, podId: event.podId }, 'Pod thread creation failed');
+    }
+  } catch (err) {
+    log.warn({ err: (err as Error).message, podId: event.podId }, 'Pod thread creation failed');
+  }
+}
+
+/**
+ * Called at each provision stage. Posts to the pod's existing thread.
+ */
+export function notifyPodProgress(podId: string, message: string): void {
+  const threadId = podThreads.get(podId);
+  if (!threadId) return;
+
+  const webhookUrl = config.COST_POD_LOG_WEBHOOK_URL || config.COST_ALERT_WEBHOOK_URL;
+  if (!webhookUrl) return;
+
+  fetch(`${webhookUrl}?thread_id=${threadId}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ content }),
+    body: JSON.stringify({ content: message }),
     signal: AbortSignal.timeout(5000),
   }).catch((err) => {
-    log.warn({ err: (err as Error).message }, 'Pod event webhook failed');
+    log.warn({ err: (err as Error).message, podId }, 'Pod progress webhook failed');
   });
+}
+
+/**
+ * Called when a pod is terminated. Posts final message to thread, cleans up.
+ */
+export function notifyPodTerminated(podId: string, reason: string): void {
+  const threadId = podThreads.get(podId);
+  const webhookUrl = config.COST_POD_LOG_WEBHOOK_URL || config.COST_ALERT_WEBHOOK_URL;
+
+  if (threadId && webhookUrl) {
+    fetch(`${webhookUrl}?thread_id=${threadId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: `🔴 **Terminated** — ${reason}` }),
+      signal: AbortSignal.timeout(5000),
+    }).catch((err) => {
+      log.warn({ err: (err as Error).message, podId }, 'Pod terminated webhook failed');
+    });
+  }
+
+  podThreads.delete(podId);
 }
 
 // ────────────────────────────────────────────────────────────────────────────

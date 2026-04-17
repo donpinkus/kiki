@@ -29,7 +29,7 @@ import {
   type SpotBidInfo,
 } from './runpodClient.js';
 import { getPolicy } from './policy.js';
-import { notifyPodEvent } from './costMonitor.js';
+import { notifyPodCreated, notifyPodProgress, notifyPodTerminated } from './costMonitor.js';
 
 // ────────────────────────────────────────────────────────────────────────────
 // Types
@@ -159,6 +159,7 @@ export async function getOrProvisionPod(
       log.error({ sessionId, err }, 'Provision failed');
       // If we got a pod ID before failing, clean it up so we don't leak.
       if (session.podId) {
+        notifyPodProgress(session.podId, `❌ **Failed:** ${(err as Error).message}`);
         terminatePod(session.podId).catch((e) =>
           log.warn({ podId: session.podId, err: e }, 'Failed to clean up pod after provision failure'),
         );
@@ -232,7 +233,7 @@ function runReaper(): void {
       log.info({ sessionId: session.sessionId, podId: session.podId, idleMs }, 'Reaping idle pod');
       session.status = 'terminated';
       const podId = session.podId;
-      notifyPodEvent({ action: 'terminated', podId, reason: `idle ${Math.round(idleMs / 1000)}s` });
+      notifyPodTerminated(podId, `idle ${Math.round(idleMs / 1000)}s`);
       terminatePod(podId)
         .then(() => registry.delete(session.sessionId))
         .catch((err) => log.error({ sessionId: session.sessionId, podId, err }, 'Reap failed'));
@@ -274,20 +275,26 @@ async function provision(sessionId: string, onStatus: (msg: string) => void): Pr
   // 1 + 2. Create a pod — spot first, on-demand fallback if capacity exhausted
   const { podId, podType } = await createPodWithFallback(sessionId, onStatus);
 
+  const provisionStart = Date.now();
+
   // 3. Wait for the container to boot. In baked mode the image is slim (~2-3
   // GB) but the very first pull to a host in a DC can still take a few minutes.
   // Split the wait so the user sees "Pulling container image..." (runtime null)
   // vs "Loading AI model..." (container up, server initializing).
   onStatus('Pulling container image...');
+  notifyPodProgress(podId, '⏳ Pulling container image...');
   await waitForRuntime(podId, onStatus);
+  notifyPodProgress(podId, `📦 Container runtime up (${Math.round((Date.now() - provisionStart) / 1000)}s)`);
 
   if (config.FLUX_PROVISION_MODE !== 'baked') {
     const sshInfo = await waitForSsh(podId);
     log.info({ sessionId, podId, ssh: `${sshInfo.ip}:${sshInfo.port}` }, 'Pod SSH ready');
 
     onStatus('Installing server...');
+    notifyPodProgress(podId, '🔧 Installing server...');
     await scpFiles(sshInfo);
     onStatus('Downloading AI model (~2 min)...');
+    notifyPodProgress(podId, '⬇️ Downloading AI model...');
     await runSetup(sshInfo, (line) => {
       if (line.includes('Downloading') && line.includes('FLUX.2-klein')) onStatus('Downloading AI model...');
       else if (line.includes('Warming up')) onStatus('Warming up...');
@@ -296,13 +303,17 @@ async function provision(sessionId: string, onStatus: (msg: string) => void): Pr
 
   // 4. Poll /health via RunPod proxy until the FLUX server reports ready
   onStatus('Loading AI model & warming up...');
+  notifyPodProgress(podId, '🧠 Loading AI model & warming up...');
   const healthUrl = `https://${podId}-8766.proxy.runpod.net/health`;
   await waitForHealth(healthUrl);
+
+  const totalSeconds = Math.round((Date.now() - provisionStart) / 1000);
 
   // 5. Build WebSocket URL and return
   const podUrl = `wss://${podId}-8766.proxy.runpod.net/ws`;
   log.info({ sessionId, podId, podUrl, podType, mode: config.FLUX_PROVISION_MODE }, 'Pod ready');
   onStatus('Ready');
+  notifyPodProgress(podId, `✅ **Pod ready** (${totalSeconds}s total)`);
   return { podId, podUrl, podType };
 }
 
@@ -466,7 +477,7 @@ async function createPodWithFallback(
         { sessionId, event: 'provision.spot.success', podId, costPerHr, podType: 'spot', dc: target.dataCenterId },
         'Pod created (spot)',
       );
-      notifyPodEvent({ action: 'created', podId, podType: 'spot', dc: target.dataCenterId ?? undefined, costPerHr });
+      void notifyPodCreated({ podId, podType: 'spot', dc: target.dataCenterId ?? undefined, costPerHr });
       return { podId, podType: 'spot' };
     } catch (err) {
       if (isCapacityError(err)) {
@@ -517,7 +528,7 @@ async function createPodWithFallback(
       { sessionId, event: 'provision.onDemand.success', podId, costPerHr, podType: 'onDemand', dc: target.dataCenterId },
       'Pod created (on-demand)',
     );
-    notifyPodEvent({ action: 'created', podId, podType: 'onDemand', dc: target.dataCenterId ?? undefined, costPerHr });
+    void notifyPodCreated({ podId, podType: 'onDemand', dc: target.dataCenterId ?? undefined, costPerHr });
     return { podId, podType: 'onDemand' };
   } catch (err) {
     log.error(
