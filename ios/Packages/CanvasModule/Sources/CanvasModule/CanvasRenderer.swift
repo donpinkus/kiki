@@ -244,6 +244,58 @@ public final class CanvasRenderer {
         cmdBuf.commit()
     }
 
+    /// Render a batch of brush stamps directly into the canvas texture (source-over).
+    /// Used for stroke replay during persistence restore — each saved stroke is
+    /// regenerated as stamps and committed in one pass.
+    func commitStampsToCanvas(_ stamps: [StampInstance]) {
+        guard let canvas = canvasTexture, !stamps.isEmpty else { return }
+        guard let scratch = scratchTexture else { return }
+        guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
+
+        // 1. Clear scratch and render stamps into it.
+        let scratchRPD = MTLRenderPassDescriptor()
+        scratchRPD.colorAttachments[0].texture = scratch
+        scratchRPD.colorAttachments[0].loadAction = .clear
+        scratchRPD.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        scratchRPD.colorAttachments[0].storeAction = .store
+
+        let byteCount = stamps.count * MemoryLayout<StampInstance>.stride
+        guard let stampBuf = stamps.withUnsafeBytes({ ptr -> MTLBuffer? in
+            guard let base = ptr.baseAddress else { return nil }
+            return device.makeBuffer(bytes: base, length: byteCount, options: .storageModeShared)
+        }) else { return }
+
+        if let enc = cmdBuf.makeRenderCommandEncoder(descriptor: scratchRPD) {
+            enc.setRenderPipelineState(brushStampPSO)
+            enc.setVertexBuffer(quadVertexBuffer, offset: 0, index: 0)
+            enc.setVertexBuffer(stampBuf, offset: 0, index: 1)
+            var canvasSize = SIMD2<Float>(Float(canvasWidth), Float(canvasHeight))
+            enc.setVertexBytes(&canvasSize, length: MemoryLayout<SIMD2<Float>>.size, index: 2)
+            enc.setFragmentTexture(brushMaskTexture, index: 0)
+            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: stamps.count)
+            enc.endEncoding()
+        }
+
+        // 2. Flatten scratch into canvas (source-over).
+        let flattenRPD = MTLRenderPassDescriptor()
+        flattenRPD.colorAttachments[0].texture = canvas
+        flattenRPD.colorAttachments[0].loadAction = .load
+        flattenRPD.colorAttachments[0].storeAction = .store
+
+        if let enc = cmdBuf.makeRenderCommandEncoder(descriptor: flattenRPD) {
+            enc.setRenderPipelineState(compositorPSO)
+            enc.setFragmentTexture(scratch, index: 0)
+            var opacity: Float = 1.0
+            enc.setFragmentBytes(&opacity, length: MemoryLayout<Float>.size, index: 0)
+            enc.setVertexBuffer(quadVertexBuffer, offset: 0, index: 0)
+            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+            enc.endEncoding()
+        }
+
+        cmdBuf.commit()
+        cmdBuf.waitUntilCompleted()  // OK — runs once per stroke during load, not interactive
+    }
+
     /// Snapshot the canvas texture into CPU-side Data for undo.
     func snapshotCanvas() -> Data? {
         guard let texture = canvasTexture else { return nil }

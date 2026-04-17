@@ -250,78 +250,12 @@ public final class MetalCanvasView: UIView {
 
     // MARK: - Stamp Generation
 
-    /// Rebuild all stamp instances for the current stroke. Arc-length interpolates
-    /// between consecutive raw touch points with **adaptive spacing** — each stamp's
-    /// gap to the next is a fraction of its own pressure-modulated width, so light-
-    /// pressure strokes stay dense instead of scattering into dots.
+    /// Rebuild all stamp instances for the current active stroke. Delegates to
+    /// `generateStampsForStroke` which handles arc-length interpolation with
+    /// adaptive spacing.
     private func appendStampsForLatestPoints(touch: UITouch, event: UIEvent?) {
-        guard let stroke = activeStroke, !stroke.points.isEmpty else { return }
-
-        let brush = stroke.brush
-        let scale = canvasScale
-        let color = premultipliedColor(brush)
-
-        activeStrokeStamps.removeAll(keepingCapacity: true)
-
-        // Place a stamp at the very first point.
-        let first = stroke.points[0]
-        let firstWidth = brush.effectiveWidth(force: first.force, altitude: first.altitude)
-        activeStrokeStamps.append(CanvasRenderer.StampInstance(
-            center: SIMD2<Float>(Float(first.position.x * scale), Float(first.position.y * scale)),
-            radius: Float(firstWidth * 0.5 * scale),
-            rotation: 0,
-            color: color
-        ))
-
-        var lastStampPos = first.position
-        // Spacing is based on the LAST stamp's effective width, so it adapts to pressure.
-        var currentSpacing = max(firstWidth * 0.3, 0.5)
-
-        for i in 1..<stroke.points.count {
-            let prev = stroke.points[i - 1]
-            let curr = stroke.points[i]
-            let dx = curr.position.x - prev.position.x
-            let dy = curr.position.y - prev.position.y
-            let segmentDist = hypot(dx, dy)
-            guard segmentDist > 0 else { continue }
-
-            // Walk along the segment, placing stamps at adaptive intervals.
-            var traveled: CGFloat = 0
-            let leftover = hypot(prev.position.x - lastStampPos.x, prev.position.y - lastStampPos.y)
-            traveled = max(0, currentSpacing - leftover)
-
-            while traveled <= segmentDist {
-                let t = traveled / segmentDist
-                let x = prev.position.x + dx * t
-                let y = prev.position.y + dy * t
-                let force = prev.force + (curr.force - prev.force) * t
-                let altitude = prev.altitude + (curr.altitude - prev.altitude) * t
-                let width = brush.effectiveWidth(force: force, altitude: altitude)
-
-                activeStrokeStamps.append(CanvasRenderer.StampInstance(
-                    center: SIMD2<Float>(Float(x * scale), Float(y * scale)),
-                    radius: Float(width * 0.5 * scale),
-                    rotation: 0,
-                    color: color
-                ))
-
-                lastStampPos = CGPoint(x: x, y: y)
-                // Next spacing adapts to THIS stamp's size.
-                currentSpacing = max(width * 0.3, 0.5)
-                traveled += currentSpacing
-            }
-        }
-
-        // Always cap with the final point so the stroke extends to the fingertip.
-        if let last = stroke.points.last {
-            let width = brush.effectiveWidth(force: last.force, altitude: last.altitude)
-            activeStrokeStamps.append(CanvasRenderer.StampInstance(
-                center: SIMD2<Float>(Float(last.position.x * scale), Float(last.position.y * scale)),
-                radius: Float(width * 0.5 * scale),
-                rotation: 0,
-                color: color
-            ))
-        }
+        guard let stroke = activeStroke else { return }
+        activeStrokeStamps = generateStampsForStroke(stroke, scale: canvasScale)
     }
 
     // MARK: - Eraser (incremental application)
@@ -500,15 +434,97 @@ public final class MetalCanvasView: UIView {
         return try? JSONEncoder().encode(strokes)
     }
 
-    /// Load strokes from saved data. Stores stroke metadata for persistence/export.
-    ///
-    /// Phase 2: replay strokes through the stamp pipeline to rebuild the canvas
-    /// texture from stroke data alone. Currently the canvas must be restored via
-    /// a saved bitmap snapshot (bakeImage) alongside stroke data.
+    /// Load strokes from saved data and replay them into the canvas texture.
+    /// Each stroke is re-rasterized through the stamp pipeline so the canvas
+    /// displays the full drawing without needing a separate bitmap snapshot.
     public func loadStrokes(_ savedStrokes: [Stroke]) {
         strokes = savedStrokes
         hasContent = !strokes.isEmpty
+
+        guard hasContent, renderer.hasCanvas else {
+            isDirty = true
+            return
+        }
+
+        // Replay each stroke into the canvas texture.
+        let scale = canvasScale
+        for stroke in strokes {
+            let stamps = generateStampsForStroke(stroke, scale: scale)
+            if !stamps.isEmpty {
+                renderer.commitStampsToCanvas(stamps)
+            }
+        }
+
+        // Clear undo stack — loaded state is the baseline.
+        undoSnapshots.removeAll()
+        redoSnapshots.removeAll()
         isDirty = true
+    }
+
+    /// Generate stamp instances for a complete stroke (used by replay + active drawing).
+    private func generateStampsForStroke(_ stroke: Stroke, scale: CGFloat) -> [CanvasRenderer.StampInstance] {
+        guard !stroke.points.isEmpty else { return [] }
+
+        let brush = stroke.brush
+        let color = premultipliedColor(brush)
+        var stamps: [CanvasRenderer.StampInstance] = []
+
+        let first = stroke.points[0]
+        let firstWidth = brush.effectiveWidth(force: first.force, altitude: first.altitude)
+        stamps.append(CanvasRenderer.StampInstance(
+            center: SIMD2<Float>(Float(first.position.x * scale), Float(first.position.y * scale)),
+            radius: Float(firstWidth * 0.5 * scale),
+            rotation: 0,
+            color: color
+        ))
+
+        var lastStampPos = first.position
+        var currentSpacing = max(firstWidth * 0.3, 0.5)
+
+        for i in 1..<stroke.points.count {
+            let prev = stroke.points[i - 1]
+            let curr = stroke.points[i]
+            let dx = curr.position.x - prev.position.x
+            let dy = curr.position.y - prev.position.y
+            let segmentDist = hypot(dx, dy)
+            guard segmentDist > 0 else { continue }
+
+            let leftover = hypot(prev.position.x - lastStampPos.x, prev.position.y - lastStampPos.y)
+            var traveled = max(0, currentSpacing - leftover)
+
+            while traveled <= segmentDist {
+                let t = traveled / segmentDist
+                let x = prev.position.x + dx * t
+                let y = prev.position.y + dy * t
+                let force = prev.force + (curr.force - prev.force) * t
+                let altitude = prev.altitude + (curr.altitude - prev.altitude) * t
+                let width = brush.effectiveWidth(force: force, altitude: altitude)
+
+                stamps.append(CanvasRenderer.StampInstance(
+                    center: SIMD2<Float>(Float(x * scale), Float(y * scale)),
+                    radius: Float(width * 0.5 * scale),
+                    rotation: 0,
+                    color: color
+                ))
+
+                lastStampPos = CGPoint(x: x, y: y)
+                currentSpacing = max(width * 0.3, 0.5)
+                traveled += currentSpacing
+            }
+        }
+
+        // End cap.
+        if let last = stroke.points.last {
+            let width = brush.effectiveWidth(force: last.force, altitude: last.altitude)
+            stamps.append(CanvasRenderer.StampInstance(
+                center: SIMD2<Float>(Float(last.position.x * scale), Float(last.position.y * scale)),
+                radius: Float(width * 0.5 * scale),
+                rotation: 0,
+                color: color
+            ))
+        }
+
+        return stamps
     }
 
     /// Read-only access to the current canvas as a CGImage (for snapshots, thumbnails).
