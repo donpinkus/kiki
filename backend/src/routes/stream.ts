@@ -7,6 +7,8 @@ import { verifyAccess } from '../modules/auth/jwt.js';
 import {
   getOrProvisionPod,
   hasReadySession,
+  classifyClose,
+  replaceSession,
   touch,
   sessionClosed,
 } from '../modules/orchestrator/orchestrator.js';
@@ -250,18 +252,96 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
 
         relay.onClose((code, reason) => {
           request.log.info({ userId, code, reason }, 'Upstream closed');
-          // Preemption heuristic: abnormal close codes from upstream while session
-          // was ready suggest RunPod preempted the spot pod.
-          const preemptionCodes = [1006, 1011, 1012, 1013, 1014];
-          if (preemptionCodes.includes(code)) {
-            incrementCounter('session_preempted_total');
+
+          if (!config.PREEMPTION_REPLACEMENT_ENABLED) {
+            // Legacy behavior: close client immediately
+            if (socket.readyState === socket.OPEN) {
+              socket.send(
+                JSON.stringify({ type: 'error', message: 'Pod terminated (possible spot preemption)' }),
+              );
+              socket.close(1001, 'Upstream closed');
+            }
+            return;
           }
-          if (socket.readyState === socket.OPEN) {
-            socket.send(
-              JSON.stringify({ type: 'error', message: 'Pod terminated (possible spot preemption)' }),
-            );
-            socket.close(1001, 'Upstream closed');
-          }
+
+          // WS7: classify the close, attempt transparent replacement
+          void (async () => {
+            try {
+              const classification = await classifyClose(userId);
+              request.log.info({ userId, classification }, 'Close classified');
+
+              if (classification === 'voluntary') {
+                if (socket.readyState === socket.OPEN) {
+                  socket.close(1000, 'Session ended');
+                }
+                return;
+              }
+
+              incrementCounter('session_preempted_total');
+
+              if (socket.readyState !== socket.OPEN) return;
+
+              // Hold client WS open — send reprovisioning status
+              socket.send(
+                JSON.stringify({ type: 'status', status: 'reprovisioning', message: 'Replacing GPU...' }),
+              );
+
+              const { podUrl: newPodUrl } = await replaceSession(userId, (msg) => {
+                if (socket.readyState === socket.OPEN) {
+                  socket.send(
+                    JSON.stringify({ type: 'status', status: 'reprovisioning', message: msg }),
+                  );
+                }
+              });
+
+              if (socket.readyState !== socket.OPEN) return;
+
+              // Wire up new relay
+              const newRelay = new StreamRelay(newPodUrl);
+              relay = newRelay;
+
+              newRelay.onMessage((data, isBinary) => {
+                if (socket.readyState !== socket.OPEN) return;
+                touch(userId);
+                if (isBinary) {
+                  const base64 = (data as Buffer).toString('base64');
+                  socket.send(JSON.stringify({ type: 'frame', data: base64 }));
+                } else {
+                  socket.send(data);
+                }
+              });
+
+              newRelay.onClose((c, r) => {
+                request.log.info({ userId, code: c, reason: r }, 'Replacement upstream closed');
+                // Don't recurse — if replacement also preempted, let client reconnect
+                if (socket.readyState === socket.OPEN) {
+                  socket.send(
+                    JSON.stringify({ type: 'error', message: 'Replacement pod also lost' }),
+                  );
+                  socket.close(1001, 'Replacement upstream closed');
+                }
+              });
+
+              newRelay.onError((err) => {
+                request.log.error({ userId, err }, 'Replacement upstream error');
+              });
+
+              await newRelay.connect();
+              request.log.info({ userId, newPodUrl }, 'Replacement relay connected');
+
+              if (socket.readyState === socket.OPEN) {
+                socket.send(JSON.stringify({ type: 'status', status: 'ready' }));
+              }
+            } catch (err) {
+              request.log.error({ userId, err }, 'Replacement failed');
+              if (socket.readyState === socket.OPEN) {
+                socket.send(
+                  JSON.stringify({ type: 'error', message: `Replacement failed: ${(err as Error).message}` }),
+                );
+                socket.close(1011, 'Replacement failed');
+              }
+            }
+          })();
         });
 
         relay.onError((err) => {

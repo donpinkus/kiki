@@ -67,6 +67,13 @@ export interface AppConfig {
   /** Minimum seconds between alerts of the same type. */
   readonly COST_ALERT_COOLDOWN_SECONDS: number;
 
+  // ─── Preemption handling (Workstream 7) ────────────────────────────────
+  /** When true, hold client WS open and transparently replace the pod on
+   * preemption. When false, close client with error (legacy behavior). */
+  readonly PREEMPTION_REPLACEMENT_ENABLED: boolean;
+  /** Max replacement attempts per session before giving up. */
+  readonly MAX_SESSION_REPLACEMENTS: number;
+
   readonly NODE_ENV: 'development' | 'production' | 'test';
   readonly LOG_LEVEL: 'fatal' | 'error' | 'warn' | 'info' | 'debug' | 'trace';
 }
@@ -164,6 +171,8 @@ function validateConfig(): AppConfig {
     RUNPOD_GHCR_AUTH_ID: process.env['RUNPOD_GHCR_AUTH_ID'] ?? '',
     NETWORK_VOLUMES_BY_DC: parseVolumesMap(process.env['NETWORK_VOLUMES_BY_DC']),
     REDIS_URL: process.env['REDIS_URL'] ?? '',
+    PREEMPTION_REPLACEMENT_ENABLED: process.env['PREEMPTION_REPLACEMENT_ENABLED'] === 'true',
+    MAX_SESSION_REPLACEMENTS: Number(process.env['MAX_SESSION_REPLACEMENTS'] ?? 2),
     OPS_API_KEY: process.env['OPS_API_KEY'] ?? '',
     COST_MONITOR_INTERVAL_MS: Number(process.env['COST_MONITOR_INTERVAL_MS'] ?? 300_000),
     COST_ALERT_WEBHOOK_URL: process.env['COST_ALERT_WEBHOOK_URL'] ?? '',

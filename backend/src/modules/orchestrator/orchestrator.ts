@@ -37,7 +37,7 @@ import { incrementCounter, observeHistogram, setGauge, classifyProvisionError } 
 // Types
 // ────────────────────────────────────────────────────────────────────────────
 
-export type SessionStatus = 'provisioning' | 'ready' | 'terminated';
+export type SessionStatus = 'provisioning' | 'ready' | 'replacing' | 'terminated';
 
 export type PodType = 'spot' | 'onDemand';
 
@@ -103,6 +103,7 @@ interface RedisSession {
   status: SessionStatus;
   createdAt: number;
   lastActivityAt: number;
+  replacementCount: number;
 }
 
 const IDLE_TTL_SECONDS = Math.ceil(IDLE_TIMEOUT_MS / 1000) + IDLE_GRACE_SECONDS;
@@ -122,6 +123,7 @@ async function readSession(sessionId: string): Promise<RedisSession | null> {
     status: (data['status'] as SessionStatus) || 'provisioning',
     createdAt: Number(data['createdAt'] ?? 0),
     lastActivityAt: Number(data['lastActivityAt'] ?? 0),
+    replacementCount: Number(data['replacementCount'] ?? 0),
   };
 }
 
@@ -136,6 +138,7 @@ async function writeSession(session: RedisSession): Promise<void> {
   if (session.podId) fields['podId'] = session.podId;
   if (session.podUrl) fields['podUrl'] = session.podUrl;
   if (session.podType) fields['podType'] = session.podType;
+  if (session.replacementCount > 0) fields['replacementCount'] = String(session.replacementCount);
   await getRedis().multi()
     .hset(key, fields)
     .expire(key, IDLE_TTL_SECONDS)
@@ -197,6 +200,7 @@ export async function getOrProvisionPod(
     status: 'provisioning',
     createdAt: now,
     lastActivityAt: now,
+    replacementCount: 0,
   });
 
   let provisionedPodId: string | null = null;
@@ -218,6 +222,7 @@ export async function getOrProvisionPod(
           status: 'ready',
           createdAt: now,
           lastActivityAt: Date.now(),
+          replacementCount: 0,
         });
         return { podUrl: result.podUrl };
       } finally {
@@ -260,6 +265,113 @@ export function touch(sessionId: string): void {
 export async function hasReadySession(sessionId: string): Promise<boolean> {
   const session = await readSession(sessionId);
   return session?.status === 'ready' && !!session.podUrl;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Preemption handling (WS7)
+// ────────────────────────────────────────────────────────────────────────────
+
+export type CloseClassification = 'preempted' | 'crashed' | 'voluntary';
+
+/**
+ * Classify an upstream WS close. Probes RunPod to determine whether the pod
+ * was preempted, crashed, or voluntarily terminated by us.
+ */
+export async function classifyClose(sessionId: string): Promise<CloseClassification> {
+  const session = await readSession(sessionId);
+  if (!session || session.status === 'terminated') return 'voluntary';
+  if (!session.podId) return 'voluntary';
+
+  try {
+    const pod = await getPod(session.podId);
+    if (!pod || pod.desiredStatus === 'EXITED' || pod.desiredStatus === 'TERMINATED') {
+      return 'preempted';
+    }
+    if (pod.desiredStatus === 'RUNNING' && pod.runtime) {
+      // Pod is alive — check if server is healthy
+      try {
+        const healthUrl = `https://${session.podId}-8766.proxy.runpod.net/health`;
+        const res = await fetch(healthUrl, { signal: AbortSignal.timeout(5000) });
+        if (res.ok) return 'voluntary'; // pod healthy, close was intentional
+      } catch { /* health failed */ }
+      return 'crashed';
+    }
+    return 'preempted';
+  } catch {
+    // RunPod API error — assume preemption (safer to replace than ignore)
+    return 'preempted';
+  }
+}
+
+/**
+ * Replace a session's pod after preemption or crash. Holds the existing session
+ * key in Redis, provisions a new pod, swaps podId/podUrl atomically.
+ *
+ * Returns the new podUrl. Throws if replacement fails or retry bound exceeded.
+ */
+export async function replaceSession(
+  sessionId: string,
+  onStatus: (msg: string) => void,
+): Promise<{ podUrl: string }> {
+  const session = await readSession(sessionId);
+  if (!session) throw new Error('No session to replace');
+
+  if (session.replacementCount >= config.MAX_SESSION_REPLACEMENTS) {
+    incrementCounter('session_replacement_exhausted_total');
+    throw new Error(`Replacement limit reached (${config.MAX_SESSION_REPLACEMENTS} attempts)`);
+  }
+
+  const oldPodId = session.podId;
+  const attempt = session.replacementCount + 1;
+
+  log.info({ sessionId, oldPodId, attempt }, 'Starting session replacement');
+  incrementCounter('session_replacement_started_total');
+
+  // Mark as replacing in Redis
+  await writeSession({
+    ...session,
+    status: 'replacing',
+    lastActivityAt: Date.now(),
+    replacementCount: attempt,
+  });
+
+  // Clean up old pod (fire-and-forget — may already be gone)
+  if (oldPodId) {
+    terminatePod(oldPodId).catch(() => {});
+  }
+
+  const t0 = Date.now();
+
+  try {
+    await acquireSemaphore(onStatus);
+    try {
+      const result = await provision(sessionId, onStatus);
+      const replacementMs = Date.now() - t0;
+
+      await writeSession({
+        ...session,
+        podId: result.podId,
+        podUrl: result.podUrl,
+        podType: result.podType,
+        status: 'ready',
+        lastActivityAt: Date.now(),
+        replacementCount: attempt,
+      });
+
+      log.info({ sessionId, oldPodId, newPodId: result.podId, replacementMs, attempt }, 'Session replaced');
+      incrementCounter('session_replacement_succeeded_total');
+      observeHistogram('provision_total_ms', replacementMs);
+
+      return { podUrl: result.podUrl };
+    } finally {
+      releaseSemaphore();
+    }
+  } catch (err) {
+    log.error({ sessionId, attempt, err }, 'Session replacement failed');
+    incrementCounter('session_replacement_failed_total');
+    await deleteSession(sessionId).catch(() => {});
+    throw err;
+  }
 }
 
 export function sessionClosed(sessionId: string): void {
@@ -326,7 +438,9 @@ async function runReaper(): Promise<void> {
     for (const key of keys as string[]) {
       try {
         const data = await redis.hgetall(key);
-        if (!data['sessionId'] || data['status'] !== 'ready' || !data['podId']) continue;
+        const status = data['status'];
+        if (!data['sessionId'] || !data['podId']) continue;
+        if (status !== 'ready') continue; // skip provisioning, replacing, terminated
         const lastActivity = Number(data['lastActivityAt'] ?? 0);
         const idleMs = now - lastActivity;
         if (idleMs <= IDLE_TIMEOUT_MS) continue;
