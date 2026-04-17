@@ -356,18 +356,18 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
           socket.send(JSON.stringify({ type: 'status', status: 'ready' }));
         }
 
-        const activeRelay = relay;
         socket.on('message', (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
+          if (!relay) return;
           const buf = Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data as ArrayBuffer);
           touch(userId);
           if (isBinary) {
-            activeRelay.sendFrame(buf);
+            relay.sendFrame(buf);
           } else {
             const text = buf.toString('utf-8');
             try {
               const parsed = JSON.parse(text);
               if (parsed.type === 'config') {
-                activeRelay.sendConfig(parsed);
+                relay.sendConfig(parsed);
               }
             } catch {
               request.log.warn({ userId }, 'Invalid JSON from client');
