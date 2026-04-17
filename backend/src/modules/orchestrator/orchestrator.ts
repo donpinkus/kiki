@@ -18,6 +18,7 @@ import { fileURLToPath } from 'node:url';
 import type { FastifyBaseLogger } from 'fastify';
 
 import { config } from '../../config/index.js';
+import { getRedis, ensureRedis, setLogger as setRedisLogger } from '../redis/client.js';
 import {
   createOnDemandPod,
   createSpotPod,
@@ -39,24 +40,17 @@ export type SessionStatus = 'provisioning' | 'ready' | 'terminated';
 
 export type PodType = 'spot' | 'onDemand';
 
-export interface Session {
-  sessionId: string;
-  podId: string | null; // null while provisioning
-  podUrl: string | null; // wss URL, set once ready
-  podType: PodType | null; // null while provisioning
-  status: SessionStatus;
-  createdAt: number;
-  lastActivityAt: number;
-  provisionPromise: Promise<{ podUrl: string }> | null;
-}
-
 // ────────────────────────────────────────────────────────────────────────────
 // Module-scoped state
 // ────────────────────────────────────────────────────────────────────────────
 
-const registry = new Map<string, Session>();
+// Session registry lives in Redis (WS5). Local map only holds in-flight
+// provision promises for same-process join (Promises can't be serialized).
+const inFlightProvisions = new Map<string, Promise<{ podUrl: string }>>();
 
+const SESSION_PREFIX = 'session:';
 const POD_PREFIX = 'kiki-session-';
+const IDLE_GRACE_SECONDS = 300; // 5 min grace on top of idle timeout for Redis TTL
 const GPU_TYPE_ID = 'NVIDIA GeForce RTX 5090';
 const IMAGE_NAME = 'runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404';
 // Headroom above the current spot floor. Larger headroom = fewer outbids =
@@ -97,6 +91,61 @@ function findRuntimeAssets(startDir: string): string {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// Redis session helpers
+// ────────────────────────────────────────────────────────────────────────────
+
+interface RedisSession {
+  sessionId: string;
+  podId: string | null;
+  podUrl: string | null;
+  podType: PodType | null;
+  status: SessionStatus;
+  createdAt: number;
+  lastActivityAt: number;
+}
+
+const IDLE_TTL_SECONDS = Math.ceil(IDLE_TIMEOUT_MS / 1000) + IDLE_GRACE_SECONDS;
+
+function sessionKey(sessionId: string): string {
+  return `${SESSION_PREFIX}${sessionId}`;
+}
+
+async function readSession(sessionId: string): Promise<RedisSession | null> {
+  const data = await getRedis().hgetall(sessionKey(sessionId));
+  if (!data || !data['sessionId']) return null;
+  return {
+    sessionId: data['sessionId']!,
+    podId: data['podId'] || null,
+    podUrl: data['podUrl'] || null,
+    podType: (data['podType'] as PodType) || null,
+    status: (data['status'] as SessionStatus) || 'provisioning',
+    createdAt: Number(data['createdAt'] ?? 0),
+    lastActivityAt: Number(data['lastActivityAt'] ?? 0),
+  };
+}
+
+async function writeSession(session: RedisSession): Promise<void> {
+  const key = sessionKey(session.sessionId);
+  const fields: Record<string, string> = {
+    sessionId: session.sessionId,
+    status: session.status,
+    createdAt: String(session.createdAt),
+    lastActivityAt: String(session.lastActivityAt),
+  };
+  if (session.podId) fields['podId'] = session.podId;
+  if (session.podUrl) fields['podUrl'] = session.podUrl;
+  if (session.podType) fields['podType'] = session.podType;
+  await getRedis().multi()
+    .hset(key, fields)
+    .expire(key, IDLE_TTL_SECONDS)
+    .exec();
+}
+
+async function deleteSession(sessionId: string): Promise<void> {
+  await getRedis().del(sessionKey(sessionId));
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // Public API
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -105,14 +154,15 @@ function findRuntimeAssets(startDir: string): string {
  * If the same sessionId calls this concurrently while a provision is in flight,
  * both calls await the same promise — we don't create two pods.
  *
- * `onStatus` receives human-readable progress strings suitable for forwarding
- * to the client as `{type: "status", status: "provisioning", message: ...}`.
+ * Session state is stored in Redis (survives deploys). In-flight provision
+ * promises are kept in a local map for same-process join only.
  */
 export async function getOrProvisionPod(
   sessionId: string,
   onStatus: (msg: string) => void,
 ): Promise<{ podUrl: string }> {
-  const existing = registry.get(sessionId);
+  // 1. Check Redis for existing session
+  const existing = await readSession(sessionId);
 
   if (existing?.status === 'ready' && existing.podUrl) {
     log.info({ sessionId, podId: existing.podId }, 'Reusing existing session pod');
@@ -120,82 +170,101 @@ export async function getOrProvisionPod(
     return { podUrl: existing.podUrl };
   }
 
-  if (existing?.provisionPromise) {
+  // 2. Check local in-flight map (same-process concurrent callers)
+  const inFlight = inFlightProvisions.get(sessionId);
+  if (inFlight) {
     log.info({ sessionId }, 'Waiting for in-flight provision');
     onStatus('Joining existing provisioning...');
-    return existing.provisionPromise;
+    return inFlight;
   }
 
-  // Fresh provision. Create session record, then attach the promise so any
-  // concurrent callers for the same sessionId wait on us.
-  const session: Session = {
+  // 3. If Redis says provisioning but we don't own the promise (post-restart
+  // or different replica), the provision is orphaned. Clean up and re-provision.
+  if (existing?.status === 'provisioning') {
+    log.warn({ sessionId }, 'Stale provisioning session found in Redis — re-provisioning');
+    await deleteSession(sessionId);
+  }
+
+  // 4. Fresh provision — claim in Redis + start
+  const now = Date.now();
+  await writeSession({
     sessionId,
     podId: null,
     podUrl: null,
     podType: null,
     status: 'provisioning',
-    createdAt: Date.now(),
-    lastActivityAt: Date.now(),
-    provisionPromise: null,
-  };
-  registry.set(sessionId, session);
+    createdAt: now,
+    lastActivityAt: now,
+  });
+
+  let provisionedPodId: string | null = null;
 
   const promise = (async () => {
     try {
       await acquireSemaphore(onStatus);
       try {
         const result = await provision(sessionId, onStatus);
-        session.podId = result.podId;
-        session.podUrl = result.podUrl;
-        session.podType = result.podType;
-        session.status = 'ready';
-        session.lastActivityAt = Date.now();
-        session.provisionPromise = null;
+        provisionedPodId = result.podId;
+        await writeSession({
+          sessionId,
+          podId: result.podId,
+          podUrl: result.podUrl,
+          podType: result.podType,
+          status: 'ready',
+          createdAt: now,
+          lastActivityAt: Date.now(),
+        });
         return { podUrl: result.podUrl };
       } finally {
         releaseSemaphore();
       }
     } catch (err) {
       log.error({ sessionId, err }, 'Provision failed');
-      // If we got a pod ID before failing, clean it up so we don't leak.
-      if (session.podId) {
-        notifyPodProgress(session.podId, `❌ **Failed:** ${(err as Error).message}`);
-        terminatePod(session.podId).catch((e) =>
-          log.warn({ podId: session.podId, err: e }, 'Failed to clean up pod after provision failure'),
+      if (provisionedPodId) {
+        notifyPodProgress(provisionedPodId, `❌ **Failed:** ${(err as Error).message}`);
+        terminatePod(provisionedPodId).catch((e) =>
+          log.warn({ podId: provisionedPodId, err: e }, 'Failed to clean up pod after provision failure'),
         );
       }
-      registry.delete(sessionId);
+      await deleteSession(sessionId).catch(() => {});
       throw err;
+    } finally {
+      inFlightProvisions.delete(sessionId);
     }
   })();
 
-  session.provisionPromise = promise;
+  inFlightProvisions.set(sessionId, promise);
   return promise;
 }
 
 export function touch(sessionId: string): void {
-  const s = registry.get(sessionId);
-  if (s) s.lastActivityAt = Date.now();
+  // Fire-and-forget — don't block frame-relay hot path on Redis round-trip
+  const key = sessionKey(sessionId);
+  void getRedis().multi()
+    .hset(key, 'lastActivityAt', String(Date.now()))
+    .expire(key, IDLE_TTL_SECONDS)
+    .exec()
+    .catch((err) => log.warn({ err: (err as Error).message, sessionId }, 'touch failed'));
 }
 
 export function sessionClosed(sessionId: string): void {
-  const s = registry.get(sessionId);
-  if (!s) return;
   // Don't terminate — user may reconnect. Just log. Reaper handles the timeout.
   log.info(
-    { sessionId, podId: s.podId, idleAfterMs: IDLE_TIMEOUT_MS },
+    { sessionId, idleAfterMs: IDLE_TIMEOUT_MS },
     'Client disconnected; pod stays alive pending reconnect',
   );
 }
 
 /**
- * Runs once at backend boot: terminate any orphan pods from a prior backend run,
- * then arm the idle reaper.
+ * Runs once at backend boot: connect to Redis, reconcile orphan pods, then
+ * arm the idle reaper.
  */
 export async function start(logger: FastifyBaseLogger): Promise<void> {
   log = logger;
+  setRedisLogger(logger);
+  await ensureRedis();
   await reconcileOrphanPods();
-  setInterval(runReaper, REAPER_INTERVAL_MS);
+  setInterval(() => void runReaper(), REAPER_INTERVAL_MS);
   log.info({ idleTimeoutMs: IDLE_TIMEOUT_MS, maxConcurrent: MAX_CONCURRENT_PROVISIONS }, 'Orchestrator started');
 }
 
@@ -224,38 +293,100 @@ function releaseSemaphore(): void {
 // Reaper + reconcile
 // ────────────────────────────────────────────────────────────────────────────
 
-function runReaper(): void {
+async function runReaper(): Promise<void> {
   const now = Date.now();
-  for (const session of registry.values()) {
-    if (session.status !== 'ready' || !session.podId) continue;
-    const idleMs = now - session.lastActivityAt;
-    if (idleMs > IDLE_TIMEOUT_MS) {
-      log.info({ sessionId: session.sessionId, podId: session.podId, idleMs }, 'Reaping idle pod');
-      session.status = 'terminated';
-      const podId = session.podId;
-      notifyPodTerminated(podId, `idle ${Math.round(idleMs / 1000)}s`);
-      terminatePod(podId)
-        .then(() => registry.delete(session.sessionId))
-        .catch((err) => log.error({ sessionId: session.sessionId, podId, err }, 'Reap failed'));
+  const redis = getRedis();
+  const stream = redis.scanStream({ match: `${SESSION_PREFIX}*`, count: 100 });
+  for await (const keys of stream) {
+    for (const key of keys as string[]) {
+      try {
+        const data = await redis.hgetall(key);
+        if (!data['sessionId'] || data['status'] !== 'ready' || !data['podId']) continue;
+        const lastActivity = Number(data['lastActivityAt'] ?? 0);
+        const idleMs = now - lastActivity;
+        if (idleMs <= IDLE_TIMEOUT_MS) continue;
+
+        // Atomic: only reap if status is still 'ready' (prevents two reapers
+        // both reaping the same session across replicas).
+        const claimed = await redis.multi()
+          .hget(key, 'status')
+          .hset(key, 'status', 'terminated')
+          .exec();
+        const prevStatus = claimed?.[0]?.[1];
+        if (prevStatus !== 'ready') continue; // another reaper got it
+
+        const podId = data['podId']!;
+        const sessionId = data['sessionId']!;
+        log.info({ sessionId, podId, idleMs }, 'Reaping idle pod');
+        notifyPodTerminated(podId, `idle ${Math.round(idleMs / 1000)}s`);
+        terminatePod(podId)
+          .then(() => redis.del(key))
+          .catch((err) => log.error({ sessionId, podId, err }, 'Reap failed'));
+      } catch (err) {
+        log.warn({ key, err: (err as Error).message }, 'Reaper error on key');
+      }
     }
   }
 }
 
 async function reconcileOrphanPods(): Promise<void> {
   try {
-    const pods = await listPodsByPrefix(POD_PREFIX);
-    if (pods.length === 0) {
-      log.info('Reconcile: no orphan pods found');
-      return;
+    // 1. Read all session keys from Redis
+    const redis = getRedis();
+    const sessionPodIds = new Set<string>();
+    const staleKeys: string[] = [];
+    const stream = redis.scanStream({ match: `${SESSION_PREFIX}*`, count: 100 });
+    for await (const keys of stream) {
+      for (const key of keys as string[]) {
+        const data = await redis.hgetall(key);
+        if (data['podId'] && data['status'] === 'ready') {
+          sessionPodIds.add(data['podId']);
+        } else if (data['status'] === 'provisioning') {
+          // Stale provisioning row (no live promise to resume). Clean up.
+          staleKeys.push(key);
+        }
+      }
     }
-    log.warn({ count: pods.length }, 'Reconcile: terminating orphan pods from prior backend run');
-    await Promise.all(
-      pods.map((p) =>
-        terminatePod(p.id).catch((err) =>
-          log.error({ podId: p.id, name: p.name, err }, 'Failed to terminate orphan'),
-        ),
-      ),
-    );
+
+    // Clean up stale provisioning rows
+    for (const key of staleKeys) {
+      log.warn({ key }, 'Reconcile: deleting stale provisioning session');
+      await redis.del(key);
+    }
+
+    // 2. List RunPod pods
+    const pods = await listPodsByPrefix(POD_PREFIX);
+
+    // 3. Adopt or terminate
+    let adopted = 0;
+    let terminated = 0;
+    for (const pod of pods) {
+      if (sessionPodIds.has(pod.id)) {
+        adopted++;
+      } else {
+        // Genuine orphan — no Redis session references this pod
+        log.warn({ podId: pod.id, name: pod.name }, 'Reconcile: terminating orphan pod');
+        terminated++;
+        await terminatePod(pod.id).catch((err) =>
+          log.error({ podId: pod.id, name: pod.name, err }, 'Failed to terminate orphan'),
+        );
+      }
+    }
+
+    // 4. Clean up Redis sessions whose pods no longer exist on RunPod
+    const runpodPodIds = new Set(pods.map((p) => p.id));
+    const sessionStream = redis.scanStream({ match: `${SESSION_PREFIX}*`, count: 100 });
+    for await (const keys of sessionStream) {
+      for (const key of keys as string[]) {
+        const podId = await redis.hget(key, 'podId');
+        if (podId && !runpodPodIds.has(podId)) {
+          log.warn({ key, podId }, 'Reconcile: deleting session for pod no longer on RunPod');
+          await redis.del(key);
+        }
+      }
+    }
+
+    log.info({ adopted, terminated, staleProvisioning: staleKeys.length }, 'Reconcile complete');
   } catch (err) {
     log.error({ err }, 'Reconcile failed (continuing anyway)');
   }

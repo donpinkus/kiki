@@ -42,6 +42,10 @@ export interface AppConfig {
    * `{"EUR-NO-1":"49n6i3twuw","US-NC-1":"5vz7ubospw"}`. Empty = no volume path. */
   readonly NETWORK_VOLUMES_BY_DC: Readonly<Record<string, string>>;
 
+  // ─── Redis (Workstream 5) ──────────────────────────────────────────────
+  /** Redis connection URL. Required for session registry persistence. */
+  readonly REDIS_URL: string;
+
   // ─── Cost monitoring (Workstream 4) ────────────────────────────────────
   /** Shared secret for /v1/ops/* endpoints. Unset → ops routes reject all. */
   readonly OPS_API_KEY: string;
@@ -159,6 +163,7 @@ function validateConfig(): AppConfig {
     FLUX_IMAGE: process.env['FLUX_IMAGE'] ?? '',
     RUNPOD_GHCR_AUTH_ID: process.env['RUNPOD_GHCR_AUTH_ID'] ?? '',
     NETWORK_VOLUMES_BY_DC: parseVolumesMap(process.env['NETWORK_VOLUMES_BY_DC']),
+    REDIS_URL: process.env['REDIS_URL'] ?? '',
     OPS_API_KEY: process.env['OPS_API_KEY'] ?? '',
     COST_MONITOR_INTERVAL_MS: Number(process.env['COST_MONITOR_INTERVAL_MS'] ?? 300_000),
     COST_ALERT_WEBHOOK_URL: process.env['COST_ALERT_WEBHOOK_URL'] ?? '',
