@@ -76,23 +76,9 @@ Ranked by impact, worst first:
 
 **Shipped:** `costMonitor.ts` with 5-min periodic tick, `/v1/ops/cost` + `/v1/ops/cost/history` endpoints (X-Ops-Key auth), Discord webhook alerts (threshold breaches + $5k/mo hard cap circuit breaker), hourly cost digest, and per-pod lifecycle threads in a Discord Forum channel showing stage-by-stage progress (image pull → container up → model loading → ready → terminated).
 
-### 5. Redis-backed session registry
+### 5. Redis-backed session registry — DONE
 
-**Why:** Single Railway instance + in-memory Map means any deploy or crash drops all active users. At 100 users, that's a very visible outage. Also unlocks horizontal backend scaling when we need it.
-
-**Approach:**
-- Provision Redis on Railway (one-click plugin, ~$5/mo).
-- Replace `const registry = new Map<...>()` with a Redis hash. Keys: `session:<userId>`. Fields: podId, podUrl, status, createdAt, lastActivityAt.
-- TTL on the Redis key = idle timeout + a grace period so the reaper has room to work.
-- `touch()` → `HSET lastActivityAt` + reset TTL.
-- Reaper scans with `SCAN` instead of iterating a local Map.
-- On backend boot, reconcile orphan pods against the Redis registry (rather than blindly terminating all `kiki-session-*` pods — which would drop users mid-session during a deploy).
-
-**Effort:** Medium (~1 day). Straightforward refactor; Redis client for Node.
-
-**Success criteria:**
-- Redeploy the backend while a session is active → user reconnects and resumes the same pod.
-- Two backend instances run concurrently behind Railway's load balancer → sessions still work, no double-provision.
+**Shipped:** Session registry moved from in-memory `Map` to Redis hashes (`session:<userId>`). Deploys no longer drop active sessions — new process adopts pods from Redis instead of killing everything. Reaper uses `SCAN` + atomic `MULTI`. `touch()` is fire-and-forget HSET + EXPIRE (~2/sec per active user). TTL = idle timeout + 5 min grace. Uses `ioredis` with auto-reconnection. Also unblocks horizontal scaling (multiple replicas sharing one Redis).
 
 ### 6. Observability
 
