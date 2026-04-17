@@ -4,7 +4,7 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
 
     // MARK: - Public
 
-    public let canvasView = DrawingCanvasView()
+    public let canvasView = MetalCanvasView()
     public private(set) var rotation: CGFloat = 0
     public private(set) var scale: CGFloat = 1.0
     public private(set) var translation: CGPoint = .zero

@@ -30,7 +30,7 @@ cd backend && npm run lint         # Lint
 
 ## Architecture Decisions (Decided — Do Not Propose Alternatives)
 
-**iOS:** SwiftUI for UI. PencilKit for drawing. Swift Concurrency (actors, async/await) — no Combine except PencilKit delegate bridging. URLSession for networking — no third-party HTTP libs. SwiftData for persistence. Core Image + vImage for image processing. 3 local Swift packages via SPM. AppCoordinator (@Observable) injected via environment.
+**iOS:** SwiftUI for UI. **Metal for drawing** (CAMetalLayer + CADisplayLink, instanced stamp-based brush engine — see Canvas Engine below). Swift Concurrency (actors, async/await) — no Combine. URLSession for networking — no third-party HTTP libs. SwiftData for persistence. 3 local Swift packages via SPM. AppCoordinator (@Observable) injected via environment.
 
 **Backend:** TypeScript + Fastify — no Express. Railway for hosting. Backend is both a WebSocket relay AND a pod orchestrator: it provisions a dedicated RTX 5090 spot pod per session (`session=<uuid>` query param), relays frames to that pod, and terminates pods idle > 10 min. In-memory session registry, semaphore caps concurrent cold starts. See `documents/references/provider-config.md` for the full ops picture.
 
@@ -45,8 +45,27 @@ State-based navigation via `AppCoordinator.currentScreen` (`.gallery` | `.drawin
 - **Style picker** — `PromptStyle` model defines available styles. Selected style's `promptSuffix` is appended to the user's prompt client-side before sending to backend.
 - **Drawing model** (`Drawing.swift`) — SwiftData `@Model` with `@Attribute(.externalStorage)` for image blobs (drawing data, background image, generated image, canvas thumbnail). Settings: prompt, style ID.
 - **Auto-save** — debounced 1s on stroke/prompt changes.
-- **Pending-state pattern** — `CanvasViewModel.setPendingState()` queues canvas data before navigation; `attach()` applies it before the PKCanvasView delegate is set.
+- **Pending-state pattern** — `CanvasViewModel.setPendingState()` queues canvas data before navigation; `attach()` applies it when the canvas view is created.
 - **Empty drawing cleanup** — `navigateToGallery()` deletes drawings with no content.
+
+## Canvas Engine (Metal)
+
+The drawing canvas uses a custom Metal-based rendering engine (`MetalCanvasView` + `CanvasRenderer`) for GPU-accelerated painting at 120 Hz. Key architecture:
+
+- **Display**: `CAMetalLayer` (double-buffered, `.bgra8Unorm_srgb`) driven by `CADisplayLink`. Only renders when dirty.
+- **Canvas texture**: `.shared` storage — GPU and CPU access the same unified memory. No CPU↔GPU copies per frame.
+- **Brush rendering**: instanced stamp quads. Touch points → arc-length resampled positions → `StampInstance` buffer → single instanced draw call per frame. Adaptive spacing (stamp gap = 30% of pressure-modulated width) keeps strokes dense at all pressures.
+- **Eraser**: stamps applied directly to canvas texture with destination-out blend, per touchesMoved. Undo snapshot taken at touchesBegan.
+- **Active stroke**: rendered into a scratch texture (ephemeral), composited onto the canvas each frame. Flattened into the canvas texture on touchesEnded.
+- **Undo**: full-texture CPU snapshots (`texture.getBytes()` → `Data`), depth 30. Restore via `texture.replace()`.
+- **Stream capture**: reads canvas texture via `persistentImageSnapshot` (CGImage from `.shared` texture). **Never** uses `drawHierarchy` — that forces a synchronous GPU drain.
+- **Lasso**: Phase 2 (path drawing works, selection extraction not yet implemented).
+- **Smudge**: not yet implemented on Metal (reverted from a CPU attempt that hit <1 fps). Will be a ping-pong texture fragment-shader pass. See `documents/plans/metal-canvas-rewrite.md`.
+
+### Performance invariants
+- `applyEraserStamps` creates a temporary `MTLBuffer` per batch (no shared-buffer races) and commits **without** `waitUntilCompleted`.
+- `flattenScratchIntoCanvas` is the only `waitUntilCompleted` on the drawing hot path — runs once per stroke end, not per frame.
+- `clearTexture` uses `waitUntilCompleted` but only runs during canvas resize (not interactive).
 
 ## Module Dependencies
 
@@ -60,7 +79,7 @@ Data flows one direction: Canvas → Network → Result. Modules communicate thr
 
 ## Critical Constraints (NEVER Violate)
 
-1. **Canvas responsiveness is sacred.** PencilKit rendering NEVER depends on network/generation state. Target <16ms stroke latency.
+1. **Canvas responsiveness is sacred.** Metal rendering NEVER depends on network/generation state. Target <8ms stroke latency at 120 Hz. NEVER call `drawHierarchy(afterScreenUpdates: true)` or `waitUntilCompleted()` on the main-thread hot path — use `texture.getBytes()` on `.shared` storage for CPU reads, and async command buffer commits for GPU writes.
 2. **Never clear the right pane.** Always keep last successful image visible. Never show blank after first successful generation.
 3. **No secrets on client.** Provider API keys and URLs backend only. Client NEVER calls inference providers directly.
 4. **Content safety before external testing.** NSFW output filter + prompt input filter must be operational before any external TestFlight build.
@@ -75,6 +94,7 @@ Data flows one direction: Canvas → Network → Result. Modules communicate thr
 | RunPod deploy, provider ops, network volumes | `documents/references/provider-config.md` |
 | Cost monitoring, Discord alerts, pod lifecycle threads | `backend/src/modules/orchestrator/costMonitor.ts` |
 | Scale-to-100-users roadmap + workstream status | `documents/plans/scale-to-100-users.md` |
+| Metal canvas architecture plan (layers, smudge, etc.) | `documents/plans/metal-canvas-rewrite.md` |
 | Implementation decisions log | `documents/decisions.md` |
 | Removed features (ComfyUI, StreamDiffusion) | `documents/removed-features.md` |
 | Product requirements | `PRD.md` |

@@ -38,7 +38,7 @@ public final class CanvasViewModel {
     public private(set) var isInteracting = false
     public private(set) var hasLassoSelection = false
 
-    private weak var canvasView: DrawingCanvasView?
+    private weak var canvasView: MetalCanvasView?
     private weak var container: RotatableCanvasContainer?
     private var pendingState: CanvasState?
     private var preLassoSnapshot: CGImage?
@@ -69,7 +69,7 @@ public final class CanvasViewModel {
 
     // MARK: - Public API
 
-    func attach(_ canvasView: DrawingCanvasView, container: RotatableCanvasContainer) {
+    func attach(_ canvasView: MetalCanvasView, container: RotatableCanvasContainer) {
         self.canvasView = canvasView
         self.container = container
         container.updateCursorSize(diameter: 5)
@@ -115,36 +115,21 @@ public final class CanvasViewModel {
     /// Transition from Phase A (floating selection) to Phase B (clip mask).
     /// Called when switching from lasso tool to pen/eraser.
     public func transitionToClipMode() {
-        guard let container, let canvasView else { return }
+        // TODO: Phase 2 — lasso clip mode on Metal canvas
+        guard let container else { return }
         guard let result = container.commitLassoSelection() else { return }
-        canvasView.compositeSelectionImage(result.image, at: result.bounds, transform: result.transform)
         if let path = lassoClosedPath {
-            canvasView.lassoClipPath = path
-            canvasView.setNeedsDisplay()
+            canvasView?.lassoClipPath = path
         }
-        // hasLassoSelection stays true — clip mask is active
     }
 
     /// Clear the lasso entirely. Commits floating selection if active, removes clip mask.
-    /// Called by the "Clear Lasso" button.
     public func clearLasso() {
-        guard let container, let canvasView else { return }
-
+        guard let container else { return }
         if container.hasActiveLassoSelection {
-            // Phase A: commit floating selection back to canvas
-            if let result = container.commitLassoSelection() {
-                canvasView.compositeSelectionImage(result.image, at: result.bounds, transform: result.transform)
-            }
+            _ = container.commitLassoSelection()
         }
-
-        // Push undo with pre/post snapshots
-        let postSnapshot = canvasView.persistentImageSnapshot
-        if let pre = preLassoSnapshot {
-            canvasView.undoStack.push(.lassoMove(preMoveSnapshot: pre, postMoveSnapshot: postSnapshot))
-        }
-
-        canvasView.lassoClipPath = nil
-        canvasView.setNeedsDisplay()
+        canvasView?.lassoClipPath = nil
         preLassoSnapshot = nil
         lassoClosedPath = nil
         hasLassoSelection = false
@@ -154,15 +139,11 @@ public final class CanvasViewModel {
 
     /// Cancel the lasso selection, restoring the original persistent bitmap.
     public func cancelLassoSelection() {
-        guard let container, let canvasView else { return }
+        guard let container else { return }
         if container.hasActiveLassoSelection {
             container.clearLassoSelection()
         }
-        if let preSnapshot = preLassoSnapshot {
-            canvasView.restorePersistentImage(preSnapshot)
-        }
-        canvasView.lassoClipPath = nil
-        canvasView.setNeedsDisplay()
+        canvasView?.lassoClipPath = nil
         preLassoSnapshot = nil
         lassoClosedPath = nil
         hasLassoSelection = false
@@ -172,51 +153,23 @@ public final class CanvasViewModel {
     /// Clear only the clip path (not the floating selection). Used when switching back to lasso tool.
     public func clearLassoClipOnly() {
         canvasView?.lassoClipPath = nil
-        canvasView?.setNeedsDisplay()
         lassoClosedPath = nil
         hasLassoSelection = false
     }
 
     public func undo() {
-        guard let action = canvasView?.performUndo() else { return }
-        // Restore background image for actions that modify it
-        switch action {
-        case .lineartSwap(_, _, _, let prevBackground, _):
-            container?.setBackgroundImage(prevBackground)
-        case .clear(_, _, _, let prevBackground):
-            container?.setBackgroundImage(prevBackground)
-        default:
-            break
-        }
+        canvasView?.performUndo()
         updateState()
     }
 
     public func redo() {
-        guard let action = canvasView?.performRedo() else { return }
-        // Re-apply background changes for actions that modify it
-        switch action {
-        case .lineartSwap(_, _, _, _, let newBackground):
-            if let img = newBackground {
-                container?.bakeImageIntoCanvas(img)
-            }
-        case .clear:
-            container?.setBackgroundImage(nil)
-        default:
-            break
-        }
+        canvasView?.performRedo()
         updateState()
     }
 
     public func clear() {
         guard let canvasView else { return }
-        let prev = canvasView.clearAll()
-        let prevBg = container?.backgroundImage
-        canvasView.undoStack.push(.clear(
-            prevStrokes: prev.strokes,
-            prevPersistent: prev.persistent,
-            prevBaseImage: prev.baseImage,
-            prevBackground: prevBg
-        ))
+        canvasView.clearAll()
         container?.setBackgroundImage(nil)
         resetViewTransform()
         updateState()
@@ -229,18 +182,7 @@ public final class CanvasViewModel {
 
     public func swapLineart(image: UIImage) {
         guard let canvasView else { return }
-        let prevStrokes = canvasView.strokes
-        let prev = canvasView.clearAll()
-        let prevBgImage = container?.backgroundImage
-
-        canvasView.undoStack.push(.lineartSwap(
-            prevStrokes: prevStrokes,
-            prevPersistent: prev.persistent,
-            prevBaseImage: prev.baseImage,
-            prevBackground: prevBgImage,
-            newBackground: image
-        ))
-
+        canvasView.clearAll()
         container?.bakeImageIntoCanvas(image)
         updateState()
     }
@@ -259,22 +201,18 @@ public final class CanvasViewModel {
         let outputSize = canvasView.bounds.size
         guard outputSize.width > 0, outputSize.height > 0 else { return nil }
 
+        // Read the canvas texture directly — no drawHierarchy, no GPU sync.
+        // `.shared` storage on Apple Silicon means coherent CPU read.
+        let canvasCGImage = canvasView.persistentImageSnapshot
+
         let rect = CGRect(origin: .zero, size: outputSize)
         let renderer = UIGraphicsImageRenderer(size: outputSize)
-        let image = renderer.image { ctx in
-            // Composite: white base → background image → custom canvas strokes
+        let image = renderer.image { _ in
             UIColor.white.setFill()
             UIRectFill(rect)
             container?.backgroundImage?.draw(in: rect)
-            canvasView.drawHierarchy(in: rect, afterScreenUpdates: true)
-
-            // Include floating lasso selection in stream capture
-            if let lasso = container?.lassoSelectionSnapshot() {
-                let cgCtx = ctx.cgContext
-                cgCtx.saveGState()
-                cgCtx.concatenate(lasso.transform)
-                lasso.image.draw(in: lasso.bounds)
-                cgCtx.restoreGState()
+            if let cgImg = canvasCGImage {
+                UIImage(cgImage: cgImg).draw(in: rect)
             }
         }
 
@@ -313,6 +251,8 @@ public final class CanvasViewModel {
         let fullSize = canvasView.bounds.size
         guard fullSize.width > 0, fullSize.height > 0 else { return nil }
 
+        let canvasCGImage = canvasView.persistentImageSnapshot
+
         let scale = min(maxDimension / fullSize.width, maxDimension / fullSize.height, 1.0)
         let thumbSize = CGSize(width: fullSize.width * scale, height: fullSize.height * scale)
 
@@ -322,7 +262,9 @@ public final class CanvasViewModel {
             UIColor.white.setFill()
             UIRectFill(rect)
             container?.backgroundImage?.draw(in: rect)
-            canvasView.drawHierarchy(in: rect, afterScreenUpdates: true)
+            if let cgImg = canvasCGImage {
+                UIImage(cgImage: cgImg).draw(in: rect)
+            }
         }
     }
 
@@ -355,7 +297,7 @@ public final class CanvasViewModel {
     private func updateState() {
         guard let canvasView else { return }
         isEmpty = canvasView.isEmpty && !hasBackgroundContent
-        canUndo = canvasView.undoStack.canUndo
-        canRedo = canvasView.undoStack.canRedo
+        canUndo = canvasView.canUndo
+        canRedo = canvasView.canRedo
     }
 }
