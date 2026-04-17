@@ -301,20 +301,23 @@ async function fireAlert(key: string, message: string): Promise<void> {
   const webhookUrl = config.COST_ALERT_WEBHOOK_URL;
   if (!webhookUrl) return;
 
+  // Discord webhook format (content + embeds). Color is decimal:
+  // 0xFF0000 (red) = 16711680, 0xFFA500 (orange) = 16750848.
+  const color = key === 'monthly_cap' ? 16711680 : 16750848;
   try {
     await fetch(webhookUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        text,
-        attachments: [
+        content: text,
+        embeds: [
           {
-            color: key === 'monthly_cap' ? 'danger' : 'warning',
+            color,
             fields: [
-              { title: 'activePods', value: String(snap?.activePodCount ?? 0), short: true },
-              { title: 'burnPerHr', value: `$${snap?.currentBurnPerHr.toFixed(2) ?? '?'}`, short: true },
-              { title: 'rolling24hTotal', value: `$${snap?.rolling24hTotal.toFixed(2) ?? '?'}`, short: true },
-              { title: 'oldestPodAge', value: `${Math.round((snap?.oldestPodAgeSeconds ?? 0) / 60)}m`, short: true },
+              { name: 'activePods', value: String(snap?.activePodCount ?? 0), inline: true },
+              { name: 'burnPerHr', value: `$${snap?.currentBurnPerHr.toFixed(2) ?? '?'}`, inline: true },
+              { name: 'rolling24hTotal', value: `$${snap?.rolling24hTotal.toFixed(2) ?? '?'}`, inline: true },
+              { name: 'oldestPodAge', value: `${Math.round((snap?.oldestPodAgeSeconds ?? 0) / 60)}m`, inline: true },
             ],
           },
         ],
