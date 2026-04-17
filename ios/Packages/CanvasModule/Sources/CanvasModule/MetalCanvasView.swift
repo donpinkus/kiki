@@ -35,6 +35,9 @@ public final class MetalCanvasView: UIView {
     private var displayLink: CADisplayLink?
     private var isDirty = true
     private var hasContent = false
+    /// True when loadStrokes was called before the canvas texture was ready.
+    /// layoutSubviews checks this flag and replays after resizeCanvas.
+    private var needsStrokeReplay = false
 
     // MARK: - Stroke State
 
@@ -123,6 +126,13 @@ public final class MetalCanvasView: UIView {
         let pixelH = Int(bounds.height * scale)
         metalLayer.drawableSize = CGSize(width: pixelW, height: pixelH)
         renderer.resizeCanvas(width: pixelW, height: pixelH)
+
+        // If loadStrokes was called before layout (canvas texture didn't exist
+        // yet), replay the strokes now that the texture is allocated.
+        if needsStrokeReplay {
+            replayPendingStrokes()
+        }
+
         isDirty = true
     }
 
@@ -435,18 +445,29 @@ public final class MetalCanvasView: UIView {
     }
 
     /// Load strokes from saved data and replay them into the canvas texture.
-    /// Each stroke is re-rasterized through the stamp pipeline so the canvas
-    /// displays the full drawing without needing a separate bitmap snapshot.
+    /// If the Metal canvas texture isn't allocated yet (view not laid out),
+    /// replay is deferred to `layoutSubviews`.
     public func loadStrokes(_ savedStrokes: [Stroke]) {
         strokes = savedStrokes
         hasContent = !strokes.isEmpty
+        needsStrokeReplay = hasContent
 
-        guard hasContent, renderer.hasCanvas else {
+        guard renderer.hasCanvas else {
+            // Canvas texture doesn't exist yet — layoutSubviews will call
+            // replayPendingStrokes() after resizeCanvas().
             isDirty = true
             return
         }
 
-        // Replay each stroke into the canvas texture.
+        replayPendingStrokes()
+    }
+
+    /// Replay all stored strokes into the canvas texture. Called from
+    /// loadStrokes (if canvas is ready) or layoutSubviews (deferred case).
+    private func replayPendingStrokes() {
+        guard needsStrokeReplay, !strokes.isEmpty, renderer.hasCanvas else { return }
+        needsStrokeReplay = false
+
         let scale = canvasScale
         for stroke in strokes {
             let stamps = generateStampsForStroke(stroke, scale: scale)
@@ -455,7 +476,6 @@ public final class MetalCanvasView: UIView {
             }
         }
 
-        // Clear undo stack — loaded state is the baseline.
         undoSnapshots.removeAll()
         redoSnapshots.removeAll()
         isDirty = true

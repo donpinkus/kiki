@@ -330,17 +330,16 @@ public final class CanvasRenderer {
             CGImageAlphaInfo.premultipliedFirst.rawValue
             | CGBitmapInfo.byteOrder32Little.rawValue
         )
-        return data.withUnsafeBytes { ptr -> CGImage? in
-            guard let base = ptr.baseAddress else { return nil }
-            guard let provider = CGDataProvider(dataInfo: nil, data: base, size: data.count,
-                                                releaseData: { _, _, _ in }) else { return nil }
-            return CGImage(width: canvasWidth, height: canvasHeight,
-                           bitsPerComponent: 8, bitsPerPixel: 32,
-                           bytesPerRow: canvasWidth * 4,
-                           space: colorSpace, bitmapInfo: bitmapInfo,
-                           provider: provider, decode: nil,
-                           shouldInterpolate: false, intent: .defaultIntent)
-        }
+        // CGDataProvider(data:) retains the CFData, so the pixel bytes live as long
+        // as the CGImage. The previous implementation used a raw pointer inside
+        // withUnsafeBytes which dangled after the closure exited → garbage pixels.
+        guard let provider = CGDataProvider(data: data as CFData) else { return nil }
+        return CGImage(width: canvasWidth, height: canvasHeight,
+                       bitsPerComponent: 8, bitsPerPixel: 32,
+                       bytesPerRow: canvasWidth * 4,
+                       space: colorSpace, bitmapInfo: bitmapInfo,
+                       provider: provider, decode: nil,
+                       shouldInterpolate: false, intent: .defaultIntent)
     }
 
     /// Load a CGImage into the canvas texture (for restoring saved drawings or
