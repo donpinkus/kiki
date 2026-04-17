@@ -72,7 +72,9 @@ Data flows one direction: Canvas → Network → Result. Modules communicate thr
 | When | Read |
 |------|------|
 | Content safety / App Store compliance | `documents/references/content-safety.md` |
-| RunPod deploy, provider ops | `documents/references/provider-config.md` |
+| RunPod deploy, provider ops, network volumes | `documents/references/provider-config.md` |
+| Cost monitoring, Discord alerts, pod lifecycle threads | `backend/src/modules/orchestrator/costMonitor.ts` |
+| Scale-to-100-users roadmap + workstream status | `documents/plans/scale-to-100-users.md` |
 | Implementation decisions log | `documents/decisions.md` |
 | Removed features (ComfyUI, StreamDiffusion) | `documents/removed-features.md` |
 | Product requirements | `PRD.md` |
