@@ -10,7 +10,6 @@ private let streamLog = Logger(subsystem: "com.kiki.app", category: "StreamCoord
 enum DrawingTool: String, CaseIterable, Hashable {
     case brush
     case eraser
-    case smudge
     case lasso
 }
 
@@ -79,13 +78,11 @@ final class AppCoordinator {
     private var storedToolSizes: [DrawingTool: CGFloat] = [
         .brush: 5,
         .eraser: 5,
-        .smudge: 30,
         .lasso: 5
     ]
     private var storedToolOpacities: [DrawingTool: CGFloat] = [
         .brush: 1.0,
         .eraser: 1.0,
-        .smudge: 0.5,
         .lasso: 1.0
     ]
 
@@ -560,8 +557,6 @@ final class AppCoordinator {
             canvasViewModel.selectBrush(config)
         case .eraser:
             canvasViewModel.selectEraser(width: toolSize)
-        case .smudge:
-            canvasViewModel.selectSmudge(width: toolSize, strength: toolOpacity)
         case .lasso:
             canvasViewModel.selectLasso()
         }
