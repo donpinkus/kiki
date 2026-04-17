@@ -217,6 +217,8 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
 
       let relay: StreamRelay | null = null;
       let provisionRegistered = false;
+      let lastConfig: Record<string, unknown> | null = null;
+      let clientDisconnected = false;
 
       try {
         // Only count against the per-user quota for genuinely new provisions.
@@ -266,6 +268,10 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
           }
 
           // WS7: classify the close, attempt transparent replacement
+          // Close old relay to prevent ghost events from triggering a second replacement.
+          relay?.close();
+          relay = null;
+
           void (async () => {
             try {
               const classification = await classifyClose(userId);
@@ -280,7 +286,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
 
               incrementCounter('session_preempted_total');
 
-              if (socket.readyState !== socket.OPEN) return;
+              if (clientDisconnected || socket.readyState !== socket.OPEN) return;
 
               // Hold client WS open — send reprovisioning status
               socket.send(
@@ -295,7 +301,11 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
                 }
               });
 
-              if (socket.readyState !== socket.OPEN) return;
+              // If client left during replacement, clean up the new pod
+              if (clientDisconnected || socket.readyState !== socket.OPEN) {
+                request.log.info({ userId }, 'Client disconnected during replacement — pod will idle-reap');
+                return;
+              }
 
               // Wire up new relay
               const newRelay = new StreamRelay(newPodUrl);
@@ -329,6 +339,11 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
 
               await newRelay.connect();
               request.log.info({ userId, newPodUrl }, 'Replacement relay connected');
+
+              // Re-send config so the new pod knows prompt/style/params
+              if (lastConfig) {
+                newRelay.sendConfig(lastConfig);
+              }
 
               if (socket.readyState === socket.OPEN) {
                 socket.send(JSON.stringify({ type: 'status', status: 'ready' }));
@@ -365,8 +380,9 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
           } else {
             const text = buf.toString('utf-8');
             try {
-              const parsed = JSON.parse(text);
+              const parsed = JSON.parse(text) as Record<string, unknown>;
               if (parsed.type === 'config') {
+                lastConfig = parsed;
                 relay.sendConfig(parsed);
               }
             } catch {
@@ -395,6 +411,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       }
 
       socket.on('close', () => {
+        clientDisconnected = true;
         request.log.info({ userId }, 'Stream client disconnected');
         incrementCounter('session_client_disconnect_total');
         sessionClosed(userId);
