@@ -9,6 +9,7 @@ import {
   hasReadySession,
   classifyClose,
   replaceSession,
+  deleteStaleSession,
   touch,
   sessionClosed,
 } from '../modules/orchestrator/orchestrator.js';
@@ -375,6 +376,9 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         });
       } catch (err) {
         request.log.error({ userId, err }, 'Provisioning or relay failed');
+        // Clean up stale Redis session so next reconnect provisions fresh
+        // instead of looping against a dead pod URL.
+        await deleteStaleSession(userId).catch(() => {});
         if (provisionRegistered) {
           releaseActivePod(userId);
           provisionRegistered = false;

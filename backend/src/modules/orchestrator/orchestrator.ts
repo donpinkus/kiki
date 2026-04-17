@@ -145,6 +145,12 @@ async function writeSession(session: RedisSession): Promise<void> {
     .exec();
 }
 
+/** Delete a session from Redis — exported for stream.ts to clean up stale
+ * sessions when relay to a dead pod fails. */
+export async function deleteStaleSession(sessionId: string): Promise<void> {
+  return deleteSession(sessionId);
+}
+
 async function deleteSession(sessionId: string): Promise<void> {
   await getRedis().del(sessionKey(sessionId));
 }
@@ -318,6 +324,7 @@ export async function replaceSession(
 
   if (session.replacementCount >= config.MAX_SESSION_REPLACEMENTS) {
     incrementCounter('session_replacement_exhausted_total');
+    await deleteSession(sessionId);
     throw new Error(`Replacement limit reached (${config.MAX_SESSION_REPLACEMENTS} attempts)`);
   }
 
