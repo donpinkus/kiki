@@ -80,9 +80,9 @@ Ranked by impact, worst first:
 
 **Shipped:** Session registry moved from in-memory `Map` to Redis hashes (`session:<userId>`). Deploys no longer drop active sessions — new process adopts pods from Redis instead of killing everything. Reaper uses `SCAN` + atomic `MULTI`. `touch()` is fire-and-forget HSET + EXPIRE (~2/sec per active user). TTL = idle timeout + 5 min grace. Uses `ioredis` with auto-reconnection. Also unblocks horizontal scaling (multiple replicas sharing one Redis).
 
-### 6. Observability
+### 6. Observability — DONE
 
-**Why:** At 100 users, "I looked at the logs" stops scaling. Structured metrics let us see trends (provision p50 time, success rate over 24h, failure reasons by category).
+**Shipped:** In-process counters + fixed-bucket histograms at `/v1/ops/metrics` (JSON, X-Ops-Key auth). Counters: provision starts/successes/failures (by category), pod creates (by type), session reaps, preemptions, disconnects, semaphore waits. Histograms (p50/p95/p99): provision total, pod creation, container pull, health check, semaphore wait, session lifetime. Failure categorization: spot_capacity, container_pull_timeout, ssh_timeout, health_timeout, pod_create_failed, monthly_cap, unknown. Gauges: semaphore active + queue depth.
 
 **Approach:**
 - Add a lightweight in-process counter/histogram module (no deps; just `Map<string, number[]>`).
