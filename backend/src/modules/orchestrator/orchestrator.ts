@@ -29,6 +29,7 @@ import {
   type SpotBidInfo,
 } from './runpodClient.js';
 import { getPolicy } from './policy.js';
+import { notifyPodEvent } from './costMonitor.js';
 
 // ────────────────────────────────────────────────────────────────────────────
 // Types
@@ -231,6 +232,7 @@ function runReaper(): void {
       log.info({ sessionId: session.sessionId, podId: session.podId, idleMs }, 'Reaping idle pod');
       session.status = 'terminated';
       const podId = session.podId;
+      notifyPodEvent({ action: 'terminated', podId, reason: `idle ${Math.round(idleMs / 1000)}s` });
       terminatePod(podId)
         .then(() => registry.delete(session.sessionId))
         .catch((err) => log.error({ sessionId: session.sessionId, podId, err }, 'Reap failed'));
@@ -464,6 +466,7 @@ async function createPodWithFallback(
         { sessionId, event: 'provision.spot.success', podId, costPerHr, podType: 'spot', dc: target.dataCenterId },
         'Pod created (spot)',
       );
+      notifyPodEvent({ action: 'created', podId, podType: 'spot', dc: target.dataCenterId ?? undefined, costPerHr });
       return { podId, podType: 'spot' };
     } catch (err) {
       if (isCapacityError(err)) {
@@ -514,6 +517,7 @@ async function createPodWithFallback(
       { sessionId, event: 'provision.onDemand.success', podId, costPerHr, podType: 'onDemand', dc: target.dataCenterId },
       'Pod created (on-demand)',
     );
+    notifyPodEvent({ action: 'created', podId, podType: 'onDemand', dc: target.dataCenterId ?? undefined, costPerHr });
     return { podId, podType: 'onDemand' };
   } catch (err) {
     log.error(

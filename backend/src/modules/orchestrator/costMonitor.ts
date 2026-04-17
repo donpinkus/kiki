@@ -58,6 +58,7 @@ const RING_BUFFER_MAX = 288; // 24h at 5-min intervals
 
 let log: FastifyBaseLogger = console as unknown as FastifyBaseLogger;
 let tickTimer: ReturnType<typeof setInterval> | null = null;
+let hourlyTimer: ReturnType<typeof setInterval> | null = null;
 
 const ringBuffer: TickEntry[] = [];
 let latestSnapshot: CostSnapshot | null = null;
@@ -99,13 +100,46 @@ export function start(logger: FastifyBaseLogger): void {
   // Run first tick immediately, then on interval
   void tick();
   tickTimer = setInterval(() => void tick(), intervalMs);
+
+  // Hourly digest to Discord
+  hourlyTimer = setInterval(() => void sendHourlyDigest(), 3_600_000);
 }
 
 export function stop(): void {
-  if (tickTimer) {
-    clearInterval(tickTimer);
-    tickTimer = null;
-  }
+  if (tickTimer) { clearInterval(tickTimer); tickTimer = null; }
+  if (hourlyTimer) { clearInterval(hourlyTimer); hourlyTimer = null; }
+}
+
+/**
+ * Called by the orchestrator when a pod is created or terminated.
+ * Sends a short Discord notification so you see pod churn in real time.
+ */
+export function notifyPodEvent(event: {
+  action: 'created' | 'terminated';
+  podId: string;
+  podType?: string;
+  dc?: string;
+  costPerHr?: number;
+  reason?: string;
+}): void {
+  const webhookUrl = config.COST_ALERT_WEBHOOK_URL;
+  if (!webhookUrl) return;
+
+  const emoji = event.action === 'created' ? '🟢' : '🔴';
+  const cost = event.costPerHr != null ? ` ($${event.costPerHr.toFixed(2)}/hr)` : '';
+  const dc = event.dc ? ` in ${event.dc}` : '';
+  const type = event.podType ? ` [${event.podType}]` : '';
+  const reason = event.reason ? ` — ${event.reason}` : '';
+  const content = `${emoji} Pod ${event.action}: \`${event.podId}\`${type}${dc}${cost}${reason}`;
+
+  fetch(webhookUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content }),
+    signal: AbortSignal.timeout(5000),
+  }).catch((err) => {
+    log.warn({ err: (err as Error).message }, 'Pod event webhook failed');
+  });
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -332,6 +366,39 @@ async function fireAlert(key: string, message: string): Promise<void> {
 // ────────────────────────────────────────────────────────────────────────────
 // Ops auth helper (shared with ops routes)
 // ────────────────────────────────────────────────────────────────────────────
+
+async function sendHourlyDigest(): Promise<void> {
+  const webhookUrl = config.COST_ALERT_WEBHOOK_URL;
+  if (!webhookUrl) return;
+
+  const snap = latestSnapshot;
+  if (!snap) return;
+
+  const content = `📊 **Hourly cost digest** — ${new Date().toUTCString()}`;
+  try {
+    await fetch(webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        content,
+        embeds: [
+          {
+            color: 3447003, // blue
+            fields: [
+              { name: 'Active pods', value: String(snap.activePodCount), inline: true },
+              { name: 'Burn rate', value: `$${snap.currentBurnPerHr.toFixed(2)}/hr`, inline: true },
+              { name: 'Rolling 24h', value: `$${snap.rolling24hTotal.toFixed(2)}`, inline: true },
+              { name: 'Oldest pod', value: `${Math.round(snap.oldestPodAgeSeconds / 60)}m`, inline: true },
+            ],
+          },
+        ],
+      }),
+      signal: AbortSignal.timeout(5000),
+    });
+  } catch (err) {
+    log.warn({ err: (err as Error).message }, 'Hourly digest webhook failed');
+  }
+}
 
 /** Constant-time comparison of the X-Ops-Key header against OPS_API_KEY. */
 export function isValidOpsKey(provided: string | undefined): boolean {
