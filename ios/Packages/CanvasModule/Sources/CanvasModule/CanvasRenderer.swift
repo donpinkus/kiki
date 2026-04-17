@@ -1,5 +1,6 @@
 import UIKit
 import Metal
+import CoreImage
 import simd
 
 /// GPU-accelerated canvas renderer. Owns all Metal state: device, command queue,
@@ -26,6 +27,11 @@ public final class CanvasRenderer {
     private let eraserStampPSO: MTLRenderPipelineState
     private let compositorPSO: MTLRenderPipelineState
     private let flattenPSO: MTLRenderPipelineState
+
+    /// Cached CIContext for texture→CGImage conversion. CIImage handles sRGB
+    /// conversion and premultiplied alpha correctly, avoiding the color artifacts
+    /// from manual getBytes + CGDataProvider construction.
+    private let ciContext: CIContext
 
     // MARK: - Textures
 
@@ -75,6 +81,7 @@ public final class CanvasRenderer {
         guard let queue = device.makeCommandQueue() else { return nil }
         self.device = device
         self.commandQueue = queue
+        self.ciContext = CIContext(mtlDevice: device, options: [.workingColorSpace: CGColorSpaceCreateDeviceRGB()])
 
         // Compile shaders from embedded source.
         guard let lib = try? device.makeLibrary(source: Self.shaderSource, options: nil) else {
@@ -323,23 +330,20 @@ public final class CanvasRenderer {
     }
 
     /// Read the canvas texture into a CGImage for persistence / stream capture.
+    /// Uses CIImage(mtlTexture:) which correctly handles sRGB conversion and
+    /// premultiplied alpha — avoids the color artifacts from manual getBytes +
+    /// CGDataProvider construction.
     func canvasToCGImage() -> CGImage? {
-        guard let data = snapshotCanvas() else { return nil }
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
-        let bitmapInfo = CGBitmapInfo(rawValue:
-            CGImageAlphaInfo.premultipliedFirst.rawValue
-            | CGBitmapInfo.byteOrder32Little.rawValue
-        )
-        // CGDataProvider(data:) retains the CFData, so the pixel bytes live as long
-        // as the CGImage. The previous implementation used a raw pointer inside
-        // withUnsafeBytes which dangled after the closure exited → garbage pixels.
-        guard let provider = CGDataProvider(data: data as CFData) else { return nil }
-        return CGImage(width: canvasWidth, height: canvasHeight,
-                       bitsPerComponent: 8, bitsPerPixel: 32,
-                       bytesPerRow: canvasWidth * 4,
-                       space: colorSpace, bitmapInfo: bitmapInfo,
-                       provider: provider, decode: nil,
-                       shouldInterpolate: false, intent: .defaultIntent)
+        guard let texture = canvasTexture else { return nil }
+        // CIImage from Metal texture is flipped vertically (Metal = top-left origin,
+        // CIImage = bottom-left origin). Apply a vertical flip transform.
+        guard var ciImage = CIImage(mtlTexture: texture, options: [
+            .colorSpace: CGColorSpaceCreateDeviceRGB()
+        ]) else { return nil }
+        ciImage = ciImage.transformed(by: CGAffineTransform(scaleX: 1, y: -1)
+            .translatedBy(x: 0, y: -ciImage.extent.height))
+        return ciContext.createCGImage(ciImage, from: ciImage.extent,
+                                       format: .BGRA8, colorSpace: CGColorSpaceCreateDeviceRGB())
     }
 
     /// Load a CGImage into the canvas texture (for restoring saved drawings or
