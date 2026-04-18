@@ -66,10 +66,34 @@ struct DrawingTopBar: View {
 
             Spacer()
 
-            // MARK: Right — Pen, Eraser, Lasso, Reset Transform
+            // MARK: Right — Layers, Pen, Eraser, Lasso, Reset Transform
+            Button {
+                coordinator.showLayerPanel.toggle()
+            } label: {
+                Image(systemName: "square.on.square")
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(.primary)
+                    .frame(width: 36, height: 36)
+            }
+            .popover(isPresented: $coordinator.showLayerPanel) {
+                LayerPanelView()
+                    .frame(width: 260, height: 400)
+            }
+
             toolButton(icon: "pencil.tip", tool: .brush)
             toolButton(icon: "eraser", tool: .eraser)
             toolButton(icon: "lasso", tool: .lasso)
+
+            if coordinator.canvasViewModel.hasLassoSelection {
+                Button {
+                    coordinator.canvasViewModel.clearLasso()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28, height: 28)
+                }
+            }
 
             if !coordinator.canvasViewModel.isDefaultTransform {
                 actionButton(

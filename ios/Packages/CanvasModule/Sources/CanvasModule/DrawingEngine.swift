@@ -1,5 +1,21 @@
 import UIKit
 
+// MARK: - Layer Info
+
+/// Metadata for a single canvas layer (name, visibility). The actual texture
+/// is stored by index on `CanvasRenderer`.
+public struct LayerInfo: Codable, Sendable, Identifiable {
+    public let id: UUID
+    public var name: String
+    public var isVisible: Bool
+
+    public init(id: UUID = UUID(), name: String, isVisible: Bool = true) {
+        self.id = id
+        self.name = name
+        self.isVisible = isVisible
+    }
+}
+
 // MARK: - Stroke Point
 
 /// Per-point data captured from Apple Pencil during a stroke.
@@ -162,22 +178,21 @@ public enum ToolState: Sendable {
     case lasso
 }
 
-// MARK: - Canvas Action (Undo)
+// MARK: - Canvas Action (Legacy Undo)
 
-/// An undoable action on the canvas.
+/// Undoable action type used by the legacy `DrawingCanvasView` (CGBitmapContext engine).
+/// Not used by the current Metal engine (`MetalCanvasView`), which uses per-layer
+/// bitmap snapshots instead.
 public enum CanvasAction {
     case stroke(Stroke)
     case erase(preEraseSnapshot: CGImage, postEraseSnapshot: CGImage)
-    /// Lineart swap: stores previous state to undo, and the new background to redo.
     case lineartSwap(
         prevStrokes: [Stroke], prevPersistent: CGImage?, prevBaseImage: CGImage?,
         prevBackground: UIImage?, newBackground: UIImage?
     )
-    /// Clear: stores previous state to undo. Redo just clears everything.
     case clear(
         prevStrokes: [Stroke], prevPersistent: CGImage?, prevBaseImage: CGImage?,
         prevBackground: UIImage?
     )
-    /// Lasso move: stores persistent bitmap before/after the move.
     case lassoMove(preMoveSnapshot: CGImage?, postMoveSnapshot: CGImage?)
 }

@@ -35,8 +35,21 @@ public final class CanvasRenderer {
 
     // MARK: - Textures
 
-    /// The persistent canvas layer. All completed strokes live here.
-    private(set) var canvasTexture: MTLTexture?
+    /// Per-layer persistent textures. Index 0 = bottom layer. All completed
+    /// strokes on a given layer live in `layerTextures[layerIndex]`.
+    private(set) var layerTextures: [MTLTexture] = []
+
+    /// Per-layer visibility flags, parallel to `layerTextures`.
+    var layerVisibility: [Bool] = []
+
+    /// Which layer receives brush/eraser/lasso operations.
+    var activeLayerIndex: Int = 0
+
+    /// Convenience: the texture for the currently active layer.
+    var activeLayerTexture: MTLTexture? {
+        guard activeLayerIndex >= 0, activeLayerIndex < layerTextures.count else { return nil }
+        return layerTextures[activeLayerIndex]
+    }
 
     /// Scratch texture for the active (in-progress) stroke. Rebuilt each frame
     /// from stamp instances; conceptually memoryless between frames.
@@ -57,7 +70,10 @@ public final class CanvasRenderer {
     /// Ratio of canvas pixels to view points (retina scale). Set by resizeCanvas.
     private(set) var canvasScale: CGFloat = 1
 
-    var hasCanvas: Bool { canvasTexture != nil }
+    var hasCanvas: Bool { !layerTextures.isEmpty }
+
+    /// Maximum number of layers allowed.
+    static let maxLayerCount = 16
 
     // MARK: - Selection State (active during lasso floating phase)
 
@@ -145,7 +161,22 @@ public final class CanvasRenderer {
 
     // MARK: - Texture Management
 
-    /// (Re)allocate canvas and scratch textures to match the given pixel size.
+    /// Reusable texture descriptor for canvas-sized layers.
+    private func makeLayerDescriptor() -> MTLTextureDescriptor {
+        let desc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm_srgb,
+            width: canvasWidth,
+            height: canvasHeight,
+            mipmapped: false
+        )
+        desc.usage = [.shaderRead, .shaderWrite, .renderTarget]
+        desc.storageMode = .shared
+        return desc
+    }
+
+    /// (Re)allocate layer textures and scratch texture to match the given pixel size.
+    /// On first call, creates a single layer (index 0). On resize, existing layers
+    /// are discarded (caller should save/restore if needed).
     func resizeCanvas(width: Int, height: Int, viewScale: CGFloat = 0) {
         guard width > 0, height > 0 else { return }
         guard width != canvasWidth || height != canvasHeight else { return }
@@ -154,22 +185,87 @@ public final class CanvasRenderer {
         canvasHeight = height
         if viewScale > 0 { canvasScale = viewScale }
 
-        let desc = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm_srgb,
-            width: width,
-            height: height,
-            mipmapped: false
-        )
-        desc.usage = [.shaderRead, .shaderWrite, .renderTarget]
-        desc.storageMode = .shared
+        let desc = makeLayerDescriptor()
 
-        canvasTexture = device.makeTexture(descriptor: desc)
-        scratchTexture = device.makeTexture(descriptor: desc)
-
-        // Clear canvas to transparent.
-        if let canvas = canvasTexture {
-            clearTexture(canvas)
+        // Create initial single layer if none exist, otherwise recreate all layers.
+        if layerTextures.isEmpty {
+            guard let layer0 = device.makeTexture(descriptor: desc) else { return }
+            clearTexture(layer0)
+            layerTextures = [layer0]
+            layerVisibility = [true]
+            activeLayerIndex = 0
+        } else {
+            var newTextures: [MTLTexture] = []
+            for _ in 0..<layerTextures.count {
+                guard let tex = device.makeTexture(descriptor: desc) else { return }
+                clearTexture(tex)
+                newTextures.append(tex)
+            }
+            layerTextures = newTextures
         }
+
+        scratchTexture = device.makeTexture(descriptor: desc)
+    }
+
+    // MARK: - Layer Management
+
+    /// Add a new empty layer on top. Returns the index of the new layer.
+    @discardableResult
+    func addLayer() -> Int {
+        guard layerTextures.count < Self.maxLayerCount else { return activeLayerIndex }
+        let desc = makeLayerDescriptor()
+        guard let texture = device.makeTexture(descriptor: desc) else { return activeLayerIndex }
+        clearTexture(texture)
+        layerTextures.append(texture)
+        layerVisibility.append(true)
+        return layerTextures.count - 1
+    }
+
+    /// Remove a layer. Must keep at least 1 layer.
+    func removeLayer(at index: Int) {
+        guard layerTextures.count > 1, index >= 0, index < layerTextures.count else { return }
+        layerTextures.remove(at: index)
+        layerVisibility.remove(at: index)
+        if activeLayerIndex >= layerTextures.count {
+            activeLayerIndex = layerTextures.count - 1
+        } else if activeLayerIndex > index {
+            activeLayerIndex -= 1
+        }
+    }
+
+    /// Set the active layer index.
+    func setActiveLayer(_ index: Int) {
+        guard index >= 0, index < layerTextures.count else { return }
+        activeLayerIndex = index
+    }
+
+    /// Reorder a layer from one position to another.
+    func moveLayer(from source: Int, to destination: Int) {
+        guard source >= 0, source < layerTextures.count,
+              destination >= 0, destination < layerTextures.count,
+              source != destination else { return }
+        let tex = layerTextures.remove(at: source)
+        let vis = layerVisibility.remove(at: source)
+        layerTextures.insert(tex, at: destination)
+        layerVisibility.insert(vis, at: destination)
+
+        // Adjust active layer index to follow the moved layer if needed.
+        if activeLayerIndex == source {
+            activeLayerIndex = destination
+        } else {
+            if activeLayerIndex > source { activeLayerIndex -= 1 }
+            if activeLayerIndex >= destination { activeLayerIndex += 1 }
+        }
+    }
+
+    /// Reset to a single empty layer. Used by clearAll.
+    func resetToSingleLayer() {
+        let desc = makeLayerDescriptor()
+        guard let layer0 = device.makeTexture(descriptor: desc) else { return }
+        clearTexture(layer0)
+        layerTextures = [layer0]
+        layerVisibility = [true]
+        activeLayerIndex = 0
     }
 
     // MARK: - Stamp Buffer
@@ -188,25 +284,25 @@ public final class CanvasRenderer {
     // MARK: - Rendering
 
     /// Render one frame: clear scratch → draw stamps into scratch → composite
-    /// canvas + scratch into the given drawable texture.
+    /// all visible layers + scratch into the given drawable texture.
     func renderFrame(drawable: CAMetalDrawable, isErasing: Bool) {
-        guard let canvas = canvasTexture, let scratch = scratchTexture else { return }
+        guard !layerTextures.isEmpty, let scratch = scratchTexture else { return }
         guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
 
         // Pass 1: Clear scratch + render stamps into it.
         renderStampsIntoScratch(commandBuffer: cmdBuf, scratch: scratch, isEraser: isErasing)
 
-        // Pass 2: Composite canvas + scratch into the drawable.
-        compositeToDrawable(commandBuffer: cmdBuf, drawable: drawable, canvas: canvas, scratch: scratch)
+        // Pass 2: Composite all visible layers + scratch into the drawable.
+        compositeToDrawable(commandBuffer: cmdBuf, drawable: drawable, scratch: scratch)
 
         cmdBuf.present(drawable)
         cmdBuf.commit()
     }
 
-    /// Flatten the scratch texture into the canvas (stroke completion).
+    /// Flatten the scratch texture into the active layer (stroke completion).
     /// Uses source-over for brush, or a custom "erase" pass for eraser.
     func flattenScratchIntoCanvas(isEraser: Bool) {
-        guard let canvas = canvasTexture, let scratch = scratchTexture else { return }
+        guard let canvas = activeLayerTexture, let scratch = scratchTexture else { return }
         guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
 
         let rpd = MTLRenderPassDescriptor()
@@ -243,7 +339,7 @@ public final class CanvasRenderer {
     /// buffer commits asynchronously; Metal's same-queue ordering guarantees the
     /// next compositor pass sees the updated canvas.
     func applyEraserStamps(_ stamps: [StampInstance]) {
-        guard let canvas = canvasTexture, !stamps.isEmpty else { return }
+        guard let canvas = activeLayerTexture, !stamps.isEmpty else { return }
 
         let byteCount = stamps.count * MemoryLayout<StampInstance>.stride
         guard let stampBuf = stamps.withUnsafeBytes({ ptr -> MTLBuffer? in
@@ -275,7 +371,7 @@ public final class CanvasRenderer {
     /// Used for stroke replay during persistence restore — each saved stroke is
     /// regenerated as stamps and committed in one pass.
     func commitStampsToCanvas(_ stamps: [StampInstance]) {
-        guard let canvas = canvasTexture, !stamps.isEmpty else { return }
+        guard let canvas = activeLayerTexture, !stamps.isEmpty else { return }
         guard let scratch = scratchTexture else { return }
         guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
 
@@ -323,9 +419,10 @@ public final class CanvasRenderer {
         cmdBuf.waitUntilCompleted()  // OK — runs once per stroke during load, not interactive
     }
 
-    /// Snapshot the canvas texture into CPU-side Data for undo.
-    func snapshotCanvas() -> Data? {
-        guard let texture = canvasTexture else { return nil }
+    /// Snapshot a specific layer's texture into CPU-side Data for undo.
+    func snapshotLayer(at index: Int) -> Data? {
+        guard index >= 0, index < layerTextures.count else { return nil }
+        let texture = layerTextures[index]
         let bytesPerRow = canvasWidth * 4
         let byteCount = bytesPerRow * canvasHeight
         var data = Data(count: byteCount)
@@ -338,9 +435,16 @@ public final class CanvasRenderer {
         return data
     }
 
-    /// Restore canvas texture from a CPU-side undo snapshot.
-    func restoreCanvas(from data: Data) {
-        guard let texture = canvasTexture, data.count == canvasWidth * canvasHeight * 4 else { return }
+    /// Snapshot the active layer (convenience wrapper).
+    func snapshotCanvas() -> Data? {
+        snapshotLayer(at: activeLayerIndex)
+    }
+
+    /// Restore a specific layer's texture from a CPU-side undo snapshot.
+    func restoreLayer(at index: Int, from data: Data) {
+        guard index >= 0, index < layerTextures.count,
+              data.count == canvasWidth * canvasHeight * 4 else { return }
+        let texture = layerTextures[index]
         let bytesPerRow = canvasWidth * 4
         data.withUnsafeBytes { ptr in
             guard let base = ptr.baseAddress else { return }
@@ -349,14 +453,59 @@ public final class CanvasRenderer {
         }
     }
 
-    /// Read the canvas texture into a CGImage for persistence / stream capture.
-    /// Uses CIImage(mtlTexture:) which correctly handles sRGB conversion and
-    /// premultiplied alpha — avoids the color artifacts from manual getBytes +
-    /// CGDataProvider construction.
+    /// Restore the active layer (convenience wrapper).
+    func restoreCanvas(from data: Data) {
+        restoreLayer(at: activeLayerIndex, from: data)
+    }
+
+    /// Read a specific layer texture into a CGImage for per-layer persistence.
+    func layerToCGImage(at index: Int) -> CGImage? {
+        guard index >= 0, index < layerTextures.count else { return nil }
+        return textureToCGImage(layerTextures[index])
+    }
+
+    /// Read the flattened (all visible layers composited) canvas into a CGImage
+    /// for stream capture, thumbnails, and single-image export.
+    func flattenedCGImage() -> CGImage? {
+        guard !layerTextures.isEmpty else { return nil }
+
+        // Render all visible layers into a temporary texture.
+        let desc = makeLayerDescriptor()
+        guard let tempTexture = device.makeTexture(descriptor: desc) else { return nil }
+        guard let cmdBuf = commandQueue.makeCommandBuffer() else { return nil }
+
+        let rpd = MTLRenderPassDescriptor()
+        rpd.colorAttachments[0].texture = tempTexture
+        rpd.colorAttachments[0].loadAction = .clear
+        rpd.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        rpd.colorAttachments[0].storeAction = .store
+
+        guard let enc = cmdBuf.makeRenderCommandEncoder(descriptor: rpd) else { return nil }
+        enc.setRenderPipelineState(compositorPSO)
+        enc.setVertexBuffer(quadVertexBuffer, offset: 0, index: 0)
+        var opacity: Float = 1.0
+
+        for i in 0..<layerTextures.count {
+            guard layerVisibility[i] else { continue }
+            enc.setFragmentTexture(layerTextures[i], index: 0)
+            enc.setFragmentBytes(&opacity, length: MemoryLayout<Float>.size, index: 0)
+            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+        }
+        enc.endEncoding()
+
+        cmdBuf.commit()
+        cmdBuf.waitUntilCompleted()  // OK — runs once per capture, not per frame
+
+        return textureToCGImage(tempTexture)
+    }
+
+    /// Convenience: flattened CGImage (used by existing callers that expected canvasToCGImage).
     func canvasToCGImage() -> CGImage? {
-        guard let texture = canvasTexture else { return nil }
-        // CIImage from Metal texture is flipped vertically (Metal = top-left origin,
-        // CIImage = bottom-left origin). Apply a vertical flip transform.
+        flattenedCGImage()
+    }
+
+    /// Convert any Metal texture to CGImage via CIImage (correct sRGB + premultiplied alpha).
+    private func textureToCGImage(_ texture: MTLTexture) -> CGImage? {
         guard var ciImage = CIImage(mtlTexture: texture, options: [
             .colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!
         ]) else { return nil }
@@ -366,24 +515,21 @@ public final class CanvasRenderer {
                                        format: .BGRA8, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!)
     }
 
-    /// Load a CGImage into the canvas texture (for restoring saved drawings or
-    /// baking images).
-    ///
-    /// Uses `CIContext.render(_:to:)` which handles sRGB↔linear conversion and
-    /// premultiplied alpha correctly. The previous `CGContext → texture.replace()`
-    /// approach premultiplied in sRGB space, causing progressive darkening on
-    /// every CGImage→Metal round-trip (e.g., lasso extract+clear+commit).
-    func loadImageIntoCanvas(_ image: CGImage) {
-        guard let canvas = canvasTexture else { return }
+    /// Load a CGImage into a specific layer texture.
+    func loadImageIntoLayer(at index: Int, _ image: CGImage) {
+        guard index >= 0, index < layerTextures.count else { return }
+        let texture = layerTextures[index]
         var ciImage = CIImage(cgImage: image)
-        // Flip vertically: CGImage is top-down, CIImage is bottom-up, and the
-        // Metal texture expects top-down. CIContext.render writes bottom-up into
-        // the texture, so we flip the CIImage to compensate.
         ciImage = ciImage.transformed(by: CGAffineTransform(scaleX: 1, y: -1)
             .translatedBy(x: 0, y: -ciImage.extent.height))
         let bounds = CGRect(x: 0, y: 0, width: canvasWidth, height: canvasHeight)
-        ciContext.render(ciImage, to: canvas, commandBuffer: nil,
+        ciContext.render(ciImage, to: texture, commandBuffer: nil,
                          bounds: bounds, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!)
+    }
+
+    /// Load a CGImage into the active layer (convenience wrapper).
+    func loadImageIntoCanvas(_ image: CGImage) {
+        loadImageIntoLayer(at: activeLayerIndex, image)
     }
 
     // MARK: - Lasso Selection (Metal-native)
@@ -391,7 +537,7 @@ public final class CanvasRenderer {
     /// Extract pixels inside the lasso path from the canvas into a selection texture,
     /// and clear those pixels from the canvas. Both operations happen entirely in Metal.
     func extractSelection(canvasPath: CGPath, bounds: CGRect, canvasScale: CGFloat) {
-        guard let canvas = canvasTexture, let maskedPSO = maskedCopyPSO else { return }
+        guard let canvas = activeLayerTexture, let maskedPSO = maskedCopyPSO else { return }
 
         // Convert bounds from view-points to canvas-pixels.
         let pxBounds = CGRect(
@@ -560,7 +706,7 @@ public final class CanvasRenderer {
 
     /// Composite the selection texture onto the canvas at its current transform.
     func commitSelection() {
-        guard let selTex = selectionTexture, let canvas = canvasTexture,
+        guard let selTex = selectionTexture, let canvas = activeLayerTexture,
               let vertBuf = selectionVertexBuffer else { return }
         guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
 
@@ -617,7 +763,7 @@ public final class CanvasRenderer {
     }
 
     private func compositeToDrawable(commandBuffer: MTLCommandBuffer, drawable: CAMetalDrawable,
-                                     canvas: MTLTexture, scratch: MTLTexture) {
+                                     scratch: MTLTexture) {
         let rpd = MTLRenderPassDescriptor()
         rpd.colorAttachments[0].texture = drawable.texture
         rpd.colorAttachments[0].loadAction = .clear
@@ -628,18 +774,24 @@ public final class CanvasRenderer {
 
         enc.setRenderPipelineState(compositorPSO)
         enc.setVertexBuffer(quadVertexBuffer, offset: 0, index: 0)
-
-        // Draw canvas layer.
         var opacity: Float = 1.0
-        enc.setFragmentTexture(canvas, index: 0)
-        enc.setFragmentBytes(&opacity, length: MemoryLayout<Float>.size, index: 0)
-        enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
 
-        // Draw scratch (active stroke) on top.
-        if stampCount > 0 {
-            enc.setFragmentTexture(scratch, index: 0)
+        // Draw all visible layers bottom-to-top, interleaving the scratch texture
+        // at the active layer's z-position so the active stroke preview appears
+        // at the correct depth.
+        for i in 0..<layerTextures.count {
+            guard layerVisibility[i] else { continue }
+
+            enc.setFragmentTexture(layerTextures[i], index: 0)
             enc.setFragmentBytes(&opacity, length: MemoryLayout<Float>.size, index: 0)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+
+            // Draw scratch (active stroke) on top of the active layer.
+            if i == activeLayerIndex && stampCount > 0 {
+                enc.setFragmentTexture(scratch, index: 0)
+                enc.setFragmentBytes(&opacity, length: MemoryLayout<Float>.size, index: 0)
+                enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+            }
         }
 
         // Draw floating selection (if lasso is active).
@@ -648,7 +800,6 @@ public final class CanvasRenderer {
             enc.setFragmentBytes(&opacity, length: MemoryLayout<Float>.size, index: 0)
             enc.setVertexBuffer(selVB, offset: 0, index: 0)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
-            // Restore the fullscreen quad buffer for subsequent draws.
             enc.setVertexBuffer(quadVertexBuffer, offset: 0, index: 0)
         }
 

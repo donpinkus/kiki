@@ -44,15 +44,14 @@ final class AppCoordinator {
         didSet {
             if canvasViewModel.hasLassoSelection {
                 if oldValue == .lasso && currentTool != .lasso {
-                    // Phase A → Phase B: commit floating, keep clip mask
+                    // Phase A → Phase B: commit floating selection, keep clip mask
+                    // visible. Brush/eraser strokes are now clipped to the lasso region.
                     canvasViewModel.transitionToClipMode()
-                } else if currentTool == .lasso && oldValue != .lasso {
-                    // Phase B → ready for new lasso: clear clip
-                    canvasViewModel.clearLassoClipOnly()
                 }
+                // Switching back to lasso or between pen/eraser: clip mask persists.
+                // User must explicitly clear it via "Clear Lasso" button.
             }
             // Stash the outgoing tool's size/opacity and load the incoming tool's.
-            // This gives each tool its own persistent settings.
             swapToolValues(from: oldValue, to: currentTool)
             applyTool()
         }
@@ -111,6 +110,7 @@ final class AppCoordinator {
         }
     }
     var showStylePicker = false
+    var showLayerPanel = false
     var resultState: ResultState = .empty
     var dividerPosition: CGFloat = 0.5
     var showFloatingPanel = false

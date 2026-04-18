@@ -38,10 +38,14 @@ public final class CanvasViewModel {
     public private(set) var isInteracting = false
     public private(set) var hasLassoSelection = false
 
+    // MARK: - Layer State
+
+    public private(set) var layers: [LayerInfo] = [LayerInfo(name: "Layer 1")]
+    public private(set) var activeLayerIndex: Int = 0
+
     private weak var canvasView: MetalCanvasView?
     private weak var container: RotatableCanvasContainer?
     private var pendingState: CanvasState?
-    private var preLassoSnapshot: CGImage?
     private var lassoClosedPath: CGPath?
 
     public let canvasChanges: AsyncStream<SketchSnapshot>
@@ -113,13 +117,15 @@ public final class CanvasViewModel {
     }
 
     /// Transition from Phase A (floating selection) to Phase B (clip mask).
-    /// Called when switching from lasso tool to pen/eraser.
+    /// Called when switching from lasso tool to pen/eraser. Commits the floating
+    /// selection, sets the clip path, and shows marching ants outline.
     public func transitionToClipMode() {
         guard let container, let canvasView else { return }
         canvasView.commitSelection()
         container.commitLassoSelection()
         if let path = lassoClosedPath {
             canvasView.lassoClipPath = path
+            canvasView.showClipMaskOutline(path)
         }
     }
 
@@ -131,7 +137,7 @@ public final class CanvasViewModel {
             container.commitLassoSelection()
         }
         canvasView.lassoClipPath = nil
-        preLassoSnapshot = nil
+        canvasView.hideClipMaskOutline()
         lassoClosedPath = nil
         hasLassoSelection = false
         updateState()
@@ -146,7 +152,7 @@ public final class CanvasViewModel {
         }
         canvasView.cancelSelection()
         canvasView.lassoClipPath = nil
-        preLassoSnapshot = nil
+        canvasView.hideClipMaskOutline()
         lassoClosedPath = nil
         hasLassoSelection = false
         updateState()
@@ -155,8 +161,36 @@ public final class CanvasViewModel {
     /// Clear only the clip path (not the floating selection). Used when switching back to lasso tool.
     public func clearLassoClipOnly() {
         canvasView?.lassoClipPath = nil
+        canvasView?.hideClipMaskOutline()
         lassoClosedPath = nil
         hasLassoSelection = false
+    }
+
+    // MARK: - Layer Management
+
+    public func addLayer() {
+        canvasView?.addLayer()
+        updateState()
+    }
+
+    public func selectLayer(at index: Int) {
+        canvasView?.selectLayer(at: index)
+        updateState()
+    }
+
+    public func toggleLayerVisibility(at index: Int) {
+        canvasView?.toggleLayerVisibility(at: index)
+        updateState()
+    }
+
+    public func deleteLayer(at index: Int) {
+        canvasView?.deleteLayer(at: index)
+        updateState()
+    }
+
+    public func moveLayer(from source: Int, to destination: Int) {
+        canvasView?.moveLayer(from: source, to: destination)
+        updateState()
     }
 
     public func undo() {
@@ -208,7 +242,9 @@ public final class CanvasViewModel {
         let canvasCGImage = canvasView.persistentImageSnapshot
 
         let rect = CGRect(origin: .zero, size: outputSize)
-        let renderer = UIGraphicsImageRenderer(size: outputSize)
+        let format = UIGraphicsImageRendererFormat()
+        format.preferredRange = .standard  // sRGB — match Metal canvas color space
+        let renderer = UIGraphicsImageRenderer(size: outputSize, format: format)
         let image = renderer.image { _ in
             UIColor.white.setFill()
             UIRectFill(rect)
@@ -228,9 +264,10 @@ public final class CanvasViewModel {
 
     // MARK: - Persistence
 
-    /// Returns the current stroke data as JSON, or nil if the canvas is not attached.
+    /// Returns the current layered drawing data (JSON envelope with per-layer PNGs),
+    /// or nil if the canvas is not attached or empty.
     public func exportDrawingData() -> Data? {
-        canvasView?.exportStrokeData()
+        canvasView?.exportLayeredData()
     }
 
     /// Returns the current background image (lineart swap) as PNG data, or nil.
@@ -258,7 +295,9 @@ public final class CanvasViewModel {
         let scale = min(maxDimension / fullSize.width, maxDimension / fullSize.height, 1.0)
         let thumbSize = CGSize(width: fullSize.width * scale, height: fullSize.height * scale)
 
-        let renderer = UIGraphicsImageRenderer(size: thumbSize)
+        let format = UIGraphicsImageRendererFormat()
+        format.preferredRange = .standard  // sRGB — match Metal canvas color space
+        let renderer = UIGraphicsImageRenderer(size: thumbSize, format: format)
         return renderer.image { _ in
             let rect = CGRect(origin: .zero, size: thumbSize)
             UIColor.white.setFill()
@@ -301,5 +340,7 @@ public final class CanvasViewModel {
         isEmpty = canvasView.isEmpty && !hasBackgroundContent
         canUndo = canvasView.canUndo
         canRedo = canvasView.canRedo
+        layers = canvasView.layers
+        activeLayerIndex = canvasView.activeLayerIndex
     }
 }
