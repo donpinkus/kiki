@@ -561,6 +561,11 @@ async function provision(sessionId: string, onStatus: (msg: string) => void): Pr
   incrementCounter('pod_created_total', { type: podType });
   observeHistogram('pod_creation_ms', podCreateMs);
 
+  // If any subsequent step fails, terminate the pod we just created to prevent
+  // cost leaks. This matters especially for replaceSession() which calls
+  // provision() directly without its own pod cleanup.
+  try {
+
   // 3. Wait for the container to boot. In baked mode the image is slim (~2-3
   // GB) but the very first pull to a host in a DC can still take a few minutes.
   const pullStart = Date.now();
@@ -602,6 +607,14 @@ async function provision(sessionId: string, onStatus: (msg: string) => void): Pr
   onStatus('Ready');
   notifyPodProgress(podId, `✅ **Pod ready** (${Math.round(totalMs / 1000)}s total)`);
   return { podId, podUrl, podType };
+  } catch (err) {
+    // Pod was created but a later step failed — clean up to prevent cost leak.
+    log.warn({ sessionId, podId, err: (err as Error).message }, 'Provision failed after pod creation — terminating pod');
+    terminatePod(podId).catch((e) =>
+      log.warn({ podId, err: (e as Error).message }, 'Failed to terminate pod after provision failure'),
+    );
+    throw err;
+  }
 }
 
 /**
