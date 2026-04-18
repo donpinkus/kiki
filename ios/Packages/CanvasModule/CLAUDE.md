@@ -29,6 +29,19 @@ CIContext is cached on `CanvasRenderer` (created once at init, backed by the sam
 - `CIContext.createCGImage(..., colorSpace: ...)`
 - `CIContext.render(..., colorSpace: ...)`
 
+### UIGraphicsImageRenderer — Always Force sRGB
+
+`UIGraphicsImageRenderer(size:)` defaults to the display's color space — **Display P3** on modern iPads. Any image produced by a default renderer will be P3-tagged, causing a saturation mismatch when displayed alongside the sRGB Metal canvas (via CAMetalLayer).
+
+**ALWAYS create renderers with explicit sRGB format:**
+```swift
+let format = UIGraphicsImageRendererFormat()
+format.preferredRange = .standard  // sRGB
+let renderer = UIGraphicsImageRenderer(size: size, format: format)
+```
+
+This applies to: lasso extraction, lasso clear, selection composite, thumbnail generation, and any future CG-based image operations on canvas content.
+
 ### Performance — Main Thread Budget
 
 Target: <8ms per frame at 120 Hz. Three rules:

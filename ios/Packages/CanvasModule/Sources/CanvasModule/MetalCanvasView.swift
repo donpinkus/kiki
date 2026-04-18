@@ -463,7 +463,12 @@ public final class MetalCanvasView: UIView {
         let fullRect = CGRect(origin: .zero, size: size)
 
         // 2. Composite white + background + canvas into one image.
-        let compositeRenderer = UIGraphicsImageRenderer(size: size)
+        //    Force sRGB to match the Metal canvas — UIGraphicsImageRenderer defaults
+        //    to Display P3 on modern iPads, causing a saturation shift vs CAMetalLayer.
+        let srgbFormat = UIGraphicsImageRendererFormat()
+        srgbFormat.preferredRange = .standard
+
+        let compositeRenderer = UIGraphicsImageRenderer(size: size, format: srgbFormat)
         let composite = compositeRenderer.image { _ in
             UIColor.white.setFill()
             UIRectFill(fullRect)
@@ -472,7 +477,7 @@ public final class MetalCanvasView: UIView {
         }
 
         // 3. Extract pixels inside the lasso path, crop to bounding box.
-        let extractionRenderer = UIGraphicsImageRenderer(size: size)
+        let extractionRenderer = UIGraphicsImageRenderer(size: size, format: srgbFormat)
         let fullExtraction = extractionRenderer.image { ctx in
             let cgCtx = ctx.cgContext
             cgCtx.addPath(closedPath)
@@ -495,10 +500,14 @@ public final class MetalCanvasView: UIView {
         let croppedImage = UIImage(cgImage: croppedCG, scale: fullExtraction.scale, orientation: .up)
 
         // 4. Clear the lasso area from the canvas texture.
-        let clearRenderer = UIGraphicsImageRenderer(size: size)
+        let clearRenderer = UIGraphicsImageRenderer(size: size, format: srgbFormat)
         let clearedImage = clearRenderer.image { ctx in
             let cgCtx = ctx.cgContext
             UIImage(cgImage: canvasCGImage).draw(in: fullRect)
+            // Disable anti-aliasing so the clear has a crisp edge — anti-aliased
+            // clear creates partially-transparent pixels at the boundary that let
+            // the white background bleed through as a visible white outline.
+            cgCtx.setShouldAntialias(false)
             cgCtx.addPath(closedPath)
             cgCtx.setBlendMode(.clear)
             cgCtx.fillPath()
@@ -522,7 +531,9 @@ public final class MetalCanvasView: UIView {
         let size = bounds.size
         guard size.width > 0, size.height > 0 else { return }
 
-        let compositeRenderer = UIGraphicsImageRenderer(size: size)
+        let format = UIGraphicsImageRendererFormat()
+        format.preferredRange = .standard  // sRGB to match Metal canvas
+        let compositeRenderer = UIGraphicsImageRenderer(size: size, format: format)
         let result = compositeRenderer.image { ctx in
             UIImage(cgImage: canvasCGImage).draw(in: CGRect(origin: .zero, size: size))
             let cgCtx = ctx.cgContext
