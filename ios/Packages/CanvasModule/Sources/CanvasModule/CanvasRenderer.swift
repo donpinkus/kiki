@@ -57,6 +57,19 @@ public final class CanvasRenderer {
 
     var hasCanvas: Bool { canvasTexture != nil }
 
+    // MARK: - Selection State (active during lasso floating phase)
+
+    /// The extracted selection pixels (canvas-only, no background baked in).
+    private(set) var selectionTexture: MTLTexture?
+    /// Bounding box of the selection in canvas-pixel coordinates.
+    private(set) var selectionBounds: CGRect = .zero
+    /// Vertex buffer for the selection quad, recomputed when transform changes.
+    private var selectionVertexBuffer: MTLBuffer?
+    /// Whether a floating selection is active.
+    var hasActiveSelection: Bool { selectionTexture != nil }
+    /// Pipeline for masked copy (canvas → selection texture).
+    private var maskedCopyPSO: MTLRenderPipelineState?
+
     // MARK: - Stamp Instance Buffer
 
     /// Per-frame stamp instances for the active stroke. Populated by
@@ -100,6 +113,7 @@ public final class CanvasRenderer {
         self.eraserStampPSO = erasePSO
         self.compositorPSO = compPSO
         self.flattenPSO = flatPSO
+        self.maskedCopyPSO = Self.makeMaskedCopyPSO(device: device, library: lib)
 
         // Quad vertex buffer (shared).
         let quadVerts: [Float] = [
@@ -366,6 +380,206 @@ public final class CanvasRenderer {
                          bounds: bounds, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!)
     }
 
+    // MARK: - Lasso Selection (Metal-native)
+
+    /// Extract pixels inside the lasso path from the canvas into a selection texture,
+    /// and clear those pixels from the canvas. Both operations happen entirely in Metal.
+    func extractSelection(canvasPath: CGPath, bounds: CGRect, canvasScale: CGFloat) {
+        guard let canvas = canvasTexture, let maskedPSO = maskedCopyPSO else { return }
+
+        // Convert bounds from view-points to canvas-pixels.
+        let pxBounds = CGRect(
+            x: bounds.origin.x * canvasScale,
+            y: bounds.origin.y * canvasScale,
+            width: bounds.width * canvasScale,
+            height: bounds.height * canvasScale
+        )
+        let selW = max(1, Int(pxBounds.width.rounded()))
+        let selH = max(1, Int(pxBounds.height.rounded()))
+
+        // 1. Rasterize the lasso path into an R8 mask (canvas-pixel resolution).
+        //    CGContext is fine here — it's a single-channel mask, no color issues.
+        let maskW = canvasWidth
+        let maskH = canvasHeight
+        var maskPixels = [UInt8](repeating: 0, count: maskW * maskH)
+        maskPixels.withUnsafeMutableBytes { raw in
+            guard let base = raw.baseAddress else { return }
+            let colorSpace = CGColorSpaceCreateDeviceGray()
+            guard let ctx = CGContext(data: base, width: maskW, height: maskH,
+                                      bitsPerComponent: 8, bytesPerRow: maskW,
+                                      space: colorSpace,
+                                      bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return }
+            ctx.scaleBy(x: canvasScale, y: canvasScale)
+            ctx.setFillColor(gray: 1, alpha: 1)
+            ctx.addPath(canvasPath)
+            ctx.fillPath()
+        }
+
+        let maskDesc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .r8Unorm, width: maskW, height: maskH, mipmapped: false)
+        maskDesc.usage = .shaderRead
+        maskDesc.storageMode = .shared
+        guard let maskTexture = device.makeTexture(descriptor: maskDesc) else { return }
+        maskTexture.replace(region: MTLRegionMake2D(0, 0, maskW, maskH),
+                            mipmapLevel: 0, withBytes: maskPixels, bytesPerRow: maskW)
+
+        // 2. Create selection texture (cropped to bounding box).
+        let selDesc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm_srgb, width: selW, height: selH, mipmapped: false)
+        selDesc.usage = [.shaderRead, .renderTarget]
+        selDesc.storageMode = .shared
+        guard let selTex = device.makeTexture(descriptor: selDesc) else { return }
+
+        guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
+
+        // 3. Render pass A — copy canvas pixels masked by path into selection texture.
+        //    The fragment shader samples canvas + mask; outputs canvas * mask.alpha.
+        //    We use a viewport/texcoord mapping so the selection texture covers just the bounding box.
+        let copyRPD = MTLRenderPassDescriptor()
+        copyRPD.colorAttachments[0].texture = selTex
+        copyRPD.colorAttachments[0].loadAction = .clear
+        copyRPD.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        copyRPD.colorAttachments[0].storeAction = .store
+
+        // Build vertex data that maps the crop region of the canvas to the full selection texture.
+        // Texcoords sample the crop region of the canvas (pxBounds / canvasSize).
+        let u0 = Float(pxBounds.minX) / Float(canvasWidth)
+        let v0 = Float(pxBounds.minY) / Float(canvasHeight)
+        let u1 = Float(pxBounds.maxX) / Float(canvasWidth)
+        let v1 = Float(pxBounds.maxY) / Float(canvasHeight)
+        let cropVerts: [Float] = [
+            -1, -1, u0, v1,
+             1, -1, u1, v1,
+            -1,  1, u0, v0,
+            -1,  1, u0, v0,
+             1, -1, u1, v1,
+             1,  1, u1, v0,
+        ]
+        guard let cropBuf = device.makeBuffer(bytes: cropVerts, length: cropVerts.count * 4, options: .storageModeShared) else { return }
+
+        if let enc = cmdBuf.makeRenderCommandEncoder(descriptor: copyRPD) {
+            enc.setRenderPipelineState(maskedPSO)
+            enc.setVertexBuffer(cropBuf, offset: 0, index: 0)
+            enc.setFragmentTexture(canvas, index: 0)
+            enc.setFragmentTexture(maskTexture, index: 1)
+            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+            enc.endEncoding()
+        }
+
+        // 4. Render pass B — clear canvas pixels inside the mask (destination-out).
+        let clearRPD = MTLRenderPassDescriptor()
+        clearRPD.colorAttachments[0].texture = canvas
+        clearRPD.colorAttachments[0].loadAction = .load
+        clearRPD.colorAttachments[0].storeAction = .store
+
+        if let enc = cmdBuf.makeRenderCommandEncoder(descriptor: clearRPD) {
+            enc.setRenderPipelineState(flattenPSO)  // destination-out blend
+            enc.setVertexBuffer(quadVertexBuffer, offset: 0, index: 0)
+            enc.setFragmentTexture(maskTexture, index: 0)
+            var opacity: Float = 1.0
+            enc.setFragmentBytes(&opacity, length: MemoryLayout<Float>.size, index: 0)
+            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+            enc.endEncoding()
+        }
+
+        cmdBuf.commit()
+        cmdBuf.waitUntilCompleted()  // OK — runs once per lasso, not per frame
+
+        selectionTexture = selTex
+        selectionBounds = pxBounds
+        updateSelectionVertices(translation: .zero, scale: 1, rotation: 0)
+    }
+
+    /// Update the selection quad vertices from gesture state. Called each gesture update.
+    func updateSelectionVertices(translation: CGPoint, scale: CGFloat, rotation: CGFloat) {
+        guard selectionTexture != nil else { return }
+
+        // Selection bounds center in canvas pixels.
+        let cx = Float(selectionBounds.midX)
+        let cy = Float(selectionBounds.midY)
+        let hw = Float(selectionBounds.width) * 0.5
+        let hh = Float(selectionBounds.height) * 0.5
+
+        // Apply gesture transform: translate, then rotate+scale around center.
+        let tx = Float(translation.x * CGFloat(canvasWidth) / CGFloat(UIScreen.main.bounds.width))
+        let ty = Float(translation.y * CGFloat(canvasHeight) / CGFloat(UIScreen.main.bounds.height))
+        let s = Float(scale)
+        let c = cosf(Float(rotation))
+        let sn = sinf(Float(rotation))
+
+        // Four corners in canvas-pixel space, pre-transformed.
+        func transformCorner(lx: Float, ly: Float) -> SIMD2<Float> {
+            // Local offset from center
+            let rx = lx * s
+            let ry = ly * s
+            // Rotate
+            let rotX = rx * c - ry * sn
+            let rotY = rx * sn + ry * c
+            // Translate to canvas-pixel position
+            let px = cx + tx + rotX
+            let py = cy + ty + rotY
+            // Convert to NDC
+            let ndcX = (px / Float(canvasWidth)) * 2 - 1
+            let ndcY = 1 - (py / Float(canvasHeight)) * 2
+            return SIMD2<Float>(ndcX, ndcY)
+        }
+
+        let tl = transformCorner(lx: -hw, ly: -hh)
+        let tr = transformCorner(lx:  hw, ly: -hh)
+        let bl = transformCorner(lx: -hw, ly:  hh)
+        let br = transformCorner(lx:  hw, ly:  hh)
+
+        // 6 vertices (2 triangles), each with (posX, posY, texU, texV)
+        let verts: [Float] = [
+            bl.x, bl.y, 0, 1,
+            br.x, br.y, 1, 1,
+            tl.x, tl.y, 0, 0,
+            tl.x, tl.y, 0, 0,
+            br.x, br.y, 1, 1,
+            tr.x, tr.y, 1, 0,
+        ]
+
+        if let buf = selectionVertexBuffer, buf.length >= verts.count * 4 {
+            memcpy(buf.contents(), verts, verts.count * 4)
+        } else {
+            selectionVertexBuffer = device.makeBuffer(bytes: verts, length: verts.count * 4, options: .storageModeShared)
+        }
+    }
+
+    /// Composite the selection texture onto the canvas at its current transform.
+    func commitSelection() {
+        guard let selTex = selectionTexture, let canvas = canvasTexture,
+              let vertBuf = selectionVertexBuffer else { return }
+        guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
+
+        let rpd = MTLRenderPassDescriptor()
+        rpd.colorAttachments[0].texture = canvas
+        rpd.colorAttachments[0].loadAction = .load
+        rpd.colorAttachments[0].storeAction = .store
+
+        if let enc = cmdBuf.makeRenderCommandEncoder(descriptor: rpd) {
+            enc.setRenderPipelineState(compositorPSO)  // source-over
+            enc.setVertexBuffer(vertBuf, offset: 0, index: 0)
+            enc.setFragmentTexture(selTex, index: 0)
+            var opacity: Float = 1.0
+            enc.setFragmentBytes(&opacity, length: MemoryLayout<Float>.size, index: 0)
+            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+            enc.endEncoding()
+        }
+
+        cmdBuf.commit()
+        cmdBuf.waitUntilCompleted()  // OK — runs once on commit
+
+        discardSelection()
+    }
+
+    /// Free the selection texture and reset state.
+    func discardSelection() {
+        selectionTexture = nil
+        selectionBounds = .zero
+        selectionVertexBuffer = nil
+    }
+
     // MARK: - Private Render Passes
 
     private func renderStampsIntoScratch(commandBuffer: MTLCommandBuffer, scratch: MTLTexture, isEraser: Bool) {
@@ -414,6 +628,16 @@ public final class CanvasRenderer {
             enc.setFragmentTexture(scratch, index: 0)
             enc.setFragmentBytes(&opacity, length: MemoryLayout<Float>.size, index: 0)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+        }
+
+        // Draw floating selection (if lasso is active).
+        if let selTex = selectionTexture, let selVB = selectionVertexBuffer {
+            enc.setFragmentTexture(selTex, index: 0)
+            enc.setFragmentBytes(&opacity, length: MemoryLayout<Float>.size, index: 0)
+            enc.setVertexBuffer(selVB, offset: 0, index: 0)
+            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+            // Restore the fullscreen quad buffer for subsequent draws.
+            enc.setVertexBuffer(quadVertexBuffer, offset: 0, index: 0)
         }
 
         enc.endEncoding()
@@ -500,6 +724,16 @@ public final class CanvasRenderer {
         ca.sourceAlphaBlendFactor = .zero
         ca.destinationAlphaBlendFactor = .oneMinusSourceAlpha
 
+        return try? device.makeRenderPipelineState(descriptor: desc)
+    }
+
+    private static func makeMaskedCopyPSO(device: MTLDevice, library: MTLLibrary) -> MTLRenderPipelineState? {
+        let desc = MTLRenderPipelineDescriptor()
+        desc.vertexFunction = library.makeFunction(name: "compositorVertex")
+        desc.fragmentFunction = library.makeFunction(name: "maskedCopyFragment")
+        desc.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
+        // No blending — replace (copy).
+        desc.colorAttachments[0].isBlendingEnabled = false
         return try? device.makeRenderPipelineState(descriptor: desc)
     }
 
@@ -629,6 +863,19 @@ public final class CanvasRenderer {
         constexpr sampler texSampler(filter::linear, address::clamp_to_zero);
         float4 color = layerTexture.sample(texSampler, in.texCoord);
         return color * opacity;
+    }
+
+    // ── Masked Copy (lasso extraction) ──────────────────────────────────
+
+    fragment float4 maskedCopyFragment(
+        CompositorVaryings in [[stage_in]],
+        texture2d<float> canvas [[texture(0)]],
+        texture2d<float> mask [[texture(1)]]
+    ) {
+        constexpr sampler s(filter::linear, address::clamp_to_zero);
+        float4 color = canvas.sample(s, in.texCoord);
+        float maskAlpha = mask.sample(s, in.texCoord).r;
+        return color * maskAlpha;
     }
     """
 }

@@ -361,26 +361,29 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
 
     // MARK: - Lasso Selection
 
-    public func showLassoSelection(image: UIImage, bounds: CGRect, path: CGPath) {
+    /// Callback that propagates lasso gesture transforms to the Metal canvas.
+    public var onLassoTransformChanged: ((_ translation: CGPoint, _ scale: CGFloat, _ rotation: CGFloat) -> Void)?
+
+    public func showLassoSelection(bounds: CGRect, path: CGPath) {
         let selectionView = LassoSelectionView(
-            selectionImage: image,
             selectionBounds: bounds,
             lassoPath: path
         )
         selectionView.frame = canvasView.frame
         selectionView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        selectionView.onTransformChanged = { [weak self] translation, scale, rotation in
+            self?.onLassoTransformChanged?(translation, scale, rotation)
+        }
         transformView.insertSubview(selectionView, aboveSubview: canvasView)
         canvasView.isUserInteractionEnabled = false
         lassoSelectionView = selectionView
     }
 
-    public func commitLassoSelection() -> (image: UIImage, transform: CGAffineTransform, bounds: CGRect)? {
-        guard let selectionView = lassoSelectionView else { return nil }
-        let result = selectionView.commitTransform()
+    public func commitLassoSelection() {
+        guard let selectionView = lassoSelectionView else { return }
         selectionView.removeFromSuperview()
         lassoSelectionView = nil
         canvasView.isUserInteractionEnabled = true
-        return result
     }
 
     public func clearLassoSelection() {
@@ -390,12 +393,6 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
     }
 
     public var hasActiveLassoSelection: Bool { lassoSelectionView != nil }
-
-    /// Non-destructive read of the current floating selection state for stream capture.
-    public func lassoSelectionSnapshot() -> (image: UIImage, transform: CGAffineTransform, bounds: CGRect)? {
-        guard let selectionView = lassoSelectionView else { return nil }
-        return selectionView.commitTransform()
-    }
 
     public func resetTransform() {
         rotation = 0

@@ -29,13 +29,13 @@ public struct CanvasView: UIViewRepresentable {
             }
         }
 
-        canvasView.onLassoCompleted = { [weak viewModel] path, image, bounds, preSnapshot in
+        canvasView.onLassoSelectionStarted = { [weak viewModel] path, bounds in
             Task { @MainActor in
-                viewModel?.handleLassoCompleted(path: path, image: image, bounds: bounds, preSnapshot: preSnapshot)
+                viewModel?.handleLassoSelectionStarted(path: path, bounds: bounds)
             }
         }
 
-        // Wire container callbacks
+        // Wire container callbacks — including lasso gesture transform propagation.
         container.onTransformChanged = { [weak viewModel] in
             Task { @MainActor in
                 viewModel?.handleTransformChanged()
@@ -58,6 +58,10 @@ public struct CanvasView: UIViewRepresentable {
         }
         container.currentBrushColorProvider = { [weak viewModel] in
             viewModel?.currentBrushColorProvider?() ?? .black
+        }
+        // Lasso gesture transforms → Metal canvas selection quad positioning.
+        container.onLassoTransformChanged = { [weak canvasView] translation, scale, rotation in
+            canvasView?.updateSelectionTransform(translation: translation, scale: scale, rotation: rotation)
         }
         return container
     }

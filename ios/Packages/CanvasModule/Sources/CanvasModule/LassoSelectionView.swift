@@ -1,13 +1,12 @@
 import UIKit
 
 /// Floating selection overlay for the lasso tool.
-/// Shows the extracted pixels with marching ants border,
-/// and handles move/scale/rotate gestures.
+/// Gesture-only — handles move/scale/rotate and displays marching ants.
+/// The selection IMAGE is rendered by the Metal compositor (not a UIImageView).
 final class LassoSelectionView: UIView, UIGestureRecognizerDelegate {
 
     // MARK: - Properties
 
-    private let selectionImageView = UIImageView()
     private let selectionBounds: CGRect
     private let lassoPath: CGPath
 
@@ -18,12 +17,16 @@ final class LassoSelectionView: UIView, UIGestureRecognizerDelegate {
     private var selectionScale: CGFloat = 1.0
     private var selectionRotation: CGFloat = 0
 
+    /// Called on each gesture update with the current transform state.
+    /// The Metal canvas uses these values to position the selection quad.
+    var onTransformChanged: ((_ translation: CGPoint, _ scale: CGFloat, _ rotation: CGFloat) -> Void)?
+
     // Gesture accumulation
     private var lastPinchScale: CGFloat = 1.0
 
     // MARK: - Init
 
-    init(selectionImage: UIImage, selectionBounds: CGRect, lassoPath: CGPath) {
+    init(selectionBounds: CGRect, lassoPath: CGPath) {
         self.selectionBounds = selectionBounds
         self.lassoPath = lassoPath
         super.init(frame: .zero)
@@ -31,12 +34,6 @@ final class LassoSelectionView: UIView, UIGestureRecognizerDelegate {
         backgroundColor = .clear
         isOpaque = false
         isUserInteractionEnabled = true
-
-        // Selection image
-        selectionImageView.image = selectionImage
-        selectionImageView.frame = selectionBounds
-        selectionImageView.contentMode = .scaleToFill
-        addSubview(selectionImageView)
 
         // Marching ants layers
         setupMarchingAnts()
@@ -104,7 +101,6 @@ final class LassoSelectionView: UIView, UIGestureRecognizerDelegate {
         t = t.scaledBy(x: selectionScale, y: selectionScale)
         t = t.translatedBy(x: -center.x, y: -center.y)
 
-        // Disable implicit animation so the path tracks gestures instantly
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         let transformed = lassoPath.copy(using: [t])
@@ -144,22 +140,8 @@ final class LassoSelectionView: UIView, UIGestureRecognizerDelegate {
     }
 
     private func applySelectionTransform() {
-        let center = CGPoint(x: selectionBounds.midX, y: selectionBounds.midY)
-
-        var t = CGAffineTransform.identity
-        t = t.translatedBy(x: selectionTranslation.x, y: selectionTranslation.y)
-
-        // Rotate/scale around selection center
-        t = t.translatedBy(x: center.x, y: center.y)
-        t = t.rotated(by: selectionRotation)
-        t = t.scaledBy(x: selectionScale, y: selectionScale)
-        t = t.translatedBy(x: -center.x, y: -center.y)
-
-        selectionImageView.transform = .identity
-        selectionImageView.frame = selectionBounds
-        selectionImageView.transform = t
-
         updateMarchingAntsTransform()
+        onTransformChanged?(selectionTranslation, selectionScale, selectionRotation)
     }
 
     // MARK: - UIGestureRecognizerDelegate
@@ -168,7 +150,6 @@ final class LassoSelectionView: UIView, UIGestureRecognizerDelegate {
         _ gestureRecognizer: UIGestureRecognizer,
         shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer
     ) -> Bool {
-        // Allow pinch + rotation simultaneously
         let isPinchOrRotation = { (g: UIGestureRecognizer) -> Bool in
             g is UIPinchGestureRecognizer || g is UIRotationGestureRecognizer
         }
@@ -177,9 +158,8 @@ final class LassoSelectionView: UIView, UIGestureRecognizerDelegate {
 
     // MARK: - Public API
 
-    /// Returns the selection image, the cumulative transform, and the original bounds
-    /// so the caller can composite the selection back onto the persistent bitmap.
-    func commitTransform() -> (image: UIImage, transform: CGAffineTransform, bounds: CGRect) {
+    /// Returns the cumulative transform and original bounds.
+    func commitTransform() -> (transform: CGAffineTransform, bounds: CGRect) {
         let center = CGPoint(x: selectionBounds.midX, y: selectionBounds.midY)
 
         var t = CGAffineTransform.identity
@@ -189,6 +169,6 @@ final class LassoSelectionView: UIView, UIGestureRecognizerDelegate {
         t = t.scaledBy(x: selectionScale, y: selectionScale)
         t = t.translatedBy(x: -center.x, y: -center.y)
 
-        return (selectionImageView.image ?? UIImage(), t, selectionBounds)
+        return (t, selectionBounds)
     }
 }

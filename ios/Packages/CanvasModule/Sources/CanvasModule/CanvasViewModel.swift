@@ -106,10 +106,9 @@ public final class CanvasViewModel {
 
     // MARK: - Lasso Selection
 
-    func handleLassoCompleted(path: CGPath, image: UIImage, bounds: CGRect, preSnapshot: CGImage?) {
-        preLassoSnapshot = preSnapshot
+    func handleLassoSelectionStarted(path: CGPath, bounds: CGRect) {
         lassoClosedPath = path
-        container?.showLassoSelection(image: image, bounds: bounds, path: path)
+        container?.showLassoSelection(bounds: bounds, path: path)
         hasLassoSelection = true
     }
 
@@ -117,8 +116,8 @@ public final class CanvasViewModel {
     /// Called when switching from lasso tool to pen/eraser.
     public func transitionToClipMode() {
         guard let container, let canvasView else { return }
-        guard let result = container.commitLassoSelection() else { return }
-        canvasView.compositeSelectionImage(result.image, at: result.bounds, transform: result.transform)
+        canvasView.commitSelection()
+        container.commitLassoSelection()
         if let path = lassoClosedPath {
             canvasView.lassoClipPath = path
         }
@@ -128,9 +127,8 @@ public final class CanvasViewModel {
     public func clearLasso() {
         guard let container, let canvasView else { return }
         if container.hasActiveLassoSelection {
-            if let result = container.commitLassoSelection() {
-                canvasView.compositeSelectionImage(result.image, at: result.bounds, transform: result.transform)
-            }
+            canvasView.commitSelection()
+            container.commitLassoSelection()
         }
         canvasView.lassoClipPath = nil
         preLassoSnapshot = nil
@@ -146,8 +144,7 @@ public final class CanvasViewModel {
         if container.hasActiveLassoSelection {
             container.clearLassoSelection()
         }
-        // Undo to the pre-lasso state.
-        canvasView.performUndo()
+        canvasView.cancelSelection()
         canvasView.lassoClipPath = nil
         preLassoSnapshot = nil
         lassoClosedPath = nil
