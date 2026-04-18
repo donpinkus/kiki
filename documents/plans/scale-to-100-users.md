@@ -96,20 +96,11 @@ Ranked by impact, worst first:
 - Can answer "what's the p95 time-to-ready over the last hour?" with a single curl.
 - Can answer "which failure reasons are dominating?" without grep-fu.
 
-### 7. Graceful preemption handling
+### 7. Graceful preemption handling — DONE
 
-**Why:** At 100 users the preemption rate rises. Currently each preemption is a 3–5 min reconnect wait for the user. If Workstream 3 (baked image) lands, this drops to ~90s — still bad.
+**Shipped:** On upstream WS close, `classifyClose()` probes RunPod API to distinguish preemption/crash/voluntary. On preemption: holds client WS open, sends `reprovisioning` status, provisions replacement pod through same placement + semaphore flow, swaps relay transparently, re-sends config. Gated behind `PREEMPTION_REPLACEMENT_ENABLED` env flag. Max 2 replacement attempts per session. Pods are terminated on provision failure to prevent cost leaks.
 
-**Approach:**
-- When the upstream WebSocket closes with a code/pattern suggesting preemption (vs. user-initiated disconnect), don't immediately error the client.
-- Start provisioning a replacement pod *before* telling the client to reconnect.
-- If replacement is ready within X seconds, transparently reconnect the client to it (client sees a brief blip).
-- Fall back to the current "error + reconnect" behavior if replacement takes too long.
-
-**Effort:** Small-to-medium. Requires detecting preemption (may need to query pod state on close to see if it was terminated vs. just disconnected) and holding the client WebSocket open during the replace.
-
-**Success criteria:**
-- Simulated preemption mid-session: client continues streaming within 90s on a baked image.
+**Known limitation:** GHCR image pulls stall on some RunPod hosts (stuck at "still fetching image" indefinitely). Root cause is RunPod host-level — some hosts can't reach GHCR reliably. Successful pulls take ~3.5 min; stalled pulls time out at 10 min. Not fixable from our side.
 
 ## Also worth naming (not in the main 7)
 
