@@ -6,7 +6,7 @@ This doc captures the bottlenecks and the work to clear them. Each workstream is
 
 ## Baseline (current state)
 
-As of WS3 completion (2026-04-17):
+As of WS7 completion (2026-04-18) — **all 7 workstreams shipped:**
 
 - Railway backend orchestrator provisions a dedicated RTX 5090 pod per user and terminates it after 10 min of inactivity. See `documents/references/provider-config.md` for ops.
 - **Authentication (WS1 done):** Apple Sign In → JWT. Session registry keyed by `userId`. Per-user rate limiter (1 active pod, 5/hr, 30/day).

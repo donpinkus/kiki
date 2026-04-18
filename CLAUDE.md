@@ -32,9 +32,9 @@ cd backend && npm run lint         # Lint
 
 **iOS:** SwiftUI for UI. **Metal for drawing** (CAMetalLayer + CADisplayLink, instanced stamp-based brush engine — see Canvas Engine below). Swift Concurrency (actors, async/await) — no Combine. URLSession for networking — no third-party HTTP libs. SwiftData for persistence. 3 local Swift packages via SPM. AppCoordinator (@Observable) injected via environment.
 
-**Backend:** TypeScript + Fastify — no Express. Railway for hosting. Backend is both a WebSocket relay AND a pod orchestrator: it provisions a dedicated RTX 5090 spot pod per session (`session=<uuid>` query param), relays frames to that pod, and terminates pods idle > 10 min. In-memory session registry, semaphore caps concurrent cold starts. See `documents/references/provider-config.md` for the full ops picture.
+**Backend:** TypeScript + Fastify — no Express. Railway for hosting. Backend is both a WebSocket relay AND a pod orchestrator: it provisions a dedicated RTX 5090 pod per session (JWT-authenticated), relays frames to that pod, and terminates pods idle > 10 min. Redis-backed session registry (survives deploys), semaphore caps concurrent cold starts. See `documents/references/provider-config.md` for the full ops picture.
 
-**Generation:** FLUX.2-klein-4B on RunPod RTX 5090 spot, with BFL's NVFP4 transformer checkpoint loaded on top of the BF16 pipeline. Real-time img2img streaming over WebSocket. Canvas captured at ~2 FPS, sent as JPEG, generated images returned ~1 FPS. Reference-mode only: the sketch is VAE-encoded and concatenated with generation latents as conditioning tokens. Server uses frame dropping (single-slot buffer) to prevent queue buildup. ~3–5 min cold start per fresh session.
+**Generation:** FLUX.2-klein-4B on RunPod RTX 5090 spot, with BFL's NVFP4 transformer checkpoint loaded on top of the BF16 pipeline. Real-time img2img streaming over WebSocket. Canvas captured at ~2 FPS, sent as JPEG, generated images returned ~1 FPS. Reference-mode only: the sketch is VAE-encoded and concatenated with generation latents as conditioning tokens. Server uses frame dropping (single-slot buffer) to prevent queue buildup. ~110–150s cold start (slim GHCR image + pre-populated network volumes).
 
 ## Navigation & Persistence
 
@@ -82,9 +82,10 @@ Data flows one direction: Canvas → Network → Result. Modules communicate thr
 1. **Canvas responsiveness is sacred.** Metal rendering NEVER depends on network/generation state. Target <8ms stroke latency at 120 Hz. NEVER call `drawHierarchy(afterScreenUpdates: true)` or `waitUntilCompleted()` on the main-thread hot path — use `texture.getBytes()` on `.shared` storage for CPU reads, and async command buffer commits for GPU writes.
 2. **Never clear the right pane.** Always keep last successful image visible. Never show blank after first successful generation.
 3. **No secrets on client.** Provider API keys and URLs backend only. Client NEVER calls inference providers directly.
-4. **Content safety before external testing.** NSFW output filter + prompt input filter must be operational before any external TestFlight build.
-5. **Privacy by design.** Sketch data is ephemeral on server — deleted after generation response.
-6. **App Store compliance.** Must include: first-launch AI disclosure consent (guideline 5.1.2(i)), age gate (1.2.1(a)), content filtering, "Report this image" button.
+4. **Code is private.** The GitHub repo is private. Never make Docker images, packages, or artifacts public — our source code is embedded in them. Never recommend exposing code publicly as a workaround for infrastructure problems.
+5. **Content safety before external testing.** NSFW output filter + prompt input filter must be operational before any external TestFlight build.
+6. **Privacy by design.** Sketch data is ephemeral on server — deleted after generation response.
+7. **App Store compliance.** Must include: first-launch AI disclosure consent (guideline 5.1.2(i)), age gate (1.2.1(a)), content filtering, "Report this image" button.
 
 ## Key References
 

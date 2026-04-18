@@ -151,9 +151,7 @@ curl -sS "https://api.runpod.io/graphql?api_key=$RUNPOD_API_KEY" \
 | `.github/workflows/build-flux-image.yml` | Builds + pushes slim GHCR image on `flux-klein-server/` changes |
 | `.github/workflows/stop-pods.yml` | Manual "kill everything" button |
 
-## Known limitations (v1)
+## Known limitations
 
-- **In-memory registry** — lost on backend restart (orphans get reconciled). At horizontal scale we'll need Redis or similar (WS5).
-- **~110–150s cold start** on fresh hosts. Dominated by GHCR image pull. Faster on hosts with cached images.
-- **Spot preemption drops sessions.** Client's reconnect logic retries; backend provisions a new pod for the retry (WS7 will add graceful preemption handling).
-- **No cost dashboard or alerting.** Spend visibility is RunPod billing page only (WS4).
+- **~110–150s cold start** on fresh hosts. Dominated by GHCR image pull (~10 GB base image). Faster on hosts with cached layers.
+- **GHCR image pulls stall on some RunPod hosts** — stuck at "still fetching image" indefinitely. Root cause is RunPod host-level (some hosts can't reach GHCR reliably). Stalled pulls time out at 10 min; the pod is terminated and the user can retry.
