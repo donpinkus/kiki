@@ -19,6 +19,16 @@ CIContext is cached on `CanvasRenderer` (created once at init, backed by the sam
 
 **Y-flip:** CIImage uses bottom-left origin; Metal textures use top-left. Apply `CGAffineTransform(scaleX: 1, y: -1).translatedBy(x: 0, y: -extent.height)` when converting in either direction.
 
+### Color Space — Always Explicit sRGB
+
+**NEVER use `CGColorSpaceCreateDeviceRGB()`** — on modern iPads it returns Display P3 (wider gamut). The canvas texture is `.bgra8Unorm_srgb` (sRGB). If CIContext/CGImage operations use P3 while the data is sRGB, colors appear more saturated in UIKit views (UIImageView, UIGraphicsImageRenderer) vs the Metal canvas (which correctly presents as sRGB via CAMetalLayer).
+
+**ALWAYS use `CGColorSpace(name: CGColorSpace.sRGB)!`** for:
+- `CIContext` working color space
+- `CIImage(mtlTexture:, options: [.colorSpace: ...])` 
+- `CIContext.createCGImage(..., colorSpace: ...)`
+- `CIContext.render(..., colorSpace: ...)`
+
 ### Performance — Main Thread Budget
 
 Target: <8ms per frame at 120 Hz. Three rules:
