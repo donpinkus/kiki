@@ -58,6 +58,21 @@ Always `.bgra8Unorm_srgb` for canvas textures. iOS's native compositor format is
 
 For CGBitmapContext (undo snapshots only — raw bytes, no color interpretation): `premultipliedFirst | byteOrder32Little` = BGRA in memory. This matches the texture's raw byte layout, so `snapshotCanvas()`/`restoreCanvas()` are lossless round-trips (no CIImage needed for raw byte undo).
 
+### CGContext → Metal Texture Y-Flip
+
+CGBitmapContext has **bottom-left** origin. Metal textures have **top-left** origin (row 0 = top). When rasterizing a CGPath into a mask texture via CGContext, always flip Y:
+```swift
+ctx.translateBy(x: 0, y: CGFloat(textureHeight))
+ctx.scaleBy(x: scale, y: -scale)
+```
+Without this flip, the mask is upside-down and operations (lasso, clip) hit the wrong region.
+
+### R8Unorm Textures — Alpha Is Always 1
+
+Metal's R8Unorm format returns `(R, 0, 0, 1.0)` when sampled — `.a` is always 1 regardless of the R value. If you use an R8 texture as a mask with a destination-out blend (`dst *= 1 - src.alpha`), it clears the **entire** target because alpha is always 1.
+
+**Fix:** Write a dedicated fragment shader that outputs the R channel as alpha: `return float4(0, 0, 0, mask.sample(uv).r)`. See `maskedClearFragment` in `CanvasRenderer.swift`.
+
 ## Architecture
 
 ```
@@ -65,15 +80,18 @@ MetalCanvasView (UIView, CAMetalLayer)
 ├── CanvasRenderer (Metal state: device, pipelines, textures, shaders)
 │   ├── canvasTexture (.bgra8Unorm_srgb, .shared) — persistent drawing surface
 │   ├── scratchTexture — active stroke preview (cleared each frame)
+│   ├── selectionTexture — floating lasso selection (Metal-rendered, no UIImageView)
 │   ├── brushMaskTexture (R8Unorm, 64×64 soft circle)
 │   ├── brushStampPSO — instanced quads, source-over blend
 │   ├── eraserStampPSO — instanced quads, destination-out blend
-│   ├── compositorPSO — fullscreen quad, source-over (layer compositing)
-│   └── flattenPSO — fullscreen quad, destination-out (eraser flatten)
+│   ├── compositorPSO — fullscreen quad, source-over (layer compositing + selection display)
+│   ├── flattenPSO — fullscreen quad, destination-out (eraser flatten)
+│   ├── maskedCopyPSO — fullscreen quad, no blend (lasso extraction: canvas × mask → selection)
+│   └── maskedClearPSO — fullscreen quad, destination-out (lasso clear: uses maskedClearFragment)
 ├── Stamp generation (CPU: arc-length resample, adaptive spacing)
 ├── Touch handling (coalesced touches, per-tool dispatch)
 ├── Undo (raw byte snapshots via getBytes/replace, depth 30)
-└── Lasso (CAShapeLayer preview, CIImage extraction, CIContext composite)
+└── Lasso (CAShapeLayer preview, Metal extraction/display/commit)
 ```
 
 ### Brush rendering flow
@@ -96,12 +114,14 @@ MetalCanvasView (UIView, CAMetalLayer)
 - Legacy stroke JSON is auto-detected and replayed as fallback
 - Stroke data kept in memory for potential future use (time-lapse, editing)
 
-### Lasso flow
+### Lasso flow (entirely Metal — no CG color pipeline)
 - Path preview: two `CAShapeLayer`s (white + black offset dashes) — Core Animation, off Metal hot path
-- Extraction: CIImage read → CG composite+clip+crop → floating selection UIImage
-- Clear: CG draw with .clear blend → `loadImageIntoCanvas` (CIContext.render)
-- Commit: `compositeSelectionImage` → CG draw at transform → `loadImageIntoCanvas`
-- Cancel: undo to pre-lasso snapshot
+- Extraction: rasterize CGPath → R8 mask texture (CGContext, grayscale only — Y-flipped!), then two Metal render passes:
+  - **maskedCopy**: canvas × mask → selection texture (crop region only)
+  - **maskedClear**: clear canvas inside mask (maskedClearFragment outputs mask.r as alpha for destination-out)
+- Display: Metal compositor draws selection texture as a transformed quad each frame (vertex positions computed from gesture state on CPU). LassoSelectionView is gesture-only (no UIImageView) with marching ants (CAShapeLayer).
+- Commit: Metal render pass composites selection texture onto canvas at current transform (source-over)
+- Cancel: discard selection texture + undo to pre-lasso snapshot
 
 ## Files
 
