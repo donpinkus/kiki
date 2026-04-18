@@ -348,21 +348,22 @@ public final class CanvasRenderer {
 
     /// Load a CGImage into the canvas texture (for restoring saved drawings or
     /// baking images).
+    ///
+    /// Uses `CIContext.render(_:to:)` which handles sRGB↔linear conversion and
+    /// premultiplied alpha correctly. The previous `CGContext → texture.replace()`
+    /// approach premultiplied in sRGB space, causing progressive darkening on
+    /// every CGImage→Metal round-trip (e.g., lasso extract+clear+commit).
     func loadImageIntoCanvas(_ image: CGImage) {
-        guard canvasTexture != nil else { return }
-        let w = canvasWidth
-        let h = canvasHeight
-        let bytesPerRow = w * 4
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
-        let bitmapInfo = CGImageAlphaInfo.premultipliedFirst.rawValue
-            | CGBitmapInfo.byteOrder32Little.rawValue
-        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8,
-                                  bytesPerRow: bytesPerRow, space: colorSpace,
-                                  bitmapInfo: bitmapInfo) else { return }
-        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
-        guard let pixels = ctx.data else { return }
-        canvasTexture!.replace(region: MTLRegionMake2D(0, 0, w, h),
-                               mipmapLevel: 0, withBytes: pixels, bytesPerRow: bytesPerRow)
+        guard let canvas = canvasTexture else { return }
+        var ciImage = CIImage(cgImage: image)
+        // Flip vertically: CGImage is top-down, CIImage is bottom-up, and the
+        // Metal texture expects top-down. CIContext.render writes bottom-up into
+        // the texture, so we flip the CIImage to compensate.
+        ciImage = ciImage.transformed(by: CGAffineTransform(scaleX: 1, y: -1)
+            .translatedBy(x: 0, y: -ciImage.extent.height))
+        let bounds = CGRect(x: 0, y: 0, width: canvasWidth, height: canvasHeight)
+        ciContext.render(ciImage, to: canvas, commandBuffer: nil,
+                         bounds: bounds, colorSpace: CGColorSpaceCreateDeviceRGB())
     }
 
     // MARK: - Private Render Passes
