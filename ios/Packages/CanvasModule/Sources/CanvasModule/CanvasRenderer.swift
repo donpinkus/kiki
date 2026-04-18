@@ -81,7 +81,7 @@ public final class CanvasRenderer {
         guard let queue = device.makeCommandQueue() else { return nil }
         self.device = device
         self.commandQueue = queue
-        self.ciContext = CIContext(mtlDevice: device, options: [.workingColorSpace: CGColorSpaceCreateDeviceRGB()])
+        self.ciContext = CIContext(mtlDevice: device, options: [.workingColorSpace: CGColorSpace(name: CGColorSpace.sRGB)!])
 
         // Compile shaders from embedded source.
         guard let lib = try? device.makeLibrary(source: Self.shaderSource, options: nil) else {
@@ -338,12 +338,12 @@ public final class CanvasRenderer {
         // CIImage from Metal texture is flipped vertically (Metal = top-left origin,
         // CIImage = bottom-left origin). Apply a vertical flip transform.
         guard var ciImage = CIImage(mtlTexture: texture, options: [
-            .colorSpace: CGColorSpaceCreateDeviceRGB()
+            .colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!
         ]) else { return nil }
         ciImage = ciImage.transformed(by: CGAffineTransform(scaleX: 1, y: -1)
             .translatedBy(x: 0, y: -ciImage.extent.height))
         return ciContext.createCGImage(ciImage, from: ciImage.extent,
-                                       format: .BGRA8, colorSpace: CGColorSpaceCreateDeviceRGB())
+                                       format: .BGRA8, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!)
     }
 
     /// Load a CGImage into the canvas texture (for restoring saved drawings or
@@ -363,7 +363,7 @@ public final class CanvasRenderer {
             .translatedBy(x: 0, y: -ciImage.extent.height))
         let bounds = CGRect(x: 0, y: 0, width: canvasWidth, height: canvasHeight)
         ciContext.render(ciImage, to: canvas, commandBuffer: nil,
-                         bounds: bounds, colorSpace: CGColorSpaceCreateDeviceRGB())
+                         bounds: bounds, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!)
     }
 
     // MARK: - Private Render Passes
