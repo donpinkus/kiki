@@ -1,5 +1,4 @@
 import type { FastifyPluginAsync } from 'fastify';
-import WebSocket from 'ws';
 
 import { config } from '../config/index.js';
 import { extractBearer } from '../modules/auth/index.js';
@@ -9,10 +8,11 @@ import {
   hasReadySession,
   classifyClose,
   replaceSession,
-  deleteStaleSession,
+  abortSession,
   touch,
   sessionClosed,
 } from '../modules/orchestrator/orchestrator.js';
+import { StreamRelay } from '../modules/relay/streamRelay.js';
 import {
   checkProvisionQuota,
   registerProvision,
@@ -35,90 +35,6 @@ import { incrementCounter } from '../modules/orchestrator/metrics.js';
  * bidirectionally. `touch()` on every relayed frame keeps the idle reaper
  * honest.
  */
-class StreamRelay {
-  private upstream: WebSocket | null = null;
-  private readonly url: string;
-
-  private messageHandler: ((data: Buffer | string, isBinary: boolean) => void) | null = null;
-  private closeHandler: ((code: number, reason: string) => void) | null = null;
-  private errorHandler: ((err: Error) => void) | null = null;
-
-  constructor(url: string) {
-    this.url = url;
-  }
-
-  connect(): Promise<WebSocket> {
-    return new Promise((resolve, reject) => {
-      const ws = new WebSocket(this.url, { perMessageDeflate: false });
-      const timeout = setTimeout(() => {
-        ws.close();
-        reject(new Error('Upstream connection timeout'));
-      }, 10_000);
-
-      ws.on('message', (data: WebSocket.RawData, isBinary: boolean) => {
-        if (this.messageHandler) {
-          const payload = isBinary ? (data as Buffer) : (data as Buffer).toString('utf-8');
-          this.messageHandler(payload, isBinary);
-        }
-      });
-
-      ws.on('close', (code: number, reason: Buffer) => {
-        if (this.closeHandler) {
-          this.closeHandler(code, reason.toString('utf-8'));
-        }
-      });
-
-      ws.on('error', (err: Error) => {
-        if (this.errorHandler) {
-          this.errorHandler(err);
-        }
-      });
-
-      ws.on('open', () => {
-        clearTimeout(timeout);
-        this.upstream = ws;
-        resolve(ws);
-      });
-
-      ws.once('error', (err: Error) => {
-        clearTimeout(timeout);
-        reject(err);
-      });
-    });
-  }
-
-  sendConfig(configPayload: Record<string, unknown>): void {
-    if (this.upstream?.readyState === WebSocket.OPEN) {
-      this.upstream.send(JSON.stringify(configPayload));
-    }
-  }
-
-  sendFrame(jpegData: Buffer): void {
-    if (this.upstream?.readyState === WebSocket.OPEN) {
-      this.upstream.send(jpegData);
-    }
-  }
-
-  onMessage(callback: (data: Buffer | string, isBinary: boolean) => void): void {
-    this.messageHandler = callback;
-  }
-
-  onClose(callback: (code: number, reason: string) => void): void {
-    this.closeHandler = callback;
-  }
-
-  onError(callback: (err: Error) => void): void {
-    this.errorHandler = callback;
-  }
-
-  close(): void {
-    if (this.upstream) {
-      this.upstream.close();
-      this.upstream = null;
-    }
-  }
-}
-
 function extractQueryParam(rawUrl: string | undefined, name: string): string | null {
   if (!rawUrl) return null;
   try {
@@ -392,9 +308,10 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         });
       } catch (err) {
         request.log.error({ userId, err }, 'Provisioning or relay failed');
-        // Clean up stale Redis session so next reconnect provisions fresh
-        // instead of looping against a dead pod URL.
-        await deleteStaleSession(userId).catch(() => {});
+        // Terminate the pod AND clear Redis. If the failure was a bad /ws
+        // upgrade on an otherwise-healthy pod, we'd rather burn a fresh
+        // provision (~130s) than leak a pod at $0.99/hr.
+        await abortSession(userId);
         if (provisionRegistered) {
           releaseActivePod(userId);
           provisionRegistered = false;

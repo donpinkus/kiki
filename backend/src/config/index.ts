@@ -74,6 +74,15 @@ export interface AppConfig {
   /** Max replacement attempts per session before giving up. */
   readonly MAX_SESSION_REPLACEMENTS: number;
 
+  // ─── Orphan pod reconciliation ─────────────────────────────────────────
+  /** Interval between continuous `reconcileOrphanPods` sweeps (ms). Default 30 min. */
+  readonly RECONCILE_INTERVAL_MS: number;
+  /** Minimum pod age (seconds) before a runtime reconcile will consider it
+   * orphaned. Guards against terminating pods that are still mid-provision.
+   * Default 600 (10 min), well above the ~150s provision deadline. Boot-time
+   * reconcile ignores this (uses 0) since the process was just rebuilt. */
+  readonly RECONCILE_MIN_AGE_SEC: number;
+
   readonly NODE_ENV: 'development' | 'production' | 'test';
   readonly LOG_LEVEL: 'fatal' | 'error' | 'warn' | 'info' | 'debug' | 'trace';
 }
@@ -173,6 +182,8 @@ function validateConfig(): AppConfig {
     REDIS_URL: process.env['REDIS_URL'] ?? '',
     PREEMPTION_REPLACEMENT_ENABLED: process.env['PREEMPTION_REPLACEMENT_ENABLED'] === 'true',
     MAX_SESSION_REPLACEMENTS: Number(process.env['MAX_SESSION_REPLACEMENTS'] ?? 2),
+    RECONCILE_INTERVAL_MS: Number(process.env['RECONCILE_INTERVAL_MS'] ?? 30 * 60 * 1000),
+    RECONCILE_MIN_AGE_SEC: Number(process.env['RECONCILE_MIN_AGE_SEC'] ?? 600),
     OPS_API_KEY: process.env['OPS_API_KEY'] ?? '',
     COST_MONITOR_INTERVAL_MS: Number(process.env['COST_MONITOR_INTERVAL_MS'] ?? 300_000),
     COST_ALERT_WEBHOOK_URL: process.env['COST_ALERT_WEBHOOK_URL'] ?? '',

@@ -270,14 +270,17 @@ export interface PodSummary {
   id: string;
   name: string;
   desiredStatus: string;
+  /** Null while the container is still starting up. Once the pod is live,
+   * `uptimeInSeconds` counts from runtime initialization (not pod creation). */
+  runtime: { uptimeInSeconds: number } | null;
 }
 
 /**
  * Returns all pods on the account whose name starts with the given prefix.
- * Used by the startup reconcile step to find orphaned per-session pods.
+ * Used by the reconcile step to find orphaned per-session pods.
  */
 export async function listPodsByPrefix(prefix: string): Promise<PodSummary[]> {
-  const query = `query { myself { pods { id name desiredStatus } } }`;
+  const query = `query { myself { pods { id name desiredStatus runtime { uptimeInSeconds } } } }`;
   const data = await gql<{ myself: { pods: PodSummary[] } }>(query);
   return data.myself.pods.filter((p) => p.name.startsWith(prefix));
 }

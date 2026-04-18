@@ -145,14 +145,39 @@ async function writeSession(session: RedisSession): Promise<void> {
     .exec();
 }
 
-/** Delete a session from Redis — exported for stream.ts to clean up stale
- * sessions when relay to a dead pod fails. */
+/**
+ * @deprecated Use `abortSession` for error paths. `deleteStaleSession` only
+ * clears Redis and leaks the pod; `abortSession` terminates both.
+ */
 export async function deleteStaleSession(sessionId: string): Promise<void> {
   return deleteSession(sessionId);
 }
 
 async function deleteSession(sessionId: string): Promise<void> {
   await getRedis().del(sessionKey(sessionId));
+}
+
+/**
+ * Atomically tear down a session: terminate the pod on RunPod (if any), then
+ * delete the Redis row. Used from error paths where we've decided the session
+ * is unusable — e.g. relay to the pod's `/ws` failed on upgrade, or provision
+ * failed mid-way.
+ *
+ * Never throws. Logs + swallows individual failures so callers on an error
+ * path aren't pushed further off the rails.
+ */
+export async function abortSession(sessionId: string): Promise<void> {
+  try {
+    const session = await readSession(sessionId);
+    if (session?.podId) {
+      terminatePod(session.podId).catch((err) =>
+        log.warn({ sessionId, podId: session.podId, err: (err as Error).message }, 'abortSession: terminatePod failed'),
+      );
+    }
+    await deleteSession(sessionId);
+  } catch (err) {
+    log.warn({ sessionId, err: (err as Error).message }, 'abortSession failed');
+  }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -348,11 +373,13 @@ export async function replaceSession(
   }
 
   const t0 = Date.now();
+  let newPodId: string | null = null;
 
   try {
     await acquireSemaphore(onStatus);
     try {
       const result = await provision(sessionId, onStatus);
+      newPodId = result.podId;
       const replacementMs = Date.now() - t0;
 
       await writeSession({
@@ -376,6 +403,14 @@ export async function replaceSession(
   } catch (err) {
     log.error({ sessionId, attempt, err }, 'Session replacement failed');
     incrementCounter('session_replacement_failed_total');
+    // If provision() succeeded but a later step threw (e.g. writeSession),
+    // the new pod is running with no Redis pointer. Terminate it so we don't
+    // leak. The old pod was already terminated above (line 372).
+    if (newPodId) {
+      terminatePod(newPodId).catch((e) =>
+        log.warn({ sessionId, newPodId, err: (e as Error).message }, 'Failed to clean up replacement pod'),
+      );
+    }
     await deleteSession(sessionId).catch(() => {});
     throw err;
   }
@@ -391,15 +426,31 @@ export function sessionClosed(sessionId: string): void {
 
 /**
  * Runs once at backend boot: connect to Redis, reconcile orphan pods, then
- * arm the idle reaper.
+ * arm the idle reaper + periodic reconcile sweep.
  */
 export async function start(logger: FastifyBaseLogger): Promise<void> {
   log = logger;
   setRedisLogger(logger);
   await ensureRedis();
-  await reconcileOrphanPods();
+  // Boot-time reconcile is aggressive (no age gate) — we just restarted so
+  // anything not in Redis is genuinely orphaned.
+  await reconcileOrphanPods(0);
   setInterval(() => void runReaper(), REAPER_INTERVAL_MS);
-  log.info({ idleTimeoutMs: IDLE_TIMEOUT_MS, maxConcurrent: MAX_CONCURRENT_PROVISIONS }, 'Orchestrator started');
+  // Periodic reconcile with age gate to catch leaks between restarts without
+  // killing pods mid-provision.
+  setInterval(
+    () => void reconcileOrphanPods(config.RECONCILE_MIN_AGE_SEC),
+    config.RECONCILE_INTERVAL_MS,
+  );
+  log.info(
+    {
+      idleTimeoutMs: IDLE_TIMEOUT_MS,
+      maxConcurrent: MAX_CONCURRENT_PROVISIONS,
+      reconcileIntervalMs: config.RECONCILE_INTERVAL_MS,
+      reconcileMinAgeSec: config.RECONCILE_MIN_AGE_SEC,
+    },
+    'Orchestrator started',
+  );
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -479,7 +530,17 @@ async function runReaper(): Promise<void> {
   }
 }
 
-async function reconcileOrphanPods(): Promise<void> {
+/**
+ * Cross-reference Redis sessions with RunPod pods matching our prefix.
+ * Pods that no Redis session points at are terminated. Sessions whose pods
+ * no longer exist on RunPod are deleted.
+ *
+ * @param minAgeSec Skip pods younger than this (or whose runtime hasn't
+ *   started yet). Pass 0 at boot — every pod is fair game since we just
+ *   restarted. At runtime, pass a value comfortably over the provision
+ *   deadline so we don't kill pods mid-provision.
+ */
+async function reconcileOrphanPods(minAgeSec = 0): Promise<void> {
   try {
     // 1. Read all session keys from Redis
     const redis = getRedis();
@@ -507,20 +568,29 @@ async function reconcileOrphanPods(): Promise<void> {
     // 2. List RunPod pods
     const pods = await listPodsByPrefix(POD_PREFIX);
 
-    // 3. Adopt or terminate
+    // 3. Adopt, skip young, or terminate
     let adopted = 0;
+    let skippedYoung = 0;
     let terminated = 0;
     for (const pod of pods) {
       if (sessionPodIds.has(pod.id)) {
         adopted++;
-      } else {
-        // Genuine orphan — no Redis session references this pod
-        log.warn({ podId: pod.id, name: pod.name }, 'Reconcile: terminating orphan pod');
-        terminated++;
-        await terminatePod(pod.id).catch((err) =>
-          log.error({ podId: pod.id, name: pod.name, err }, 'Failed to terminate orphan'),
-        );
+        continue;
       }
+      if (minAgeSec > 0) {
+        const uptime = pod.runtime?.uptimeInSeconds ?? 0;
+        if (pod.runtime === null || uptime < minAgeSec) {
+          // Pod might be mid-provision — its Redis row hasn't been written yet.
+          skippedYoung++;
+          continue;
+        }
+      }
+      // Genuine orphan — no Redis session references this pod and it's old enough
+      log.warn({ podId: pod.id, name: pod.name }, 'Reconcile: terminating orphan pod');
+      terminated++;
+      await terminatePod(pod.id).catch((err) =>
+        log.error({ podId: pod.id, name: pod.name, err }, 'Failed to terminate orphan'),
+      );
     }
 
     // 4. Clean up Redis sessions whose pods no longer exist on RunPod
@@ -536,7 +606,7 @@ async function reconcileOrphanPods(): Promise<void> {
       }
     }
 
-    log.info({ adopted, terminated, staleProvisioning: staleKeys.length }, 'Reconcile complete');
+    log.info({ adopted, terminated, skippedYoung, staleProvisioning: staleKeys.length, minAgeSec }, 'Reconcile complete');
   } catch (err) {
     log.error({ err }, 'Reconcile failed (continuing anyway)');
   }
