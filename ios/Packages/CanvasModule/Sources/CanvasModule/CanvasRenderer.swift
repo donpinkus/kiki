@@ -71,6 +71,8 @@ public final class CanvasRenderer {
     var hasActiveSelection: Bool { selectionTexture != nil }
     /// Pipeline for masked copy (canvas → selection texture).
     private var maskedCopyPSO: MTLRenderPipelineState?
+    /// Pipeline for masked clear (clear canvas inside lasso mask, destination-out).
+    private var maskedClearPSO: MTLRenderPipelineState?
 
     // MARK: - Stamp Instance Buffer
 
@@ -116,6 +118,7 @@ public final class CanvasRenderer {
         self.compositorPSO = compPSO
         self.flattenPSO = flatPSO
         self.maskedCopyPSO = Self.makeMaskedCopyPSO(device: device, library: lib)
+        self.maskedClearPSO = Self.makeMaskedClearPSO(device: device, library: lib)
 
         // Quad vertex buffer (shared).
         let quadVerts: [Float] = [
@@ -412,7 +415,10 @@ public final class CanvasRenderer {
                                       bitsPerComponent: 8, bytesPerRow: maskW,
                                       space: colorSpace,
                                       bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return }
-            ctx.scaleBy(x: canvasScale, y: canvasScale)
+            // Flip Y: CGContext origin is bottom-left, Metal texture origin is top-left.
+            // Without this flip, the mask is upside-down and the lasso clips the wrong region.
+            ctx.translateBy(x: 0, y: CGFloat(maskH))
+            ctx.scaleBy(x: canvasScale, y: -canvasScale)
             ctx.setFillColor(gray: 1, alpha: 1)
             ctx.addPath(canvasPath)
             ctx.fillPath()
@@ -475,12 +481,13 @@ public final class CanvasRenderer {
         clearRPD.colorAttachments[0].loadAction = .load
         clearRPD.colorAttachments[0].storeAction = .store
 
-        if let enc = cmdBuf.makeRenderCommandEncoder(descriptor: clearRPD) {
-            enc.setRenderPipelineState(flattenPSO)  // destination-out blend
+        if let enc = cmdBuf.makeRenderCommandEncoder(descriptor: clearRPD),
+           let clearPSO = maskedClearPSO {
+            // maskedClearFragment outputs alpha = mask.r; destination-out multiplies
+            // canvas by (1 - alpha). Inside mask: cleared. Outside: preserved.
+            enc.setRenderPipelineState(clearPSO)
             enc.setVertexBuffer(quadVertexBuffer, offset: 0, index: 0)
             enc.setFragmentTexture(maskTexture, index: 0)
-            var opacity: Float = 1.0
-            enc.setFragmentBytes(&opacity, length: MemoryLayout<Float>.size, index: 0)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
             enc.endEncoding()
         }
@@ -742,6 +749,24 @@ public final class CanvasRenderer {
         return try? device.makeRenderPipelineState(descriptor: desc)
     }
 
+    private static func makeMaskedClearPSO(device: MTLDevice, library: MTLLibrary) -> MTLRenderPipelineState? {
+        let desc = MTLRenderPipelineDescriptor()
+        desc.vertexFunction = library.makeFunction(name: "compositorVertex")
+        desc.fragmentFunction = library.makeFunction(name: "maskedClearFragment")
+        desc.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
+        // Destination-out: dst = dst * (1 - src.alpha). maskedClearFragment outputs
+        // alpha = mask.r, so pixels inside the mask are cleared.
+        let ca = desc.colorAttachments[0]!
+        ca.isBlendingEnabled = true
+        ca.rgbBlendOperation = .add
+        ca.alphaBlendOperation = .add
+        ca.sourceRGBBlendFactor = .zero
+        ca.destinationRGBBlendFactor = .oneMinusSourceAlpha
+        ca.sourceAlphaBlendFactor = .zero
+        ca.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        return try? device.makeRenderPipelineState(descriptor: desc)
+    }
+
     // MARK: - Brush Mask Generation
 
     private static func generateBrushMask(device: MTLDevice, size: Int) -> MTLTexture? {
@@ -871,6 +896,18 @@ public final class CanvasRenderer {
     }
 
     // ── Masked Copy (lasso extraction) ──────────────────────────────────
+
+    /// Outputs mask.r as alpha for destination-out clear passes. R8Unorm textures
+    /// return alpha=1 when sampled normally, so compositorFragment can't be used
+    /// for masked clears — it would clear the entire canvas regardless of mask value.
+    fragment float4 maskedClearFragment(
+        CompositorVaryings in [[stage_in]],
+        texture2d<float> mask [[texture(0)]]
+    ) {
+        constexpr sampler s(filter::linear, address::clamp_to_zero);
+        float maskVal = mask.sample(s, in.texCoord).r;
+        return float4(0.0, 0.0, 0.0, maskVal);
+    }
 
     fragment float4 maskedCopyFragment(
         CompositorVaryings in [[stage_in]],
