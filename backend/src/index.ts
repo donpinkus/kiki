@@ -1,3 +1,14 @@
+// Sentry must init before all other imports for auto-instrumentation.
+import * as Sentry from '@sentry/node';
+
+Sentry.init({
+  dsn: process.env['SENTRY_DSN'] || '',
+  environment: process.env['NODE_ENV'] ?? 'development',
+  tracesSampleRate: 1.0,
+  // Don't send if DSN is empty (local dev without Sentry)
+  enabled: !!process.env['SENTRY_DSN'],
+});
+
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import websocket from '@fastify/websocket';
@@ -41,6 +52,9 @@ await app.register(healthRoute);
 await app.register(authRoute);
 await app.register(streamRoute);
 await app.register(opsRoute);
+
+// --- Sentry error handler (must be before custom error handler) ---
+Sentry.setupFastifyErrorHandler(app);
 
 // --- Error handler ---
 app.setErrorHandler((error, request, reply) => {
