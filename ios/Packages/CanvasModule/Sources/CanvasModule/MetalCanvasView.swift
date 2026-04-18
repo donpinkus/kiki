@@ -150,7 +150,7 @@ public final class MetalCanvasView: UIView {
         let pixelW = Int(bounds.width * scale)
         let pixelH = Int(bounds.height * scale)
         metalLayer.drawableSize = CGSize(width: pixelW, height: pixelH)
-        renderer.resizeCanvas(width: pixelW, height: pixelH)
+        renderer.resizeCanvas(width: pixelW, height: pixelH, viewScale: scale)
 
         // If drawing data was loaded before layout (canvas texture didn't exist
         // yet), apply it now that the texture is allocated.

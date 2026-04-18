@@ -54,6 +54,8 @@ public final class CanvasRenderer {
 
     private(set) var canvasWidth: Int = 0
     private(set) var canvasHeight: Int = 0
+    /// Ratio of canvas pixels to view points (retina scale). Set by resizeCanvas.
+    private(set) var canvasScale: CGFloat = 1
 
     var hasCanvas: Bool { canvasTexture != nil }
 
@@ -141,12 +143,13 @@ public final class CanvasRenderer {
     // MARK: - Texture Management
 
     /// (Re)allocate canvas and scratch textures to match the given pixel size.
-    func resizeCanvas(width: Int, height: Int) {
+    func resizeCanvas(width: Int, height: Int, viewScale: CGFloat = 0) {
         guard width > 0, height > 0 else { return }
         guard width != canvasWidth || height != canvasHeight else { return }
 
         canvasWidth = width
         canvasHeight = height
+        if viewScale > 0 { canvasScale = viewScale }
 
         let desc = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .bgra8Unorm_srgb,
@@ -500,9 +503,11 @@ public final class CanvasRenderer {
         let hw = Float(selectionBounds.width) * 0.5
         let hh = Float(selectionBounds.height) * 0.5
 
-        // Apply gesture transform: translate, then rotate+scale around center.
-        let tx = Float(translation.x * CGFloat(canvasWidth) / CGFloat(UIScreen.main.bounds.width))
-        let ty = Float(translation.y * CGFloat(canvasHeight) / CGFloat(UIScreen.main.bounds.height))
+        // Convert gesture translation from view-points to canvas-pixels using
+        // the stored canvas scale (canvasPixels / viewPoints). Previously used
+        // UIScreen.main.bounds which broke in split-screen or non-fullscreen layouts.
+        let tx = Float(translation.x * canvasScale)
+        let ty = Float(translation.y * canvasScale)
         let s = Float(scale)
         let c = cosf(Float(rotation))
         let sn = sinf(Float(rotation))
