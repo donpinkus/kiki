@@ -57,7 +57,7 @@ final class AppCoordinator {
             applyTool()
         }
     }
-    var toolSize: CGFloat = 5.0 {
+    var toolSize: CGFloat = 15.0 {
         didSet {
             guard !isSwappingToolValues else { return }
             applyTool()
@@ -76,8 +76,8 @@ final class AppCoordinator {
     /// (used when swapping values on a tool change).
     private var isSwappingToolValues = false
     private var storedToolSizes: [DrawingTool: CGFloat] = [
-        .brush: 5,
-        .eraser: 5,
+        .brush: 15,
+        .eraser: 25,
         .lasso: 5
     ]
     private var storedToolOpacities: [DrawingTool: CGFloat] = [
