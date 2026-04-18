@@ -66,12 +66,17 @@ public final class MetalCanvasView: UIView {
     public var canUndo: Bool { !undoSnapshots.isEmpty }
     public var canRedo: Bool { !redoSnapshots.isEmpty }
 
-    // MARK: - Lasso (placeholder — Phase 2)
+    // MARK: - Lasso
 
     private var lassoPoints: [CGPoint] = []
     private var lassoPath: CGMutablePath?
     private var preLassoSnapshot: CGImage?
     public var lassoClipPath: CGPath?
+
+    /// Marching-ants preview of the lasso path while the user draws it.
+    /// Two shape layers (white + black offset dashes) for visibility on any background.
+    private let lassoPreviewWhite = CAShapeLayer()
+    private let lassoPreviewBlack = CAShapeLayer()
 
     // MARK: - Init
 
@@ -115,6 +120,22 @@ public final class MetalCanvasView: UIView {
         link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
         link.add(to: .main, forMode: .common)
         self.displayLink = link
+
+        // Lasso preview shape layers — marching ants (white + black offset dashes).
+        for (shapeLayer, color, phase) in [
+            (lassoPreviewWhite, UIColor.white, NSNumber(value: 0)),
+            (lassoPreviewBlack, UIColor.black, NSNumber(value: 5))
+        ] {
+            shapeLayer.fillColor = nil
+            shapeLayer.strokeColor = color.cgColor
+            shapeLayer.lineWidth = 2
+            shapeLayer.lineCap = .round
+            shapeLayer.lineJoin = .round
+            shapeLayer.lineDashPattern = [6, 4]
+            shapeLayer.lineDashPhase = CGFloat(phase.floatValue)
+            shapeLayer.isHidden = true
+            layer.addSublayer(shapeLayer)
+        }
     }
 
     public override class var layerClass: AnyClass { CAMetalLayer.self }
@@ -228,6 +249,14 @@ public final class MetalCanvasView: UIView {
             path.move(to: lassoPoints[0])
             for i in 1..<lassoPoints.count { path.addLine(to: lassoPoints[i]) }
             lassoPath = path
+            // Update the marching-ants shape layers so the user can see the path.
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            lassoPreviewWhite.path = path
+            lassoPreviewBlack.path = path
+            lassoPreviewWhite.isHidden = false
+            lassoPreviewBlack.isHidden = false
+            CATransaction.commit()
         }
 
         isDirty = true
@@ -260,6 +289,7 @@ public final class MetalCanvasView: UIView {
         lastEraserPointIndex = 0
         lassoPoints.removeAll()
         lassoPath = nil
+        hideLassoPreview()
         onInteractionEnded?()
         isDirty = true
     }
@@ -375,11 +405,22 @@ public final class MetalCanvasView: UIView {
         isDirty = true
     }
 
+    private func hideLassoPreview() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        lassoPreviewWhite.path = nil
+        lassoPreviewBlack.path = nil
+        lassoPreviewWhite.isHidden = true
+        lassoPreviewBlack.isHidden = true
+        CATransaction.commit()
+    }
+
     private func finishLasso() {
         defer {
             drawingTouch = nil
             lassoPoints.removeAll()
             lassoPath = nil
+            hideLassoPreview()
             onInteractionEnded?()
         }
 
