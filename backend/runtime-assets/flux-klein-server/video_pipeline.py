@@ -90,12 +90,17 @@ class LtxvVideoPipeline:
 
             # Assemble the full pipeline from the 0.9.5 repo (VAE, text
             # encoder, scheduler) with our transformer swapped in.
+            # Use model_cpu_offload instead of .to("cuda") — the T5 text
+            # encoder alone is ~19GB which won't fit alongside FLUX (~29GB).
+            # CPU offload keeps components on CPU and moves them to GPU only
+            # during their forward pass, then back to CPU.
             logger.info("Assembling pipeline from %s...", config.LTXV_BASE_REPO)
             self.pipe = LTXConditionPipeline.from_pretrained(
                 config.LTXV_BASE_REPO,
                 transformer=transformer,
                 torch_dtype=self._dtype,
-            ).to("cuda")
+            )
+            self.pipe.enable_model_cpu_offload()
             self.pipe.vae.enable_tiling()
 
             # Warmup so the first user-facing call doesn't pay CUDA graph /
