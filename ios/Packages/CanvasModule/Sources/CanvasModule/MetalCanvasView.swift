@@ -16,10 +16,12 @@ public final class MetalCanvasView: UIView {
 
     public var currentTool: ToolState = .brush(.defaultPen)
 
-    /// Layer metadata (name, visibility). Parallel to renderer's layerTextures.
-    public private(set) var layers: [LayerInfo] = [LayerInfo(name: "Layer 1")]
+    /// Layer metadata, read from the renderer (single source of truth).
+    public var layers: [LayerInfo] {
+        renderer.layers.map { LayerInfo(id: $0.id, name: $0.name, isVisible: $0.isVisible) }
+    }
     /// Which layer is currently active for drawing.
-    public private(set) var activeLayerIndex: Int = 0
+    public var activeLayerIndex: Int { renderer.activeLayerIndex }
 
     /// Tracks canvas-modifying operations (brush, erase, lasso, bake, load).
     /// Used for isEmpty checks and save-trigger telemetry.
@@ -30,6 +32,9 @@ public final class MetalCanvasView: UIView {
     // MARK: - Callbacks
 
     public var onDrawingChanged: (() -> Void)?
+    /// Fired after any mutation that changes observable state (layers, undo, content).
+    /// CanvasViewModel listens to this to sync its @Observable properties.
+    public var onStateChanged: (() -> Void)?
     public var onInteractionBegan: (() -> Void)?
     public var onInteractionEnded: (() -> Void)?
     /// Fired when a lasso selection is extracted. No UIImage — the selection lives
@@ -529,6 +534,7 @@ public final class MetalCanvasView: UIView {
         renderer.restoreLayer(at: entry.layerIndex, from: entry.snapshotData)
         if strokeCount > 0 { strokeCount -= 1 }
         onDrawingChanged?()
+        onStateChanged?()
         isDirty = true
     }
 
@@ -540,51 +546,43 @@ public final class MetalCanvasView: UIView {
         renderer.restoreLayer(at: entry.layerIndex, from: entry.snapshotData)
         strokeCount += 1
         onDrawingChanged?()
+        onStateChanged?()
         isDirty = true
     }
 
     // MARK: - Layer Management
 
     public func addLayer() {
-        guard layers.count < CanvasRenderer.maxLayerCount else { return }
-        let newIndex = renderer.addLayer()
-        layers.append(LayerInfo(name: "Layer \(layers.count + 1)"))
-        activeLayerIndex = newIndex
-        renderer.activeLayerIndex = newIndex
+        let count = renderer.layers.count
+        guard count < CanvasRenderer.maxLayerCount else { return }
+        let newIndex = renderer.addLayer(name: "Layer \(count + 1)")
+        renderer.setActiveLayer(newIndex)
         isDirty = true
+        onStateChanged?()
     }
 
     public func selectLayer(at index: Int) {
-        guard index >= 0, index < layers.count else { return }
-        activeLayerIndex = index
-        renderer.activeLayerIndex = index
+        renderer.setActiveLayer(index)
         isDirty = true
+        onStateChanged?()
     }
 
     public func toggleLayerVisibility(at index: Int) {
-        guard index >= 0, index < layers.count else { return }
-        layers[index].isVisible.toggle()
-        renderer.layerVisibility[index] = layers[index].isVisible
+        renderer.toggleVisibility(at: index)
         isDirty = true
+        onStateChanged?()
     }
 
     public func deleteLayer(at index: Int) {
-        guard layers.count > 1, index >= 0, index < layers.count else { return }
         renderer.removeLayer(at: index)
-        layers.remove(at: index)
-        activeLayerIndex = renderer.activeLayerIndex
         isDirty = true
+        onStateChanged?()
     }
 
     public func moveLayer(from source: Int, to destination: Int) {
-        guard source >= 0, source < layers.count,
-              destination >= 0, destination < layers.count,
-              source != destination else { return }
-        let info = layers.remove(at: source)
-        layers.insert(info, at: destination)
         renderer.moveLayer(from: source, to: destination)
-        activeLayerIndex = renderer.activeLayerIndex
         isDirty = true
+        onStateChanged?()
     }
 
     // MARK: - Public API
@@ -593,10 +591,9 @@ public final class MetalCanvasView: UIView {
     public func clearAll() {
         pushUndoSnapshot()
         renderer.resetToSingleLayer()
-        layers = [LayerInfo(name: "Layer 1")]
-        activeLayerIndex = 0
         strokeCount = 0
         isDirty = true
+        onStateChanged?()
     }
 
     /// Load an image onto the canvas (e.g., "Send to Canvas").
@@ -605,6 +602,7 @@ public final class MetalCanvasView: UIView {
         renderer.loadImageIntoCanvas(cgImage)
         strokeCount += 1
         isDirty = true
+        onStateChanged?()
     }
 
     /// Export all layers as a JSON envelope with per-layer PNG data.
@@ -691,9 +689,6 @@ public final class MetalCanvasView: UIView {
         guard let image = pendingCanvasImage else { return }
         pendingCanvasImage = nil
         renderer.loadImageIntoCanvas(image)
-        // Reset to single layer state.
-        layers = [LayerInfo(name: "Layer 1")]
-        activeLayerIndex = 0
         undoSnapshots.removeAll()
         redoSnapshots.removeAll()
         isDirty = true
@@ -705,30 +700,27 @@ public final class MetalCanvasView: UIView {
         guard let layered = pendingLayeredDrawing else { return }
         pendingLayeredDrawing = nil
 
-        // We need to create the right number of layer textures.
+        // Create the right number of layer textures.
         // The first layer already exists from resizeCanvas. Add more as needed.
-        while renderer.layerTextures.count < layered.layers.count {
+        while renderer.layers.count < layered.layers.count {
             renderer.addLayer()
         }
 
-        var newLayers: [LayerInfo] = []
         for (i, entry) in layered.layers.enumerated() {
-            let info = LayerInfo(
+            guard i < renderer.layers.count else { break }
+            renderer.layers[i] = CanvasRenderer.Layer(
                 id: UUID(uuidString: entry.id) ?? UUID(),
                 name: entry.name,
-                isVisible: entry.isVisible
+                isVisible: entry.isVisible,
+                texture: renderer.layers[i].texture
             )
-            newLayers.append(info)
-            renderer.layerVisibility[i] = entry.isVisible
-
             if let image = UIImage(data: entry.pngData)?.cgImage {
                 renderer.loadImageIntoLayer(at: i, image)
             }
         }
 
-        layers = newLayers
-        activeLayerIndex = min(layered.activeLayerIndex, layers.count - 1)
-        renderer.activeLayerIndex = activeLayerIndex
+        let targetIndex = min(layered.activeLayerIndex, renderer.layers.count - 1)
+        renderer.setActiveLayer(targetIndex)
         undoSnapshots.removeAll()
         redoSnapshots.removeAll()
         isDirty = true

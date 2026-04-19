@@ -138,7 +138,6 @@ public final class CanvasViewModel {
         canvasView.setClipPath(nil)
         lassoClosedPath = nil
         hasLassoSelection = false
-        updateState()
         handleDrawingChanged()
     }
 
@@ -152,7 +151,6 @@ public final class CanvasViewModel {
         canvasView.setClipPath(nil)
         lassoClosedPath = nil
         hasLassoSelection = false
-        updateState()
     }
 
     /// Clear only the clip path (not the floating selection).
@@ -166,37 +164,30 @@ public final class CanvasViewModel {
 
     public func addLayer() {
         canvasView?.addLayer()
-        updateState()
     }
 
     public func selectLayer(at index: Int) {
         canvasView?.selectLayer(at: index)
-        updateState()
     }
 
     public func toggleLayerVisibility(at index: Int) {
         canvasView?.toggleLayerVisibility(at: index)
-        updateState()
     }
 
     public func deleteLayer(at index: Int) {
         canvasView?.deleteLayer(at: index)
-        updateState()
     }
 
     public func moveLayer(from source: Int, to destination: Int) {
         canvasView?.moveLayer(from: source, to: destination)
-        updateState()
     }
 
     public func undo() {
         canvasView?.performUndo()
-        updateState()
     }
 
     public func redo() {
         canvasView?.performRedo()
-        updateState()
     }
 
     public func clear() {
@@ -204,7 +195,6 @@ public final class CanvasViewModel {
         canvasView.clearAll()
         container?.setBackgroundImage(nil)
         resetViewTransform()
-        updateState()
         changesContinuation.yield(SketchSnapshot(
             image: UIImage(),
             strokeCount: 0,
@@ -326,6 +316,13 @@ public final class CanvasViewModel {
 
     func handleColorPicked(_ color: UIColor) {
         onColorPicked?(color)
+    }
+
+    /// Sync @Observable properties from the canvas view. Called automatically
+    /// via onStateChanged callback — CanvasViewModel methods no longer need
+    /// to call this manually.
+    func syncState() {
+        updateState()
     }
 
     // MARK: - Private

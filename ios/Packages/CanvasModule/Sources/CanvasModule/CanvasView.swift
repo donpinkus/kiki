@@ -13,6 +13,11 @@ public struct CanvasView: UIViewRepresentable {
         viewModel.attach(canvasView, container: container)
 
         // Wire canvas callbacks to view model
+        canvasView.onStateChanged = { [weak viewModel] in
+            Task { @MainActor in
+                viewModel?.syncState()
+            }
+        }
         canvasView.onDrawingChanged = { [weak viewModel] in
             Task { @MainActor in
                 viewModel?.handleDrawingChanged()

@@ -33,22 +33,28 @@ public final class CanvasRenderer {
     /// from manual getBytes + CGDataProvider construction.
     private let ciContext: CIContext
 
-    // MARK: - Textures
+    // MARK: - Layers
 
-    /// Per-layer persistent textures. Index 0 = bottom layer. All completed
-    /// strokes on a given layer live in `layerTextures[layerIndex]`.
-    private(set) var layerTextures: [MTLTexture] = []
+    /// A canvas layer: texture + metadata. CanvasRenderer is the single source
+    /// of truth for layer state — MetalCanvasView reads from here.
+    struct Layer {
+        let id: UUID
+        var name: String
+        var isVisible: Bool
+        let texture: MTLTexture
+    }
 
-    /// Per-layer visibility flags, parallel to `layerTextures`.
-    var layerVisibility: [Bool] = []
+    /// All canvas layers. Index 0 = bottom (drawn first).
+    /// Internal setter: MetalCanvasView updates metadata during load.
+    var layers: [Layer] = []
 
     /// Which layer receives brush/eraser/lasso operations.
-    var activeLayerIndex: Int = 0
+    private(set) var activeLayerIndex: Int = 0
 
     /// Convenience: the texture for the currently active layer.
     var activeLayerTexture: MTLTexture? {
-        guard activeLayerIndex >= 0, activeLayerIndex < layerTextures.count else { return nil }
-        return layerTextures[activeLayerIndex]
+        guard activeLayerIndex >= 0, activeLayerIndex < layers.count else { return nil }
+        return layers[activeLayerIndex].texture
     }
 
     /// Scratch texture for the active (in-progress) stroke. Rebuilt each frame
@@ -70,7 +76,7 @@ public final class CanvasRenderer {
     /// Ratio of canvas pixels to view points (retina scale). Set by resizeCanvas.
     private(set) var canvasScale: CGFloat = 1
 
-    var hasCanvas: Bool { !layerTextures.isEmpty }
+    var hasCanvas: Bool { !layers.isEmpty }
 
     /// Maximum number of layers allowed.
     static let maxLayerCount = 16
@@ -192,27 +198,26 @@ public final class CanvasRenderer {
         let desc = makeLayerDescriptor()
 
         // Create initial single layer if none exist, otherwise recreate all layers.
-        if layerTextures.isEmpty {
-            guard let layer0 = device.makeTexture(descriptor: desc) else {
+        if layers.isEmpty {
+            guard let tex = device.makeTexture(descriptor: desc) else {
                 canvasWidth = oldWidth; canvasHeight = oldHeight; canvasScale = oldScale
                 return
             }
-            clearTexture(layer0)
-            layerTextures = [layer0]
-            layerVisibility = [true]
+            clearTexture(tex)
+            layers = [Layer(id: UUID(), name: "Layer 1", isVisible: true, texture: tex)]
             activeLayerIndex = 0
         } else {
             // Build complete array before assigning — rollback on partial failure.
-            var newTextures: [MTLTexture] = []
-            for _ in 0..<layerTextures.count {
+            var newLayers: [Layer] = []
+            for old in layers {
                 guard let tex = device.makeTexture(descriptor: desc) else {
                     canvasWidth = oldWidth; canvasHeight = oldHeight; canvasScale = oldScale
                     return
                 }
                 clearTexture(tex)
-                newTextures.append(tex)
+                newLayers.append(Layer(id: old.id, name: old.name, isVisible: old.isVisible, texture: tex))
             }
-            layerTextures = newTextures
+            layers = newLayers
         }
 
         scratchTexture = device.makeTexture(descriptor: desc)
@@ -222,23 +227,21 @@ public final class CanvasRenderer {
 
     /// Add a new empty layer on top. Returns the index of the new layer.
     @discardableResult
-    func addLayer() -> Int {
-        guard layerTextures.count < Self.maxLayerCount else { return activeLayerIndex }
+    func addLayer(name: String = "Layer", id: UUID = UUID()) -> Int {
+        guard layers.count < Self.maxLayerCount else { return activeLayerIndex }
         let desc = makeLayerDescriptor()
         guard let texture = device.makeTexture(descriptor: desc) else { return activeLayerIndex }
         clearTexture(texture)
-        layerTextures.append(texture)
-        layerVisibility.append(true)
-        return layerTextures.count - 1
+        layers.append(Layer(id: id, name: name, isVisible: true, texture: texture))
+        return layers.count - 1
     }
 
     /// Remove a layer. Must keep at least 1 layer.
     func removeLayer(at index: Int) {
-        guard layerTextures.count > 1, index >= 0, index < layerTextures.count else { return }
-        layerTextures.remove(at: index)
-        layerVisibility.remove(at: index)
-        if activeLayerIndex >= layerTextures.count {
-            activeLayerIndex = layerTextures.count - 1
+        guard layers.count > 1, index >= 0, index < layers.count else { return }
+        layers.remove(at: index)
+        if activeLayerIndex >= layers.count {
+            activeLayerIndex = layers.count - 1
         } else if activeLayerIndex > index {
             activeLayerIndex -= 1
         }
@@ -246,19 +249,23 @@ public final class CanvasRenderer {
 
     /// Set the active layer index.
     func setActiveLayer(_ index: Int) {
-        guard index >= 0, index < layerTextures.count else { return }
+        guard index >= 0, index < layers.count else { return }
         activeLayerIndex = index
+    }
+
+    /// Toggle visibility for a layer.
+    func toggleVisibility(at index: Int) {
+        guard index >= 0, index < layers.count else { return }
+        layers[index].isVisible.toggle()
     }
 
     /// Reorder a layer from one position to another.
     func moveLayer(from source: Int, to destination: Int) {
-        guard source >= 0, source < layerTextures.count,
-              destination >= 0, destination < layerTextures.count,
+        guard source >= 0, source < layers.count,
+              destination >= 0, destination < layers.count,
               source != destination else { return }
-        let tex = layerTextures.remove(at: source)
-        let vis = layerVisibility.remove(at: source)
-        layerTextures.insert(tex, at: destination)
-        layerVisibility.insert(vis, at: destination)
+        let layer = layers.remove(at: source)
+        layers.insert(layer, at: destination)
 
         // Adjust active layer index to follow the moved layer if needed.
         if activeLayerIndex == source {
@@ -272,10 +279,9 @@ public final class CanvasRenderer {
     /// Reset to a single empty layer. Used by clearAll.
     func resetToSingleLayer() {
         let desc = makeLayerDescriptor()
-        guard let layer0 = device.makeTexture(descriptor: desc) else { return }
-        clearTexture(layer0)
-        layerTextures = [layer0]
-        layerVisibility = [true]
+        guard let tex = device.makeTexture(descriptor: desc) else { return }
+        clearTexture(tex)
+        layers = [Layer(id: UUID(), name: "Layer 1", isVisible: true, texture: tex)]
         activeLayerIndex = 0
     }
 
@@ -297,7 +303,7 @@ public final class CanvasRenderer {
     /// Render one frame: clear scratch → draw stamps into scratch → composite
     /// all visible layers + scratch into the given drawable texture.
     func renderFrame(drawable: CAMetalDrawable, isErasing: Bool) {
-        guard !layerTextures.isEmpty, let scratch = scratchTexture else { return }
+        guard !layers.isEmpty, let scratch = scratchTexture else { return }
         guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
 
         // Pass 1: Clear scratch + render stamps into it.
@@ -432,8 +438,8 @@ public final class CanvasRenderer {
 
     /// Snapshot a specific layer's texture into CPU-side Data for undo.
     func snapshotLayer(at index: Int) -> Data? {
-        guard index >= 0, index < layerTextures.count else { return nil }
-        let texture = layerTextures[index]
+        guard index >= 0, index < layers.count else { return nil }
+        let texture = layers[index].texture
         let bytesPerRow = canvasWidth * 4
         let byteCount = bytesPerRow * canvasHeight
         var data = Data(count: byteCount)
@@ -453,9 +459,9 @@ public final class CanvasRenderer {
 
     /// Restore a specific layer's texture from a CPU-side undo snapshot.
     func restoreLayer(at index: Int, from data: Data) {
-        guard index >= 0, index < layerTextures.count,
+        guard index >= 0, index < layers.count,
               data.count == canvasWidth * canvasHeight * 4 else { return }
-        let texture = layerTextures[index]
+        let texture = layers[index].texture
         let bytesPerRow = canvasWidth * 4
         data.withUnsafeBytes { ptr in
             guard let base = ptr.baseAddress else { return }
@@ -471,14 +477,14 @@ public final class CanvasRenderer {
 
     /// Read a specific layer texture into a CGImage for per-layer persistence.
     func layerToCGImage(at index: Int) -> CGImage? {
-        guard index >= 0, index < layerTextures.count else { return nil }
-        return textureToCGImage(layerTextures[index])
+        guard index >= 0, index < layers.count else { return nil }
+        return textureToCGImage(layers[index].texture)
     }
 
     /// Read the flattened (all visible layers composited) canvas into a CGImage
     /// for stream capture, thumbnails, and single-image export.
     func flattenedCGImage() -> CGImage? {
-        guard !layerTextures.isEmpty else { return nil }
+        guard !layers.isEmpty else { return nil }
 
         // Render all visible layers into a temporary texture.
         let desc = makeLayerDescriptor()
@@ -496,9 +502,8 @@ public final class CanvasRenderer {
         enc.setVertexBuffer(quadVertexBuffer, offset: 0, index: 0)
         var opacity: Float = 1.0
 
-        for i in 0..<layerTextures.count {
-            guard i < layerVisibility.count, layerVisibility[i] else { continue }
-            enc.setFragmentTexture(layerTextures[i], index: 0)
+        for layer in layers where layer.isVisible {
+            enc.setFragmentTexture(layer.texture, index: 0)
             enc.setFragmentBytes(&opacity, length: MemoryLayout<Float>.size, index: 0)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
         }
@@ -523,8 +528,8 @@ public final class CanvasRenderer {
 
     /// Load a CGImage into a specific layer texture.
     func loadImageIntoLayer(at index: Int, _ image: CGImage) {
-        guard index >= 0, index < layerTextures.count else { return }
-        let texture = layerTextures[index]
+        guard index >= 0, index < layers.count else { return }
+        let texture = layers[index].texture
         var ciImage = CIImage(cgImage: image)
         ciImage = ciImage.transformed(by: CGAffineTransform(scaleX: 1, y: -1)
             .translatedBy(x: 0, y: -ciImage.extent.height))
@@ -785,10 +790,10 @@ public final class CanvasRenderer {
         // Draw all visible layers bottom-to-top, interleaving the scratch texture
         // at the active layer's z-position so the active stroke preview appears
         // at the correct depth.
-        for i in 0..<layerTextures.count {
-            guard i < layerVisibility.count, layerVisibility[i] else { continue }
+        for i in 0..<layers.count {
+            guard layers[i].isVisible else { continue }
 
-            enc.setFragmentTexture(layerTextures[i], index: 0)
+            enc.setFragmentTexture(layers[i].texture, index: 0)
             enc.setFragmentBytes(&opacity, length: MemoryLayout<Float>.size, index: 0)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
 

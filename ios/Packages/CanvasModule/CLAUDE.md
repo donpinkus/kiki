@@ -78,7 +78,7 @@ Metal's R8Unorm format returns `(R, 0, 0, 1.0)` when sampled — `.a` is always 
 ```
 MetalCanvasView (UIView, CAMetalLayer)
 ├── CanvasRenderer (Metal state: device, pipelines, textures, shaders)
-│   ├── canvasTexture (.bgra8Unorm_srgb, .shared) — persistent drawing surface
+│   ├── layers: [Layer] — unified array (texture + name + visibility per layer)
 │   ├── scratchTexture — active stroke preview (cleared each frame)
 │   ├── selectionTexture — floating lasso selection (Metal-rendered, no UIImageView)
 │   ├── brushMaskTexture (R8Unorm, 64×64 soft circle)
@@ -90,37 +90,43 @@ MetalCanvasView (UIView, CAMetalLayer)
 │   └── maskedClearPSO — fullscreen quad, destination-out (lasso clear: uses maskedClearFragment)
 ├── Stamp generation (CPU: arc-length resample, adaptive spacing)
 ├── Touch handling (coalesced touches, per-tool dispatch)
-├── Undo (raw byte snapshots via getBytes/replace, depth 30)
-└── Lasso (CAShapeLayer preview, Metal extraction/display/commit)
+├── Undo (per-layer raw byte snapshots via getBytes/replace, depth 30)
+└── Lasso (CAShapeLayer preview, Metal extraction/display/commit, CPU clip mask)
 ```
+
+### Layer state — single source of truth
+
+`CanvasRenderer` owns the authoritative layer state via `layers: [Layer]`. Each `Layer` struct holds the `MTLTexture`, `name`, `isVisible`, and `id`. MetalCanvasView reads from the renderer via computed properties. CanvasViewModel caches copies for SwiftUI `@Observable` reactivity, synced via the `onStateChanged` callback.
+
+### Multi-layer compositing
+1. Compositor iterates `layers` bottom-to-top (index 0 = bottom)
+2. Skips layers where `isVisible == false`
+3. Draws scratch texture (active stroke) interleaved at the active layer's z-position
+4. Draws floating selection (lasso) on top of all layers
 
 ### Brush rendering flow
 1. Touch points → `StrokePoint` array (pressure, altitude, position)
-2. Arc-length resample with **adaptive spacing** (`max(effectiveWidth × 0.3, 0.5)`) — tighter at low pressure so light strokes don't scatter into dots
+2. Arc-length resample with **adaptive spacing** (`max(effectiveWidth × 0.3, 0.5)`)
 3. Per-stamp: `StampInstance` (center, radius, rotation, premultiplied color)
 4. All stamps → shared `MTLBuffer` → single instanced draw call into scratch texture
-5. Compositor pass: canvas + scratch → drawable
-6. On touchesEnded: flatten scratch into canvas (source-over for brush, destination-out for eraser)
+5. On touchesEnded: flatten scratch into active layer (source-over)
 
 ### Eraser flow (different from brush)
-- Stamps applied **directly to canvas texture** per touchesMoved (not via scratch)
-- Uses temporary `MTLBuffer` per batch (`device.makeBuffer(bytes:)`) — no shared-buffer races
+- Stamps applied **directly to active layer texture** per touchesMoved (not via scratch)
+- Uses temporary `MTLBuffer` per batch — no shared-buffer races
 - Commits **without** `waitUntilCompleted` — async, same-queue ordering
 - Undo snapshot pushed at touchesBegan (before any erasing), popped on cancel
 
 ### Persistence
-- Canvas saved as **PNG bitmap** (via `canvasToCGImage()` → `pngData()`), not stroke JSON
-- Restored via `loadDrawingData()` → `loadImageIntoCanvas()` (CIContext.render path)
-- Legacy stroke JSON is auto-detected and replayed as fallback
-- Stroke data kept in memory for potential future use (time-lapse, editing)
+- Canvas saved as **layered JSON envelope** with per-layer PNGs
+- Backward compatible: old single-PNG format auto-detected and loaded as layer 0
+- Legacy stroke JSON replayed as final fallback
 
 ### Lasso flow (entirely Metal — no CG color pipeline)
-- Path preview: two `CAShapeLayer`s (white + black offset dashes) — Core Animation, off Metal hot path
-- Extraction: rasterize CGPath → R8 mask texture (CGContext, grayscale only — Y-flipped!), then two Metal render passes:
-  - **maskedCopy**: canvas × mask → selection texture (crop region only)
-  - **maskedClear**: clear canvas inside mask (maskedClearFragment outputs mask.r as alpha for destination-out)
-- Display: Metal compositor draws selection texture as a transformed quad each frame (vertex positions computed from gesture state on CPU). LassoSelectionView is gesture-only (no UIImageView) with marching ants (CAShapeLayer).
-- Commit: Metal render pass composites selection texture onto canvas at current transform (source-over)
+- Path preview: two `CAShapeLayer`s (white + black offset dashes)
+- Extraction: rasterize CGPath → R8 mask texture, then Metal maskedCopy + maskedClear passes
+- Clip mask: `setClipPath()` persists the path across tool switches. Stamps outside the path are discarded (CPU-side via `CGPath.contains()`)
+- Commit: Metal render pass composites selection texture onto active layer (source-over)
 - Cancel: discard selection texture + undo to pre-lasso snapshot
 
 ## Files
@@ -128,10 +134,9 @@ MetalCanvasView (UIView, CAMetalLayer)
 | File | Role |
 |------|------|
 | `MetalCanvasView.swift` | UIView, touch handling, CADisplayLink render loop, stamp generation, undo, lasso |
-| `CanvasRenderer.swift` | Metal device/queue/pipelines, texture management, render passes, CIContext, shaders (embedded MSL) |
-| `CanvasViewModel.swift` | Public API bridge between AppCoordinator and MetalCanvasView |
+| `CanvasRenderer.swift` | Metal device/queue/pipelines, Layer struct, texture management, render passes, CIContext, shaders (embedded MSL) |
+| `CanvasViewModel.swift` | @Observable bridge between AppCoordinator and MetalCanvasView, snapshot/thumbnail compositing |
+| `CanvasView.swift` | UIViewRepresentable wrapper, callback wiring |
 | `RotatableCanvasContainer.swift` | Gesture handling (zoom/rotate/pan), cursor overlay, background image, lasso selection view |
-| `DrawingCanvasView.swift` | **LEGACY** — old CGBitmapContext engine, kept for reference. Not used at runtime. |
-| `DrawingEngine.swift` | Stroke/StrokePoint/BrushConfig/ToolState types (shared by old and new engines) |
-| `StrokeSmoother.swift` | CPU stroke smoothing (Catmull-Rom + EMA) |
-| `StrokeTessellator.swift` | CPU tessellation for variable-width stroke contours |
+| `LassoSelectionView.swift` | Gesture-only view for lasso transform (pan/pinch/rotate), marching ants |
+| `DrawingEngine.swift` | Stroke/StrokePoint/BrushConfig/ToolState/LayerInfo/LayeredDrawing types |
