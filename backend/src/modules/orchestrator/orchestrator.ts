@@ -9,6 +9,77 @@
  *   - Reaper: terminate pods idle > 10 min
  *   - Reconcile: on boot, kill orphaned `kiki-session-*` pods from prior runs
  *   - Semaphore: cap concurrent provisions to prevent rate-limit + burst OOM
+ *
+ * ─── Pod Lifecycle Edge Cases ────────────────────────────────────────────
+ *
+ * Every scenario below MUST be handled. If you change provisioning, replacement,
+ * or session logic, verify each case still works. Add new rows as we discover them.
+ *
+ * ┌─────────────────────────────────────┬──────────────────────────────────────────────────┬──────────────────────────────┐
+ * │ Scenario                            │ What happens                                     │ Handling                     │
+ * ├─────────────────────────────────────┼──────────────────────────────────────────────────┼──────────────────────────────┤
+ * │ 1. Spot pod preempted (disappears)  │ Upstream WS closes with code 1006/1012.          │ stream.ts relay.onClose →    │
+ * │                                     │ RunPod deletes pod entirely.                     │ classifyClose → replaceSession│
+ * │                                     │                                                  │ provisions new pod. iOS      │
+ * │                                     │                                                  │ reconnect joins via          │
+ * │                                     │                                                  │ status='replacing' check in  │
+ * │                                     │                                                  │ getOrProvisionPod.           │
+ * ├─────────────────────────────────────┼──────────────────────────────────────────────────┼──────────────────────────────┤
+ * │ 2. Pod vanishes during provisioning │ Pod created on RunPod but disappears before      │ waitForRuntime detects null   │
+ * │    (spot preempted before boot)     │ container starts. getPod() returns null.          │ from getPod() and throws     │
+ * │                                     │                                                  │ immediately (no 10min wait). │
+ * │                                     │                                                  │ Provision promise rejects →  │
+ * │                                     │                                                  │ stream.ts abortSession →     │
+ * │                                     │                                                  │ client gets error, can retry. │
+ * ├─────────────────────────────────────┼──────────────────────────────────────────────────┼──────────────────────────────┤
+ * │ 3. Pod errors during provisioning   │ Container pulls but server.py crashes on startup │ waitForHealth polls /health;  │
+ * │    (e.g. Python import error)       │ (e.g. missing dep, bad config). Pod is running   │ if pod runtime is up but      │
+ * │                                     │ but /health never returns 200.                   │ health never passes, times    │
+ * │                                     │                                                  │ out after 10min → abortSession│
+ * │                                     │                                                  │ terminates pod + clears Redis.│
+ * ├─────────────────────────────────────┼──────────────────────────────────────────────────┼──────────────────────────────┤
+ * │ 4. User idle >10min on gallery      │ No WS connection → no touch() calls.             │ Reaper scans every 60s,      │
+ * │                                     │ lastActivityAt goes stale.                       │ terminates pod if idle >10min.│
+ * │                                     │                                                  │ Redis session deleted. Next   │
+ * │                                     │                                                  │ startStream() provisions     │
+ * │                                     │                                                  │ fresh.                       │
+ * ├─────────────────────────────────────┼──────────────────────────────────────────────────┼──────────────────────────────┤
+ * │ 5. User idle >10min on canvas       │ WS stays open but no frames sent (canvas         │ Same as #4 — touch() only    │
+ * │    (not drawing)                    │ unchanged). No touch() calls from relay.          │ fires on relayed messages.   │
+ * │                                     │                                                  │ Pod reaped. Next stroke →    │
+ * │                                     │                                                  │ frame send fails → iOS       │
+ * │                                     │                                                  │ reconnects → provisions new. │
+ * ├─────────────────────────────────────┼──────────────────────────────────────────────────┼──────────────────────────────┤
+ * │ 6. Railway redeploy during          │ Backend process dies. In-memory                  │ New process boots → reconcile │
+ * │    provisioning                     │ inFlightProvisions map lost. Pod may still be    │ adopts or terminates orphans. │
+ * │                                     │ provisioning on RunPod.                          │ iOS reconnects → checks Redis │
+ * │                                     │                                                  │ status: if 'provisioning',   │
+ * │                                     │                                                  │ detected as stale → deleted  │
+ * │                                     │                                                  │ → fresh provision.           │
+ * ├─────────────────────────────────────┼──────────────────────────────────────────────────┼──────────────────────────────┤
+ * │ 7. iOS reconnect during replacement │ Spot preempted → replaceSession sets             │ getOrProvisionPod detects    │
+ * │    (duplicate pod race)             │ status='replacing'. iOS reconnects and calls     │ status='replacing' → polls   │
+ * │                                     │ getOrProvisionPod.                               │ Redis via waitForReplacement │
+ * │                                     │                                                  │ until replacement completes. │
+ * │                                     │                                                  │ No duplicate pod created.    │
+ * ├─────────────────────────────────────┼──────────────────────────────────────────────────┼──────────────────────────────┤
+ * │ 8. Network glitch during drawing    │ WS momentarily drops. iOS receive loop ends      │ iOS attemptReconnect (3x     │
+ * │                                     │ unexpectedly.                                    │ with exponential backoff).   │
+ * │                                     │                                                  │ Backend pod stays alive      │
+ * │                                     │                                                  │ (sessionClosed keeps it for  │
+ * │                                     │                                                  │ reconnect within 10min).     │
+ * │                                     │                                                  │ Reconnect reuses ready pod.  │
+ * ├─────────────────────────────────────┼──────────────────────────────────────────────────┼──────────────────────────────┤
+ * │ 9. App backgrounded then resumed    │ iOS stopStream() on background, restarts on      │ Pod stays alive up to 10min  │
+ * │                                     │ foreground if streamWasActiveBeforeBackground.   │ (idle reaper). If resumed    │
+ * │                                     │                                                  │ within window, reuses pod.   │
+ * │                                     │                                                  │ If >10min, fresh provision.  │
+ * ├─────────────────────────────────────┼──────────────────────────────────────────────────┼──────────────────────────────┤
+ * │ 10. Docker image pull fails         │ Pod created but container never starts.           │ waitForRuntime times out     │
+ * │     (manifest unknown, registry     │ getPod() returns pod with runtime=null            │ after 10min → abortSession.  │
+ * │     down, wrong tag)                │ indefinitely.                                    │ FLUX_IMAGE uses :latest to   │
+ * │                                     │                                                  │ avoid SHA mismatch.          │
+ * └─────────────────────────────────────┴──────────────────────────────────────────────────┴──────────────────────────────┘
  */
 
 import { spawn } from 'node:child_process';
@@ -1037,7 +1108,12 @@ async function waitForRuntime(
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const pod = await getPod(podId);
-    if (pod?.runtime) {
+    if (!pod) {
+      // Pod vanished (spot preempted before container started, or manually
+      // deleted). Fail fast instead of waiting the full timeout.
+      throw new Error(`Pod ${podId} vanished during provisioning (spot preempted?)`);
+    }
+    if (pod.runtime) {
       log.info({ podId, uptimeInSeconds: pod.runtime.uptimeInSeconds }, 'Container runtime up');
       onStatus('Starting server...');
       return;

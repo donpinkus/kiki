@@ -93,6 +93,7 @@ Data flows one direction: Canvas → Network → Result. Modules communicate thr
 |------|------|
 | Content safety / App Store compliance | `documents/references/content-safety.md` |
 | RunPod deploy, provider ops, network volumes | `documents/references/provider-config.md` |
+| Pod lifecycle edge cases (MUST-handle matrix)          | `backend/src/modules/orchestrator/orchestrator.ts` (file header) |
 | Cost monitoring, Discord alerts, pod lifecycle threads | `backend/src/modules/orchestrator/costMonitor.ts` |
 | Scale-to-100-users roadmap + workstream status | `documents/plans/scale-to-100-users.md` |
 | Metal canvas architecture plan (layers, smudge, etc.) | `documents/plans/metal-canvas-rewrite.md` |
