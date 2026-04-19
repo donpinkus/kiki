@@ -482,11 +482,14 @@ public final class CanvasRenderer {
     }
 
     /// Read the flattened (all visible layers composited) canvas into a CGImage
-    /// for stream capture, thumbnails, and single-image export.
+    /// for stream capture, thumbnails, and single-image export. Includes the
+    /// active stroke (scratch texture) so in-progress drawing is captured.
     func flattenedCGImage() -> CGImage? {
         guard !layers.isEmpty else { return nil }
 
-        // Render all visible layers into a temporary texture.
+        // Render all visible layers into a temporary texture, interleaving
+        // the scratch texture at the active layer's z-position (same logic
+        // as compositeToDrawable) so the in-progress stroke is included.
         let desc = makeLayerDescriptor()
         guard let tempTexture = device.makeTexture(descriptor: desc) else { return nil }
         guard let cmdBuf = commandQueue.makeCommandBuffer() else { return nil }
@@ -502,10 +505,18 @@ public final class CanvasRenderer {
         enc.setVertexBuffer(quadVertexBuffer, offset: 0, index: 0)
         var opacity: Float = 1.0
 
-        for layer in layers where layer.isVisible {
-            enc.setFragmentTexture(layer.texture, index: 0)
+        for i in 0..<layers.count {
+            guard layers[i].isVisible else { continue }
+            enc.setFragmentTexture(layers[i].texture, index: 0)
             enc.setFragmentBytes(&opacity, length: MemoryLayout<Float>.size, index: 0)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+
+            // Include in-progress stroke on the active layer.
+            if i == activeLayerIndex, stampCount > 0, let scratch = scratchTexture {
+                enc.setFragmentTexture(scratch, index: 0)
+                enc.setFragmentBytes(&opacity, length: MemoryLayout<Float>.size, index: 0)
+                enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+            }
         }
         enc.endEncoding()
 

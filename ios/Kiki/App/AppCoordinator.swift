@@ -561,8 +561,6 @@ final class AppCoordinator {
                 baseWidth: toolSize,
                 opacity: toolOpacity,
                 pressureGamma: 0.35,
-                pressureOpacity: 0.0,
-                streamline: 0.0,
                 tiltSensitivity: 1.0
             )
             canvasViewModel.selectBrush(config)
