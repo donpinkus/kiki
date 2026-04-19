@@ -40,7 +40,6 @@ public final class MetalCanvasView: UIView {
     /// Fired when a lasso selection is extracted. No UIImage — the selection lives
     /// as an MTLTexture on the renderer, displayed by the Metal compositor.
     public var onLassoSelectionStarted: ((_ closedPath: CGPath, _ selectionBounds: CGRect) -> Void)?
-    public var backgroundImageProvider: (() -> UIImage?)?
 
     // MARK: - Private State
 
@@ -324,7 +323,12 @@ public final class MetalCanvasView: UIView {
     // MARK: - Eraser (incremental application)
 
     /// Generate stamps from newly-added stroke points and apply them directly
-    /// to the canvas texture with destination-out blend. Called per touchesMoved.
+    /// to the active layer texture with destination-out blend. Called per touchesMoved.
+    ///
+    /// Unlike brush (which stages stamps in scratch for live preview then flattens
+    /// on touchesEnded), eraser commits each batch immediately so the erased region
+    /// is visible in real time. Undo snapshot was pre-pushed at touchesBegan.
+    ///
     /// Uses adaptive spacing and persists stamp position across batches.
     /// When `lassoClipPath` is set, stamps outside the clip path are skipped.
     private func applyNewEraserStamps() {

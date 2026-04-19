@@ -12,54 +12,37 @@ public struct CanvasView: UIViewRepresentable {
         let canvasView = container.canvasView
         viewModel.attach(canvasView, container: container)
 
-        // Wire canvas callbacks to view model
+        // Wire canvas callbacks to view model.
+        // All callbacks fire from UIKit event handlers (main thread) so no
+        // Task { @MainActor } wrapper is needed.
         canvasView.onStateChanged = { [weak viewModel] in
-            Task { @MainActor in
-                viewModel?.syncState()
-            }
+            viewModel?.syncState()
         }
         canvasView.onDrawingChanged = { [weak viewModel] in
-            Task { @MainActor in
-                viewModel?.handleDrawingChanged()
-            }
+            viewModel?.handleDrawingChanged()
         }
         canvasView.onInteractionBegan = { [weak viewModel] in
-            Task { @MainActor in
-                viewModel?.handleInteractionBegan()
-            }
+            viewModel?.handleInteractionBegan()
         }
         canvasView.onInteractionEnded = { [weak viewModel] in
-            Task { @MainActor in
-                viewModel?.handleInteractionEnded()
-            }
+            viewModel?.handleInteractionEnded()
         }
-
         canvasView.onLassoSelectionStarted = { [weak viewModel] path, bounds in
-            Task { @MainActor in
-                viewModel?.handleLassoSelectionStarted(path: path, bounds: bounds)
-            }
+            viewModel?.handleLassoSelectionStarted(path: path, bounds: bounds)
         }
 
-        // Wire container callbacks — including lasso gesture transform propagation.
+        // Wire container callbacks.
         container.onTransformChanged = { [weak viewModel] in
-            Task { @MainActor in
-                viewModel?.handleTransformChanged()
-            }
+            viewModel?.handleTransformChanged()
         }
         container.onInteractionChanged = { [weak viewModel] interacting in
-            Task { @MainActor in
-                if interacting { viewModel?.handleInteractionBegan() }
-                else { viewModel?.handleInteractionEnded() }
-            }
+            if interacting { viewModel?.handleInteractionBegan() }
+            else { viewModel?.handleInteractionEnded() }
         }
-        container.onUndoRequested = { [weak viewModel] in
-            Task { @MainActor in viewModel?.undo() }
-        }
-        container.onRedoRequested = { [weak viewModel] in
-            Task { @MainActor in viewModel?.redo() }
-        }
+        container.onUndoRequested = { [weak viewModel] in viewModel?.undo() }
+        container.onRedoRequested = { [weak viewModel] in viewModel?.redo() }
         container.onColorPicked = { [weak viewModel] color in
-            Task { @MainActor in viewModel?.handleColorPicked(color) }
+            viewModel?.handleColorPicked(color)
         }
         container.currentBrushColorProvider = { [weak viewModel] in
             viewModel?.currentBrushColorProvider?() ?? .black

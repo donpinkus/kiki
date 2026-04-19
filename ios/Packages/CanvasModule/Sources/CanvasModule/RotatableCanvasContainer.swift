@@ -76,10 +76,6 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
         cursorView.isHidden = true
         transformView.addSubview(cursorView)
 
-        // Supply background image for lasso compositing
-        canvasView.backgroundImageProvider = { [weak self] in
-            self?.backgroundImageView.image
-        }
 
         // Color picker ring — sits on the container (not transformView) so it stays in screen-space
         // during canvas rotation/zoom. Hidden until the long-press fires.

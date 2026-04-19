@@ -66,10 +66,6 @@ public struct BrushConfig: Codable, Sendable {
     public var opacity: CGFloat
     /// Pressure-to-width gamma curve. <1 = heavy feel (wider early), >1 = light feel (narrow early).
     public var pressureGamma: CGFloat
-    /// How much stroke opacity varies with average pressure (0 = constant, 1 = fully pressure-driven).
-    public var pressureOpacity: CGFloat
-    /// Path stabilization strength (0 = raw input, higher = smoother/laggier).
-    public var streamline: CGFloat
     /// How much Apple Pencil tilt widens the stroke (0 = none, 1 = dramatic).
     public var tiltSensitivity: CGFloat
 
@@ -78,16 +74,12 @@ public struct BrushConfig: Codable, Sendable {
         baseWidth: CGFloat,
         opacity: CGFloat = 1.0,
         pressureGamma: CGFloat = 0.7,
-        pressureOpacity: CGFloat = 0.0,
-        streamline: CGFloat = 0.0,
         tiltSensitivity: CGFloat = 0.0
     ) {
         self.color = color
         self.baseWidth = baseWidth
         self.opacity = opacity
         self.pressureGamma = pressureGamma
-        self.pressureOpacity = pressureOpacity
-        self.streamline = streamline
         self.tiltSensitivity = tiltSensitivity
     }
 
@@ -106,12 +98,6 @@ public struct BrushConfig: Codable, Sendable {
         return width
     }
 
-    /// Multiplier for base opacity based on average stroke pressure.
-    public func pressureAlpha(force: CGFloat) -> CGFloat {
-        let pa = pow(max(force, 0.01), 0.7)
-        return 1.0 - pressureOpacity + pressureOpacity * pa
-    }
-
     // MARK: - Backward-compatible Codable
 
     enum CodingKeys: String, CodingKey {
@@ -125,12 +111,12 @@ public struct BrushConfig: Codable, Sendable {
         baseWidth = try container.decode(CGFloat.self, forKey: .baseWidth)
         pressureGamma = try container.decode(CGFloat.self, forKey: .pressureGamma)
         opacity = try container.decodeIfPresent(CGFloat.self, forKey: .opacity) ?? 1.0
-        pressureOpacity = try container.decodeIfPresent(CGFloat.self, forKey: .pressureOpacity) ?? 0.0
-        streamline = try container.decodeIfPresent(CGFloat.self, forKey: .streamline) ?? 0.0
-        // taperIn/taperOut: decoded for backward compat but no longer stored (removed with StrokeTessellator)
+        tiltSensitivity = try container.decodeIfPresent(CGFloat.self, forKey: .tiltSensitivity) ?? 0.0
+        // Removed fields — decoded for backward compat with saved configs, not stored.
+        _ = try container.decodeIfPresent(CGFloat.self, forKey: .pressureOpacity)
+        _ = try container.decodeIfPresent(CGFloat.self, forKey: .streamline)
         _ = try container.decodeIfPresent(CGFloat.self, forKey: .taperIn)
         _ = try container.decodeIfPresent(CGFloat.self, forKey: .taperOut)
-        tiltSensitivity = try container.decodeIfPresent(CGFloat.self, forKey: .tiltSensitivity) ?? 0.0
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -139,8 +125,6 @@ public struct BrushConfig: Codable, Sendable {
         try container.encode(baseWidth, forKey: .baseWidth)
         try container.encode(opacity, forKey: .opacity)
         try container.encode(pressureGamma, forKey: .pressureGamma)
-        try container.encode(pressureOpacity, forKey: .pressureOpacity)
-        try container.encode(streamline, forKey: .streamline)
         try container.encode(tiltSensitivity, forKey: .tiltSensitivity)
     }
 }
