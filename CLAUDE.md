@@ -105,9 +105,7 @@ Data flows one direction: Canvas → Network → Result. Modules communicate thr
 
 **Backend (Fastify on Railway):** `cd backend && railway up`. No git push.
 
-**Pod Docker image (flux-klein-server on RunPod):** Two-step process:
-1. Push to `main` touching `flux-klein-server/**` → GitHub Actions builds and pushes to `ghcr.io/donpinkus/kiki-flux-klein:sha-<commit>`.
-2. **Update `FLUX_IMAGE` on Railway** to the new SHA tag (e.g. `ghcr.io/donpinkus/kiki-flux-klein:sha-abc123`). Without this, new pods still pull the old image. Use `railway variables set FLUX_IMAGE=ghcr.io/donpinkus/kiki-flux-klein:sha-<commit>` or the Railway dashboard.
+**Pod Docker image (flux-klein-server on RunPod):** Push to `main` touching `flux-klein-server/**` → GitHub Actions builds and pushes to `ghcr.io/donpinkus/kiki-flux-klein:latest`. `FLUX_IMAGE` on Railway is set to `:latest`, so new pods automatically pull the latest image — no Railway update needed. SHA-pinned tags (`:sha-<commit>`) are also pushed for rollback: `railway variables set FLUX_IMAGE=ghcr.io/donpinkus/kiki-flux-klein:sha-<commit>`. **Warning:** the SHA in the tag is GitHub's merge commit SHA (`github.sha`), NOT the local git commit SHA — check the Actions run log for the exact tag.
 
 Existing running pods are unaffected — only newly provisioned pods pick up the new image. To force a user onto the new image, terminate their pod and let the orchestrator reprovision.
 

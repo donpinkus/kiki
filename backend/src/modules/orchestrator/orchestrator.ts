@@ -209,7 +209,7 @@ export async function getOrProvisionPod(
   const inFlight = inFlightProvisions.get(sessionId);
   if (inFlight) {
     log.info({ sessionId }, 'Waiting for in-flight provision');
-    onStatus('Joining existing provisioning...');
+    onStatus('Pod is starting up...');
     return inFlight;
   }
 
