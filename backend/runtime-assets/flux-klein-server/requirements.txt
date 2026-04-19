@@ -22,5 +22,8 @@ uvicorn[standard]>=0.25.0
 websockets>=12.0
 Pillow>=10.0.0
 
-# Video generation (LTXV 2B distilled image-to-video)
+# Video generation (LTXV 2B distilled image-to-video).
+# imageio + imageio-ffmpeg are needed by diffusers' export_to_video / load_video
+# for encoding the conditioning keyframe as a video-codec-compressed input.
+imageio[ffmpeg]>=2.31.0
 numpy>=1.26.0
