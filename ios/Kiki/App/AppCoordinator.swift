@@ -303,7 +303,6 @@ final class AppCoordinator {
         streamSeed = seed
         lastSuccessfulImage = nil
         showFloatingPanel = false
-        resultState = .empty
 
         canvasViewModel.setPendingState(nil)
 
@@ -311,6 +310,7 @@ final class AppCoordinator {
         isSuppressingObservation = false
 
         startStream()
+        seedResultStateForCurrentDrawing()
     }
 
     func openDrawing(_ drawing: Drawing) {
@@ -329,7 +329,6 @@ final class AppCoordinator {
         } else {
             lastSuccessfulImage = nil
         }
-        resultState = lastSuccessfulImage.map { .preview(image: $0) } ?? .empty
         showFloatingPanel = lastSuccessfulImage != nil
 
         // Prepare canvas state
@@ -342,6 +341,7 @@ final class AppCoordinator {
         isSuppressingObservation = false
 
         startStream()
+        seedResultStateForCurrentDrawing()
     }
 
     func navigateToGallery() {
@@ -424,6 +424,14 @@ final class AppCoordinator {
     // MARK: - Stream
 
     private func startStream() {
+        // Idempotent: if a session is already running (e.g. pre-warmed at app
+        // launch), just push the latest config and return. The capture loop
+        // will pick up the new prompt/seed before the next frame.
+        if streamSession != nil {
+            syncStreamConfig()
+            return
+        }
+
         var components = URLComponents(url: backendURL, resolvingAgainstBaseURL: false)!
         components.scheme = backendURL.scheme == "https" ? "wss" : "ws"
         components.path = "/v1/stream"
@@ -482,10 +490,12 @@ final class AppCoordinator {
         session.onConnectionStateChanged = { [weak self] state in
             guard let self else { return }
             streamLog.info("Connection state changed: \(String(describing: state))")
+            let previousState = self.streamConnectionState
             self.streamConnectionState = state
             if case .error(let message) = state {
                 self.generationError = message
             }
+            self.applyStreamStateToResultState(previousState: previousState, newState: state)
         }
 
         self.streamSession = session
@@ -504,6 +514,90 @@ final class AppCoordinator {
 
         if let image = lastSuccessfulImage {
             resultState = .preview(image: image)
+        } else if case .provisioning = resultState {
+            resultState = .empty
+        }
+    }
+
+    /// Map a stream connection state into the right `resultState`. Used to keep
+    /// the result pane reflecting warm-up progress whenever the connection
+    /// transitions, without overwriting an existing generated image.
+    ///
+    /// Subtlety: `.connected` is reported twice on a cold start — first when
+    /// the WebSocket opens, again when the server sends `status=ready`. We
+    /// only treat the second one as "pod ready" by checking that the previous
+    /// state was `.provisioning` (i.e. we were genuinely in warm-up).
+    private func applyStreamStateToResultState(
+        previousState: StreamSession.ConnectionState,
+        newState: StreamSession.ConnectionState
+    ) {
+        switch newState {
+        case .connecting:
+            // Don't overwrite an existing image or in-flight generation.
+            guard lastSuccessfulImage == nil else { return }
+            if case .provisioning = resultState { return }
+            if case .streaming = resultState { return }
+            resultState = .provisioning(message: "Connecting…", startedAt: Date())
+
+        case .provisioning(let message):
+            guard lastSuccessfulImage == nil else { return }
+            if case .streaming = resultState { return }
+            // Preserve `startedAt` across multiple status updates so the
+            // progress bar keeps advancing instead of resetting on each message.
+            if case .provisioning(_, let startedAt) = resultState {
+                resultState = .provisioning(message: message, startedAt: startedAt)
+            } else {
+                resultState = .provisioning(message: message, startedAt: Date())
+            }
+
+        case .connected:
+            // Two cases that look the same:
+            //   1. WebSocket just opened (came from .connecting). Pod may
+            //      still be cold — keep the warm-up UI; the server will send
+            //      `provisioning` status messages shortly.
+            //   2. Server sent `status=ready` (came from .provisioning). Pod
+            //      is genuinely ready — drop the warm-up UI; the next frame
+            //      will move us to .streaming.
+            if case .provisioning = previousState {
+                if case .provisioning = resultState {
+                    resultState = lastSuccessfulImage.map { .preview(image: $0) } ?? .empty
+                }
+            }
+
+        case .error(let msg):
+            resultState = .error(message: msg, previousImage: lastSuccessfulImage)
+
+        case .disconnected:
+            if case .provisioning = resultState {
+                resultState = lastSuccessfulImage.map { .preview(image: $0) } ?? .empty
+            }
+        }
+    }
+
+    /// Seed `resultState` from the current image and stream connection state.
+    /// Called when entering a drawing so the result pane reflects pre-warming
+    /// already in progress, instead of momentarily flashing empty.
+    private func seedResultStateForCurrentDrawing() {
+        if let image = lastSuccessfulImage {
+            resultState = .preview(image: image)
+            return
+        }
+        // If pre-warming has been running (likely since app launch), preserve
+        // the existing `startedAt` so the progress bar doesn't reset to 0%
+        // when the user enters a drawing partway through warm-up.
+        let preservedStart: Date? = {
+            if case .provisioning(_, let startedAt) = resultState { return startedAt }
+            return nil
+        }()
+        switch streamConnectionState {
+        case .connecting:
+            resultState = .provisioning(message: "Connecting…", startedAt: preservedStart ?? Date())
+        case .provisioning(let message):
+            resultState = .provisioning(message: message, startedAt: preservedStart ?? Date())
+        case .error(let msg):
+            resultState = .error(message: msg, previousImage: nil)
+        case .connected, .disconnected:
+            resultState = .empty
         }
     }
 

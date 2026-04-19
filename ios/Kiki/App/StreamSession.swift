@@ -246,7 +246,7 @@ final class StreamSession {
                 guard !Task.isCancelled else { break }
                 print("[Stream] Server status: \(status.status) \(status.message ?? "")")
                 await MainActor.run {
-                    if status.type == "status" && status.status == "provisioning" {
+                    if status.type == "status" && (status.status == "provisioning" || status.status == "reprovisioning") {
                         self.updateConnectionState(.provisioning(message: status.message ?? "Provisioning GPU..."))
                     } else if status.type == "status" && status.status == "ready" {
                         self.updateConnectionState(.connected)
