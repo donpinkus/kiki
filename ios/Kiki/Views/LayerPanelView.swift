@@ -46,14 +46,14 @@ struct LayerPanelView: View {
             } label: {
                 Image(systemName: layer.isVisible ? "eye.fill" : "eye.slash")
                     .font(.system(size: 14))
-                    .foregroundStyle(layer.isVisible ? .primary : .tertiary)
+                    .foregroundStyle(isActive ? .white : (layer.isVisible ? .primary : .secondary))
                     .frame(width: 24, height: 24)
             }
 
             // Layer name
             Text(layer.name)
-                .font(.subheadline)
-                .foregroundStyle(layer.isVisible ? .primary : .secondary)
+                .font(.subheadline.weight(isActive ? .semibold : .regular))
+                .foregroundStyle(isActive ? .white : (layer.isVisible ? .primary : .secondary))
 
             Spacer()
 
@@ -64,14 +64,14 @@ struct LayerPanelView: View {
                 } label: {
                     Image(systemName: "trash")
                         .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.red)
                         .frame(width: 24, height: 24)
                 }
             }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
-        .background(isActive ? Color.accentColor.opacity(0.12) : Color.clear)
+        .background(isActive ? Color.accentColor : Color.clear, in: RoundedRectangle(cornerRadius: 8))
         .contentShape(Rectangle())
         .onTapGesture {
             coordinator.canvasViewModel.selectLayer(at: index)

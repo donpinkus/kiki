@@ -733,6 +733,7 @@ public final class MetalCanvasView: UIView {
         undoSnapshots.removeAll()
         redoSnapshots.removeAll()
         isDirty = true
+        onDrawingChanged?()
     }
 
     /// Apply a deferred layered drawing load.
@@ -767,6 +768,7 @@ public final class MetalCanvasView: UIView {
         undoSnapshots.removeAll()
         redoSnapshots.removeAll()
         isDirty = true
+        onDrawingChanged?()
     }
 
     /// Replay all stored strokes into the canvas texture (legacy path).
