@@ -216,11 +216,18 @@ async def websocket_stream(ws: WebSocket):
                     await ws.send_bytes(result_jpeg)
                     frames_processed += 1
                     # Stash the PIL result as the keyframe for any future video
-                    # generation. Reset the once-per-still guard + cancel flag
-                    # so the video loop can pick it up on the next idle window.
+                    # generation. Reset the once-per-still guard so the video
+                    # loop can pick this still up on the next idle window.
+                    #
+                    # NOTE: do NOT clear `video_cancel_event` here. The previous
+                    # in-flight video task's per-step callback may not have
+                    # observed the set yet — clearing now would let it complete
+                    # for the *previous* still and incorrectly mark
+                    # `video_done_for_last`. `video_loop` clears the flag itself
+                    # right before launching the next task, after confirming any
+                    # prior task is done.
                     last_generated = result_image
                     video_done_for_last = False
-                    video_cancel_event.clear()
             except Exception as e:
                 logger.error("Frame processing error: %s", e, exc_info=True)
                 if not done:
