@@ -1,3 +1,4 @@
+import AVFoundation
 import SwiftUI
 
 /// Displays the generated image result with support for loading, error, and empty states.
@@ -59,6 +60,12 @@ public struct ResultView: View {
 
             case .error(let message, let previousImage):
                 errorView(message: message, previousImage: previousImage)
+
+            case .videoStreaming(_, let latestFrame, let framesReceived):
+                videoStreamingView(latestFrame, framesReceived: framesReceived)
+
+            case .videoLooping(let url, let fallbackImage):
+                videoLoopingView(url: url, fallbackImage: fallbackImage)
             }
 
             if showToast {
@@ -223,6 +230,25 @@ public struct ResultView: View {
                 .background(.red.opacity(0.85), in: Capsule())
                 .padding(12)
         }
+    }
+
+    private func videoStreamingView(_ image: UIImage, framesReceived: Int) -> some View {
+        ZStack(alignment: .topTrailing) {
+            imageView(image)
+
+            Text("ANIMATING \(framesReceived)")
+                .font(.caption2.weight(.bold).monospacedDigit())
+                .foregroundStyle(.white)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(.purple.opacity(0.85), in: Capsule())
+                .padding(12)
+        }
+    }
+
+    private func videoLoopingView(url: URL, fallbackImage: UIImage) -> some View {
+        LoopingVideoView(url: url, fallback: fallbackImage)
+            .shadow(color: .black.opacity(0.25), radius: 12, x: 0, y: 6)
     }
 
     private func imageView(_ image: UIImage) -> some View {
@@ -410,6 +436,70 @@ public struct ResultView: View {
         withAnimation {
             showToast = false
         }
+    }
+}
+
+// MARK: - Looping Video
+
+/// Plays an MP4 on repeat using `AVQueuePlayer` + `AVPlayerLooper`.
+/// Falls back to showing the still image if the player can't start.
+private struct LoopingVideoView: UIViewRepresentable {
+    let url: URL
+    let fallback: UIImage
+
+    func makeUIView(context: Context) -> LoopingVideoUIView {
+        LoopingVideoUIView(url: url, fallback: fallback)
+    }
+
+    func updateUIView(_ uiView: LoopingVideoUIView, context: Context) {
+        uiView.update(url: url, fallback: fallback)
+    }
+}
+
+private final class LoopingVideoUIView: UIView {
+    private var player: AVQueuePlayer?
+    private var looper: AVPlayerLooper?
+    private var playerLayer: AVPlayerLayer?
+    private let fallbackImageView = UIImageView()
+    private var currentURL: URL?
+
+    init(url: URL, fallback: UIImage) {
+        super.init(frame: .zero)
+        fallbackImageView.contentMode = .scaleAspectFit
+        addSubview(fallbackImageView)
+        update(url: url, fallback: fallback)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) not implemented") }
+
+    func update(url: URL, fallback: UIImage) {
+        fallbackImageView.image = fallback
+        if currentURL == url { return }
+        currentURL = url
+
+        playerLayer?.removeFromSuperlayer()
+        looper = nil
+        player?.pause()
+
+        let item = AVPlayerItem(url: url)
+        let queue = AVQueuePlayer(playerItem: item)
+        queue.isMuted = true
+        let loop = AVPlayerLooper(player: queue, templateItem: item)
+        let layer = AVPlayerLayer(player: queue)
+        layer.videoGravity = .resizeAspect
+        layer.frame = bounds
+        self.layer.addSublayer(layer)
+        queue.play()
+
+        player = queue
+        looper = loop
+        playerLayer = layer
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        fallbackImageView.frame = bounds
+        playerLayer?.frame = bounds
     }
 }
 

@@ -156,6 +156,12 @@ final class AppCoordinator {
     // MARK: - Private State
 
     private var lastSuccessfulImage: UIImage?
+    /// Temp-file URL of the most recent looping MP4. Kept so we can delete
+    /// the previous one when a new animation arrives.
+    private var currentVideoURL: URL?
+    /// Number of video frames received in the current LTXV generation.
+    /// Reset when a new still is generated or drawing resumes.
+    private var videoFramesReceived = 0
     private var canvasObservationTask: Task<Void, Never>?
 
     // MARK: - Lifecycle
@@ -476,6 +482,9 @@ final class AppCoordinator {
             guard let self else { return }
             self.streamFrameCount += 1
             self.lastSuccessfulImage = image
+            // A new still arrived — any in-flight video for the previous still
+            // is obsolete. Reset counters and drop the old MP4 file.
+            self.resetVideoPlayback()
             self.resultState = .streaming(image: image, frameCount: self.streamFrameCount)
             if self.drawingLayout == .fullscreen {
                 self.showFloatingPanel = true
@@ -485,6 +494,10 @@ final class AppCoordinator {
             if count == 1 || count % 30 == 0 {
                 print("[Stream] Received frame \(count)")
             }
+        }
+
+        session.onVideoEvent = { [weak self] event in
+            self?.handleVideoEvent(event)
         }
 
         session.onConnectionStateChanged = { [weak self] state in
@@ -511,6 +524,7 @@ final class AppCoordinator {
         streamSession = nil
         streamConnectionState = .disconnected
         streamFrameCount = 0
+        resetVideoPlayback()
 
         if let image = lastSuccessfulImage {
             resultState = .preview(image: image)
@@ -599,6 +613,63 @@ final class AppCoordinator {
         case .connected, .disconnected:
             resultState = .empty
         }
+
+        // Now that the view is detached, it's safe to remove the temp MP4.
+        if let url = currentVideoURL {
+            try? FileManager.default.removeItem(at: url)
+            currentVideoURL = nil
+        }
+    }
+
+    // MARK: - Video Playback
+
+    private func handleVideoEvent(_ event: StreamWebSocketClient.VideoEvent) {
+        // Only render animation over a still we've actually generated.
+        // Without a `baseImage`, Constraint #2 (never clear the right pane)
+        // would be violated by a bare video frame on gray.
+        guard let base = lastSuccessfulImage else { return }
+
+        switch event {
+        case .frame(let jpegData):
+            guard let frame = UIImage(data: jpegData) else { return }
+            videoFramesReceived += 1
+            resultState = .videoStreaming(
+                baseImage: base,
+                latestFrame: frame,
+                framesReceived: videoFramesReceived
+            )
+
+        case .complete(let mp4Data):
+            // Persist to a temp file so AVPlayer can stream it from disk.
+            do {
+                let url = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("kiki-anim-\(UUID().uuidString).mp4")
+                try mp4Data.write(to: url, options: .atomic)
+                // Clean up any previous video file.
+                if let old = currentVideoURL {
+                    try? FileManager.default.removeItem(at: old)
+                }
+                currentVideoURL = url
+                resultState = .videoLooping(mp4URL: url, fallbackImage: base)
+            } catch {
+                streamLog.error("Failed to write video to temp file: \(error.localizedDescription)")
+                // Fall back to the last still; drop the video silently.
+                resultState = .preview(image: base)
+            }
+
+        case .cancelled:
+            resetVideoPlayback()
+            // After cancellation, the pod will typically start sending img2img
+            // frames again. Keep the last still visible until then.
+            resultState = .streaming(image: base, frameCount: streamFrameCount)
+        }
+    }
+
+    /// Reset the streaming-frame counter. The MP4 file is left on disk so
+    /// SwiftUI can finish tearing down the AVPlayer view before we remove it
+    /// (done on `stopStream()` or when a new animation overwrites it).
+    private func resetVideoPlayback() {
+        videoFramesReceived = 0
     }
 
     /// Push the current config to the stream session. The capture loop will

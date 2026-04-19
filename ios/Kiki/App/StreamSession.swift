@@ -34,6 +34,7 @@ final class StreamSession {
     private var captureTask: Task<Void, Never>?
     private var receiveTask: Task<Void, Never>?
     private var statusTask: Task<Void, Never>?
+    private var videoTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
 
     /// How often to capture and send frames (default ~2 FPS for FLUX.2-klein).
@@ -46,11 +47,22 @@ final class StreamSession {
     /// Last config actually sent to the server (used for change detection).
     private var lastSentConfig: StreamConfig?
 
+    /// `strokeCount` of the canvas snapshot at the last successful frame send.
+    /// If the current snapshot's `strokeCount` matches, the canvas hasn't
+    /// changed — skip the send so the pod's input buffer goes idle and can
+    /// switch to video generation. Reset to `nil` whenever config changes so
+    /// the unchanged sketch re-renders under the new prompt.
+    private var lastSentStrokeCount: Int?
+
     /// Current connection state, observed by AppCoordinator.
     private(set) var connectionState: ConnectionState = .disconnected
 
     /// Called when a new generated image frame is received.
     var onImageReceived: ((UIImage) -> Void)?
+
+    /// Called when the pod emits a video-animation event (LTXV-generated
+    /// animation of the last generated still, played while the user is idle).
+    var onVideoEvent: ((StreamWebSocketClient.VideoEvent) -> Void)?
 
     /// Called when connection state changes.
     var onConnectionStateChanged: ((ConnectionState) -> Void)?
@@ -95,6 +107,7 @@ final class StreamSession {
         self.reconnectAttempts = 0
         self.framesSent = 0
         self.framesReceived = 0
+        self.lastSentStrokeCount = nil
 
         await connectAndRun()
     }
@@ -123,6 +136,7 @@ final class StreamSession {
             print("[Stream] Initial config sent")
 
             startReceiveLoop()
+            startVideoLoop()
             startCaptureLoop()
         } catch {
             print("[Stream] Connection failed: \(error)")
@@ -170,15 +184,23 @@ final class StreamSession {
                 // Send config update if it changed since last send
                 await self.sendConfigIfChanged()
 
-                let jpeg: Data? = await MainActor.run {
+                let result: (Data, Int)? = await MainActor.run {
                     guard let snapshot = self.canvasViewModel.captureSnapshot() else { return nil }
+                    // Dirty check: skip if the canvas hasn't changed since the
+                    // last successful send. `strokeCount` increments on every
+                    // stroke-end, erase, undo, redo, clear, and background change.
+                    if snapshot.strokeCount == self.lastSentStrokeCount {
+                        return nil
+                    }
                     guard let resized = self.resizeImage(snapshot.image, to: Self.captureSize) else { return nil }
-                    return resized.jpegData(compressionQuality: 0.7)
+                    guard let data = resized.jpegData(compressionQuality: 0.7) else { return nil }
+                    return (data, snapshot.strokeCount)
                 }
 
-                if let jpeg {
+                if let (jpeg, strokeCount) = result {
                     do {
                         try await self.client.sendFrame(jpeg)
+                        await MainActor.run { self.lastSentStrokeCount = strokeCount }
                         count += 1
                         await self.setFramesSent(count)
                         if count == 1 || count % 30 == 0 {
@@ -188,7 +210,7 @@ final class StreamSession {
                         print("[Stream] Send error: \(error)")
                     }
                 } else if count == 0 {
-                    print("[Stream] captureSnapshot returned nil (canvas empty?)")
+                    print("[Stream] captureSnapshot returned nil or unchanged (canvas empty?)")
                 }
 
                 let interval = await self.captureInterval
@@ -199,12 +221,15 @@ final class StreamSession {
     }
 
     /// Compare current config to what was last sent; if different, send an update.
+    /// Also clears `lastSentStrokeCount` so the unchanged sketch gets re-sent
+    /// under the new prompt (the dirty check would otherwise suppress it).
     private func sendConfigIfChanged() async {
         let current = config
         guard current != lastSentConfig else { return }
         do {
             try await client.sendConfig(current)
             lastSentConfig = current
+            lastSentStrokeCount = nil
             print("[Stream] Config auto-sent: prompt=\(current.prompt ?? "(none)")")
         } catch {
             print("[Stream] Config send error: \(error)")
@@ -261,6 +286,21 @@ final class StreamSession {
         }
     }
 
+    // MARK: - Video Loop
+
+    private func startVideoLoop() {
+        videoTask = Task { [weak self] in
+            guard let self else { return }
+            let events = await client.videoEvents
+            for await event in events {
+                guard !Task.isCancelled else { break }
+                await MainActor.run {
+                    self.onVideoEvent?(event)
+                }
+            }
+        }
+    }
+
     // MARK: - Private
 
     private func setFramesSent(_ count: Int) {
@@ -278,6 +318,8 @@ final class StreamSession {
         receiveTask = nil
         statusTask?.cancel()
         statusTask = nil
+        videoTask?.cancel()
+        videoTask = nil
         reconnectTask?.cancel()
         reconnectTask = nil
     }

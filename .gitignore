@@ -27,6 +27,10 @@ backend/.env
 # FLUX test-client debug output
 flux-klein-server/output.jpg
 
+# Python
+__pycache__/
+*.pyc
+
 # IDE
 .idea/
 .vscode/

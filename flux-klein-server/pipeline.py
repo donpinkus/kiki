@@ -22,14 +22,16 @@ class FluxKleinPipeline:
     distillation trajectory doesn't tolerate partial-denoise starts.
     """
 
-    def __init__(self):
+    def __init__(self, gpu_lock: threading.Lock | None = None):
         self.pipe = None
         self._ready = False
         self._dtype = getattr(torch, config.DTYPE)
         self._quantization = "bf16"  # overwritten to "nvfp4" if that path succeeds
         # Serialize pipeline calls — PyTorch is not thread-safe and
-        # asyncio.to_thread could overlap frames.
-        self._lock = threading.Lock()
+        # asyncio.to_thread could overlap frames. If a shared lock is passed in,
+        # use it so the sibling LTXV video pipeline can't run on the same GPU
+        # at the same time.
+        self._lock = gpu_lock if gpu_lock is not None else threading.Lock()
 
     @property
     def ready(self) -> bool:

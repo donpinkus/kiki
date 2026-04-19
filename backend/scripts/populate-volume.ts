@@ -54,6 +54,9 @@ const SSH_KEY_PATH = '/tmp/kiki-populate-key';
 const FLUX_REPO = 'black-forest-labs/FLUX.2-klein-4B';
 const NVFP4_REPO = 'black-forest-labs/FLUX.2-klein-4b-nvfp4';
 const NVFP4_FILENAME = 'flux-2-klein-4b-nvfp4.safetensors';
+// LTXV 2B distilled: used for idle-state video animation of the last generated still.
+// Must match config.LTXV_MODEL_ID in flux-klein-server/config.py.
+const LTXV_REPO = 'Lightricks/LTX-Video-2B-v0.9.1-distilled';
 
 // ─── GraphQL helper ───────────────────────────────────────────────────────
 
@@ -243,6 +246,16 @@ python3 -c "
 from huggingface_hub import hf_hub_download
 p = hf_hub_download('${NVFP4_REPO}', '${NVFP4_FILENAME}')
 print('nvfp4 weights at', p)
+"
+
+echo "=== Downloading ${LTXV_REPO} (LTXV 2B distilled, ~4 GB) ==="
+python3 -c "
+from huggingface_hub import snapshot_download
+p = snapshot_download(
+    '${LTXV_REPO}',
+    allow_patterns=['*.json','*.safetensors','*.txt','tokenizer*/*','text_encoder*/*','transformer/*','vae/*','scheduler/*','model_index.json'],
+)
+print('ltxv weights at', p)
 "
 
 echo "=== Disk after ==="

@@ -20,6 +20,19 @@ public actor StreamWebSocketClient {
         public let message: String?
     }
 
+    /// Video-generation messages from the pod. Emitted only while the pod is
+    /// idle and running LTXV animation on the last generated still. Any img2img
+    /// frame arriving on `receivedFrames` should cause the client to discard
+    /// in-flight video and revert to normal streaming display.
+    public enum VideoEvent: Sendable {
+        /// A single decoded video frame as JPEG. Sent as they are ready.
+        case frame(Data)
+        /// The complete animation as an MP4 blob, intended for smooth looping.
+        case complete(Data)
+        /// Pod aborted generation (user resumed drawing).
+        case cancelled
+    }
+
     // MARK: - Properties
 
     private let request: URLRequest
@@ -35,6 +48,9 @@ public actor StreamWebSocketClient {
     private let statusContinuation: AsyncStream<ServerStatus>.Continuation
     public let serverStatuses: AsyncStream<ServerStatus>
 
+    private let videoEventsContinuation: AsyncStream<VideoEvent>.Continuation
+    public let videoEvents: AsyncStream<VideoEvent>
+
     // MARK: - Lifecycle
 
     /// Create a client for a URL (no auth headers).
@@ -49,6 +65,10 @@ public actor StreamWebSocketClient {
         var statusCont: AsyncStream<ServerStatus>.Continuation!
         self.serverStatuses = AsyncStream { statusCont = $0 }
         self.statusContinuation = statusCont
+
+        var videoCont: AsyncStream<VideoEvent>.Continuation!
+        self.videoEvents = AsyncStream { videoCont = $0 }
+        self.videoEventsContinuation = videoCont
     }
 
     // MARK: - Connection
@@ -66,6 +86,10 @@ public actor StreamWebSocketClient {
         var statusCont: AsyncStream<ServerStatus>.Continuation!
         self.serverStatuses = AsyncStream { statusCont = $0 }
         self.statusContinuation = statusCont
+
+        var videoCont: AsyncStream<VideoEvent>.Continuation!
+        self.videoEvents = AsyncStream { videoCont = $0 }
+        self.videoEventsContinuation = videoCont
     }
 
     public func connect() async throws {
@@ -120,6 +144,7 @@ public actor StreamWebSocketClient {
         state = .disconnected
         framesContinuation.finish()
         statusContinuation.finish()
+        videoEventsContinuation.finish()
     }
 
     // MARK: - Sending
@@ -164,6 +189,14 @@ public actor StreamWebSocketClient {
                             if type == "frame", let b64 = json["data"] as? String,
                                let imageData = Data(base64Encoded: b64) {
                                 await self.framesContinuation.yield(imageData)
+                            } else if type == "video_frame", let b64 = json["data"] as? String,
+                                      let imageData = Data(base64Encoded: b64) {
+                                await self.videoEventsContinuation.yield(.frame(imageData))
+                            } else if type == "video_complete", let b64 = json["data"] as? String,
+                                      let mp4Data = Data(base64Encoded: b64) {
+                                await self.videoEventsContinuation.yield(.complete(mp4Data))
+                            } else if type == "video_cancelled" {
+                                await self.videoEventsContinuation.yield(.cancelled)
                             } else if type == "status" || type == "error" {
                                 if let status = try? JSONDecoder().decode(ServerStatus.self, from: jsonData) {
                                     print("[StreamWS] Server status: \(status.status) \(status.message ?? "")")
@@ -193,5 +226,6 @@ public actor StreamWebSocketClient {
         receiveLoopTask = nil
         framesContinuation.finish()
         statusContinuation.finish()
+        videoEventsContinuation.finish()
     }
 }
