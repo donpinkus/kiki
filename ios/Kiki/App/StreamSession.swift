@@ -64,6 +64,9 @@ final class StreamSession {
     /// animation of the last generated still, played while the user is idle).
     var onVideoEvent: ((StreamWebSocketClient.VideoEvent) -> Void)?
 
+    /// Called when the pod reports whether LTXV video generation is available.
+    var onVideoReadyChanged: ((Bool) -> Void)?
+
     /// Called when connection state changes.
     var onConnectionStateChanged: ((ConnectionState) -> Void)?
 
@@ -278,6 +281,10 @@ final class StreamSession {
                         // Re-send config now that the server is ready to accept it.
                         // The initial config may have been sent during provisioning.
                         self.lastSentConfig = nil
+                        // Surface video availability to the coordinator.
+                        if let videoReady = status.videoReady {
+                            self.onVideoReadyChanged?(videoReady)
+                        }
                     } else if (status.type == "status" && status.status == "error") || status.type == "error" {
                         self.updateConnectionState(.error(status.message ?? "Server error"))
                     }

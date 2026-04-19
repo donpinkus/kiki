@@ -154,6 +154,12 @@ struct DrawingView: View {
                         .padding(.bottom, 16)
                 }
             }
+            .overlay(alignment: .bottomLeading) {
+                if coordinator.videoAvailable == false {
+                    videoUnavailableBadge
+                        .padding(12)
+                }
+            }
 
             Rectangle()
                 .fill(Color(.separator))
@@ -167,6 +173,15 @@ struct DrawingView: View {
     }
 
     // MARK: - Private
+
+    private var videoUnavailableBadge: some View {
+        Label("Video animation unavailable", systemImage: "film.circle")
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(.ultraThinMaterial, in: Capsule())
+    }
 
     private var streamSwapBar: some View {
         Button {

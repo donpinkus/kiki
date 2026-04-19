@@ -1,8 +1,13 @@
-"""LTXV 2B distilled image-to-video pipeline.
+"""LTXV 2B 0.9.8 distilled image-to-video pipeline.
 
 Runs alongside the FLUX img2img pipeline on the same GPU. When the user stops
 drawing (input buffer goes idle), the server feeds the last generated still
 into this pipeline as a keyframe and streams back frames + a looping MP4.
+
+Uses LTXConditionPipeline (0.9.5+ API) with the 2B 0.9.8 distilled
+transformer loaded from a single-file checkpoint. Weights are stored in FP8
+(float8_e4m3fn) via enable_layerwise_casting for lower VRAM and faster
+inference on Blackwell tensor cores; compute stays in BF16.
 
 Kept deliberately minimal — resolution, frame count, and step count are
 tuned for speed (SLA: <5s time-to-first-playback), not quality.
@@ -31,7 +36,7 @@ class VideoCancelled(Exception):
 
 
 class LtxvVideoPipeline:
-    """Wraps LTX-Video 2B distilled for image-to-video generation.
+    """Wraps LTX-Video 2B 0.9.8 distilled for image-to-video generation.
 
     The pipeline is loaded once at pod startup and reused across all client
     connections. Concurrent access is serialized via `gpu_lock` (passed in
@@ -54,33 +59,50 @@ class LtxvVideoPipeline:
             logger.info("Video generation disabled (KIKI_ENABLE_VIDEO=0); skipping LTXV load")
             return
 
-        logger.info("Loading LTXV model: %s (dtype=%s)", config.LTXV_MODEL_ID, config.LTXV_DTYPE)
+        logger.info(
+            "Loading LTXV 2B 0.9.8 distilled (base=%s, transformer=%s/%s)",
+            config.LTXV_BASE_REPO, config.LTXV_TRANSFORMER_REPO,
+            config.LTXV_TRANSFORMER_FILE,
+        )
         t0 = time.time()
 
         try:
-            from diffusers import LTXImageToVideoPipeline
+            from diffusers import AutoModel, LTXConditionPipeline
 
-            self.pipe = LTXImageToVideoPipeline.from_pretrained(
-                config.LTXV_MODEL_ID,
+            # Load the 2B transformer from the pre-quantized FP8 checkpoint.
+            # from_single_file upcasts to BF16 on load; we then apply
+            # layerwise_casting to store FP8 / compute BF16 for inference.
+            logger.info("Loading transformer from single file...")
+            transformer = AutoModel.from_single_file(
+                f"https://huggingface.co/{config.LTXV_TRANSFORMER_REPO}/blob/main/{config.LTXV_TRANSFORMER_FILE}",
+                config=config.LTXV_BASE_REPO,
+                subfolder="transformer",
+                torch_dtype=self._dtype,
+            )
+
+            logger.info("Applying FP8 layerwise casting...")
+            transformer.enable_layerwise_casting(
+                storage_dtype=torch.float8_e4m3fn,
+                compute_dtype=torch.bfloat16,
+            )
+
+            # Assemble the full pipeline from the 0.9.5 repo (VAE, text
+            # encoder, scheduler) with our transformer swapped in.
+            logger.info("Assembling pipeline from %s...", config.LTXV_BASE_REPO)
+            self.pipe = LTXConditionPipeline.from_pretrained(
+                config.LTXV_BASE_REPO,
+                transformer=transformer,
                 torch_dtype=self._dtype,
             ).to("cuda")
+            self.pipe.vae.enable_tiling()
 
-            # A tiny warmup so the first user-facing call doesn't pay the
-            # CUDA graph / kernel compilation cost.
+            # Warmup so the first user-facing call doesn't pay CUDA graph /
+            # kernel compilation cost.
             logger.info("Warming up LTXV...")
             t1 = time.time()
             warmup_image = Image.new("RGB", (config.LTXV_WIDTH, config.LTXV_HEIGHT), "gray")
             with self._gpu_lock:
-                _ = self.pipe(
-                    image=warmup_image,
-                    prompt="warmup",
-                    num_frames=config.LTXV_NUM_FRAMES,
-                    num_inference_steps=config.LTXV_STEPS,
-                    guidance_scale=config.LTXV_GUIDANCE,
-                    width=config.LTXV_WIDTH,
-                    height=config.LTXV_HEIGHT,
-                    generator=torch.Generator(device="cuda").manual_seed(0),
-                )
+                self._run_generation(warmup_image, "warmup", None, 0)
             logger.info("LTXV warmup done (%.1fs)", time.time() - t1)
             self._ready = True
             logger.info("LTXV ready. Total init: %.1fs", time.time() - t0)
@@ -88,6 +110,56 @@ class LtxvVideoPipeline:
             logger.error("LTXV load failed (%s: %s); video generation disabled", type(e).__name__, e)
             self.pipe = None
             self._ready = False
+
+    def _run_generation(
+        self,
+        image: Image.Image,
+        prompt: str,
+        cancel_event: threading.Event | None,
+        seed: int | None,
+    ) -> list[Image.Image]:
+        """Inner generation call — assumes gpu_lock is held."""
+        from diffusers.pipelines.ltx.pipeline_ltx_condition import LTXVideoCondition
+        from diffusers.utils import export_to_video, load_video
+
+        # LTXConditionPipeline expects video-codec-compressed conditioning.
+        # Export the single image as a 1-frame video, then load it back.
+        keyframe = image.convert("RGB").resize(
+            (config.LTXV_WIDTH, config.LTXV_HEIGHT), Image.LANCZOS
+        )
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=True) as tmp:
+            export_to_video([keyframe], tmp.name, fps=config.LTXV_FPS)
+            video_cond = load_video(tmp.name)
+        condition = LTXVideoCondition(video=video_cond, frame_index=0)
+
+        # Per-step cancel check.
+        def step_cancel(pipe, step_index, timestep, callback_kwargs):
+            if cancel_event is not None and cancel_event.is_set():
+                raise VideoCancelled()
+            return callback_kwargs
+
+        generator = (
+            torch.Generator(device="cuda").manual_seed(seed) if seed is not None else None
+        )
+
+        result = self.pipe(
+            conditions=[condition],
+            prompt=prompt or "",
+            negative_prompt="worst quality, inconsistent motion, blurry, jittery, distorted",
+            width=config.LTXV_WIDTH,
+            height=config.LTXV_HEIGHT,
+            num_frames=config.LTXV_NUM_FRAMES,
+            timesteps=config.LTXV_TIMESTEPS,
+            guidance_scale=config.LTXV_GUIDANCE,
+            decode_timestep=0.05,
+            decode_noise_scale=0.025,
+            generator=generator,
+            callback_on_step_end=step_cancel,
+            output_type="pil",
+        )
+
+        frames = result.frames[0] if hasattr(result, "frames") else result.videos[0]
+        return list(frames)
 
     def generate(
         self,
@@ -105,47 +177,16 @@ class LtxvVideoPipeline:
         if not self._ready or self.pipe is None:
             raise RuntimeError("LTXV pipeline not ready")
 
-        # LTX expects the keyframe to be resized to the generation resolution.
-        keyframe = image.convert("RGB").resize(
-            (config.LTXV_WIDTH, config.LTXV_HEIGHT), Image.LANCZOS
-        )
-
-        # Per-step cancel check. Runs on the GPU thread between denoising
-        # steps; raising aborts the pipeline call.
-        def step_cancel(pipe, step_index, timestep, callback_kwargs):
-            if cancel_event.is_set():
-                raise VideoCancelled()
-            return callback_kwargs
-
-        generator = (
-            torch.Generator(device="cuda").manual_seed(seed) if seed is not None else None
-        )
-
         with self._gpu_lock:
             if cancel_event.is_set():
                 raise VideoCancelled()
-            result = self.pipe(
-                image=keyframe,
-                prompt=prompt or "",
-                num_frames=config.LTXV_NUM_FRAMES,
-                num_inference_steps=config.LTXV_STEPS,
-                guidance_scale=config.LTXV_GUIDANCE,
-                width=config.LTXV_WIDTH,
-                height=config.LTXV_HEIGHT,
-                generator=generator,
-                callback_on_step_end=step_cancel,
-                output_type="pil",
-            )
-
-        # diffusers returns `frames` as a list of lists (batch dim).
-        frames = result.frames[0] if hasattr(result, "frames") else result.videos[0]
-        return list(frames)
+            return self._run_generation(image, prompt, cancel_event, seed)
 
     def get_info(self) -> dict:
         return {
             "video_enabled": config.ENABLE_VIDEO,
             "video_ready": self._ready,
-            "video_model": config.LTXV_MODEL_ID if self._ready else None,
+            "video_model": "ltxv-2b-0.9.8-distilled-fp8" if self._ready else None,
             "video_resolution": f"{config.LTXV_WIDTH}x{config.LTXV_HEIGHT}",
             "video_num_frames": config.LTXV_NUM_FRAMES,
         }

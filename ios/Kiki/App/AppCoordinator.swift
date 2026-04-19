@@ -139,6 +139,10 @@ final class AppCoordinator {
     private var streamSession: StreamSession?
     private(set) var streamConnectionState: StreamSession.ConnectionState = .disconnected
     private(set) var streamFrameCount = 0
+    /// Whether the pod's LTXV video pipeline is available. `nil` until the
+    /// server reports its status; `false` if LTXV failed to load (e.g.
+    /// weights missing from the network volume).
+    private(set) var videoAvailable: Bool?
 
     // -- Stream parameters --
 
@@ -500,6 +504,10 @@ final class AppCoordinator {
             self?.handleVideoEvent(event)
         }
 
+        session.onVideoReadyChanged = { [weak self] ready in
+            self?.videoAvailable = ready
+        }
+
         session.onConnectionStateChanged = { [weak self] state in
             guard let self else { return }
             streamLog.info("Connection state changed: \(String(describing: state))")
@@ -524,6 +532,7 @@ final class AppCoordinator {
         streamSession = nil
         streamConnectionState = .disconnected
         streamFrameCount = 0
+        videoAvailable = nil
         resetVideoPlayback()
 
         if let image = lastSuccessfulImage {

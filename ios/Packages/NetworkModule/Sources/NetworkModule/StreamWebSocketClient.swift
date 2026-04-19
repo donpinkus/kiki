@@ -18,6 +18,14 @@ public actor StreamWebSocketClient {
         public let type: String
         public let status: String
         public let message: String?
+        /// Whether the pod's LTXV video pipeline loaded successfully.
+        /// Only present on `"ready"` status messages; `nil` on older pods.
+        public let videoReady: Bool?
+
+        enum CodingKeys: String, CodingKey {
+            case type, status, message
+            case videoReady = "video_ready"
+        }
     }
 
     /// Video-generation messages from the pod. Emitted only while the pod is

@@ -472,6 +472,11 @@ private final class LoopingVideoUIView: UIView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) not implemented") }
 
+    deinit {
+        player?.pause()
+        playerLayer?.removeFromSuperlayer()
+    }
+
     func update(url: URL, fallback: UIImage) {
         fallbackImageView.image = fallback
         if currentURL == url { return }

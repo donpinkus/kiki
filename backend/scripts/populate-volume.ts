@@ -54,9 +54,13 @@ const SSH_KEY_PATH = '/tmp/kiki-populate-key';
 const FLUX_REPO = 'black-forest-labs/FLUX.2-klein-4B';
 const NVFP4_REPO = 'black-forest-labs/FLUX.2-klein-4b-nvfp4';
 const NVFP4_FILENAME = 'flux-2-klein-4b-nvfp4.safetensors';
-// LTXV 2B distilled: used for idle-state video animation of the last generated still.
-// Must match config.LTXV_MODEL_ID in flux-klein-server/config.py.
-const LTXV_REPO = 'Lightricks/LTX-Video-2B-v0.9.1-distilled';
+// LTXV 2B 0.9.8 distilled: used for idle-state video animation.
+// VAE/text_encoder/scheduler come from the 0.9.5 base repo (same 2B arch).
+// The 0.9.8 distilled transformer is a single-file checkpoint in the main repo.
+// Must match config.LTXV_BASE_REPO / LTXV_TRANSFORMER_* in flux-klein-server/config.py.
+const LTXV_BASE_REPO = 'Lightricks/LTX-Video-0.9.5';
+const LTXV_TRANSFORMER_REPO = 'Lightricks/LTX-Video';
+const LTXV_TRANSFORMER_FILE = 'ltxv-2b-0.9.8-distilled-fp8.safetensors';
 
 // ─── GraphQL helper ───────────────────────────────────────────────────────
 
@@ -248,14 +252,24 @@ p = hf_hub_download('${NVFP4_REPO}', '${NVFP4_FILENAME}')
 print('nvfp4 weights at', p)
 "
 
-echo "=== Downloading ${LTXV_REPO} (LTXV 2B distilled, ~4 GB) ==="
+echo "=== Downloading ${LTXV_BASE_REPO} (VAE/text_encoder/scheduler — skip transformer, ~16 GB) ==="
 python3 -c "
 from huggingface_hub import snapshot_download
+# Download everything except the 0.9.5 transformer weights — we replace
+# those with the 0.9.8 distilled single-file checkpoint below.
 p = snapshot_download(
-    '${LTXV_REPO}',
-    allow_patterns=['*.json','*.safetensors','*.txt','tokenizer*/*','text_encoder*/*','transformer/*','vae/*','scheduler/*','model_index.json'],
+    '${LTXV_BASE_REPO}',
+    allow_patterns=['*.json','*.txt','model_index.json','tokenizer*/*','text_encoder*/*','vae/*','scheduler/*','transformer/config.json'],
+    ignore_patterns=['transformer/*.safetensors'],
 )
-print('ltxv weights at', p)
+print('ltxv base at', p)
+"
+
+echo "=== Downloading ${LTXV_TRANSFORMER_REPO}/${LTXV_TRANSFORMER_FILE} (0.9.8 distilled transformer, ~6 GB) ==="
+python3 -c "
+from huggingface_hub import hf_hub_download
+p = hf_hub_download('${LTXV_TRANSFORMER_REPO}', '${LTXV_TRANSFORMER_FILE}')
+print('ltxv transformer at', p)
 "
 
 echo "=== Disk after ==="

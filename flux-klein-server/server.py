@@ -91,9 +91,17 @@ async def websocket_stream(ws: WebSocket):
     client_id = id(ws)
     logger.info("Client %d connected", client_id)
 
-    # Send initial status
+    # Send initial status. Include video_ready so the client knows whether
+    # LTXV animation is available for this session.
+    def _ready_status() -> dict:
+        return {
+            "type": "status",
+            "status": "ready",
+            "video_ready": video_pipeline.ready,
+        }
+
     if pipeline.ready:
-        await ws.send_text(json.dumps({"type": "status", "status": "ready"}))
+        await ws.send_text(json.dumps(_ready_status()))
     else:
         await ws.send_text(json.dumps({
             "type": "status",
@@ -102,7 +110,7 @@ async def websocket_stream(ws: WebSocket):
         }))
         while not pipeline.ready:
             await asyncio.sleep(0.5)
-        await ws.send_text(json.dumps({"type": "status", "status": "ready"}))
+        await ws.send_text(json.dumps(_ready_status()))
 
     # Per-connection state. Default seed is random-per-session (not per-frame)
     # so output is stable when the sketch doesn't change. Client can override.
@@ -281,7 +289,7 @@ async def websocket_stream(ws: WebSocket):
 
         # Stream decoded frames one at a time so the client can start playback
         # before the MP4 arrives. If cancelled between frames, bail out.
-        for i, frame in enumerate(frames):
+        for frame in frames:
             if done or video_cancel_event.is_set():
                 if not done:
                     try:
