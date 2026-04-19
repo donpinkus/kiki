@@ -15,8 +15,7 @@ import {
 import { StreamRelay } from '../modules/relay/streamRelay.js';
 import {
   checkProvisionQuota,
-  registerProvision,
-  releaseActivePod,
+  recordProvision,
 } from '../modules/auth/rateLimiter.js';
 import { checkEntitlement } from '../modules/entitlement/index.js';
 import { incrementCounter } from '../modules/orchestrator/metrics.js';
@@ -116,7 +115,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
           return;
         }
 
-        const quota = checkProvisionQuota(userId);
+        const quota = await checkProvisionQuota(userId);
         if (!quota.allowed) {
           socket.send(
             JSON.stringify({
@@ -132,15 +131,15 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       }
 
       let relay: StreamRelay | null = null;
-      let provisionRegistered = false;
       let lastConfig: Record<string, unknown> | null = null;
       let clientDisconnected = false;
 
       try {
-        // Only count against the per-user quota for genuinely new provisions.
+        // Record this provision in the sliding-window history for hourly/daily
+        // rate limiting. Active-pod enforcement is derived from the session
+        // row in Redis, so there's no counter to roll back on failure.
         if (source === 'jwt' && !isReconnect) {
-          registerProvision(userId);
-          provisionRegistered = true;
+          await recordProvision(userId);
         }
 
         const { podUrl } = await getOrProvisionPod(userId, (msg) => {
@@ -310,12 +309,11 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         request.log.error({ userId, err }, 'Provisioning or relay failed');
         // Terminate the pod AND clear Redis. If the failure was a bad /ws
         // upgrade on an otherwise-healthy pod, we'd rather burn a fresh
-        // provision (~130s) than leak a pod at $0.99/hr.
+        // provision (~130s) than leak a pod at $0.99/hr. abortSession deletes
+        // the Redis session row, which is what the rate limiter reads to
+        // decide whether the user still has an "active pod" — so the
+        // accounting is released transitively.
         await abortSession(userId);
-        if (provisionRegistered) {
-          releaseActivePod(userId);
-          provisionRegistered = false;
-        }
         if (socket.readyState === socket.OPEN) {
           socket.send(
             JSON.stringify({
@@ -332,10 +330,6 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         request.log.info({ userId }, 'Stream client disconnected');
         incrementCounter('session_client_disconnect_total');
         sessionClosed(userId);
-        if (provisionRegistered) {
-          releaseActivePod(userId);
-          provisionRegistered = false;
-        }
         relay?.close();
       });
 

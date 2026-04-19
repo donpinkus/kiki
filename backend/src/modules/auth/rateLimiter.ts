@@ -1,19 +1,21 @@
 /**
- * Per-user rate limiting for pod provisions.
+ * Per-user rate limiting for pod provisions. Redis-backed so state survives
+ * backend restarts and is consistent across replicas.
  *
- * Simple in-memory token bucket. Two dimensions:
- *   - Max active pods per user (cap: 1)
- *   - Provisions per hour and per 24h (sliding window)
+ * Two dimensions:
+ *   1. Active pods — derived from the orchestrator's session row. We don't
+ *      keep a separate counter because that counter inevitably drifts from
+ *      reality (early-return paths, idle-reaper terminations, crashes). The
+ *      session row is the single source of truth.
+ *   2. Provision frequency — sliding windows per hour and per day, stored as
+ *      a Redis sorted set keyed by userId. ZADD on each new provision,
+ *      ZCOUNT to check windows, ZREMRANGEBYSCORE to prune.
  *
- * When Workstream 5 (Redis) lands, this moves to Redis `INCR` + `EXPIRE` so
- * limits are consistent across backend replicas. For now (single Railway
- * instance) in-memory is correct.
+ * Active-pod enforcement is checked in the orchestrator's `hasReadySession`
+ * path (reconnect fast-path) + here for the provisioning case.
  */
 
-interface ProvisionHistory {
-  timestamps: number[]; // ms epoch
-  activePodCount: number;
-}
+import { getRedis } from '../redis/client.js';
 
 const MAX_ACTIVE_PODS_PER_USER = Number(process.env['RATE_LIMIT_MAX_ACTIVE_PODS'] ?? 1);
 const MAX_PROVISIONS_PER_HOUR = Number(process.env['RATE_LIMIT_MAX_PER_HOUR'] ?? 20);
@@ -21,21 +23,19 @@ const MAX_PROVISIONS_PER_24H = Number(process.env['RATE_LIMIT_MAX_PER_DAY'] ?? 1
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
+const HISTORY_TTL_SECONDS = Math.ceil(DAY_MS / 1000) + 300;
 
-const userHistory = new Map<string, ProvisionHistory>();
+const SESSION_PREFIX = 'session:';
+const HISTORY_PREFIX = 'ratelimit:provisions:';
 
-function getOrCreate(userId: string): ProvisionHistory {
-  let h = userHistory.get(userId);
-  if (!h) {
-    h = { timestamps: [], activePodCount: 0 };
-    userHistory.set(userId, h);
-  }
-  return h;
+const ACTIVE_SESSION_STATUSES = new Set(['provisioning', 'ready', 'replacing']);
+
+function historyKey(userId: string): string {
+  return `${HISTORY_PREFIX}${userId}`;
 }
 
-function prune(h: ProvisionHistory, now: number): void {
-  const cutoff = now - DAY_MS;
-  h.timestamps = h.timestamps.filter((t) => t > cutoff);
+function sessionKey(userId: string): string {
+  return `${SESSION_PREFIX}${userId}`;
 }
 
 export interface QuotaCheck {
@@ -44,50 +44,82 @@ export interface QuotaCheck {
   retryAfterSec?: number;
 }
 
-export function checkProvisionQuota(userId: string): QuotaCheck {
-  const now = Date.now();
-  const h = getOrCreate(userId);
-  prune(h, now);
+async function getActiveSessionCount(userId: string): Promise<number> {
+  const status = await getRedis().hget(sessionKey(userId), 'status');
+  if (!status) return 0;
+  return ACTIVE_SESSION_STATUSES.has(status) ? 1 : 0;
+}
 
-  if (h.activePodCount >= MAX_ACTIVE_PODS_PER_USER) {
+export async function checkProvisionQuota(userId: string): Promise<QuotaCheck> {
+  const now = Date.now();
+
+  const activeCount = await getActiveSessionCount(userId);
+  if (activeCount >= MAX_ACTIVE_PODS_PER_USER) {
     return { allowed: false, reason: 'too_many_active_pods' };
   }
 
-  const hourCount = h.timestamps.filter((t) => t > now - HOUR_MS).length;
+  const redis = getRedis();
+  const key = historyKey(userId);
+
+  // Prune anything older than the 24h window, then read counts for both
+  // windows in a single pipeline to minimize round-trips.
+  const dayCutoff = now - DAY_MS;
+  const hourCutoff = now - HOUR_MS;
+
+  const pipeline = redis.multi();
+  pipeline.zremrangebyscore(key, 0, dayCutoff);
+  pipeline.zcount(key, hourCutoff, '+inf');
+  pipeline.zcard(key);
+  pipeline.zrangebyscore(key, hourCutoff, '+inf', 'LIMIT', 0, 1);
+  pipeline.zrange(key, 0, 0, 'WITHSCORES');
+  const results = await pipeline.exec();
+
+  if (!results) return { allowed: true };
+
+  const hourCount = Number(results[1]?.[1] ?? 0);
+  const dayCount = Number(results[2]?.[1] ?? 0);
+  const oldestInHourArr = (results[3]?.[1] as string[] | undefined) ?? [];
+  const oldestInDayArr = (results[4]?.[1] as string[] | undefined) ?? [];
+
   if (hourCount >= MAX_PROVISIONS_PER_HOUR) {
-    const oldestInHour = h.timestamps.find((t) => t > now - HOUR_MS) ?? now;
+    const oldestTs = parseTimestamp(oldestInHourArr[0]) ?? now;
     return {
       allowed: false,
       reason: 'hourly_rate_exceeded',
-      retryAfterSec: Math.ceil((oldestInHour + HOUR_MS - now) / 1000),
+      retryAfterSec: Math.max(1, Math.ceil((oldestTs + HOUR_MS - now) / 1000)),
     };
   }
 
-  const dayCount = h.timestamps.length;
   if (dayCount >= MAX_PROVISIONS_PER_24H) {
-    const oldestInDay = h.timestamps[0] ?? now;
+    const oldestTs = Number(oldestInDayArr[1] ?? now);
     return {
       allowed: false,
       reason: 'daily_rate_exceeded',
-      retryAfterSec: Math.ceil((oldestInDay + DAY_MS - now) / 1000),
+      retryAfterSec: Math.max(1, Math.ceil((oldestTs + DAY_MS - now) / 1000)),
     };
   }
 
   return { allowed: true };
 }
 
-export function registerProvision(userId: string): void {
-  const h = getOrCreate(userId);
-  h.timestamps.push(Date.now());
-  h.activePodCount += 1;
+/**
+ * Record that we just kicked off a fresh provision. Adds a timestamp to the
+ * user's sliding-window history so subsequent hourly/daily checks see it.
+ * Does NOT track "active pod count" — that's derived from the session row.
+ */
+export async function recordProvision(userId: string): Promise<void> {
+  const now = Date.now();
+  const key = historyKey(userId);
+  // Member must be unique even if two provisions happen in the same ms.
+  const member = `${now}:${Math.random().toString(36).slice(2, 10)}`;
+  await getRedis().multi()
+    .zadd(key, now, member)
+    .expire(key, HISTORY_TTL_SECONDS)
+    .exec();
 }
 
-export function releaseActivePod(userId: string): void {
-  const h = userHistory.get(userId);
-  if (!h) return;
-  h.activePodCount = Math.max(0, h.activePodCount - 1);
-}
-
-export function getActivePodCount(userId: string): number {
-  return userHistory.get(userId)?.activePodCount ?? 0;
+function parseTimestamp(member: string | undefined): number | null {
+  if (!member) return null;
+  const ts = Number(member.split(':')[0]);
+  return Number.isFinite(ts) ? ts : null;
 }
