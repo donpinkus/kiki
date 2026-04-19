@@ -195,6 +195,14 @@ final class AppCoordinator {
         applyTool()
         startObservingCanvas()
 
+        // Pre-warm the GPU pod as soon as the app launches with a signed-in
+        // user. ~90s cold start otherwise dominates time-to-first-image and
+        // makes the app look broken to App Review and first-time users.
+        if signedInUserId != nil {
+            startStream()
+            seedResultStateForCurrentDrawing()
+        }
+
         // Eyedropper: commit picked colors to currentColor
         canvasViewModel.onColorPicked = { [weak self] uiColor in
             self?.currentColor = Color(uiColor: uiColor)
@@ -227,6 +235,11 @@ final class AppCoordinator {
             } else {
                 self.currentScreen = .gallery
             }
+
+            // Kick off pod provisioning immediately so the user isn't waiting
+            // for ~90s of cold start when they tap into a drawing.
+            self.startStream()
+            self.seedResultStateForCurrentDrawing()
         }
     }
 
@@ -550,8 +563,6 @@ final class AppCoordinator {
                 pressureGamma: 0.35,
                 pressureOpacity: 0.0,
                 streamline: 0.0,
-                taperIn: 8,
-                taperOut: 8,
                 tiltSensitivity: 1.0
             )
             canvasViewModel.selectBrush(config)

@@ -70,10 +70,6 @@ public struct BrushConfig: Codable, Sendable {
     public var pressureOpacity: CGFloat
     /// Path stabilization strength (0 = raw input, higher = smoother/laggier).
     public var streamline: CGFloat
-    /// Start taper distance in screen points.
-    public var taperIn: CGFloat
-    /// End taper distance in screen points.
-    public var taperOut: CGFloat
     /// How much Apple Pencil tilt widens the stroke (0 = none, 1 = dramatic).
     public var tiltSensitivity: CGFloat
 
@@ -84,8 +80,6 @@ public struct BrushConfig: Codable, Sendable {
         pressureGamma: CGFloat = 0.7,
         pressureOpacity: CGFloat = 0.0,
         streamline: CGFloat = 0.0,
-        taperIn: CGFloat = 0.0,
-        taperOut: CGFloat = 0.0,
         tiltSensitivity: CGFloat = 0.0
     ) {
         self.color = color
@@ -94,8 +88,6 @@ public struct BrushConfig: Codable, Sendable {
         self.pressureGamma = pressureGamma
         self.pressureOpacity = pressureOpacity
         self.streamline = streamline
-        self.taperIn = taperIn
-        self.taperOut = taperOut
         self.tiltSensitivity = tiltSensitivity
     }
 
@@ -135,8 +127,9 @@ public struct BrushConfig: Codable, Sendable {
         opacity = try container.decodeIfPresent(CGFloat.self, forKey: .opacity) ?? 1.0
         pressureOpacity = try container.decodeIfPresent(CGFloat.self, forKey: .pressureOpacity) ?? 0.0
         streamline = try container.decodeIfPresent(CGFloat.self, forKey: .streamline) ?? 0.0
-        taperIn = try container.decodeIfPresent(CGFloat.self, forKey: .taperIn) ?? 0.0
-        taperOut = try container.decodeIfPresent(CGFloat.self, forKey: .taperOut) ?? 0.0
+        // taperIn/taperOut: decoded for backward compat but no longer stored (removed with StrokeTessellator)
+        _ = try container.decodeIfPresent(CGFloat.self, forKey: .taperIn)
+        _ = try container.decodeIfPresent(CGFloat.self, forKey: .taperOut)
         tiltSensitivity = try container.decodeIfPresent(CGFloat.self, forKey: .tiltSensitivity) ?? 0.0
     }
 
@@ -148,8 +141,6 @@ public struct BrushConfig: Codable, Sendable {
         try container.encode(pressureGamma, forKey: .pressureGamma)
         try container.encode(pressureOpacity, forKey: .pressureOpacity)
         try container.encode(streamline, forKey: .streamline)
-        try container.encode(taperIn, forKey: .taperIn)
-        try container.encode(taperOut, forKey: .taperOut)
         try container.encode(tiltSensitivity, forKey: .tiltSensitivity)
     }
 }
@@ -178,21 +169,20 @@ public enum ToolState: Sendable {
     case lasso
 }
 
-// MARK: - Canvas Action (Legacy Undo)
+// MARK: - Layered Drawing Persistence
 
-/// Undoable action type used by the legacy `DrawingCanvasView` (CGBitmapContext engine).
-/// Not used by the current Metal engine (`MetalCanvasView`), which uses per-layer
-/// bitmap snapshots instead.
-public enum CanvasAction {
-    case stroke(Stroke)
-    case erase(preEraseSnapshot: CGImage, postEraseSnapshot: CGImage)
-    case lineartSwap(
-        prevStrokes: [Stroke], prevPersistent: CGImage?, prevBaseImage: CGImage?,
-        prevBackground: UIImage?, newBackground: UIImage?
-    )
-    case clear(
-        prevStrokes: [Stroke], prevPersistent: CGImage?, prevBaseImage: CGImage?,
-        prevBackground: UIImage?
-    )
-    case lassoMove(preMoveSnapshot: CGImage?, postMoveSnapshot: CGImage?)
+/// Persistence envelope for multi-layer canvas data. Each layer is stored
+/// as a separate PNG blob alongside its metadata.
+struct LayeredDrawing: Codable {
+    let version: Int
+    let layers: [LayerEntry]
+    let activeLayerIndex: Int
+
+    struct LayerEntry: Codable {
+        let id: String
+        let name: String
+        let isVisible: Bool
+        let pngData: Data
+    }
 }
+

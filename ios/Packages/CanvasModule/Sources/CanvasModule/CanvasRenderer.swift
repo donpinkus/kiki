@@ -181,6 +181,10 @@ public final class CanvasRenderer {
         guard width > 0, height > 0 else { return }
         guard width != canvasWidth || height != canvasHeight else { return }
 
+        let oldWidth = canvasWidth
+        let oldHeight = canvasHeight
+        let oldScale = canvasScale
+
         canvasWidth = width
         canvasHeight = height
         if viewScale > 0 { canvasScale = viewScale }
@@ -189,15 +193,22 @@ public final class CanvasRenderer {
 
         // Create initial single layer if none exist, otherwise recreate all layers.
         if layerTextures.isEmpty {
-            guard let layer0 = device.makeTexture(descriptor: desc) else { return }
+            guard let layer0 = device.makeTexture(descriptor: desc) else {
+                canvasWidth = oldWidth; canvasHeight = oldHeight; canvasScale = oldScale
+                return
+            }
             clearTexture(layer0)
             layerTextures = [layer0]
             layerVisibility = [true]
             activeLayerIndex = 0
         } else {
+            // Build complete array before assigning — rollback on partial failure.
             var newTextures: [MTLTexture] = []
             for _ in 0..<layerTextures.count {
-                guard let tex = device.makeTexture(descriptor: desc) else { return }
+                guard let tex = device.makeTexture(descriptor: desc) else {
+                    canvasWidth = oldWidth; canvasHeight = oldHeight; canvasScale = oldScale
+                    return
+                }
                 clearTexture(tex)
                 newTextures.append(tex)
             }
@@ -486,7 +497,7 @@ public final class CanvasRenderer {
         var opacity: Float = 1.0
 
         for i in 0..<layerTextures.count {
-            guard layerVisibility[i] else { continue }
+            guard i < layerVisibility.count, layerVisibility[i] else { continue }
             enc.setFragmentTexture(layerTextures[i], index: 0)
             enc.setFragmentBytes(&opacity, length: MemoryLayout<Float>.size, index: 0)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
@@ -497,11 +508,6 @@ public final class CanvasRenderer {
         cmdBuf.waitUntilCompleted()  // OK — runs once per capture, not per frame
 
         return textureToCGImage(tempTexture)
-    }
-
-    /// Convenience: flattened CGImage (used by existing callers that expected canvasToCGImage).
-    func canvasToCGImage() -> CGImage? {
-        flattenedCGImage()
     }
 
     /// Convert any Metal texture to CGImage via CIImage (correct sRGB + premultiplied alpha).
@@ -780,7 +786,7 @@ public final class CanvasRenderer {
         // at the active layer's z-position so the active stroke preview appears
         // at the correct depth.
         for i in 0..<layerTextures.count {
-            guard layerVisibility[i] else { continue }
+            guard i < layerVisibility.count, layerVisibility[i] else { continue }
 
             enc.setFragmentTexture(layerTextures[i], index: 0)
             enc.setFragmentBytes(&opacity, length: MemoryLayout<Float>.size, index: 0)

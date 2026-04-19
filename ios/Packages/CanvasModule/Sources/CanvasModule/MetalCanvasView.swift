@@ -1,21 +1,7 @@
 import UIKit
 import Metal
 
-/// Persistence envelope for multi-layer canvas data.
-struct LayeredDrawing: Codable {
-    let version: Int
-    let layers: [LayerEntry]
-    let activeLayerIndex: Int
-
-    struct LayerEntry: Codable {
-        let id: String
-        let name: String
-        let isVisible: Bool
-        let pngData: Data
-    }
-}
-
-/// Metal-backed drawing canvas. Replaces `DrawingCanvasView` with a GPU-resident
+/// Metal-backed drawing canvas. GPU-resident
 /// texture pipeline: all painting happens in Metal shaders, display via
 /// `CAMetalLayer`, zero CPU↔GPU pixel copies per frame.
 ///
@@ -28,7 +14,6 @@ public final class MetalCanvasView: UIView {
 
     // MARK: - Public State
 
-    public private(set) var strokes: [Stroke] = []
     public var currentTool: ToolState = .brush(.defaultPen)
 
     /// Layer metadata (name, visibility). Parallel to renderer's layerTextures.
@@ -36,9 +21,11 @@ public final class MetalCanvasView: UIView {
     /// Which layer is currently active for drawing.
     public private(set) var activeLayerIndex: Int = 0
 
-    public var isEmpty: Bool {
-        strokes.isEmpty && !hasContent
-    }
+    /// Tracks canvas-modifying operations (brush, erase, lasso, bake, load).
+    /// Used for isEmpty checks and save-trigger telemetry.
+    public private(set) var strokeCount: Int = 0
+
+    public var isEmpty: Bool { strokeCount == 0 }
 
     // MARK: - Callbacks
 
@@ -55,10 +42,6 @@ public final class MetalCanvasView: UIView {
     private let renderer: CanvasRenderer
     private var displayLink: CADisplayLink?
     private var isDirty = true
-    private var hasContent = false
-    /// True when loadStrokes was called before the canvas texture was ready.
-    /// layoutSubviews checks this flag and replays after resizeCanvas.
-    private var needsStrokeReplay = false
     /// Canvas bitmap deferred from loadDrawingData until layout is ready.
     private var pendingCanvasImage: CGImage?
     /// Layered drawing deferred from loadDrawingData until layout is ready.
@@ -100,8 +83,7 @@ public final class MetalCanvasView: UIView {
 
     private var lassoPoints: [CGPoint] = []
     private var lassoPath: CGMutablePath?
-    private var preLassoSnapshot: CGImage?
-    public var lassoClipPath: CGPath?
+    public private(set) var lassoClipPath: CGPath?
 
     /// Marching-ants preview of the lasso path while the user draws it.
     /// Two shape layers (white + black offset dashes) for visibility on any background.
@@ -186,8 +168,6 @@ public final class MetalCanvasView: UIView {
             applyPendingLayeredDrawing()
         } else if pendingCanvasImage != nil {
             applyPendingCanvasImage()
-        } else if needsStrokeReplay {
-            replayPendingStrokes()
         }
 
         isDirty = true
@@ -378,7 +358,7 @@ public final class MetalCanvasView: UIView {
                 let width = brush.effectiveWidth(force: force, altitude: altitude)
 
                 let pos = CGPoint(x: x, y: y)
-                if clipPath == nil || clipPath!.contains(pos) {
+                if clipPath.map({ $0.contains(pos) }) ?? true {
                     newStamps.append(CanvasRenderer.StampInstance(
                         center: SIMD2<Float>(Float(x * scale), Float(y * scale)),
                         radius: Float(width * 0.5 * scale),
@@ -419,9 +399,7 @@ public final class MetalCanvasView: UIView {
         if case .eraser = currentTool {
             // Eraser stamps were already applied directly to canvas during touchesMoved.
             // Undo snapshot was pushed at touchesBegan. Nothing to flatten.
-            // Don't append to strokes — eraser operations are baked into the canvas
-            // bitmap and saved/restored via PNG, not stroke replay.
-            hasContent = true
+            strokeCount += 1
             onDrawingChanged?()
             isDirty = true
             return
@@ -436,8 +414,7 @@ public final class MetalCanvasView: UIView {
         }
         renderer.flattenScratchIntoCanvas(isEraser: false)
 
-        strokes.append(stroke)
-        hasContent = true
+        strokeCount += 1
         onDrawingChanged?()
         isDirty = true
     }
@@ -452,20 +429,21 @@ public final class MetalCanvasView: UIView {
         CATransaction.commit()
     }
 
-    /// Show marching ants for the clip mask path (persists across tool switches).
-    public func showClipMaskOutline(_ path: CGPath) {
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        lassoPreviewWhite.path = path
-        lassoPreviewBlack.path = path
-        lassoPreviewWhite.isHidden = false
-        lassoPreviewBlack.isHidden = false
-        CATransaction.commit()
-    }
-
-    /// Hide the clip mask marching ants.
-    public func hideClipMaskOutline() {
-        hideLassoPreview()
+    /// Set or clear the clip mask path. Automatically manages marching ants display.
+    /// When set, brush/eraser stamps outside the path are discarded.
+    public func setClipPath(_ path: CGPath?) {
+        lassoClipPath = path
+        if let path = path {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            lassoPreviewWhite.path = path
+            lassoPreviewBlack.path = path
+            lassoPreviewWhite.isHidden = false
+            lassoPreviewBlack.isHidden = false
+            CATransaction.commit()
+        } else {
+            hideLassoPreview()
+        }
     }
 
     private func finishLasso() {
@@ -545,15 +523,11 @@ public final class MetalCanvasView: UIView {
 
     public func performUndo() {
         guard let entry = undoSnapshots.popLast() else { return }
-        // Save current state of the affected layer for redo.
         if let current = renderer.snapshotLayer(at: entry.layerIndex) {
             redoSnapshots.append(UndoEntry(layerIndex: entry.layerIndex, snapshotData: current))
         }
         renderer.restoreLayer(at: entry.layerIndex, from: entry.snapshotData)
-        if !undoSnapshots.isEmpty || hasContent {
-            if !strokes.isEmpty { strokes.removeLast() }
-        }
-        hasContent = !strokes.isEmpty
+        if strokeCount > 0 { strokeCount -= 1 }
         onDrawingChanged?()
         isDirty = true
     }
@@ -564,7 +538,7 @@ public final class MetalCanvasView: UIView {
             undoSnapshots.append(UndoEntry(layerIndex: entry.layerIndex, snapshotData: current))
         }
         renderer.restoreLayer(at: entry.layerIndex, from: entry.snapshotData)
-        hasContent = true
+        strokeCount += 1
         onDrawingChanged?()
         isDirty = true
     }
@@ -621,8 +595,7 @@ public final class MetalCanvasView: UIView {
         renderer.resetToSingleLayer()
         layers = [LayerInfo(name: "Layer 1")]
         activeLayerIndex = 0
-        strokes.removeAll()
-        hasContent = false
+        strokeCount = 0
         isDirty = true
     }
 
@@ -630,14 +603,14 @@ public final class MetalCanvasView: UIView {
     public func bakeImage(_ image: UIImage) {
         guard let cgImage = image.cgImage else { return }
         renderer.loadImageIntoCanvas(cgImage)
-        hasContent = true
+        strokeCount += 1
         isDirty = true
     }
 
     /// Export all layers as a JSON envelope with per-layer PNG data.
     /// Returns nil if the canvas has no content.
     public func exportLayeredData() -> Data? {
-        guard hasContent || !strokes.isEmpty else { return nil }
+        guard strokeCount > 0 else { return nil }
 
         var layerEntries: [LayeredDrawing.LayerEntry] = []
         for (i, info) in layers.enumerated() {
@@ -662,37 +635,20 @@ public final class MetalCanvasView: UIView {
 
     /// Export the canvas as a single flattened PNG (used by stream capture).
     public func exportStrokeData() -> Data? {
-        guard hasContent || !strokes.isEmpty else { return nil }
+        guard strokeCount > 0 else { return nil }
         guard let cgImage = renderer.flattenedCGImage() else { return nil }
         return UIImage(cgImage: cgImage).pngData()
-    }
-
-    /// Load strokes from saved data. Accepts either:
-    /// - Canvas bitmap PNG (current format — pixel-perfect restore via bakeImage)
-    /// - Stroke JSON (legacy format — replayed through stamp pipeline)
-    public func loadStrokes(_ savedStrokes: [Stroke]) {
-        strokes = savedStrokes
-        hasContent = !strokes.isEmpty
-        needsStrokeReplay = hasContent
-
-        guard renderer.hasCanvas else {
-            isDirty = true
-            return
-        }
-
-        replayPendingStrokes()
     }
 
     /// Load canvas from saved data. Auto-detects format:
     /// 1. Layered JSON envelope (current format — per-layer PNGs)
     /// 2. Single PNG bitmap (pre-layers format — loads as layer 0)
-    /// 3. Stroke JSON (legacy format — replayed through stamp pipeline)
+    /// 3. Stroke JSON (legacy fallback — replays through stamp pipeline)
     public func loadDrawingData(_ data: Data) {
         // Try layered JSON first.
         if let layered = try? JSONDecoder().decode(LayeredDrawing.self, from: data) {
             pendingLayeredDrawing = layered
-            hasContent = true
-            needsStrokeReplay = false
+            strokeCount = 1
 
             guard renderer.hasCanvas else {
                 isDirty = true
@@ -705,8 +661,7 @@ public final class MetalCanvasView: UIView {
         // Try single PNG.
         if let image = UIImage(data: data)?.cgImage {
             pendingCanvasImage = image
-            hasContent = true
-            needsStrokeReplay = false
+            strokeCount = 1
 
             guard renderer.hasCanvas else {
                 isDirty = true
@@ -716,9 +671,18 @@ public final class MetalCanvasView: UIView {
             return
         }
 
-        // Try legacy stroke JSON.
-        if let strokes = try? JSONDecoder().decode([Stroke].self, from: data) {
-            loadStrokes(strokes)
+        // Legacy stroke JSON fallback — replay immediately.
+        if let savedStrokes = try? JSONDecoder().decode([Stroke].self, from: data),
+           !savedStrokes.isEmpty, renderer.hasCanvas {
+            let scale = canvasScale
+            for stroke in savedStrokes {
+                let stamps = generateStampsForStroke(stroke, scale: scale)
+                if !stamps.isEmpty {
+                    renderer.commitStampsToCanvas(stamps)
+                }
+            }
+            strokeCount = savedStrokes.count
+            isDirty = true
         }
     }
 
@@ -771,24 +735,6 @@ public final class MetalCanvasView: UIView {
         onDrawingChanged?()
     }
 
-    /// Replay all stored strokes into the canvas texture (legacy path).
-    private func replayPendingStrokes() {
-        guard needsStrokeReplay, !strokes.isEmpty, renderer.hasCanvas else { return }
-        needsStrokeReplay = false
-
-        let scale = canvasScale
-        for stroke in strokes {
-            let stamps = generateStampsForStroke(stroke, scale: scale)
-            if !stamps.isEmpty {
-                renderer.commitStampsToCanvas(stamps)
-            }
-        }
-
-        undoSnapshots.removeAll()
-        redoSnapshots.removeAll()
-        isDirty = true
-    }
-
     /// Generate stamp instances for a complete stroke (used by replay + active drawing).
     /// When `lassoClipPath` is set, stamps whose center falls outside the clip path
     /// are discarded (CPU-side clip masking).
@@ -802,7 +748,7 @@ public final class MetalCanvasView: UIView {
 
         let first = stroke.points[0]
         let firstWidth = brush.effectiveWidth(force: first.force, altitude: first.altitude)
-        if clipPath == nil || clipPath!.contains(first.position) {
+        if clipPath.map({ $0.contains(first.position) }) ?? true {
             stamps.append(CanvasRenderer.StampInstance(
                 center: SIMD2<Float>(Float(first.position.x * scale), Float(first.position.y * scale)),
                 radius: Float(firstWidth * 0.5 * scale),
@@ -834,7 +780,7 @@ public final class MetalCanvasView: UIView {
                 let width = brush.effectiveWidth(force: force, altitude: altitude)
 
                 let pos = CGPoint(x: x, y: y)
-                if clipPath == nil || clipPath!.contains(pos) {
+                if clipPath.map({ $0.contains(pos) }) ?? true {
                     stamps.append(CanvasRenderer.StampInstance(
                         center: SIMD2<Float>(Float(x * scale), Float(y * scale)),
                         radius: Float(width * 0.5 * scale),
@@ -852,7 +798,7 @@ public final class MetalCanvasView: UIView {
         // End cap.
         if let last = stroke.points.last {
             let width = brush.effectiveWidth(force: last.force, altitude: last.altitude)
-            if clipPath == nil || clipPath!.contains(last.position) {
+            if clipPath.map({ $0.contains(last.position) }) ?? true {
                 stamps.append(CanvasRenderer.StampInstance(
                     center: SIMD2<Float>(Float(last.position.x * scale), Float(last.position.y * scale)),
                     radius: Float(width * 0.5 * scale),

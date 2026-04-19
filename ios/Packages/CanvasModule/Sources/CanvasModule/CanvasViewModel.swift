@@ -124,8 +124,7 @@ public final class CanvasViewModel {
         canvasView.commitSelection()
         container.commitLassoSelection()
         if let path = lassoClosedPath {
-            canvasView.lassoClipPath = path
-            canvasView.showClipMaskOutline(path)
+            canvasView.setClipPath(path)
         }
     }
 
@@ -136,8 +135,7 @@ public final class CanvasViewModel {
             canvasView.commitSelection()
             container.commitLassoSelection()
         }
-        canvasView.lassoClipPath = nil
-        canvasView.hideClipMaskOutline()
+        canvasView.setClipPath(nil)
         lassoClosedPath = nil
         hasLassoSelection = false
         updateState()
@@ -151,17 +149,15 @@ public final class CanvasViewModel {
             container.clearLassoSelection()
         }
         canvasView.cancelSelection()
-        canvasView.lassoClipPath = nil
-        canvasView.hideClipMaskOutline()
+        canvasView.setClipPath(nil)
         lassoClosedPath = nil
         hasLassoSelection = false
         updateState()
     }
 
-    /// Clear only the clip path (not the floating selection). Used when switching back to lasso tool.
+    /// Clear only the clip path (not the floating selection).
     public func clearLassoClipOnly() {
-        canvasView?.lassoClipPath = nil
-        canvasView?.hideClipMaskOutline()
+        canvasView?.setClipPath(nil)
         lassoClosedPath = nil
         hasLassoSelection = false
     }
@@ -254,10 +250,9 @@ public final class CanvasViewModel {
             }
         }
 
-        let strokeCount = canvasView.strokes.count
         return SketchSnapshot(
             image: image,
-            strokeCount: max(strokeCount, hasBackgroundContent ? 1 : 0),
+            strokeCount: max(canvasView.strokeCount, hasBackgroundContent ? 1 : 0),
             bounds: rect
         )
     }
@@ -315,7 +310,7 @@ public final class CanvasViewModel {
         updateState()
         changesContinuation.yield(SketchSnapshot(
             image: UIImage(),
-            strokeCount: canvasView?.strokes.count ?? 0,
+            strokeCount: canvasView?.strokeCount ?? 0,
             bounds: canvasView?.bounds ?? .zero
         ))
     }
