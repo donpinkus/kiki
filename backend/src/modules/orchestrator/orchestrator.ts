@@ -184,6 +184,39 @@ export async function abortSession(sessionId: string): Promise<void> {
 // Public API
 // ────────────────────────────────────────────────────────────────────────────
 
+const REPLACEMENT_POLL_MS = 3_000;
+const REPLACEMENT_TIMEOUT_MS = 10 * 60 * 1000; // 10 min — same as provision timeout
+
+/**
+ * Poll Redis until a 'replacing' session becomes 'ready' or is deleted.
+ * Used by getOrProvisionPod when it detects that replaceSession is already
+ * handling spot preemption recovery — avoids provisioning a duplicate pod.
+ */
+async function waitForReplacement(
+  sessionId: string,
+  onStatus: (msg: string) => void,
+): Promise<string> {
+  const deadline = Date.now() + REPLACEMENT_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, REPLACEMENT_POLL_MS));
+    const session = await readSession(sessionId);
+    if (!session) {
+      throw new Error('Session deleted while waiting for replacement');
+    }
+    if (session.status === 'ready' && session.podUrl) {
+      log.info({ sessionId, podId: session.podId }, 'Replacement completed — reusing pod');
+      onStatus('Ready');
+      return session.podUrl;
+    }
+    if (session.status !== 'replacing') {
+      // Status changed to something unexpected (e.g. 'provisioning' from
+      // another code path). Break out and let the caller re-evaluate.
+      throw new Error(`Unexpected session status while waiting for replacement: ${session.status}`);
+    }
+  }
+  throw new Error('Replacement timed out');
+}
+
 /**
  * Returns a healthy pod URL for the given session, provisioning one if needed.
  * If the same sessionId calls this concurrently while a provision is in flight,
@@ -203,6 +236,17 @@ export async function getOrProvisionPod(
     log.info({ sessionId, podId: existing.podId }, 'Reusing existing session pod');
     onStatus('Ready');
     return { podUrl: existing.podUrl };
+  }
+
+  // 1b. If a replacement is in progress (spot preemption recovery), wait for
+  // it instead of provisioning a duplicate pod. The replacement flow in
+  // replaceSession() writes status='replacing' and will flip to 'ready' once
+  // the new pod is up.
+  if (existing?.status === 'replacing') {
+    log.info({ sessionId }, 'Replacement in progress — waiting');
+    onStatus('Replacing GPU...');
+    const podUrl = await waitForReplacement(sessionId, onStatus);
+    return { podUrl };
   }
 
   // 2. Check local in-flight map (same-process concurrent callers)
