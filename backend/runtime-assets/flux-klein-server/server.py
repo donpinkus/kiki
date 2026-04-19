@@ -23,6 +23,7 @@ Video generation:
   `video_loop` kicks off LTXV animation on the GPU. Arrival of a new
   input frame cancels the in-flight video generation.
 """
+from __future__ import annotations
 
 import asyncio
 import base64

@@ -1,5 +1,7 @@
 """FLUX.2-klein reference-mode img2img pipeline."""
 
+from __future__ import annotations
+
 import logging
 import threading
 import time

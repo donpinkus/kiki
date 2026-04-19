@@ -12,6 +12,7 @@ inference on Blackwell tensor cores; compute stays in BF16.
 Kept deliberately minimal — resolution, frame count, and step count are
 tuned for speed (SLA: <5s time-to-first-playback), not quality.
 """
+from __future__ import annotations
 
 import io
 import logging

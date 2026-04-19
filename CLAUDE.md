@@ -101,6 +101,16 @@ Data flows one direction: Canvas → Network → Result. Modules communicate thr
 | Product requirements | `PRD.md` |
 | System architecture | `TECHNICAL_ARCHITECTURE.md` |
 
+## Deploy Process
+
+**Backend (Fastify on Railway):** `cd backend && railway up`. No git push.
+
+**Pod Docker image (flux-klein-server on RunPod):** Two-step process:
+1. Push to `main` touching `flux-klein-server/**` → GitHub Actions builds and pushes to `ghcr.io/donpinkus/kiki-flux-klein:sha-<commit>`.
+2. **Update `FLUX_IMAGE` on Railway** to the new SHA tag (e.g. `ghcr.io/donpinkus/kiki-flux-klein:sha-abc123`). Without this, new pods still pull the old image. Use `railway variables set FLUX_IMAGE=ghcr.io/donpinkus/kiki-flux-klein:sha-<commit>` or the Railway dashboard.
+
+Existing running pods are unaffected — only newly provisioned pods pick up the new image. To force a user onto the new image, terminate their pod and let the orchestrator reprovision.
+
 ## Git Conventions
 
 - **Branches:** `feature/module-short-desc`, `fix/module-short-desc`, `chore/desc`
