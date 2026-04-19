@@ -45,6 +45,9 @@ public struct ResultView: View {
             case .empty:
                 emptyView
 
+            case .provisioning(let message, let startedAt):
+                provisioningView(message: message, startedAt: startedAt)
+
             case .generating(let progress, let previousImage):
                 generatingView(progress: progress, previousImage: previousImage)
 
@@ -78,6 +81,95 @@ public struct ResultView: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 40)
+        }
+    }
+
+    // MARK: - Provisioning
+
+    private func provisioningView(message: String, startedAt: Date) -> some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: false)) { context in
+            // Asymptotic curve approaching 95% — starts fast, slows down.
+            // t=15s ≈ 39%, t=30s ≈ 63%, t=60s ≈ 87%, t=90s ≈ 95%.
+            let elapsed = max(0, context.date.timeIntervalSince(startedAt))
+            let progress = min(0.95, 1.0 - exp(-elapsed / 30.0))
+
+            VStack(spacing: 28) {
+                Spacer(minLength: 0)
+
+                Image(systemName: "wand.and.stars")
+                    .font(.system(size: 56, weight: .light))
+                    .foregroundStyle(provisioningGradient)
+                    .symbolEffect(.pulse, options: .repeating)
+
+                VStack(spacing: 8) {
+                    Text("Warming up the AI")
+                        .font(.title2.weight(.semibold))
+                        .foregroundStyle(.primary)
+
+                    Text("First-time setup takes about 90 seconds")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+
+                VStack(spacing: 12) {
+                    provisioningProgressBar(progress: progress)
+                        .frame(height: 8)
+                        .frame(maxWidth: 320)
+
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 320, minHeight: 28, alignment: .top)
+                        .animation(.easeInOut(duration: 0.2), value: message)
+                }
+
+                Label {
+                    Text("Keep sketching — your drawing will appear here as soon as the AI is ready.")
+                        .font(.callout)
+                        .foregroundStyle(.primary)
+                        .multilineTextAlignment(.leading)
+                } icon: {
+                    Image(systemName: "pencil.and.scribble")
+                        .foregroundStyle(.tint)
+                }
+                .padding(16)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+                .padding(.horizontal, 32)
+
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 32)
+        }
+    }
+
+    private var provisioningGradient: LinearGradient {
+        LinearGradient(
+            colors: [.purple, .pink, .orange],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+    }
+
+    private func provisioningProgressBar(progress: Double) -> some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(.quaternary)
+
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(
+                        LinearGradient(
+                            colors: [.purple, .pink, .orange],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .frame(width: max(8, geo.size.width * progress))
+                    .animation(.easeOut(duration: 0.6), value: progress)
+            }
         }
     }
 
@@ -325,6 +417,27 @@ public struct ResultView: View {
 
 #Preview("Empty") {
     ResultView(state: .empty)
+}
+
+#Preview("Provisioning – Just started") {
+    ResultView(state: .provisioning(
+        message: "Reserving GPU…",
+        startedAt: Date()
+    ))
+}
+
+#Preview("Provisioning – Mid warm-up") {
+    ResultView(state: .provisioning(
+        message: "Loading model weights — this is the longest step",
+        startedAt: Date().addingTimeInterval(-30)
+    ))
+}
+
+#Preview("Provisioning – Almost ready") {
+    ResultView(state: .provisioning(
+        message: "Final initialization…",
+        startedAt: Date().addingTimeInterval(-75)
+    ))
 }
 
 #Preview("Generating – Preparing") {

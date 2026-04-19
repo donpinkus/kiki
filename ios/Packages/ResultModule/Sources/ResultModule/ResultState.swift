@@ -37,6 +37,9 @@ public struct GenerationProgress: Equatable, Sendable {
 /// Represents the current state of the result pane.
 public enum ResultState {
     case empty
+    /// Backend GPU pod is being provisioned. `startedAt` lets the UI compute
+    /// elapsed time for a smooth progress bar across many `message` updates.
+    case provisioning(message: String, startedAt: Date)
     case generating(progress: GenerationProgress, previousImage: UIImage?)
     case preview(image: UIImage)
     case streaming(image: UIImage, frameCount: Int = 0)

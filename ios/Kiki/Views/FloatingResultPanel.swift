@@ -93,6 +93,13 @@ struct FloatingResultPanel: View {
             }
             .padding(4)
 
+        case .provisioning:
+            ZStack {
+                Color(.systemGray6)
+                ProgressView()
+                    .controlSize(.regular)
+            }
+
         case .error(_, let previousImage):
             if let prev = previousImage {
                 pickableImage(prev).padding(4)
