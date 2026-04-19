@@ -315,13 +315,12 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         // accounting is released transitively.
         await abortSession(userId);
         if (socket.readyState === socket.OPEN) {
-          socket.send(
-            JSON.stringify({
-              type: 'error',
-              message: `Provisioning failed: ${err instanceof Error ? err.message : String(err)}`,
-            }),
-          );
+          const errorMsg = `Provisioning failed: ${err instanceof Error ? err.message : String(err)}`;
+          request.log.info({ userId }, 'Sending provisioning error to client and closing socket');
+          socket.send(JSON.stringify({ type: 'error', message: errorMsg }));
           socket.close(1011, 'Provisioning failed');
+        } else {
+          request.log.warn({ userId, readyState: socket.readyState }, 'Cannot send provisioning error — socket not open');
         }
       }
 

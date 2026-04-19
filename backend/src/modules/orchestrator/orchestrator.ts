@@ -267,22 +267,30 @@ async function waitForReplacement(
   sessionId: string,
   onStatus: (msg: string) => void,
 ): Promise<string> {
-  const deadline = Date.now() + REPLACEMENT_TIMEOUT_MS;
+  const start = Date.now();
+  const deadline = start + REPLACEMENT_TIMEOUT_MS;
+  let polls = 0;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, REPLACEMENT_POLL_MS));
+    polls++;
     const session = await readSession(sessionId);
     if (!session) {
+      log.warn({ sessionId, polls }, 'Session deleted while waiting for replacement');
       throw new Error('Session deleted while waiting for replacement');
     }
     if (session.status === 'ready' && session.podUrl) {
-      log.info({ sessionId, podId: session.podId }, 'Replacement completed — reusing pod');
+      const elapsed = Math.round((Date.now() - start) / 1000);
+      log.info({ sessionId, podId: session.podId, elapsedSec: elapsed }, 'Replacement completed — reusing pod');
       onStatus('Ready');
       return session.podUrl;
     }
     if (session.status !== 'replacing') {
-      // Status changed to something unexpected (e.g. 'provisioning' from
-      // another code path). Break out and let the caller re-evaluate.
+      log.warn({ sessionId, status: session.status, polls }, 'Unexpected status while waiting for replacement');
       throw new Error(`Unexpected session status while waiting for replacement: ${session.status}`);
+    }
+    if (polls % 10 === 0) {
+      const elapsed = Math.round((Date.now() - start) / 1000);
+      log.info({ sessionId, elapsedSec: elapsed, status: session.status }, 'Still waiting for replacement');
     }
   }
   throw new Error('Replacement timed out');
@@ -1105,12 +1113,15 @@ async function waitForRuntime(
   onStatus: (msg: string) => void,
   timeoutMs = 10 * 60 * 1000,
 ): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
+  const start = Date.now();
+  const deadline = start + timeoutMs;
+  let lastUpdateAt = 0;
+  onStatus('Pulling container image...');
   while (Date.now() < deadline) {
     const pod = await getPod(podId);
     if (!pod) {
-      // Pod vanished (spot preempted before container started, or manually
-      // deleted). Fail fast instead of waiting the full timeout.
+      const elapsed = Math.round((Date.now() - start) / 1000);
+      log.warn({ podId, elapsedSec: elapsed }, 'Pod vanished during provisioning (spot preempted?)');
       throw new Error(`Pod ${podId} vanished during provisioning (spot preempted?)`);
     }
     if (pod.runtime) {
@@ -1118,13 +1129,23 @@ async function waitForRuntime(
       onStatus('Starting server...');
       return;
     }
+    // Send progress updates every 30s so the client knows we're still waiting.
+    const now = Date.now();
+    if (now - lastUpdateAt > 30_000) {
+      const elapsed = Math.round((now - start) / 1000);
+      log.info({ podId, elapsedSec: elapsed }, 'Still waiting for container runtime');
+      onStatus(`Pulling container image... (${elapsed}s)`);
+      lastUpdateAt = now;
+    }
     await sleep(5000);
   }
   throw new Error(`Pod ${podId} container never started within ${Math.round(timeoutMs / 1000)}s`);
 }
 
 async function waitForHealth(healthUrl: string, timeoutMs = 10 * 60 * 1000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
+  const start = Date.now();
+  const deadline = start + timeoutMs;
+  let lastLogAt = 0;
   while (Date.now() < deadline) {
     try {
       const res = await fetch(healthUrl, { signal: AbortSignal.timeout(10_000) });
@@ -1134,6 +1155,12 @@ async function waitForHealth(healthUrl: string, timeoutMs = 10 * 60 * 1000): Pro
       }
     } catch {
       // Ignore — health check hasn't come up yet
+    }
+    const now = Date.now();
+    if (now - lastLogAt > 30_000) {
+      const elapsed = Math.round((now - start) / 1000);
+      log.info({ healthUrl, elapsedSec: elapsed }, 'Still waiting for health check');
+      lastLogAt = now;
     }
     await sleep(10_000);
   }

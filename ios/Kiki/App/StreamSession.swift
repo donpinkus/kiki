@@ -73,7 +73,7 @@ final class StreamSession {
     // MARK: - Reconnection
 
     private var reconnectAttempts = 0
-    private static let maxReconnectAttempts = 3
+    private static let maxReconnectAttempts = 5
     private var isStopped = false
 
     // MARK: - Stats
@@ -142,32 +142,40 @@ final class StreamSession {
             startVideoLoop()
             startCaptureLoop()
         } catch {
-            print("[Stream] Connection failed: \(error)")
+            print("[Stream] Connection failed: \(error.localizedDescription) (stopped=\(isStopped))")
             if !isStopped {
                 await attemptReconnect()
+            } else {
+                print("[Stream] Not reconnecting — session stopped")
             }
         }
     }
 
     private func attemptReconnect() async {
-        guard !isStopped else { return }
+        guard !isStopped else {
+            print("[Stream] Reconnect skipped — session stopped")
+            return
+        }
         reconnectAttempts += 1
-        print("[Stream] Reconnect attempt \(reconnectAttempts)/\(Self.maxReconnectAttempts)")
+        let delay = pow(2.0, Double(reconnectAttempts - 1))  // 1, 2, 4, 8, 16s
+        print("[Stream] Reconnect attempt \(reconnectAttempts)/\(Self.maxReconnectAttempts) (backoff: \(delay)s)")
 
         if reconnectAttempts > Self.maxReconnectAttempts {
             print("[Stream] Giving up after \(Self.maxReconnectAttempts) retries")
-            updateConnectionState(.error("Connection lost after \(Self.maxReconnectAttempts) retries"))
+            updateConnectionState(.error("Unable to connect. Please restart the app."))
             return
         }
 
         cancelAllTasks()
-
-        let delay = pow(2.0, Double(reconnectAttempts - 1))
         updateConnectionState(.connecting)
 
         try? await Task.sleep(for: .seconds(delay))
-        guard !isStopped, !Task.isCancelled else { return }
+        guard !isStopped, !Task.isCancelled else {
+            print("[Stream] Reconnect cancelled during backoff (stopped=\(isStopped), cancelled=\(Task.isCancelled))")
+            return
+        }
 
+        print("[Stream] Reconnecting to \(url.absoluteString)")
         self.client = StreamWebSocketClient(request: request)
         await connectAndRun()
     }
@@ -262,8 +270,10 @@ final class StreamSession {
             }
             let stopped = await self.isStopped
             if !Task.isCancelled, !stopped {
-                print("[Stream] Receive stream ended unexpectedly, attempting reconnect")
+                print("[Stream] Receive stream ended unexpectedly (cancelled=\(Task.isCancelled), stopped=\(stopped), frames=\(count)) — attempting reconnect")
                 await self.attemptReconnect()
+            } else {
+                print("[Stream] Receive stream ended (cancelled=\(Task.isCancelled), stopped=\(stopped), frames=\(count))")
             }
         }
 
@@ -286,6 +296,11 @@ final class StreamSession {
                             self.onVideoReadyChanged?(videoReady)
                         }
                     } else if (status.type == "status" && status.status == "error") || status.type == "error" {
+                        // Server-sent error (e.g. provisioning failed). Reset
+                        // reconnect counter since the next connection is a fresh
+                        // provision, not a reconnect to a dead session.
+                        print("[Stream] Server error received: \(status.message ?? "(no message)") — resetting reconnect counter")
+                        self.reconnectAttempts = 0
                         self.updateConnectionState(.error(status.message ?? "Server error"))
                     }
                 }

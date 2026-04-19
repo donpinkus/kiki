@@ -505,6 +505,7 @@ final class AppCoordinator {
         }
 
         session.onVideoReadyChanged = { [weak self] ready in
+            streamLog.info("Video availability: \(ready)")
             self?.videoAvailable = ready
         }
 
@@ -557,19 +558,27 @@ final class AppCoordinator {
         switch newState {
         case .connecting:
             // Don't overwrite an existing image or in-flight generation.
-            guard lastSuccessfulImage == nil else { return }
+            guard lastSuccessfulImage == nil else {
+                streamLog.info("Stream connecting — keeping existing image")
+                return
+            }
             if case .provisioning = resultState { return }
             if case .streaming = resultState { return }
+            streamLog.info("Stream connecting — showing provisioning UI")
             resultState = .provisioning(message: "Connecting…", startedAt: Date())
 
         case .provisioning(let message):
-            guard lastSuccessfulImage == nil else { return }
+            guard lastSuccessfulImage == nil else {
+                streamLog.info("Stream provisioning (\(message)) — keeping existing image")
+                return
+            }
             if case .streaming = resultState { return }
             // Preserve `startedAt` across multiple status updates so the
             // progress bar keeps advancing instead of resetting on each message.
             if case .provisioning(_, let startedAt) = resultState {
                 resultState = .provisioning(message: message, startedAt: startedAt)
             } else {
+                streamLog.info("Stream provisioning — showing warm-up UI")
                 resultState = .provisioning(message: message, startedAt: Date())
             }
 
@@ -583,15 +592,18 @@ final class AppCoordinator {
             //      will move us to .streaming.
             if case .provisioning = previousState {
                 if case .provisioning = resultState {
+                    streamLog.info("Stream ready (was provisioning) — clearing warm-up UI")
                     resultState = lastSuccessfulImage.map { .preview(image: $0) } ?? .empty
                 }
             }
 
         case .error(let msg):
+            streamLog.error("Stream error: \(msg)")
             resultState = .error(message: msg, previousImage: lastSuccessfulImage)
 
         case .disconnected:
             if case .provisioning = resultState {
+                streamLog.info("Stream disconnected during provisioning — clearing warm-up UI")
                 resultState = lastSuccessfulImage.map { .preview(image: $0) } ?? .empty
             }
         }
