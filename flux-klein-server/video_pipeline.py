@@ -68,13 +68,14 @@ class LtxvVideoPipeline:
         t0 = time.time()
 
         try:
-            from diffusers import AutoModel, LTXConditionPipeline
+            from diffusers import LTXConditionPipeline
+            from diffusers.models import LTXVideoTransformer3DModel
 
             # Load the 2B transformer from the pre-quantized FP8 checkpoint.
             # from_single_file upcasts to BF16 on load; we then apply
             # layerwise_casting to store FP8 / compute BF16 for inference.
             logger.info("Loading transformer from single file...")
-            transformer = AutoModel.from_single_file(
+            transformer = LTXVideoTransformer3DModel.from_single_file(
                 f"https://huggingface.co/{config.LTXV_TRANSFORMER_REPO}/blob/main/{config.LTXV_TRANSFORMER_FILE}",
                 config=config.LTXV_BASE_REPO,
                 subfolder="transformer",
