@@ -25,6 +25,11 @@ export class StreamRelay {
   private closeHandler: ((code: number, reason: string) => void) | null = null;
   private errorHandler: ((err: Error) => void) | null = null;
 
+  // Single-slot frame buffer: drops stale frames when the upstream socket
+  // has backpressure, so the pod always processes the latest sketch.
+  private pendingFrame: Buffer | null = null;
+  private drainScheduled = false;
+
   constructor(url: string) {
     this.url = url;
   }
@@ -87,10 +92,36 @@ export class StreamRelay {
     }
   }
 
+  /**
+   * Send a sketch frame to the upstream pod. Uses a single-slot buffer:
+   * if the previous send hasn't completed (socket backpressure), the new
+   * frame replaces it so the pod always gets the latest sketch. Without
+   * this, WebSocket buffering causes a queue of stale frames that the pod
+   * processes sequentially, creating visible lag.
+   */
   sendFrame(jpegData: Buffer): void {
-    if (this.upstream?.readyState === WebSocket.OPEN) {
-      this.upstream.send(jpegData);
+    if (this.upstream?.readyState !== WebSocket.OPEN) return;
+    // bufferedAmount > 0 means the previous send is still in the kernel
+    // buffer — the pod hasn't read it yet. Drop it by replacing with the
+    // latest frame. We can't un-send what's already in the buffer, but
+    // we can skip sending more data until it drains.
+    if (this.upstream.bufferedAmount > 0) {
+      this.pendingFrame = jpegData;
+      if (!this.drainScheduled) {
+        this.drainScheduled = true;
+        this.upstream.once('drain', () => {
+          this.drainScheduled = false;
+          if (this.pendingFrame) {
+            const frame = this.pendingFrame;
+            this.pendingFrame = null;
+            this.sendFrame(frame);
+          }
+        });
+      }
+      return;
     }
+    this.pendingFrame = null;
+    this.upstream.send(jpegData);
   }
 
   onMessage(callback: (data: Buffer | string, isBinary: boolean) => void): void {

@@ -46,12 +46,10 @@ final class StreamSession {
     /// Last config actually sent to the server (used for change detection).
     private var lastSentConfig: StreamConfig?
 
-    /// `strokeCount` of the canvas snapshot at the last successful frame send.
-    /// If the current snapshot's `strokeCount` matches, the canvas hasn't
-    /// changed — skip the send so the pod's input buffer goes idle and can
-    /// switch to video generation. Reset to `nil` whenever config changes so
-    /// the unchanged sketch re-renders under the new prompt.
-    private var lastSentStrokeCount: Int?
+    /// JPEG bytes of the last successfully sent frame. Used to skip sending
+    /// identical frames when the canvas hasn't changed. Cleared on config
+    /// change so the unchanged sketch re-generates under the new prompt.
+    private var lastSentJpegData: Data?
 
     /// Current connection state, observed by AppCoordinator.
     private(set) var connectionState: ConnectionState = .disconnected
@@ -102,7 +100,7 @@ final class StreamSession {
         self.reconnectAttempts = 0
         self.framesSent = 0
         self.framesReceived = 0
-        self.lastSentStrokeCount = nil
+        self.lastSentJpegData = nil
 
         await connectAndRun()
     }
@@ -186,23 +184,20 @@ final class StreamSession {
                 // Send config update if it changed since last send
                 await self.sendConfigIfChanged()
 
-                let result: (Data, Int)? = await MainActor.run {
+                let jpeg: Data? = await MainActor.run {
                     guard let snapshot = self.canvasViewModel.captureSnapshot() else { return nil }
-                    // Dirty check: skip if the canvas hasn't changed since the
-                    // last successful send. `strokeCount` increments on every
-                    // stroke-end, erase, undo, redo, clear, and background change.
-                    if snapshot.strokeCount == self.lastSentStrokeCount {
-                        return nil
-                    }
                     guard let resized = self.resizeImage(snapshot.image, to: Self.captureSize) else { return nil }
                     guard let data = resized.jpegData(compressionQuality: 0.7) else { return nil }
-                    return (data, snapshot.strokeCount)
+                    // Skip if the rendered output hasn't changed since last send.
+                    // Catches all visual changes: mid-stroke, eraser, lasso, undo.
+                    if data == self.lastSentJpegData { return nil }
+                    return data
                 }
 
-                if let (jpeg, strokeCount) = result {
+                if let jpeg {
                     do {
                         try await self.client.sendFrame(jpeg)
-                        await MainActor.run { self.lastSentStrokeCount = strokeCount }
+                        await MainActor.run { self.lastSentJpegData = jpeg }
                         count += 1
                         await self.setFramesSent(count)
                         if count == 1 || count % 30 == 0 {
@@ -212,7 +207,7 @@ final class StreamSession {
                         print("[Stream] Send error: \(error)")
                     }
                 } else if count == 0 {
-                    print("[Stream] captureSnapshot returned nil or unchanged (canvas empty?)")
+                    print("[Stream] captureSnapshot returned nil (canvas empty?)")
                 }
 
                 let interval = await self.captureInterval
@@ -231,7 +226,7 @@ final class StreamSession {
         do {
             try await client.sendConfig(current)
             lastSentConfig = current
-            lastSentStrokeCount = nil
+            lastSentJpegData = nil
             print("[Stream] Config auto-sent: prompt=\(current.prompt ?? "(none)")")
         } catch {
             print("[Stream] Config send error: \(error)")
