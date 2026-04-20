@@ -107,12 +107,6 @@ struct FloatingResultPanel: View {
                 Color(.systemGray6)
             }
 
-        case .videoStreaming(_, let latestFrame, _):
-            pickableImage(latestFrame).padding(4)
-
-        case .videoLooping(_, let fallbackImage):
-            pickableImage(fallbackImage).padding(4)
-
         case .empty:
             Color(.systemGray6)
         }

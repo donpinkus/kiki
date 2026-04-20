@@ -34,7 +34,6 @@ final class StreamSession {
     private var captureTask: Task<Void, Never>?
     private var receiveTask: Task<Void, Never>?
     private var statusTask: Task<Void, Never>?
-    private var videoTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
 
     /// How often to capture and send frames (default ~2 FPS for FLUX.2-klein).
@@ -59,13 +58,6 @@ final class StreamSession {
 
     /// Called when a new generated image frame is received.
     var onImageReceived: ((UIImage) -> Void)?
-
-    /// Called when the pod emits a video-animation event (LTXV-generated
-    /// animation of the last generated still, played while the user is idle).
-    var onVideoEvent: ((StreamWebSocketClient.VideoEvent) -> Void)?
-
-    /// Called when the pod reports whether LTXV video generation is available.
-    var onVideoReadyChanged: ((Bool) -> Void)?
 
     /// Called when connection state changes.
     var onConnectionStateChanged: ((ConnectionState) -> Void)?
@@ -139,7 +131,6 @@ final class StreamSession {
             print("[Stream] Initial config sent")
 
             startReceiveLoop()
-            startVideoLoop()
             startCaptureLoop()
         } catch {
             print("[Stream] Connection failed: \(error.localizedDescription) (stopped=\(isStopped))")
@@ -291,10 +282,6 @@ final class StreamSession {
                         // Re-send config now that the server is ready to accept it.
                         // The initial config may have been sent during provisioning.
                         self.lastSentConfig = nil
-                        // Surface video availability to the coordinator.
-                        if let videoReady = status.videoReady {
-                            self.onVideoReadyChanged?(videoReady)
-                        }
                     } else if (status.type == "status" && status.status == "error") || status.type == "error" {
                         // Server-sent error (e.g. provisioning failed). Reset
                         // reconnect counter since the next connection is a fresh
@@ -303,21 +290,6 @@ final class StreamSession {
                         self.reconnectAttempts = 0
                         self.updateConnectionState(.error(status.message ?? "Server error"))
                     }
-                }
-            }
-        }
-    }
-
-    // MARK: - Video Loop
-
-    private func startVideoLoop() {
-        videoTask = Task { [weak self] in
-            guard let self else { return }
-            let events = await client.videoEvents
-            for await event in events {
-                guard !Task.isCancelled else { break }
-                await MainActor.run {
-                    self.onVideoEvent?(event)
                 }
             }
         }
@@ -340,8 +312,6 @@ final class StreamSession {
         receiveTask = nil
         statusTask?.cancel()
         statusTask = nil
-        videoTask?.cancel()
-        videoTask = nil
         reconnectTask?.cancel()
         reconnectTask = nil
     }

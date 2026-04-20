@@ -7,31 +7,20 @@ Protocol:
 
   Server -> Client:
     - Text frame (JSON): { "type": "status", "status": "ready" | "warmup" | "error", "message": "..." }
-    - Binary frame: Generated JPEG bytes (img2img result)
-    - Text frame (JSON): { "type": "video_frame", "data": "<base64 JPEG>" } — one
-      per decoded LTXV animation frame, sent while the user is idle
-    - Text frame (JSON): { "type": "video_complete", "data": "<base64 MP4>" }
-    - Text frame (JSON): { "type": "video_cancelled" }
+    - Binary frame: Generated JPEG bytes
 
 Frame dropping:
   The client may send frames faster than the server can generate (~1 FPS).
   Only the latest frame is kept; older frames are dropped. This prevents
   frame queue buildup and keeps the output responsive to the current sketch.
-
-Video generation:
-  When the input buffer is empty and we have a last-generated still,
-  `video_loop` kicks off LTXV animation on the GPU. Arrival of a new
-  input frame cancels the in-flight video generation.
 """
 from __future__ import annotations
 
 import asyncio
-import base64
 import io
 import json
 import logging
 import random
-import threading
 import time
 from contextlib import asynccontextmanager
 
@@ -41,12 +30,6 @@ from PIL import Image
 
 import config
 from pipeline import FluxKleinPipeline
-from video_pipeline import (
-    LtxvVideoPipeline,
-    VideoCancelled,
-    encode_mp4,
-    frames_to_jpeg,
-)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -54,21 +37,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Shared serialization point across FLUX and LTXV — PyTorch isn't thread-safe
-# and both pipelines would otherwise interleave CUDA kernels on the same stream.
-gpu_lock = threading.Lock()
-
-pipeline = FluxKleinPipeline(gpu_lock)
-video_pipeline = LtxvVideoPipeline(gpu_lock)
+pipeline = FluxKleinPipeline()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Load the model(s) on startup."""
+    """Load the model on startup."""
     logger.info("Starting FLUX.2-klein server...")
     pipeline.load()
-    # LTXV is optional — if it fails to load, the server still serves img2img.
-    video_pipeline.load()
     yield
     logger.info("Shutting down.")
 
@@ -79,7 +55,6 @@ app = FastAPI(lifespan=lifespan)
 @app.get("/health")
 async def health():
     info = pipeline.get_info()
-    info.update(video_pipeline.get_info())
     return {
         "status": "ok" if pipeline.ready else "loading",
         **info,
@@ -92,17 +67,9 @@ async def websocket_stream(ws: WebSocket):
     client_id = id(ws)
     logger.info("Client %d connected", client_id)
 
-    # Send initial status. Include video_ready so the client knows whether
-    # LTXV animation is available for this session.
-    def _ready_status() -> dict:
-        return {
-            "type": "status",
-            "status": "ready",
-            "video_ready": video_pipeline.ready,
-        }
-
+    # Send initial status
     if pipeline.ready:
-        await ws.send_text(json.dumps(_ready_status()))
+        await ws.send_text(json.dumps({"type": "status", "status": "ready"}))
     else:
         await ws.send_text(json.dumps({
             "type": "status",
@@ -111,7 +78,7 @@ async def websocket_stream(ws: WebSocket):
         }))
         while not pipeline.ready:
             await asyncio.sleep(0.5)
-        await ws.send_text(json.dumps(_ready_status()))
+        await ws.send_text(json.dumps({"type": "status", "status": "ready"}))
 
     # Per-connection state. Default seed is random-per-session (not per-frame)
     # so output is stable when the sketch doesn't change. Client can override.
@@ -131,17 +98,6 @@ async def websocket_stream(ws: WebSocket):
     frames_dropped = 0
     session_start = time.time()
     done = False
-
-    # ── Video-generation state (LTXV) ────────────────────────────────────
-    # The most recent generated still, used as the first-frame keyframe for
-    # video generation. Reset whenever a new img2img result is produced.
-    last_generated: Image.Image | None = None
-    # Guards against re-generating a video for the same still more than once.
-    video_done_for_last = False
-    # Set to abort an in-flight LTXV generation when a new sketch arrives.
-    video_cancel_event = threading.Event()
-    video_task: asyncio.Task | None = None
-    videos_generated = 0
 
     async def receive_loop():
         """Read messages from the client. Keep only the latest binary frame."""
@@ -184,24 +140,19 @@ async def websocket_stream(ws: WebSocket):
                         frames_dropped += 1
                     latest_frame = message["bytes"]
                     frames_received += 1
-                    # User is drawing again — abort any running video generation.
-                    video_cancel_event.set()
                     frame_event.set()
 
         except WebSocketDisconnect:
             done = True
-            video_cancel_event.set()
             frame_event.set()
         except Exception as e:
             logger.error("Client %d receive error: %s", client_id, e)
             done = True
-            video_cancel_event.set()
             frame_event.set()
 
     async def process_loop():
         """Process the latest frame whenever one is available."""
         nonlocal latest_frame, frames_processed, done
-        nonlocal last_generated, video_done_for_last
 
         while not done:
             await frame_event.wait()
@@ -218,25 +169,10 @@ async def websocket_stream(ws: WebSocket):
 
             try:
                 cfg = dict(current_config)
-                result_jpeg, result_image = await asyncio.to_thread(
-                    _process_frame, jpeg_data, cfg
-                )
+                result_jpeg = await asyncio.to_thread(_process_frame, jpeg_data, cfg)
                 if not done:
                     await ws.send_bytes(result_jpeg)
                     frames_processed += 1
-                    # Stash the PIL result as the keyframe for any future video
-                    # generation. Reset the once-per-still guard so the video
-                    # loop can pick this still up on the next idle window.
-                    #
-                    # NOTE: do NOT clear `video_cancel_event` here. The previous
-                    # in-flight video task's per-step callback may not have
-                    # observed the set yet — clearing now would let it complete
-                    # for the *previous* still and incorrectly mark
-                    # `video_done_for_last`. `video_loop` clears the flag itself
-                    # right before launching the next task, after confirming any
-                    # prior task is done.
-                    last_generated = result_image
-                    video_done_for_last = False
             except Exception as e:
                 logger.error("Frame processing error: %s", e, exc_info=True)
                 if not done:
@@ -249,137 +185,24 @@ async def websocket_stream(ws: WebSocket):
                     except Exception:
                         pass
 
-    async def run_video_generation():
-        """Generate an LTXV animation for the current `last_generated` still
-        and stream frames + MP4 back to the client. Any new sketch arriving
-        during generation aborts via `video_cancel_event`."""
-        nonlocal videos_generated, video_done_for_last
-
-        if last_generated is None:
-            return
-        keyframe = last_generated
-        prompt = str(current_config.get("prompt") or "")
-        seed = current_config.get("seed")
-
-        logger.info(
-            "Client %d: starting LTXV animation (prompt='%s', %d frames, %dx%d)",
-            client_id, prompt[:50], config.LTXV_NUM_FRAMES,
-            config.LTXV_WIDTH, config.LTXV_HEIGHT,
-        )
-        t0 = time.time()
-
-        try:
-            frames = await asyncio.to_thread(
-                video_pipeline.generate,
-                keyframe, prompt, video_cancel_event, seed,
-            )
-        except VideoCancelled:
-            logger.info("Client %d: LTXV cancelled by user", client_id)
-            if not done:
-                try:
-                    await ws.send_text(json.dumps({"type": "video_cancelled"}))
-                except Exception:
-                    pass
-            return
-        except Exception as e:  # noqa: BLE001
-            logger.error("Client %d: LTXV error: %s", client_id, e, exc_info=True)
-            return
-
-        if done or video_cancel_event.is_set():
-            return
-
-        # Stream decoded frames one at a time so the client can start playback
-        # before the MP4 arrives. If cancelled between frames, bail out.
-        for frame in frames:
-            if done or video_cancel_event.is_set():
-                if not done:
-                    try:
-                        await ws.send_text(json.dumps({"type": "video_cancelled"}))
-                    except Exception:
-                        pass
-                return
-            try:
-                jpeg = frames_to_jpeg(frame, quality=config.OUTPUT_JPEG_QUALITY)
-                await ws.send_text(json.dumps({
-                    "type": "video_frame",
-                    "data": base64.b64encode(jpeg).decode("ascii"),
-                }))
-            except Exception as e:  # noqa: BLE001
-                logger.warning("Client %d: video_frame send failed: %s", client_id, e)
-                return
-
-        # Encode the full MP4 for smooth looping on the client.
-        try:
-            mp4 = await asyncio.to_thread(
-                encode_mp4, frames, config.LTXV_FPS, config.LTXV_OUTPUT_CRF,
-            )
-            if done:
-                return
-            await ws.send_text(json.dumps({
-                "type": "video_complete",
-                "data": base64.b64encode(mp4).decode("ascii"),
-            }))
-            video_done_for_last = True
-            videos_generated += 1
-            logger.info(
-                "Client %d: LTXV done in %.1fs (%d frames, %d bytes MP4)",
-                client_id, time.time() - t0, len(frames), len(mp4),
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.error("Client %d: MP4 encode failed: %s", client_id, e, exc_info=True)
-
-    async def video_loop():
-        """Poll for idle windows (no input frame, no in-flight generation) and
-        kick off LTXV animation. Runs concurrently with receive/process loops."""
-        nonlocal video_task
-
-        if not video_pipeline.ready:
-            return
-        # Small wait so the initial warmup img2img frame has a chance to land.
-        await asyncio.sleep(0.5)
-        while not done:
-            await asyncio.sleep(0.1)
-            if done:
-                break
-            if latest_frame is not None:
-                continue
-            if last_generated is None:
-                continue
-            if video_done_for_last:
-                continue
-            if video_task is not None and not video_task.done():
-                continue
-            # Clear the abort flag just before we launch so stale signals from
-            # the previous generation don't carry over.
-            video_cancel_event.clear()
-            video_task = asyncio.create_task(run_video_generation())
-
-    # Run all loops concurrently
+    # Run both loops concurrently
     try:
-        await asyncio.gather(receive_loop(), process_loop(), video_loop())
+        await asyncio.gather(receive_loop(), process_loop())
     except Exception as e:
         logger.error("WebSocket error for client %d: %s", client_id, e, exc_info=True)
     finally:
-        # Make sure any in-flight video generation stops cleanly.
-        video_cancel_event.set()
-        if video_task is not None and not video_task.done():
-            video_task.cancel()
         elapsed = time.time() - session_start
         fps = frames_processed / elapsed if elapsed > 0 else 0
         logger.info(
-            "Client %d disconnected. Received %d, processed %d, dropped %d, "
-            "videos %d, %.1f FPS over %.1fs",
-            client_id, frames_received, frames_processed, frames_dropped,
-            videos_generated, fps, elapsed,
+            "Client %d disconnected. Received %d, processed %d, dropped %d, %.1f FPS over %.1fs",
+            client_id, frames_received, frames_processed, frames_dropped, fps, elapsed,
         )
 
 
-def _process_frame(jpeg_data: bytes, cfg: dict) -> tuple[bytes, Image.Image]:
+def _process_frame(jpeg_data: bytes, cfg: dict) -> bytes:
     """Decode JPEG, run through pipeline, encode result as JPEG.
 
-    Returns the encoded JPEG bytes plus the PIL result so the caller can
-    reuse it as a keyframe for subsequent LTXV animation. Runs in a thread
-    to avoid blocking the event loop.
+    Runs in a thread to avoid blocking the event loop.
     """
     image = Image.open(io.BytesIO(jpeg_data)).convert("RGB")
     image = image.resize((config.DEFAULT_WIDTH, config.DEFAULT_HEIGHT), Image.LANCZOS)
@@ -393,7 +216,7 @@ def _process_frame(jpeg_data: bytes, cfg: dict) -> tuple[bytes, Image.Image]:
 
     buffer = io.BytesIO()
     output.save(buffer, format="JPEG", quality=config.OUTPUT_JPEG_QUALITY)
-    return buffer.getvalue(), output
+    return buffer.getvalue()
 
 
 if __name__ == "__main__":

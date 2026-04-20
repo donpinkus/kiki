@@ -20,9 +20,8 @@ ENV HF_HUB_DISABLE_TELEMETRY=1
 
 # ─── Layer 1: OS deps ───────────────────────────────────────────────────
 # git is needed to pip-install diffusers from source.
-# ffmpeg is used by the LTXV video pipeline to encode the final looping MP4.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git ffmpeg \
+ && apt-get install -y --no-install-recommends git \
  && rm -rf /var/lib/apt/lists/*
 
 # ─── Layer 2: Python deps ───────────────────────────────────────────────
@@ -32,7 +31,7 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt \
 
 # ─── Layer 3: server code ───────────────────────────────────────────────
 WORKDIR /app
-COPY server.py pipeline.py video_pipeline.py config.py /app/
+COPY server.py pipeline.py config.py /app/
 
 # Offline mode — weights are on the network volume; refuse network lookups so
 # a transient DNS issue doesn't trigger a silent re-download.
@@ -41,9 +40,6 @@ ENV HF_HUB_OFFLINE=1
 ENV FLUX_HOST=0.0.0.0
 ENV FLUX_PORT=8766
 ENV FLUX_USE_NVFP4=1
-# LTXV 2B distilled animates the last generated still while the user is idle.
-# Both FLUX.2-klein (~8 GB) and LTXV 2B (~4 GB) stay resident on the 5090.
-ENV KIKI_ENABLE_VIDEO=1
 
 EXPOSE 8766
 

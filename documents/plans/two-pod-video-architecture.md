@@ -2,6 +2,12 @@
 
 > GitHub Issue: #25
 > Status: Blocked on stabilizing single-pod FLUX flow first
+>
+> Video code was fully implemented and working (except OOM) in commits
+> `e00a1e2..89908a6` on main (2026-04-19). All video code was then removed
+> in a cleanup commit to stabilize the image-only flow. Use `git log --oneline
+> e00a1e2..89908a6` to see the full video implementation history and
+> `git show <sha>` to recover any specific file.
 
 ## Why This Exists
 
