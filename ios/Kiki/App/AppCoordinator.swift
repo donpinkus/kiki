@@ -149,7 +149,7 @@ final class AppCoordinator {
     var streamSeed: Int? { didSet { syncStreamConfig() } }
 
     /// Capture FPS for stream mode.
-    var streamCaptureFPS: Double = 2 {
+    var streamCaptureFPS: Double = 5 {
         didSet { streamSession?.captureInterval = 1.0 / streamCaptureFPS }
     }
 
