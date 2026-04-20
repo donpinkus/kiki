@@ -95,6 +95,7 @@ Data flows one direction: Canvas → Network → Result. Modules communicate thr
 | RunPod deploy, provider ops, network volumes | `documents/references/provider-config.md` |
 | Pod lifecycle edge cases (MUST-handle matrix)          | `backend/src/modules/orchestrator/orchestrator.ts` (file header) |
 | Two-pod video architecture (LTXV split) plan + context | `documents/plans/two-pod-video-architecture.md` + GitHub #25 |
+| UX test cases (must-pass manual checklist)              | `documents/test-cases.md` |
 | Cost monitoring, Discord alerts, pod lifecycle threads | `backend/src/modules/orchestrator/costMonitor.ts` |
 | Scale-to-100-users roadmap + workstream status | `documents/plans/scale-to-100-users.md` |
 | Metal canvas architecture plan (layers, smudge, etc.) | `documents/plans/metal-canvas-rewrite.md` |
