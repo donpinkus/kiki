@@ -518,6 +518,16 @@ public final class CanvasRenderer {
                 enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
             }
         }
+
+        // Draw floating selection (if lasso is active) at current transform.
+        if let selTex = selectionTexture, let selVB = selectionVertexBuffer {
+            enc.setFragmentTexture(selTex, index: 0)
+            enc.setFragmentBytes(&opacity, length: MemoryLayout<Float>.size, index: 0)
+            enc.setVertexBuffer(selVB, offset: 0, index: 0)
+            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+            enc.setVertexBuffer(quadVertexBuffer, offset: 0, index: 0)
+        }
+
         enc.endEncoding()
 
         cmdBuf.commit()
