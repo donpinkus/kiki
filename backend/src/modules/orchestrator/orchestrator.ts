@@ -25,12 +25,12 @@
  * │                                     │                                                  │ status='replacing' check in  │
  * │                                     │                                                  │ getOrProvisionPod.           │
  * ├─────────────────────────────────────┼──────────────────────────────────────────────────┼──────────────────────────────┤
- * │ 2. Pod vanishes during provisioning │ Pod created on RunPod but disappears before      │ waitForRuntime detects null   │
- * │    (spot preempted before boot)     │ container starts. getPod() returns null.          │ from getPod() and throws     │
- * │                                     │                                                  │ immediately (no 10min wait). │
- * │                                     │                                                  │ Provision promise rejects →  │
- * │                                     │                                                  │ stream.ts abortSession →     │
- * │                                     │                                                  │ client gets error, can retry. │
+ * │ 2. Pod vanishes during provisioning │ Pod created on RunPod but disappears before      │ waitForRuntime / waitForHealth│
+ * │    (spot preempted before serving)  │ becoming serve-ready. getPod() returns null.      │ throw PodVanishedError;       │
+ * │                                     │                                                  │ provision()'s reroll loop     │
+ * │                                     │                                                  │ blacklists the DC and retries.│
+ * │                                     │                                                  │ Only after rerolls exhausted  │
+ * │                                     │                                                  │ does abortSession fire.       │
  * ├─────────────────────────────────────┼──────────────────────────────────────────────────┼──────────────────────────────┤
  * │ 3. Pod errors during provisioning   │ Container pulls but server.py crashes on startup │ waitForHealth polls /health;  │
  * │    (e.g. Python import error)       │ (e.g. missing dep, bad config). Pod is running   │ if pod runtime is up but      │
@@ -75,10 +75,17 @@
  * │                                     │                                                  │ within window, reuses pod.   │
  * │                                     │                                                  │ If >10min, fresh provision.  │
  * ├─────────────────────────────────────┼──────────────────────────────────────────────────┼──────────────────────────────┤
- * │ 10. Docker image pull fails         │ Pod created but container never starts.           │ waitForRuntime times out     │
- * │     (manifest unknown, registry     │ getPod() returns pod with runtime=null            │ after 10min → abortSession.  │
- * │     down, wrong tag)                │ indefinitely.                                    │ FLUX_IMAGE uses :latest to   │
- * │                                     │                                                  │ avoid SHA mismatch.          │
+ * │ 10. Docker image pull stalls on     │ Pod created but runtime stays null. GHCR blob    │ waitForRuntime throws        │
+ * │     a bad RunPod host (known to     │ serve or host-network stall indistinguishable     │ ImagePullStallError after    │
+ * │     happen on GHCR + spot).         │ from the outside — pod.runtime stays null.        │ CONTAINER_PULL_STALL_MS      │
+ * │                                     │                                                  │ (default 120s). provision()  │
+ * │                                     │                                                  │ terminates pod, blacklists   │
+ * │                                     │                                                  │ the DC, and rerolls up to    │
+ * │                                     │                                                  │ CONTAINER_PULL_MAX_REROLLS.  │
+ * │                                     │                                                  │ Sentry captures each stall.  │
+ * │                                     │                                                  │ 10-min hard timeout remains  │
+ * │                                     │                                                  │ as a safety net when the     │
+ * │                                     │                                                  │ watchdog is disabled.        │
  * └─────────────────────────────────────┴──────────────────────────────────────────────────┴──────────────────────────────┘
  */
 
@@ -87,6 +94,7 @@ import { chmodSync, writeFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { FastifyBaseLogger } from 'fastify';
+import * as Sentry from '@sentry/node';
 
 import { config } from '../../config/index.js';
 import { getRedis, ensureRedis, setLogger as setRedisLogger } from '../redis/client.js';
@@ -102,7 +110,18 @@ import {
 } from './runpodClient.js';
 import { getPolicy } from './policy.js';
 import { notifyPodCreated, notifyPodProgress, notifyPodTerminated } from './costMonitor.js';
-import { incrementCounter, observeHistogram, setGauge, classifyProvisionError } from './metrics.js';
+import { ImagePullStallError, PodVanishedError, classifyProvisionError } from './errorClassification.js';
+import {
+  trackPodProvisionStarted,
+  trackPodProvisionCompleted,
+  trackPodProvisionFailed,
+  trackPodProvisionStalled,
+  trackPodProvisionVanished,
+  trackPodReplacementExhausted,
+  trackPodTerminated,
+} from '../analytics/index.js';
+
+export { ImagePullStallError } from './errorClassification.js';
 
 // ────────────────────────────────────────────────────────────────────────────
 // Types
@@ -237,10 +256,15 @@ async function deleteSession(sessionId: string): Promise<void> {
  * Never throws. Logs + swallows individual failures so callers on an error
  * path aren't pushed further off the rails.
  */
-export async function abortSession(sessionId: string): Promise<void> {
+export async function abortSession(
+  sessionId: string,
+  reason: 'manual' | 'error' = 'error',
+): Promise<void> {
   try {
     const session = await readSession(sessionId);
     if (session?.podId) {
+      const lifetimeMs = session.createdAt > 0 ? Date.now() - session.createdAt : 0;
+      trackPodTerminated({ userId: sessionId, reason, lifetimeMs });
       terminatePod(session.podId).catch((err) =>
         log.warn({ sessionId, podId: session.podId, err: (err as Error).message }, 'abortSession: terminatePod failed'),
       );
@@ -345,7 +369,6 @@ export async function getOrProvisionPod(
 
   // 4. Fresh provision — claim in Redis + start
   const now = Date.now();
-  incrementCounter('provision_start_total');
   await writeSession({
     sessionId,
     podId: null,
@@ -365,9 +388,6 @@ export async function getOrProvisionPod(
       try {
         const result = await provision(sessionId, onStatus);
         provisionedPodId = result.podId;
-        const elapsedMs = Date.now() - now;
-        incrementCounter('provision_success_total');
-        observeHistogram('provision_total_ms', elapsedMs);
         await writeSession({
           sessionId,
           podId: result.podId,
@@ -385,8 +405,6 @@ export async function getOrProvisionPod(
     } catch (err) {
       const elapsedMs = Date.now() - now;
       const category = classifyProvisionError(err as Error);
-      incrementCounter('provision_failed_total', { category });
-      observeHistogram('provision_failed_ms', elapsedMs);
       log.error({ sessionId, err, category, elapsedMs }, 'Provision failed');
       if (provisionedPodId) {
         notifyPodProgress(provisionedPodId, `❌ **Failed:** ${(err as Error).message}`);
@@ -415,10 +433,17 @@ export function touch(sessionId: string): void {
     .catch((err) => log.warn({ err: (err as Error).message, sessionId }, 'touch failed'));
 }
 
-/** Check if a user already has a ready pod — used to skip rate limiting on reconnect. */
+/**
+ * Check if a user already has an active pod — used to skip rate limiting on
+ * reconnect. "Active" includes `provisioning` and `replacing`, not just
+ * `ready`: a user navigating away and back during cold start is reconnecting
+ * to their existing in-flight pod, not creating a new one. Treating this as
+ * a fresh provision triggers spurious `too_many_active_pods` rejections.
+ */
 export async function hasReadySession(sessionId: string): Promise<boolean> {
   const session = await readSession(sessionId);
-  return session?.status === 'ready' && !!session.podUrl;
+  if (!session) return false;
+  return session.status === 'ready' || session.status === 'provisioning' || session.status === 'replacing';
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -471,7 +496,10 @@ export async function replaceSession(
   if (!session) throw new Error('No session to replace');
 
   if (session.replacementCount >= config.MAX_SESSION_REPLACEMENTS) {
-    incrementCounter('session_replacement_exhausted_total');
+    trackPodReplacementExhausted({
+      userId: sessionId,
+      maxAttempts: config.MAX_SESSION_REPLACEMENTS,
+    });
     await deleteSession(sessionId);
     throw new Error(`Replacement limit reached (${config.MAX_SESSION_REPLACEMENTS} attempts)`);
   }
@@ -480,7 +508,6 @@ export async function replaceSession(
   const attempt = session.replacementCount + 1;
 
   log.info({ sessionId, oldPodId, attempt }, 'Starting session replacement');
-  incrementCounter('session_replacement_started_total');
 
   // Mark as replacing in Redis
   await writeSession({
@@ -492,7 +519,12 @@ export async function replaceSession(
 
   // Clean up old pod (fire-and-forget — may already be gone)
   if (oldPodId) {
-    terminatePod(oldPodId).catch(() => {});
+    terminatePod(oldPodId).catch((e) =>
+      log.warn(
+        { sessionId, oldPodId, err: (e as Error).message },
+        'Failed to terminate old pod during replacement — will be reaped',
+      ),
+    );
   }
 
   const t0 = Date.now();
@@ -516,8 +548,6 @@ export async function replaceSession(
       });
 
       log.info({ sessionId, oldPodId, newPodId: result.podId, replacementMs, attempt }, 'Session replaced');
-      incrementCounter('session_replacement_succeeded_total');
-      observeHistogram('provision_total_ms', replacementMs);
 
       return { podUrl: result.podUrl };
     } finally {
@@ -525,16 +555,29 @@ export async function replaceSession(
     }
   } catch (err) {
     log.error({ sessionId, attempt, err }, 'Session replacement failed');
-    incrementCounter('session_replacement_failed_total');
+    Sentry.captureException(err, {
+      tags: { sessionId, attempt: String(attempt), phase: 'session_replacement' },
+    });
     // If provision() succeeded but a later step threw (e.g. writeSession),
     // the new pod is running with no Redis pointer. Terminate it so we don't
     // leak. The old pod was already terminated above (line 372).
     if (newPodId) {
-      terminatePod(newPodId).catch((e) =>
-        log.warn({ sessionId, newPodId, err: (e as Error).message }, 'Failed to clean up replacement pod'),
-      );
+      terminatePod(newPodId).catch((e) => {
+        log.warn({ sessionId, newPodId, err: (e as Error).message }, 'Failed to clean up replacement pod');
+        Sentry.captureException(e, {
+          tags: { sessionId, phase: 'replacement_pod_cleanup' },
+        });
+      });
     }
-    await deleteSession(sessionId).catch(() => {});
+    await deleteSession(sessionId).catch((delErr) => {
+      log.error(
+        { sessionId, err: (delErr as Error).message },
+        'Failed to delete session after replacement failure',
+      );
+      Sentry.captureException(delErr, {
+        tags: { sessionId, phase: 'replacement_session_cleanup' },
+      });
+    });
     throw err;
   }
 }
@@ -581,24 +624,21 @@ export async function start(logger: FastifyBaseLogger): Promise<void> {
 // ────────────────────────────────────────────────────────────────────────────
 
 async function acquireSemaphore(onStatus: (msg: string) => void): Promise<void> {
-  setGauge('semaphore_active', activeProvisions);
-  setGauge('semaphore_queue_depth', semaphoreWaiters.length);
   if (activeProvisions < MAX_CONCURRENT_PROVISIONS) {
     activeProvisions++;
-    setGauge('semaphore_active', activeProvisions);
     return;
   }
   const queuedAt = Date.now();
   const queueDepth = semaphoreWaiters.length + 1;
   log.info({ active: activeProvisions, cap: MAX_CONCURRENT_PROVISIONS, queueDepth }, 'Provision queued');
   onStatus(`Waiting for GPU (${queueDepth} in queue)...`);
-  await new Promise<void>((resolve) => semaphoreWaiters.push(resolve));
+  await Sentry.startSpan(
+    { name: 'pod.semaphore_wait', op: 'pod.semaphore_wait', attributes: { queueDepth } },
+    () => new Promise<void>((resolve) => semaphoreWaiters.push(resolve)),
+  );
   activeProvisions++;
   const waitedMs = Date.now() - queuedAt;
-  incrementCounter('semaphore_wait_total');
-  observeHistogram('semaphore_wait_ms', waitedMs);
-  setGauge('semaphore_active', activeProvisions);
-  setGauge('semaphore_queue_depth', semaphoreWaiters.length);
+  log.info({ waitedMs, active: activeProvisions }, 'Provision dequeued');
 }
 
 function releaseSemaphore(): void {
@@ -640,8 +680,7 @@ async function runReaper(): Promise<void> {
         const createdAt = Number(data['createdAt'] ?? 0);
         const lifetimeMs = createdAt > 0 ? now - createdAt : 0;
         log.info({ sessionId, podId, idleMs, lifetimeMs }, 'Reaping idle pod');
-        incrementCounter('session_reaped_total');
-        if (lifetimeMs > 0) observeHistogram('session_lifetime_ms', lifetimeMs);
+        trackPodTerminated({ userId: sessionId, reason: 'idle', lifetimeMs });
         notifyPodTerminated(podId, `idle ${Math.round(idleMs / 1000)}s`);
         terminatePod(podId)
           .then(() => redis.del(key))
@@ -745,69 +784,254 @@ interface ProvisionResult {
   podType: PodType;
 }
 
+type ProvisionPhase =
+  | 'placement'
+  | 'pod_create'
+  | 'runtime_up'
+  | 'setup'
+  | 'health_check';
+
 async function provision(sessionId: string, onStatus: (msg: string) => void): Promise<ProvisionResult> {
-  const t0 = Date.now();
+  return Sentry.startSpan(
+    { name: 'pod.provision', op: 'pod.provision', attributes: { sessionId } },
+    async (parentSpan) => {
+      const t0 = Date.now();
+      const blacklistedDcs = new Set<string>();
+      const maxRerolls = Math.max(0, config.CONTAINER_PULL_MAX_REROLLS);
 
-  // 1 + 2. Create a pod — spot first, on-demand fallback if capacity exhausted
-  const { podId, podType } = await createPodWithFallback(sessionId, onStatus);
-  const podCreateMs = Date.now() - t0;
-  incrementCounter('pod_created_total', { type: podType });
-  observeHistogram('pod_creation_ms', podCreateMs);
+      for (let attempt = 0; attempt <= maxRerolls; attempt++) {
+        let podId: string | null = null;
+        let podType: PodType | null = null;
+        let dc: string | null = null;
+        let phase: ProvisionPhase = 'placement';
+        const attemptStart = Date.now();
+        let phaseStart = attemptStart;
+        const phaseTimings: Record<string, number> = {};
 
-  // If any subsequent step fails, terminate the pod we just created to prevent
-  // cost leaks. This matters especially for replaceSession() which calls
-  // provision() directly without its own pod cleanup.
-  try {
+        trackPodProvisionStarted({
+          userId: sessionId,
+          attempt,
+          excludedDcs: Array.from(blacklistedDcs),
+        });
 
-  // 3. Wait for the container to boot. In baked mode the image is slim (~2-3
-  // GB) but the very first pull to a host in a DC can still take a few minutes.
-  const pullStart = Date.now();
-  onStatus('Pulling container image...');
-  notifyPodProgress(podId, '⏳ Pulling container image...');
-  await waitForRuntime(podId, onStatus);
-  const pullMs = Date.now() - pullStart;
-  observeHistogram('container_pull_ms', pullMs);
-  notifyPodProgress(podId, `📦 Container runtime up (${Math.round(pullMs / 1000)}s)`);
+        try {
+          phase = 'pod_create';
 
-  if (config.FLUX_PROVISION_MODE !== 'baked') {
-    const sshInfo = await waitForSsh(podId);
-    log.info({ sessionId, podId, ssh: `${sshInfo.ip}:${sshInfo.port}` }, 'Pod SSH ready');
+          // 1 + 2. Create a pod — spot first, on-demand fallback if capacity exhausted
+          const created = await Sentry.startSpan(
+            { name: 'pod.create', op: 'pod.create', attributes: { sessionId, attempt } },
+            () => createPodWithFallback(sessionId, onStatus, blacklistedDcs),
+          );
+          podId = created.podId;
+          podType = created.podType;
+          dc = created.dc;
 
-    onStatus('Installing server...');
-    notifyPodProgress(podId, '🔧 Installing server...');
-    await scpFiles(sshInfo);
-    onStatus('Downloading AI model (~2 min)...');
-    notifyPodProgress(podId, '⬇️ Downloading AI model...');
-    await runSetup(sshInfo, (line) => {
-      if (line.includes('Downloading') && line.includes('FLUX.2-klein')) onStatus('Downloading AI model...');
-      else if (line.includes('Warming up')) onStatus('Warming up...');
-    });
-  }
+          phaseTimings.pod_create_ms = Date.now() - phaseStart;
+          phaseStart = Date.now();
 
-  // 4. Poll /health via RunPod proxy until the FLUX server reports ready
-  const healthStart = Date.now();
-  onStatus('Loading AI model & warming up...');
-  notifyPodProgress(podId, '🧠 Loading AI model & warming up...');
-  const healthUrl = `https://${podId}-8766.proxy.runpod.net/health`;
-  await waitForHealth(healthUrl);
-  observeHistogram('health_ready_ms', Date.now() - healthStart);
+          Sentry.addBreadcrumb({
+            category: 'provision',
+            level: 'info',
+            message: 'Pod created',
+            data: { podId, dc, podType, attempt, podCreateMs: phaseTimings.pod_create_ms },
+          });
 
-  const totalMs = Date.now() - t0;
+          // If any subsequent step fails, terminate the pod we just created to prevent
+          // cost leaks. This matters especially for replaceSession() which calls
+          // provision() directly without its own pod cleanup.
+          try {
+            // 3. Wait for the container to boot. In baked mode the image is slim (~2-3
+            // GB) but the very first pull to a host in a DC can still take a few minutes.
+            // Wall-clock window: image pull (dominant) + container start +
+            // runtime registration. Internally `runtime_up` because that's
+            // the gate (`pod.runtime` field becoming non-null); the
+            // user-facing string emphasizes the dominant cost.
+            phase = 'runtime_up';
+            onStatus('Pulling container image...');
+            notifyPodProgress(podId, '⏳ Pulling container image...');
+            await Sentry.startSpan(
+              { name: 'pod.runtime_up', op: 'pod.runtime_up', attributes: { podId, dc: dc ?? 'unknown', attempt } },
+              () => waitForRuntime(podId as string, onStatus),
+            );
+            notifyPodProgress(podId, `📦 Container runtime up`);
+            phaseTimings.runtime_up_ms = Date.now() - phaseStart;
+            phaseStart = Date.now();
 
-  // 5. Build WebSocket URL and return
-  const podUrl = `wss://${podId}-8766.proxy.runpod.net/ws`;
-  log.info({ sessionId, podId, podUrl, podType, totalMs, mode: config.FLUX_PROVISION_MODE }, 'Pod ready');
-  onStatus('Ready');
-  notifyPodProgress(podId, `✅ **Pod ready** (${Math.round(totalMs / 1000)}s total)`);
-  return { podId, podUrl, podType };
-  } catch (err) {
-    // Pod was created but a later step failed — clean up to prevent cost leak.
-    log.warn({ sessionId, podId, err: (err as Error).message }, 'Provision failed after pod creation — terminating pod');
-    terminatePod(podId).catch((e) =>
-      log.warn({ podId, err: (e as Error).message }, 'Failed to terminate pod after provision failure'),
-    );
-    throw err;
-  }
+            if (config.FLUX_PROVISION_MODE !== 'baked') {
+              phase = 'setup';
+              await Sentry.startSpan(
+                { name: 'pod.setup', op: 'pod.setup', attributes: { podId, dc: dc ?? 'unknown' } },
+                async () => {
+                  const sshInfo = await waitForSsh(podId as string);
+                  log.info({ sessionId, podId, ssh: `${sshInfo.ip}:${sshInfo.port}` }, 'Pod SSH ready');
+
+                  onStatus('Installing server...');
+                  notifyPodProgress(podId as string, '🔧 Installing server...');
+                  await scpFiles(sshInfo);
+                  onStatus('Downloading AI model (~2 min)...');
+                  notifyPodProgress(podId as string, '⬇️ Downloading AI model...');
+                  await runSetup(sshInfo, (line) => {
+                    if (line.includes('Downloading') && line.includes('FLUX.2-klein')) onStatus('Downloading AI model...');
+                    else if (line.includes('Warming up')) onStatus('Warming up...');
+                  });
+                },
+              );
+              phaseTimings.setup_ms = Date.now() - phaseStart;
+              phaseStart = Date.now();
+            }
+
+            // 4. Poll /health via RunPod proxy until the FLUX server reports ready
+            phase = 'health_check';
+            onStatus('Loading AI model & warming up...');
+            notifyPodProgress(podId, '🧠 Loading AI model & warming up...');
+            const healthUrl = `https://${podId}-8766.proxy.runpod.net/health`;
+            await Sentry.startSpan(
+              { name: 'pod.health_check', op: 'pod.health_check', attributes: { podId, dc: dc ?? 'unknown' } },
+              () => waitForHealth(podId as string, healthUrl),
+            );
+            phaseTimings.health_check_ms = Date.now() - phaseStart;
+
+            const totalMs = Date.now() - t0;
+
+            // 5. Build WebSocket URL and return
+            const podUrl = `wss://${podId}-8766.proxy.runpod.net/ws`;
+            log.info(
+              { sessionId, podId, podUrl, podType, totalMs, mode: config.FLUX_PROVISION_MODE, attempt, dc },
+              'Pod ready',
+            );
+            onStatus('Ready');
+            notifyPodProgress(podId, `✅ **Pod ready** (${Math.round(totalMs / 1000)}s total)`);
+
+            parentSpan.setAttributes({
+              dc: dc ?? 'unknown',
+              podType,
+              attempt,
+              outcome: 'success',
+              mode: config.FLUX_PROVISION_MODE,
+            });
+            trackPodProvisionCompleted({
+              userId: sessionId,
+              durationMs: Date.now() - attemptStart,
+              dc,
+              podType,
+              attempt,
+              mode: config.FLUX_PROVISION_MODE,
+              phaseTimings,
+            });
+            return { podId, podUrl, podType };
+          } catch (err) {
+            // Pod was created but a later step failed — clean up to prevent cost leak.
+            log.warn(
+              { sessionId, podId, err: (err as Error).message, phase, attempt },
+              'Provision failed after pod creation — terminating pod',
+            );
+            terminatePod(podId).catch((e) =>
+              log.warn({ podId, err: (e as Error).message }, 'Failed to terminate pod after provision failure'),
+            );
+            throw err;
+          }
+        } catch (err) {
+          // Two error classes share the same recovery: the DC may be flaky
+          // (image pull stall) or pod was reclaimed (spot preemption / host
+          // failure). In both cases blacklist the DC and reroll if attempts
+          // remain. Falls through to the generic failure path on exhaustion.
+          if (err instanceof ImagePullStallError || err instanceof PodVanishedError) {
+            const errDc = err.dc ?? dc;
+            const willReroll = attempt < maxRerolls;
+            const isStall = err instanceof ImagePullStallError;
+            const errPhase: 'runtime_up' | 'health_check' = isStall ? 'runtime_up' : err.phase;
+
+            log.warn(
+              {
+                sessionId,
+                event: isStall ? 'provision.pull.stall_detected' : 'provision.pod.vanished',
+                podId: err.podId,
+                dc: errDc,
+                phase: errPhase,
+                elapsedSec: err.elapsedSec,
+                attempt,
+                willReroll,
+              },
+              isStall ? 'Image pull stalled' : 'Pod vanished during provisioning',
+            );
+            Sentry.captureMessage(isStall ? 'Image pull stalled' : 'Pod vanished during provisioning', {
+              level: 'warning',
+              tags: {
+                dc: errDc ?? 'unknown',
+                podType: podType ?? 'unknown',
+                phase: errPhase,
+                attempt: String(attempt),
+                willReroll: String(willReroll),
+              },
+              contexts: {
+                pod: { id: err.podId, sessionId, elapsedSec: err.elapsedSec },
+              },
+            });
+            if (isStall) {
+              trackPodProvisionStalled({
+                userId: sessionId,
+                dc: errDc,
+                elapsedSec: err.elapsedSec,
+                attempt,
+                willReroll,
+              });
+            } else {
+              trackPodProvisionVanished({
+                userId: sessionId,
+                dc: errDc,
+                phase: errPhase,
+                elapsedSec: err.elapsedSec,
+                attempt,
+                willReroll,
+              });
+            }
+            if (willReroll) {
+              if (errDc) blacklistedDcs.add(errDc);
+              continue;
+            }
+            // Fall through: exhausted rerolls, capture as exception below.
+          }
+
+          parentSpan.setAttributes({
+            dc: dc ?? 'unknown',
+            podType: podType ?? 'unknown',
+            attempt,
+            outcome: 'failure',
+            phase,
+          });
+
+          Sentry.captureException(err, {
+            tags: {
+              dc: dc ?? 'unknown',
+              podType: podType ?? 'unknown',
+              phase,
+              attempt: String(attempt),
+              category: classifyProvisionError(err as Error),
+            },
+            contexts: {
+              pod: {
+                id: podId ?? 'none',
+                sessionId,
+                elapsedSec: Math.round((Date.now() - t0) / 1000),
+              },
+            },
+          });
+          trackPodProvisionFailed({
+            userId: sessionId,
+            durationMs: Date.now() - attemptStart,
+            category: classifyProvisionError(err as Error),
+            dc,
+            phase,
+            attempt,
+          });
+          throw err;
+        }
+      }
+
+      // Unreachable — loop body either returns or throws. Kept for type-checker.
+      throw new Error('provision: reroll loop exited without resolution');
+    },
+  );
 }
 
 /**
@@ -831,9 +1055,12 @@ interface PlacementTarget {
  * In non-baked mode or with no volumes configured, returns a single unpinned
  * target (DC = null) and lets RunPod pick.
  */
-async function selectPlacement(sessionId: string): Promise<PlacementTarget | null> {
+async function selectPlacement(
+  sessionId: string,
+  excludeDcs: ReadonlySet<string> = new Set(),
+): Promise<PlacementTarget | null> {
   const volumes = config.NETWORK_VOLUMES_BY_DC;
-  const volumeDcs = Object.keys(volumes);
+  const volumeDcs = Object.keys(volumes).filter((dc) => !excludeDcs.has(dc));
   const useVolumes = config.FLUX_PROVISION_MODE === 'baked' && volumeDcs.length > 0;
 
   if (!useVolumes) {
@@ -877,6 +1104,7 @@ async function selectPlacement(sessionId: string): Promise<PlacementTarget | nul
       sessionId,
       event: 'provision.placement.ranked',
       dcs: probed.map((p) => ({ dc: p.dc, stock: p.bid?.stockStatus ?? 'none' })),
+      excluded: Array.from(excludeDcs),
     },
     'DC placement ranked',
   );
@@ -897,7 +1125,8 @@ async function selectPlacement(sessionId: string): Promise<PlacementTarget | nul
 async function createPodWithFallback(
   sessionId: string,
   onStatus: (msg: string) => void,
-): Promise<{ podId: string; podType: PodType }> {
+  excludeDcs: ReadonlySet<string> = new Set(),
+): Promise<{ podId: string; podType: PodType; dc: string | null }> {
   const podName = `${POD_PREFIX}${sessionId.slice(0, 16)}`;
 
   // Image + registry auth depend on provision mode.
@@ -913,9 +1142,12 @@ async function createPodWithFallback(
 
   // ─── Pick DC (+ volume if baked) ─────────────────────────────────────
   onStatus('Finding available GPU...');
-  const target = await selectPlacement(sessionId);
+  const target = await selectPlacement(sessionId, excludeDcs);
   if (!target) {
-    throw new Error('No RunPod DC has 5090 capacity right now (all volume-DCs exhausted)');
+    const suffix = excludeDcs.size > 0
+      ? ` (excluding ${Array.from(excludeDcs).join(',')} after earlier stall)`
+      : '';
+    throw new Error(`No RunPod DC has 5090 capacity right now (all volume-DCs exhausted)${suffix}`);
   }
   const bidInfo = target.bidInfo;
   const dcField = target.dataCenterId ? { dataCenterId: target.dataCenterId } : {};
@@ -925,7 +1157,17 @@ async function createPodWithFallback(
   let spotCapacityExhausted = false;
   let fallbackReason: string | null = null;
 
-  if (!bidInfo) {
+  if (config.ONDEMAND_ONLY_MODE) {
+    // Operator has disabled spot for stability. Skip the spot attempt and
+    // fall through to the on-demand path. Probe results from selectPlacement
+    // (DC ranking) are still used; only the spot create call is bypassed.
+    spotCapacityExhausted = true;
+    fallbackReason = 'ondemand_only_mode';
+    log.info(
+      { sessionId, event: 'provision.spot.skipped', reason: fallbackReason, dc: target.dataCenterId },
+      'Spot disabled by ONDEMAND_ONLY_MODE — going straight to on-demand',
+    );
+  } else if (!bidInfo) {
     spotCapacityExhausted = true;
     fallbackReason = 'spot_bid_unavailable';
     log.info(
@@ -971,7 +1213,7 @@ async function createPodWithFallback(
         'Pod created (spot)',
       );
       void notifyPodCreated({ podId, podType: 'spot', dc: target.dataCenterId ?? undefined, costPerHr });
-      return { podId, podType: 'spot' };
+      return { podId, podType: 'spot', dc: target.dataCenterId };
     } catch (err) {
       if (isCapacityError(err)) {
         spotCapacityExhausted = true;
@@ -987,7 +1229,7 @@ async function createPodWithFallback(
   }
 
   // ─── Fall through to on-demand ───────────────────────────────────────
-  if (!config.ONDEMAND_FALLBACK_ENABLED) {
+  if (!config.ONDEMAND_FALLBACK_ENABLED && !config.ONDEMAND_ONLY_MODE) {
     throw new Error(
       `5090 spot capacity exhausted (${fallbackReason ?? 'unknown'}); on-demand fallback disabled`,
     );
@@ -1022,7 +1264,7 @@ async function createPodWithFallback(
       'Pod created (on-demand)',
     );
     void notifyPodCreated({ podId, podType: 'onDemand', dc: target.dataCenterId ?? undefined, costPerHr });
-    return { podId, podType: 'onDemand' };
+    return { podId, podType: 'onDemand', dc: target.dataCenterId };
   } catch (err) {
     log.error(
       { sessionId, event: 'provision.onDemand.failed', err: (err as Error).message, dc: target.dataCenterId },
@@ -1107,45 +1349,65 @@ async function runSetup(ssh: SshInfo, onLine: (line: string) => void): Promise<v
  * the container image has been pulled and the container process is running.
  * Emits a status update when the transition happens so the user sees
  * "Pulling container image..." → "Starting server..." in real time.
+ *
+ * If `stallMs` is finite and `pod.runtime` stays null longer than that,
+ * throws `ImagePullStallError` so the caller can reroll onto a different DC
+ * instead of waiting out the full `timeoutMs`. Pass `Infinity` to disable
+ * the watchdog and preserve the legacy binary-timeout behavior.
  */
 async function waitForRuntime(
   podId: string,
   onStatus: (msg: string) => void,
-  timeoutMs = 10 * 60 * 1000,
+  opts: { timeoutMs?: number; stallMs?: number } = {},
 ): Promise<void> {
+  const timeoutMs = opts.timeoutMs ?? 10 * 60 * 1000;
+  const stallMs = opts.stallMs
+    ?? (config.CONTAINER_PULL_WATCHDOG_ENABLED ? config.CONTAINER_PULL_STALL_MS : Infinity);
   const start = Date.now();
   const deadline = start + timeoutMs;
   let lastUpdateAt = 0;
+  let lastDc: string | null = null;
   onStatus('Pulling container image...');
   while (Date.now() < deadline) {
     const pod = await getPod(podId);
     if (!pod) {
       const elapsed = Math.round((Date.now() - start) / 1000);
-      log.warn({ podId, elapsedSec: elapsed }, 'Pod vanished during provisioning (spot preempted?)');
-      throw new Error(`Pod ${podId} vanished during provisioning (spot preempted?)`);
+      log.warn({ podId, elapsedSec: elapsed, dc: lastDc }, 'Pod vanished during runtime_up (spot preempted?)');
+      throw new PodVanishedError(podId, lastDc, 'runtime_up', elapsed);
     }
+    if (pod.machine?.dataCenterId) lastDc = pod.machine.dataCenterId;
     if (pod.runtime) {
       log.info({ podId, uptimeInSeconds: pod.runtime.uptimeInSeconds }, 'Container runtime up');
       onStatus('Starting server...');
       return;
     }
+    const elapsedMs = Date.now() - start;
+    if (elapsedMs > stallMs) {
+      throw new ImagePullStallError(podId, lastDc, Math.round(elapsedMs / 1000));
+    }
     // Send progress updates every 30s so the client knows we're still waiting.
     const now = Date.now();
     if (now - lastUpdateAt > 30_000) {
-      const elapsed = Math.round((now - start) / 1000);
-      log.info({ podId, elapsedSec: elapsed }, 'Still waiting for container runtime');
+      const elapsed = Math.round(elapsedMs / 1000);
+      log.info({ podId, elapsedSec: elapsed, dc: lastDc }, 'Still waiting for container runtime');
       onStatus(`Pulling container image... (${elapsed}s)`);
       lastUpdateAt = now;
     }
     await sleep(5000);
   }
-  throw new Error(`Pod ${podId} container never started within ${Math.round(timeoutMs / 1000)}s`);
+  throw new Error(`Pod ${podId} runtime never appeared within ${Math.round(timeoutMs / 1000)}s`);
 }
 
-async function waitForHealth(healthUrl: string, timeoutMs = 10 * 60 * 1000): Promise<void> {
+async function waitForHealth(
+  podId: string,
+  healthUrl: string,
+  timeoutMs = 10 * 60 * 1000,
+): Promise<void> {
   const start = Date.now();
   const deadline = start + timeoutMs;
   let lastLogAt = 0;
+  let lastPodProbeAt = 0;
+  let lastDc: string | null = null;
   while (Date.now() < deadline) {
     try {
       const res = await fetch(healthUrl, { signal: AbortSignal.timeout(10_000) });
@@ -1157,6 +1419,19 @@ async function waitForHealth(healthUrl: string, timeoutMs = 10 * 60 * 1000): Pro
       // Ignore — health check hasn't come up yet
     }
     const now = Date.now();
+    // Probe RunPod every 30s to detect a vanished pod (preempted, host
+    // failure). Fail fast instead of waiting out the full timeoutMs polling
+    // a dead URL.
+    if (now - lastPodProbeAt > 30_000) {
+      const pod = await getPod(podId);
+      if (!pod) {
+        const elapsed = Math.round((now - start) / 1000);
+        log.warn({ podId, elapsedSec: elapsed, dc: lastDc }, 'Pod vanished during health_check (spot preempted?)');
+        throw new PodVanishedError(podId, lastDc, 'health_check', elapsed);
+      }
+      if (pod.machine?.dataCenterId) lastDc = pod.machine.dataCenterId;
+      lastPodProbeAt = now;
+    }
     if (now - lastLogAt > 30_000) {
       const elapsed = Math.round((now - start) / 1000);
       log.info({ healthUrl, elapsedSec: elapsed }, 'Still waiting for health check');

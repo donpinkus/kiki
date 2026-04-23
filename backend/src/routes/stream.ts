@@ -18,7 +18,7 @@ import {
   recordProvision,
 } from '../modules/auth/rateLimiter.js';
 import { checkEntitlement } from '../modules/entitlement/index.js';
-import { incrementCounter } from '../modules/orchestrator/metrics.js';
+import { trackPodPreempted, trackPodRelayFailed, trackSessionClosed } from '../modules/analytics/index.js';
 
 /**
  * WebSocket relay to a per-user FLUX.2-klein pod.
@@ -97,8 +97,9 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       // Entitlement check — only applies when authenticated via JWT. Legacy
       // sessions bypass entitlement to keep the old iPad binaries working
       // during the rollout window.
-      // Skip rate limiting if the user is reconnecting to an existing ready pod.
-      // Only apply rate limits + register provision for genuinely new provisions.
+      // Skip rate limiting if the user is reconnecting to an existing pod
+      // (ready, provisioning, or replacing). Only apply rate limits + register
+      // provision for genuinely new provisions.
       const isReconnect = await hasReadySession(userId);
 
       if (source === 'jwt' && !isReconnect) {
@@ -133,7 +134,9 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       let relay: StreamRelay | null = null;
       let lastConfig: Record<string, unknown> | null = null;
       let clientDisconnected = false;
+      const sessionStartMs = Date.now();
 
+      let getOrProvisionMs = 0;
       try {
         // Record this provision in the sliding-window history for hourly/daily
         // rate limiting. Active-pod enforcement is derived from the session
@@ -142,6 +145,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
           await recordProvision(userId);
         }
 
+        const getOrProvisionStart = Date.now();
         const { podUrl } = await getOrProvisionPod(userId, (msg) => {
           if (socket.readyState === socket.OPEN) {
             socket.send(
@@ -149,6 +153,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             );
           }
         });
+        getOrProvisionMs = Date.now() - getOrProvisionStart;
 
         if (socket.readyState !== socket.OPEN) {
           request.log.info({ userId }, 'Client disconnected during provisioning');
@@ -199,7 +204,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
                 return;
               }
 
-              incrementCounter('session_preempted_total');
+              trackPodPreempted({ userId, replacementAttempt: 1 });
 
               if (clientDisconnected || socket.readyState !== socket.OPEN) return;
 
@@ -307,15 +312,29 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         });
       } catch (err) {
         request.log.error({ userId, err }, 'Provisioning or relay failed');
+        // If the failure happened essentially-instantly, getOrProvisionPod
+        // returned a cached podUrl and the relay then 404'd — i.e. the pod
+        // we thought was ready turned out dead. Tracking this distinctly
+        // from generic provision failures so we can spot stale-session bugs.
+        const errMsg = err instanceof Error ? err.message : String(err);
+        const looksLikeStalePodReuse = isReconnect && getOrProvisionMs < 1000;
+        if (looksLikeStalePodReuse) {
+          trackPodRelayFailed({
+            userId,
+            wasReused: true,
+            errorMessage: errMsg,
+            getOrProvisionMs,
+          });
+        }
         // Terminate the pod AND clear Redis. If the failure was a bad /ws
         // upgrade on an otherwise-healthy pod, we'd rather burn a fresh
         // provision (~130s) than leak a pod at $0.99/hr. abortSession deletes
         // the Redis session row, which is what the rate limiter reads to
         // decide whether the user still has an "active pod" — so the
         // accounting is released transitively.
-        await abortSession(userId);
+        await abortSession(userId, 'error');
         if (socket.readyState === socket.OPEN) {
-          const errorMsg = `Provisioning failed: ${err instanceof Error ? err.message : String(err)}`;
+          const errorMsg = `Provisioning failed: ${errMsg}`;
           request.log.info({ userId }, 'Sending provisioning error to client and closing socket');
           socket.send(JSON.stringify({ type: 'error', message: errorMsg }));
           socket.close(1011, 'Provisioning failed');
@@ -327,7 +346,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       socket.on('close', () => {
         clientDisconnected = true;
         request.log.info({ userId }, 'Stream client disconnected');
-        incrementCounter('session_client_disconnect_total');
+        trackSessionClosed({ userId, durationMs: Date.now() - sessionStartMs });
         sessionClosed(userId);
         relay?.close();
       });

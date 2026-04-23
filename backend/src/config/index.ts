@@ -29,6 +29,12 @@ export interface AppConfig {
    * is exhausted. Default false so the flag can be flipped on per deploy. */
   readonly ONDEMAND_FALLBACK_ENABLED: boolean;
 
+  /** When true, skip the spot attempt entirely and provision on-demand pods
+   * directly. Implies `ONDEMAND_FALLBACK_ENABLED` semantics regardless of that
+   * flag's value. Used to ride out RunPod spot capacity instability without
+   * removing the spot code path. Default false. */
+  readonly ONDEMAND_ONLY_MODE: boolean;
+
   // ─── Pre-baked Docker image (Workstream 3) ────────────────────────────
   /** 'ssh' = run setup-flux-klein.sh over SSH (legacy); 'baked' = use FLUX_IMAGE */
   readonly FLUX_PROVISION_MODE: 'ssh' | 'baked';
@@ -82,6 +88,29 @@ export interface AppConfig {
    * Default 600 (10 min), well above the ~150s provision deadline. Boot-time
    * reconcile ignores this (uses 0) since the process was just rebuilt. */
   readonly RECONCILE_MIN_AGE_SEC: number;
+
+  // ─── Product analytics (PostHog) ───────────────────────────────────────
+  /** PostHog project API key (write-only, `phc_...`). If unset, all analytics
+   * calls no-op — safe to leave empty in dev. */
+  readonly POSTHOG_API_KEY: string;
+  /** PostHog ingestion host. Default US cloud. Override for EU cloud or
+   * self-hosted. */
+  readonly POSTHOG_HOST: string;
+
+  // ─── Image-pull stall watchdog ─────────────────────────────────────────
+  /** When true, `waitForRuntime` fast-fails with `ImagePullStallError` once
+   * `pod.runtime` has stayed null longer than `CONTAINER_PULL_STALL_MS`, and
+   * `provision` rerolls onto a different DC. Disable to restore legacy binary
+   * 10-min timeout. */
+  readonly CONTAINER_PULL_WATCHDOG_ENABLED: boolean;
+  /** Ms to wait for `pod.runtime` to become non-null before calling a stall.
+   * Default 120000 (2 min). Tune upward if Sentry shows false-positive stalls
+   * on legitimately cold hosts. */
+  readonly CONTAINER_PULL_STALL_MS: number;
+  /** Max retries with a different DC per provision attempt. Default 2 (so up
+   * to 3 attempts total). Set to 0 to emit Sentry stall events without
+   * actually rerolling — useful for a dry-run observation phase. */
+  readonly CONTAINER_PULL_MAX_REROLLS: number;
 
   readonly NODE_ENV: 'development' | 'production' | 'test';
   readonly LOG_LEVEL: 'fatal' | 'error' | 'warn' | 'info' | 'debug' | 'trace';
@@ -174,6 +203,7 @@ function validateConfig(): AppConfig {
     AUTH_REQUIRED: process.env['AUTH_REQUIRED'] === 'true',
     FREE_TIER_SECONDS: Number(process.env['FREE_TIER_SECONDS'] ?? 3600),
     ONDEMAND_FALLBACK_ENABLED: process.env['ONDEMAND_FALLBACK_ENABLED'] === 'true',
+    ONDEMAND_ONLY_MODE: process.env['ONDEMAND_ONLY_MODE'] === 'true',
     FLUX_PROVISION_MODE:
       (process.env['FLUX_PROVISION_MODE'] as 'ssh' | 'baked' | undefined) ?? 'ssh',
     FLUX_IMAGE: process.env['FLUX_IMAGE'] ?? '',
@@ -184,6 +214,11 @@ function validateConfig(): AppConfig {
     MAX_SESSION_REPLACEMENTS: Number(process.env['MAX_SESSION_REPLACEMENTS'] ?? 2),
     RECONCILE_INTERVAL_MS: Number(process.env['RECONCILE_INTERVAL_MS'] ?? 30 * 60 * 1000),
     RECONCILE_MIN_AGE_SEC: Number(process.env['RECONCILE_MIN_AGE_SEC'] ?? 600),
+    POSTHOG_API_KEY: process.env['POSTHOG_API_KEY'] ?? '',
+    POSTHOG_HOST: process.env['POSTHOG_HOST'] ?? 'https://us.i.posthog.com',
+    CONTAINER_PULL_WATCHDOG_ENABLED: process.env['CONTAINER_PULL_WATCHDOG_ENABLED'] !== 'false',
+    CONTAINER_PULL_STALL_MS: Number(process.env['CONTAINER_PULL_STALL_MS'] ?? 120_000),
+    CONTAINER_PULL_MAX_REROLLS: Number(process.env['CONTAINER_PULL_MAX_REROLLS'] ?? 2),
     OPS_API_KEY: process.env['OPS_API_KEY'] ?? '',
     COST_MONITOR_INTERVAL_MS: Number(process.env['COST_MONITOR_INTERVAL_MS'] ?? 300_000),
     COST_ALERT_WEBHOOK_URL: process.env['COST_ALERT_WEBHOOK_URL'] ?? '',
