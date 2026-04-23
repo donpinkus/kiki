@@ -80,15 +80,24 @@ private struct StyleTile: View {
                 }
                 Spacer(minLength: 0)
             }
-            if !style.promptSuffix.isEmpty {
-                Text(style.promptSuffix.trimmingCharacters(in: .whitespaces))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.leading)
-            }
+            suffixText
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(2, reservesSpace: true)
+                .truncationMode(.tail)
+                .multilineTextAlignment(.leading)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    // Always reserves two lines so every tile's image starts at the same
+    // y-offset. Empty suffix falls back to an italic placeholder.
+    private var suffixText: Text {
+        let trimmed = style.promptSuffix.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty {
+            return Text("no extra text").italic()
+        }
+        return Text(trimmed)
     }
 
     @ViewBuilder
