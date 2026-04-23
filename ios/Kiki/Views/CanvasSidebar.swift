@@ -38,8 +38,9 @@ struct CanvasSidebar: View {
             .frame(width: 30, height: 120)
             .overlay(alignment: .trailing) {
                 if isDraggingSize {
-                    let divisor = CanvasViewModel.penCursorDivisor
-                    let displaySize = max(coordinator.toolSize / divisor, 4)
+                    // Show the configured size at rest (force=1, perp tilt) so the
+                    // preview matches the actual stamp diameter the user will get.
+                    let displaySize = max(coordinator.toolSize, 4)
                     let containerSize = max(displaySize + 16, 32)
                     Circle()
                         .stroke(.primary, lineWidth: 1)

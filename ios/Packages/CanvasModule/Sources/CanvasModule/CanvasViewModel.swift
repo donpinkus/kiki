@@ -17,10 +17,11 @@ public final class CanvasViewModel {
 
     // MARK: - Properties
 
-    /// Cursor divisor for approximating visual stroke size in the sidebar tooltip.
-    /// With the custom engine, pressure gamma means the visual width ≈ baseWidth * 0.5 at rest,
-    /// so divisor ~2.0 gives a reasonable preview.
-    public static let penCursorDivisor: CGFloat = 2.0
+    /// Display divisor applied to slider previews. 1.0 means the preview circle
+    /// matches the actual stamp diameter (= configured baseWidth) at rest. Kept
+    /// as a single named constant so the slider preview and any future cursor
+    /// callers stay in sync.
+    public static let penCursorDivisor: CGFloat = 1.0
 
     public private(set) var canUndo = false
     public private(set) var canRedo = false
@@ -95,12 +96,23 @@ public final class CanvasViewModel {
 
     public func selectBrush(_ config: BrushConfig) {
         canvasView?.currentTool = .brush(config)
-        container?.updateCursorSize(diameter: config.baseWidth, divisor: Self.penCursorDivisor)
+        container?.updateCursorSize(
+            diameter: config.baseWidth,
+            pressureGamma: config.pressureGamma,
+            tiltSensitivity: config.tiltSensitivity
+        )
     }
 
     public func selectEraser(width: CGFloat = 5) {
         canvasView?.currentTool = .eraser(width: width)
-        container?.updateCursorSize(diameter: width, divisor: Self.penCursorDivisor)
+        // Eraser builds its internal BrushConfig with pressureGamma 0.7 and
+        // tiltSensitivity 0 (see MetalCanvasView.swift). Mirror those defaults
+        // here so the cursor tracks the actual eraser stamp diameter.
+        container?.updateCursorSize(
+            diameter: width,
+            pressureGamma: 0.7,
+            tiltSensitivity: 0.0
+        )
     }
 
     public func selectLasso() {

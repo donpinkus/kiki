@@ -29,7 +29,8 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
     private static let ringFingerOffset: CGFloat = 80
     private var lassoSelectionView: LassoSelectionView?
     private var cursorBaseWidth: CGFloat = 5
-    private var cursorDivisor: CGFloat = 3.0
+    private var cursorPressureGamma: CGFloat = 0.7
+    private var cursorTiltSensitivity: CGFloat = 0.0
     private static let snapThreshold: CGFloat = 0.15 // ~8.6 degrees
     private static let minScale: CGFloat = 0.5
     private static let maxScale: CGFloat = 5.0
@@ -129,12 +130,18 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
             cursorView.center = location
             cursorView.isHidden = false
 
-            // Dynamically size cursor based on pressure and tilt.
-            // PK's .pen ink scales width with force and reduces it at low tilt angles.
-            let forceFraction = 0.15 + 0.85 * gesture.normalizedForce
-            // Altitude: perpendicular (π/2) = full width, flat (0) = thinner
-            let tiltFraction = 0.3 + 0.7 * (gesture.altitudeAngle / (.pi / 2))
-            let diameter = cursorBaseWidth * forceFraction * tiltFraction / cursorDivisor
+            // Match BrushConfig.effectiveWidth so the cursor reflects the actual
+            // stamp diameter (in view points) — pow(force, gamma) for pressure,
+            // and the same tiltFactor formula (which is 1.0 unless tiltSensitivity > 0).
+            let force = max(gesture.normalizedForce, 0.01)
+            let pressureFactor = pow(force, cursorPressureGamma)
+            let tiltFactor: CGFloat
+            if cursorTiltSensitivity > 0 {
+                tiltFactor = 1.0 + cursorTiltSensitivity * (1.0 - gesture.altitudeAngle / (.pi / 2)) * 2.0
+            } else {
+                tiltFactor = 1.0
+            }
+            let diameter = cursorBaseWidth * pressureFactor * tiltFactor
             cursorView.bounds = CGRect(x: 0, y: 0, width: diameter, height: diameter)
             cursorView.setNeedsDisplay()
         case .ended, .cancelled:
@@ -350,9 +357,10 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
         backgroundImageView.image
     }
 
-    public func updateCursorSize(diameter: CGFloat, divisor: CGFloat = 3.0) {
+    public func updateCursorSize(diameter: CGFloat, pressureGamma: CGFloat = 0.7, tiltSensitivity: CGFloat = 0.0) {
         cursorBaseWidth = diameter
-        cursorDivisor = divisor
+        cursorPressureGamma = pressureGamma
+        cursorTiltSensitivity = tiltSensitivity
     }
 
     // MARK: - Lasso Selection
