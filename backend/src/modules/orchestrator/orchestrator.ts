@@ -138,12 +138,13 @@ export type State =
   | 'creating_pod'    // createSpotPod / createOnDemandPod RPC
   | 'fetching_image'  // pod exists; waiting for pod.runtime (GHCR image pull)
   | 'warming_model'   // container running; polling /health while model loads
-  | 'ready'           // pod serving traffic
+  | 'connecting'      // pod /health ok; backend wiring the iOS↔pod frame relay
+  | 'ready'           // relay live; iOS can stream
   | 'failed'          // unrecoverable error; WS closes after
   | 'terminated';     // session ended (reaped / aborted / replaced out)
 
 const ACTIVE_PROVISION_STATES: readonly State[] = [
-  'queued', 'finding_gpu', 'creating_pod', 'fetching_image', 'warming_model',
+  'queued', 'finding_gpu', 'creating_pod', 'fetching_image', 'warming_model', 'connecting',
 ] as const;
 
 export function isActiveProvisioning(state: State): boolean {
@@ -335,8 +336,11 @@ export async function subscribe(
 
 /**
  * Write a state transition to Redis and fan out to every subscriber.
+ * Exported so stream.ts can emit `connecting` / `ready` after the frame
+ * relay is wired up (those emits can't happen inside provision() because
+ * provision doesn't own the relay).
  */
-async function emitState(
+export async function emitState(
   sessionId: string,
   state: State,
   failureCategory: FailureCategory | null = null,
@@ -1008,18 +1012,18 @@ async function provision(sessionId: string): Promise<ProvisionResult> {
 
             const totalMs = Date.now() - t0;
 
-            // 5. Build WebSocket URL, persist pod info, transition to ready.
+            // 5. Pod is serving. Persist pod info and return — stream.ts will
+            // emit 'connecting' / 'ready' once it wires up the iOS↔pod relay.
+            // Keeping the 'ready' emit out of provision() prevents a window
+            // where iOS sees 'ready' but the backend's relay isn't yet set up
+            // to forward its frames to the pod.
             const podUrl = `wss://${podId}-8766.proxy.runpod.net/ws`;
-            // Persist pod info first so the 'ready' emit's readSession picks it up
-            // for the broker fan-out.
             await patchSession(sessionId, { podId, podUrl, podType });
-            await emitState(sessionId, 'ready');
-            currentState = 'ready';
             log.info(
               { sessionId, podId, podUrl, podType, totalMs, attempt, dc },
-              'Pod ready',
+              'Pod serving — awaiting relay',
             );
-            notifyPodProgress(podId, `✅ **Pod ready** (${Math.round(totalMs / 1000)}s total)`);
+            notifyPodProgress(podId, `✅ **Pod serving** (${Math.round(totalMs / 1000)}s total)`);
 
             parentSpan.setAttributes({
               dc: dc ?? 'unknown',
