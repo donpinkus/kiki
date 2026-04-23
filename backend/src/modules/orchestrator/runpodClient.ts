@@ -178,6 +178,7 @@ export function isCapacityError(err: unknown): boolean {
     msg.includes('no instances available') ||
     msg.includes('no pod (spot capacity likely unavailable)') ||
     msg.includes('no spot pricing available') ||
+    msg.includes('does not have the resources') ||
     msg.includes('stock')
   );
 }

@@ -21,6 +21,7 @@ import { opsRoute } from './routes/ops.js';
 import { authPlugin } from './modules/auth/index.js';
 import { start as startOrchestrator } from './modules/orchestrator/orchestrator.js';
 import { start as startCostMonitor } from './modules/orchestrator/costMonitor.js';
+import { shutdownAnalytics } from './modules/analytics/index.js';
 
 const app = Fastify({
   bodyLimit: 10 * 1024 * 1024, // 10 MB — composited lineart snapshots are larger than plain sketches
@@ -114,5 +115,19 @@ const start = async () => {
 };
 
 start();
+
+// Flush queued PostHog events on graceful shutdown so we don't lose in-flight
+// analytics when Railway restarts the container.
+async function gracefulShutdown(signal: string): Promise<void> {
+  app.log.info({ signal }, 'Shutting down — flushing analytics');
+  try {
+    await shutdownAnalytics();
+  } catch (err) {
+    app.log.warn({ err }, 'Failed to flush analytics during shutdown');
+  }
+  process.exit(0);
+}
+process.on('SIGTERM', () => void gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => void gracefulShutdown('SIGINT'));
 
 export { app };
