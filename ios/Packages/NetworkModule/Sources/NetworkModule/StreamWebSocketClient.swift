@@ -27,6 +27,14 @@ public actor StreamWebSocketClient {
         public let message: String?          // present for type=="error"
     }
 
+    /// A generated image frame from the pod. `requestId` is set when the
+    /// pod preceded the binary with a `frame_meta` text message (used for
+    /// style-preview correlation). Normal streaming frames have nil.
+    public struct ReceivedFrame: Sendable {
+        public let requestId: String?
+        public let data: Data
+    }
+
     // MARK: - Properties
 
     private let request: URLRequest
@@ -36,11 +44,15 @@ public actor StreamWebSocketClient {
 
     public private(set) var state: State = .disconnected
 
-    private let framesContinuation: AsyncStream<Data>.Continuation
-    public let receivedFrames: AsyncStream<Data>
+    private let framesContinuation: AsyncStream<ReceivedFrame>.Continuation
+    public let receivedFrames: AsyncStream<ReceivedFrame>
 
     private let statusContinuation: AsyncStream<ServerStatus>.Continuation
     public let serverStatuses: AsyncStream<ServerStatus>
+
+    /// Most recent `frame_meta` from the pod, waiting to be paired with
+    /// the next binary frame. Cleared each time a binary is emitted.
+    private var pendingFrameMetaRequestId: String?
 
     // MARK: - Lifecycle
 
@@ -49,7 +61,7 @@ public actor StreamWebSocketClient {
         self.request = URLRequest(url: url)
         self.session = URLSession(configuration: .default)
 
-        var frameCont: AsyncStream<Data>.Continuation!
+        var frameCont: AsyncStream<ReceivedFrame>.Continuation!
         self.receivedFrames = AsyncStream { frameCont = $0 }
         self.framesContinuation = frameCont
 
@@ -66,7 +78,7 @@ public actor StreamWebSocketClient {
         self.request = request
         self.session = URLSession(configuration: .default)
 
-        var frameCont: AsyncStream<Data>.Continuation!
+        var frameCont: AsyncStream<ReceivedFrame>.Continuation!
         self.receivedFrames = AsyncStream { frameCont = $0 }
         self.framesContinuation = frameCont
 
@@ -167,7 +179,7 @@ public actor StreamWebSocketClient {
                     switch message {
                     case .data(let data):
                         // Raw binary frame (may not be used if backend wraps in JSON)
-                        await self.framesContinuation.yield(data)
+                        await self.yieldFrame(data)
 
                     case .string(let text):
                         // Backend wraps JPEG as JSON text: {"type":"frame","data":"<base64>"}
@@ -177,7 +189,11 @@ public actor StreamWebSocketClient {
                            let type = json["type"] as? String {
                             if type == "frame", let b64 = json["data"] as? String,
                                let imageData = Data(base64Encoded: b64) {
-                                await self.framesContinuation.yield(imageData)
+                                await self.yieldFrame(imageData)
+                            } else if type == "frame_meta" {
+                                // Preamble to the next binary frame. Stores the
+                                // requestId so the next yielded frame carries it.
+                                await self.setPendingFrameMeta(json["requestId"] as? String)
                             } else if type == "state" || type == "error" {
                                 if let status = try? JSONDecoder().decode(ServerStatus.self, from: jsonData) {
                                     Self.breadcrumb(category: "ws.status", message: "Server status", data: [
@@ -204,6 +220,16 @@ public actor StreamWebSocketClient {
                 }
             }
         }
+    }
+
+    private func setPendingFrameMeta(_ requestId: String?) {
+        pendingFrameMetaRequestId = requestId
+    }
+
+    private func yieldFrame(_ data: Data) {
+        let requestId = pendingFrameMetaRequestId
+        pendingFrameMetaRequestId = nil
+        framesContinuation.yield(ReceivedFrame(requestId: requestId, data: data))
     }
 
     private func handleDisconnect() {

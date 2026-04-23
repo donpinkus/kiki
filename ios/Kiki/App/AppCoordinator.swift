@@ -160,7 +160,6 @@ final class AppCoordinator {
 
     let canvasViewModel = CanvasViewModel()
     let stylePreviewController = StylePreviewController()
-    private var stylePreviewSetupTask: Task<Void, Never>?
     private let backendURL: URL
     private let authService: AuthService
 
@@ -739,7 +738,6 @@ final class AppCoordinator {
     // MARK: - Style Preview
 
     private func enterStylePreviewMode() {
-        stylePreviewSetupTask?.cancel()
         stylePreviewController.reset()
 
         guard let session = streamSession else {
@@ -752,33 +750,18 @@ final class AppCoordinator {
             return
         }
 
-        let basePrompt = promptText
-        let steps = streamSteps
-        let seed = streamSeed
-        let styles = PromptStyle.allStyles
-
-        stylePreviewSetupTask = Task { [weak self, weak session] in
-            guard let session else { return }
-            await session.enterPreviewMode()
-            if Task.isCancelled {
-                session.exitPreviewMode()
-                return
-            }
-            guard let self else { return }
-            self.stylePreviewController.start(
-                canvasJPEG: jpeg,
-                basePrompt: basePrompt,
-                steps: steps,
-                seed: seed,
-                styles: styles,
-                session: session
-            )
-        }
+        session.enterPreviewMode()
+        stylePreviewController.start(
+            canvasJPEG: jpeg,
+            basePrompt: promptText,
+            steps: streamSteps,
+            seed: streamSeed,
+            styles: PromptStyle.allStyles,
+            session: session
+        )
     }
 
     private func exitStylePreviewMode() {
-        stylePreviewSetupTask?.cancel()
-        stylePreviewSetupTask = nil
         stylePreviewController.cancel()
         streamSession?.exitPreviewMode()
     }

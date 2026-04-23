@@ -62,15 +62,14 @@ final class StreamSession {
     /// while the picker is driving the pod for previews.
     private var isCapturePaused = false
 
-    /// When true, incoming frames route to `pendingPreviewContinuation`
-    /// instead of `onImageReceived`. Turned on after the drain window so
-    /// in-flight pre-picker responses still reach the main UI normally.
-    private var isPreviewModeActive = false
+    /// Continuations for in-flight preview requests, keyed by the
+    /// `requestId` that was sent in the config. Responses are paired by
+    /// requestId (via the pod's `frame_meta` preamble) rather than by
+    /// arrival order, so stale or out-of-order frames can't land on the
+    /// wrong tile.
+    private var pendingPreviewContinuations: [String: CheckedContinuation<UIImage, Error>] = [:]
 
-    /// Continuation for the single in-flight preview request, if any.
-    private var pendingPreviewContinuation: CheckedContinuation<UIImage, Error>?
-
-    enum PreviewError: Error { case invalidImage, cancelled, notActive }
+    enum PreviewError: Error { case invalidImage, cancelled }
 
     /// Called when a new generated image frame is received.
     var onImageReceived: ((UIImage) -> Void)?
@@ -128,59 +127,47 @@ final class StreamSession {
 
     // MARK: - Preview mode
 
-    /// Pause the capture loop and (after a short drain) route subsequent
-    /// responses to `sendPreview` continuations. The drain gives any
-    /// already-in-flight user frame time to return through the normal
-    /// `onImageReceived` path before we start attributing responses to
-    /// preview requests.
-    func enterPreviewMode(maxDrainMs: Int = 1200) async {
+    /// Pause the normal capture loop so the preview controller has the
+    /// pod to itself. No drain needed — stale in-flight responses from
+    /// before the pause don't carry a requestId and are routed to
+    /// `onImageReceived` normally.
+    func enterPreviewMode() {
         isCapturePaused = true
-        // Give the capture loop ~1 tick to notice the flag before we
-        // read framesSent — otherwise we might undercount if it was
-        // mid-send when we paused.
-        try? await Task.sleep(for: .milliseconds(80))
-
-        let sentAtPause = framesSent
-        if framesReceived < sentAtPause {
-            let deadline = Date().addingTimeInterval(Double(maxDrainMs) / 1000.0)
-            while Date() < deadline, framesReceived < sentAtPause {
-                try? await Task.sleep(for: .milliseconds(50))
-            }
-        }
-
-        isPreviewModeActive = true
-        Self.breadcrumb(category: "stream.preview", message: "Entered preview mode", data: [
-            "drainedFrames": sentAtPause - framesReceived,
-        ])
+        Self.breadcrumb(category: "stream.preview", message: "Entered preview mode")
     }
 
     /// Resume the normal capture loop. Clears `lastSentConfig` and
     /// `lastSentJpegData` so the next tick re-pushes the live config
     /// (e.g. the newly-selected style) and re-sends the current sketch.
+    /// Any preview continuations still waiting are failed so callers
+    /// unwind cleanly.
     func exitPreviewMode() {
-        if let cont = pendingPreviewContinuation {
-            pendingPreviewContinuation = nil
+        let stranded = pendingPreviewContinuations
+        pendingPreviewContinuations = [:]
+        for (_, cont) in stranded {
             cont.resume(throwing: PreviewError.cancelled)
         }
-        isPreviewModeActive = false
         isCapturePaused = false
         lastSentConfig = nil
         lastSentJpegData = nil
-        Self.breadcrumb(category: "stream.preview", message: "Exited preview mode")
+        Self.breadcrumb(category: "stream.preview", message: "Exited preview mode", data: [
+            "cancelledContinuations": stranded.count,
+        ])
     }
 
-    /// Send one preview frame and await its generated image. Caller must
-    /// have entered preview mode and must serialize — only one preview
-    /// can be in flight at a time.
+    /// Send one preview frame and await its generated image. The
+    /// `requestId` (passed inside `config`) is echoed back by the pod so
+    /// responses pair deterministically regardless of arrival order.
     func sendPreview(jpeg: Data, config: StreamConfig) async throws -> UIImage {
-        guard isPreviewModeActive else { throw PreviewError.notActive }
-        precondition(pendingPreviewContinuation == nil, "sendPreview while another is pending")
+        guard let requestId = config.requestId else {
+            preconditionFailure("sendPreview requires config.requestId to be set")
+        }
 
         try await client.sendConfig(config)
         try await client.sendFrame(jpeg)
 
         return try await withCheckedThrowingContinuation { cont in
-            pendingPreviewContinuation = cont
+            pendingPreviewContinuations[requestId] = cont
         }
     }
 
@@ -368,25 +355,23 @@ final class StreamSession {
             guard let self else { return }
             let frames = await client.receivedFrames
             var count = 0
-            for await frameData in frames {
+            for await frame in frames {
                 guard !Task.isCancelled else { break }
-                if let image = UIImage(data: frameData) {
-                    count += 1
-                    await self.setFramesReceived(count)
-                    await MainActor.run {
-                        // Route to preview-mode continuation if one is
-                        // pending; otherwise fall through to the normal
-                        // result-pane callback.
-                        if self.isPreviewModeActive, let cont = self.pendingPreviewContinuation {
-                            self.pendingPreviewContinuation = nil
-                            cont.resume(returning: image)
-                        } else {
-                            self.onImageReceived?(image)
-                        }
-                    }
+                guard let image = UIImage(data: frame.data) else { continue }
+                count += 1
+                self.setFramesReceived(count)
+                // Route by requestId: preview responses pair with the
+                // continuation that sent them. Everything else (live
+                // stream, stale pre-pause responses) goes to the normal
+                // result pane.
+                if let requestId = frame.requestId,
+                   let cont = self.pendingPreviewContinuations.removeValue(forKey: requestId) {
+                    cont.resume(returning: image)
+                } else {
+                    self.onImageReceived?(image)
                 }
             }
-            let stopped = await self.isStopped
+            let stopped = self.isStopped
             if !Task.isCancelled, !stopped {
                 SentrySDK.capture(message: "stream.receive.unexpected_end") { scope in
                     scope.setLevel(.warning)

@@ -40,10 +40,13 @@ final class StylePreviewController {
                 if Task.isCancelled { return }
 
                 let prompt = Self.composePrompt(base: basePrompt, suffix: style.promptSuffix)
-                let config = StreamConfig(prompt: prompt, steps: steps, seed: seed)
+                let requestId = "preview-\(style.id)-\(UUID().uuidString)"
+                let config = StreamConfig(prompt: prompt, steps: steps, seed: seed, requestId: requestId)
 
                 do {
-                    let image = try await session.sendPreview(jpeg: canvasJPEG, config: config)
+                    let image = try await Self.withTimeout(seconds: 20) {
+                        try await session.sendPreview(jpeg: canvasJPEG, config: config)
+                    }
                     if Task.isCancelled { return }
                     self.previews[style.id] = .ready(image)
                 } catch {
@@ -51,6 +54,27 @@ final class StylePreviewController {
                     self.previews[style.id] = .failed
                 }
             }
+        }
+    }
+
+    /// Bounds each preview at 20s so an unresponsive pod (or one still
+    /// running pre-correlation image that never sends `frame_meta`)
+    /// doesn't leave tiles in shimmer forever.
+    private static func withTimeout<T: Sendable>(
+        seconds: TimeInterval,
+        _ operation: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await operation() }
+            group.addTask {
+                try await Task.sleep(for: .seconds(seconds))
+                throw CancellationError()
+            }
+            guard let first = try await group.next() else {
+                throw CancellationError()
+            }
+            group.cancelAll()
+            return first
         }
     }
 
