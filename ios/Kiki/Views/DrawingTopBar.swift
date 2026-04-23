@@ -3,13 +3,26 @@ import CanvasModule
 
 struct DrawingTopBar: View {
     @Environment(AppCoordinator.self) private var coordinator
-    @State private var showAdvancedParameters = false
+    @State private var showSettings = false
 
     var body: some View {
         @Bindable var coordinator = coordinator
 
         HStack(spacing: 12) {
-            // MARK: Left — Gallery
+            // MARK: Left — Settings, Gallery
+            Button {
+                showSettings = true
+            } label: {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(.primary)
+                    .frame(width: 36, height: 36)
+            }
+            .popover(isPresented: $showSettings) {
+                SettingsPanel()
+                    .frame(width: 400, height: 600)
+            }
+
             Button {
                 coordinator.navigateToGallery()
             } label: {
@@ -19,7 +32,7 @@ struct DrawingTopBar: View {
 
             Spacer()
 
-            // MARK: Center — Style, Prompt, Stream Status, Settings
+            // MARK: Center — Style, Prompt
             if coordinator.drawingLayout != .splitScreen {
                 Button {
                     coordinator.showStylePicker = true
@@ -36,32 +49,6 @@ struct DrawingTopBar: View {
                     .textFieldStyle(.plain)
                     .font(.subheadline)
                     .frame(minWidth: 120, maxWidth: 400)
-            }
-
-            connectionStatusIndicator
-
-            Button {
-                showAdvancedParameters = true
-            } label: {
-                Image(systemName: "slider.horizontal.3")
-                    .font(.system(size: 18, weight: .medium))
-                    .foregroundStyle(.primary)
-                    .frame(width: 36, height: 36)
-            }
-            .popover(isPresented: $showAdvancedParameters) {
-                AdvancedParametersPanel()
-                    .frame(width: 400, height: 600)
-            }
-
-            Button {
-                coordinator.drawingLayout = coordinator.drawingLayout == .splitScreen
-                    ? .fullscreen : .splitScreen
-            } label: {
-                Image(systemName: coordinator.drawingLayout == .splitScreen
-                    ? "rectangle.inset.filled" : "rectangle.split.2x1")
-                    .font(.system(size: 18, weight: .medium))
-                    .foregroundStyle(.primary)
-                    .frame(width: 36, height: 36)
             }
 
             Spacer()
@@ -106,39 +93,6 @@ struct DrawingTopBar: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
         .background(.bar)
-    }
-
-    // MARK: - Connection Status
-
-    private var connectionStatusIndicator: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(streamStatusColor)
-                .frame(width: 8, height: 8)
-            Text(streamStatusLabel)
-                .font(.subheadline.weight(.medium))
-        }
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-    }
-
-    private var streamStatusColor: Color {
-        switch coordinator.streamReadiness {
-        case .ready: return .green
-        case .warming: return .orange
-        case .disconnected: return .gray
-        case .failed: return .red
-        }
-    }
-
-    private var streamStatusLabel: String {
-        switch coordinator.streamReadiness {
-        case .ready: return "Streaming"
-        case .warming(let message, _): return message
-        case .disconnected: return "Disconnected"
-        case .failed: return "Error"
-        }
     }
 
     // MARK: - Helpers

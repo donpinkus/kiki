@@ -1,7 +1,7 @@
 import SwiftUI
 import SwiftData
 
-struct AdvancedParametersPanel: View {
+struct SettingsPanel: View {
     @Environment(AppCoordinator.self) private var coordinator
 
     var body: some View {
@@ -9,6 +9,7 @@ struct AdvancedParametersPanel: View {
 
         NavigationStack {
             Form {
+                displaySection
                 streamParametersSection
                 captureSection
 
@@ -17,15 +18,28 @@ struct AdvancedParametersPanel: View {
                         coordinator.streamSteps = 4
                         coordinator.streamSeed = nil
                         coordinator.streamCaptureFPS = 2
+                        coordinator.drawingLayout = .splitScreen
                     }
                 }
             }
-            .navigationTitle("Advanced")
+            .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
         }
     }
 
     // MARK: - Sections
+
+    private var displaySection: some View {
+        @Bindable var coordinator = coordinator
+
+        return Section("Display") {
+            Picker("Layout", selection: $coordinator.drawingLayout) {
+                Text("Split").tag(DrawingLayout.splitScreen)
+                Text("Fullscreen").tag(DrawingLayout.fullscreen)
+            }
+            .pickerStyle(.segmented)
+        }
+    }
 
     private var streamParametersSection: some View {
         @Bindable var coordinator = coordinator
@@ -92,7 +106,7 @@ struct AdvancedParametersPanel: View {
 }
 
 #Preview {
-    AdvancedParametersPanel()
+    SettingsPanel()
         .environment(AppCoordinator(modelContext: try! ModelContainer(for: Drawing.self).mainContext))
         .frame(width: 400, height: 600)
 }

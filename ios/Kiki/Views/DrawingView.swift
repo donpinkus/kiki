@@ -109,6 +109,10 @@ struct DrawingView: View {
                                 coordinator.canvasOnTop = false
                             }
                         )
+                        .overlay(alignment: .bottomLeading) {
+                            connectionStatusIndicator
+                                .padding(8)
+                        }
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
                         .padding(16)
                         .zIndex(coordinator.canvasOnTop ? 0 : 2)
@@ -155,10 +159,14 @@ struct DrawingView: View {
                     .padding(.top, 8)
                     .padding(.horizontal, 24)
             }
-            .overlay(alignment: .bottom) {
+            .overlay(alignment: .bottomLeading) {
+                connectionStatusIndicator
+                    .padding(12)
+            }
+            .overlay(alignment: .bottomTrailing) {
                 if coordinator.canSwapStreamImageToCanvas {
                     streamSwapBar
-                        .padding(.bottom, 16)
+                        .padding(12)
                 }
             }
 
@@ -175,19 +183,47 @@ struct DrawingView: View {
 
     // MARK: - Private
 
+    private var connectionStatusIndicator: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(streamStatusColor)
+                .frame(width: 7, height: 7)
+            Text(streamStatusLabel)
+                .font(.caption.weight(.medium))
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(.ultraThinMaterial, in: Capsule())
+    }
+
+    private var streamStatusColor: Color {
+        switch coordinator.streamReadiness {
+        case .ready: return .green
+        case .warming: return .orange
+        case .disconnected: return .gray
+        case .failed: return .red
+        }
+    }
+
+    private var streamStatusLabel: String {
+        switch coordinator.streamReadiness {
+        case .ready: return "Streaming · frame \(coordinator.streamFrameCount)"
+        case .warming(let message, _): return message
+        case .disconnected: return "Disconnected"
+        case .failed: return "Error"
+        }
+    }
+
     private var streamSwapBar: some View {
         Button {
             coordinator.swapStreamImageToCanvas()
         } label: {
-            Label("Send to Canvas", systemImage: "arrow.left.arrow.right")
+            Label("Send to Canvas", systemImage: "arrow.right")
                 .font(.caption)
         }
         .buttonStyle(.borderedProminent)
         .controlSize(.small)
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .background(.ultraThinMaterial, in: Capsule())
-        .shadow(color: .black.opacity(0.15), radius: 8, y: 4)
     }
 }
 
