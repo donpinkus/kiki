@@ -15,9 +15,10 @@ struct DrawingTopBar: View {
             } label: {
                 Image(systemName: "gearshape")
                     .font(.system(size: 18, weight: .medium))
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(Color.primary)
                     .frame(width: 36, height: 36)
             }
+            .tint(Color.primary)
             .popover(isPresented: $showSettings) {
                 SettingsPanel()
                     .frame(width: 400, height: 600)
@@ -26,9 +27,11 @@ struct DrawingTopBar: View {
             Button {
                 coordinator.navigateToGallery()
             } label: {
-                Label("Gallery", systemImage: "square.grid.2x2")
+                Text("Gallery")
                     .font(.subheadline.weight(.medium))
+                    .foregroundStyle(Color.primary)
             }
+            .tint(Color.primary)
 
             Spacer()
 
