@@ -266,6 +266,12 @@ public final class CanvasViewModel {
         pendingState = state
     }
 
+    /// Renders a thumbnail of a single layer's contents. Returns nil if the
+    /// canvas is not attached or the index is out of range.
+    public func layerThumbnail(at index: Int, maxDimension: CGFloat = 64) -> UIImage? {
+        canvasView?.layerThumbnail(at: index, maxDimension: maxDimension)
+    }
+
     /// Renders a thumbnail of the current canvas at the given max dimension.
     /// Returns nil if the canvas is not attached or is empty.
     public func generateThumbnail(maxDimension: CGFloat = 256) -> UIImage? {

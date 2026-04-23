@@ -3,6 +3,9 @@ import CanvasModule
 
 struct LayerPanelView: View {
     @Environment(AppCoordinator.self) private var coordinator
+    @State private var thumbnails: [UUID: UIImage] = [:]
+
+    private static let thumbnailSize: CGFloat = 36
 
     var body: some View {
         VStack(spacing: 0) {
@@ -36,6 +39,20 @@ struct LayerPanelView: View {
                 }
             }
         }
+        .onAppear { refreshThumbnails() }
+    }
+
+    private func refreshThumbnails() {
+        let layers = coordinator.canvasViewModel.layers
+        let scale = UIScreen.main.scale
+        let pixelSize = Self.thumbnailSize * scale
+        var next: [UUID: UIImage] = [:]
+        for (index, layer) in layers.enumerated() {
+            if let thumb = coordinator.canvasViewModel.layerThumbnail(at: index, maxDimension: pixelSize) {
+                next[layer.id] = thumb
+            }
+        }
+        thumbnails = next
     }
 
     private func layerRow(layer: LayerInfo, index: Int, isActive: Bool) -> some View {
@@ -49,6 +66,20 @@ struct LayerPanelView: View {
                     .foregroundStyle(isActive ? .white : (layer.isVisible ? .primary : .secondary))
                     .frame(width: 24, height: 24)
             }
+
+            // Thumbnail preview of layer contents
+            ZStack {
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(Color.white)
+                if let thumb = thumbnails[layer.id] {
+                    Image(uiImage: thumb)
+                        .resizable()
+                        .interpolation(.medium)
+                        .aspectRatio(contentMode: .fit)
+                }
+            }
+            .frame(width: Self.thumbnailSize, height: Self.thumbnailSize)
+            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.gray.opacity(0.4), lineWidth: 0.5))
 
             // Layer name
             Text(layer.name)

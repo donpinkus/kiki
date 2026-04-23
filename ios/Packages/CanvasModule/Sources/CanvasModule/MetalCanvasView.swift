@@ -813,6 +813,22 @@ public final class MetalCanvasView: UIView {
         renderer.flattenedCGImage()
     }
 
+    /// Render a thumbnail of a single layer's contents (no compositing). Returns nil
+    /// if the layer index is out of range or the texture can't be read.
+    public func layerThumbnail(at index: Int, maxDimension: CGFloat = 64) -> UIImage? {
+        guard let cgImage = renderer.layerToCGImage(at: index) else { return nil }
+        let fullSize = CGSize(width: cgImage.width, height: cgImage.height)
+        guard fullSize.width > 0, fullSize.height > 0 else { return nil }
+        let scale = min(maxDimension / fullSize.width, maxDimension / fullSize.height, 1.0)
+        let thumbSize = CGSize(width: fullSize.width * scale, height: fullSize.height * scale)
+        let format = UIGraphicsImageRendererFormat()
+        format.preferredRange = .standard  // sRGB — match Metal canvas color space
+        let imageRenderer = UIGraphicsImageRenderer(size: thumbSize, format: format)
+        return imageRenderer.image { _ in
+            UIImage(cgImage: cgImage).draw(in: CGRect(origin: .zero, size: thumbSize))
+        }
+    }
+
     // MARK: - Helpers
 
     private var canvasScale: CGFloat {
