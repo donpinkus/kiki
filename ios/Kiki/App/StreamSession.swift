@@ -14,23 +14,10 @@ final class StreamSession {
 
     // MARK: - Types
 
-    /// Internal WebSocket-and-server state. Captures literal transitions
-    /// (TCP open, server status messages, retry exhaustion). The `.connected`
-    /// case fires twice on a cold start — once for WS open and once for the
-    /// server's `status=ready` — so this enum on its own is not safe for UI
-    /// to consume directly. UI should observe `readiness` instead.
-    private enum ConnectionState {
-        case disconnected
-        case connecting
-        case provisioning(message: String)
-        case connected
-        case error(String)
-    }
-
-    /// UI-facing stream state. Hides backend pod vocabulary (provisioning,
-    /// reprovisioning) behind a single `.warming` case, and absorbs the
-    /// double-`.connected` quirk: only an explicit `status=ready` from the
-    /// server transitions to `.ready`; a bare WS open does not.
+    /// UI-facing stream state. Server status messages drive transitions —
+    /// a bare WS open is just a breadcrumb. The `.warming` case carries
+    /// `startedAt` for a continuous progress bar across multiple status
+    /// updates and reconnect attempts.
     enum StreamReadiness: Equatable {
         case disconnected
         case warming(message: String, startedAt: Date)
@@ -64,17 +51,10 @@ final class StreamSession {
     /// change so the unchanged sketch re-generates under the new prompt.
     private var lastSentJpegData: Data?
 
-    /// Internal connection state — drives readiness translation, not exposed.
-    private var connectionState: ConnectionState = .disconnected
-
-    /// Current readiness, observed by AppCoordinator.
+    /// Current readiness, observed by AppCoordinator. The warm-up start time
+    /// lives inside `.warming(startedAt:)` itself — `warm()` carries it
+    /// forward across consecutive warming transitions.
     private(set) var readiness: StreamReadiness = .disconnected
-
-    /// Tracks the start of the current warm-up cycle so the UI's progress bar
-    /// is continuous across multiple `provisioning` status updates and reconnect
-    /// attempts. Cleared on the explicit `status=ready` server message,
-    /// `.disconnected`, or `.failed` — not on bare WS-open transitions.
-    private var warmupStartedAt: Date?
 
     /// Called when a new generated image frame is received.
     var onImageReceived: ((UIImage) -> Void)?
@@ -138,20 +118,22 @@ final class StreamSession {
         isStopped = true
         cancelAllTasks()
         Task { await client.disconnect() }
-        updateConnectionState(.disconnected)
+        setReadiness(.disconnected)
     }
 
     // MARK: - Connection
 
     private func connectAndRun() async {
-        updateConnectionState(.connecting)
+        warm(message: "Connecting…")
         let tx = SentrySDK.startTransaction(name: "stream.connection", operation: "stream.connection")
 
         do {
             try await client.connect()
             reconnectAttempts = 0
+            // WS open is just a breadcrumb — don't change readiness here.
+            // The server's status=ready (or status=provisioning, or type=error)
+            // is what actually drives the next transition, via statusTask.
             Self.breadcrumb(category: "stream.connection", message: "Connected to server")
-            updateConnectionState(.connected)
 
             try await client.sendConfig(config)
             lastSentConfig = config
@@ -196,7 +178,7 @@ final class StreamSession {
                 scope.setLevel(.error)
                 scope.setTag(value: String(Self.maxReconnectAttempts), key: "maxAttempts")
             }
-            updateConnectionState(.error("Unable to connect. Please restart the app."))
+            setReadiness(.failed(message: "Unable to connect. Please restart the app."))
             return
         }
 
@@ -205,7 +187,7 @@ final class StreamSession {
         tx.setData(value: delay, key: "backoffSec")
 
         cancelAllTasks()
-        updateConnectionState(.connecting)
+        warm(message: "Connecting…")
 
         try? await Task.sleep(for: .seconds(delay))
         guard !isStopped, !Task.isCancelled else {
@@ -334,12 +316,9 @@ final class StreamSession {
                 ])
                 await MainActor.run {
                     if status.type == "status" && (status.status == "provisioning" || status.status == "reprovisioning") {
-                        self.updateConnectionState(.provisioning(message: status.message ?? "Provisioning GPU..."))
+                        self.warm(message: status.message ?? "Provisioning GPU...")
                     } else if status.type == "status" && status.status == "ready" {
-                        // Pod is genuinely ready. Clear warm-up tracking so a
-                        // future reconnect/replacement starts a fresh cycle.
-                        self.warmupStartedAt = nil
-                        self.updateConnectionState(.connected)
+                        self.setReadiness(.ready)
                         // Re-send config now that the server is ready to accept it.
                         // The initial config may have been sent during provisioning.
                         self.lastSentConfig = nil
@@ -352,7 +331,7 @@ final class StreamSession {
                             scope.setExtra(value: status.message ?? "(no message)", key: "serverMessage")
                         }
                         self.reconnectAttempts = 0
-                        self.updateConnectionState(.error(status.message ?? "Server error"))
+                        self.setReadiness(.failed(message: status.message ?? "Server error"))
                     }
                 }
             }
@@ -387,41 +366,37 @@ final class StreamSession {
         }
     }
 
-    private func updateConnectionState(_ state: ConnectionState) {
-        Self.breadcrumb(category: "stream.state", message: "State", data: ["state": String(describing: state)])
-        connectionState = state
-
-        let newReadiness: StreamReadiness
-        switch state {
-        case .disconnected:
-            warmupStartedAt = nil
-            newReadiness = .disconnected
-        case .connecting:
-            if warmupStartedAt == nil { warmupStartedAt = Date() }
-            newReadiness = .warming(message: "Connecting…", startedAt: warmupStartedAt ?? Date())
-        case .provisioning(let message):
-            if warmupStartedAt == nil { warmupStartedAt = Date() }
-            newReadiness = .warming(message: message, startedAt: warmupStartedAt ?? Date())
-        case .connected:
-            // `.connected` fires twice on a cold start: once when the WS opens
-            // (pod may still be cold) and once when the server sends
-            // `status=ready` (pod actually ready). The receive loop clears
-            // warmupStartedAt before calling here on the latter, so its
-            // presence distinguishes the two: keep warming if still set,
-            // transition to .ready only after the server confirms.
-            if warmupStartedAt != nil {
-                newReadiness = readiness  // still warming; no change
-            } else {
-                newReadiness = .ready
-            }
-        case .error(let msg):
-            warmupStartedAt = nil
-            newReadiness = .failed(message: msg)
+    /// Transition to `.warming`. If we're already in `.warming`, the existing
+    /// `startedAt` is carried forward so the progress bar stays continuous
+    /// across multiple status updates and reconnect attempts. Otherwise a
+    /// fresh `Date()` starts the warm-up cycle.
+    private func warm(message: String) {
+        let startedAt: Date
+        if case .warming(_, let existing) = readiness {
+            startedAt = existing
+        } else {
+            startedAt = Date()
         }
+        applyReadiness(.warming(message: message, startedAt: startedAt))
+    }
 
-        guard newReadiness != readiness else { return }
-        readiness = newReadiness
-        onReadinessChanged?(newReadiness)
+    /// Transition to a terminal/stable state (`.ready`, `.disconnected`,
+    /// `.failed`). Anything that calls this is implicitly ending the
+    /// current warm-up cycle.
+    private func setReadiness(_ readiness: StreamReadiness) {
+        applyReadiness(readiness)
+    }
+
+    /// Shared transition: log breadcrumb, dedup, fire callback. Direct
+    /// callers should use `warm()` or `setReadiness()` — this is private
+    /// implementation detail.
+    private func applyReadiness(_ new: StreamReadiness) {
+        Self.breadcrumb(category: "stream.state", message: "Readiness", data: [
+            "state": String(describing: new),
+        ])
+        guard new != readiness else { return }
+        readiness = new
+        onReadinessChanged?(new)
     }
 
     // MARK: - Breadcrumb helper
