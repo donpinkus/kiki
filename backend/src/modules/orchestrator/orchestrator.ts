@@ -5,7 +5,7 @@
  * tightly coupled — separating would just spread the reader's attention across
  * imports):
  *   - Registry: Map<sessionId, Session>
- *   - Provisioner: create pod → SSH setup → health poll
+ *   - Provisioner: create pod → wait for runtime → poll health
  *   - Reaper: terminate pods idle > 10 min
  *   - Reconcile: on boot, kill orphaned `kiki-session-*` pods from prior runs
  *   - Semaphore: cap concurrent provisions to prevent rate-limit + burst OOM
@@ -89,10 +89,6 @@
  * └─────────────────────────────────────┴──────────────────────────────────────────────────┴──────────────────────────────┘
  */
 
-import { spawn } from 'node:child_process';
-import { chmodSync, writeFileSync, existsSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import type { FastifyBaseLogger } from 'fastify';
 import * as Sentry from '@sentry/node';
 
@@ -143,7 +139,6 @@ const SESSION_PREFIX = 'session:';
 const POD_PREFIX = 'kiki-session-';
 const IDLE_GRACE_SECONDS = 300; // 5 min grace on top of idle timeout for Redis TTL
 const GPU_TYPE_ID = 'NVIDIA GeForce RTX 5090';
-const IMAGE_NAME = 'runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404';
 // Headroom above the current spot floor. Larger headroom = fewer outbids =
 // fewer needless fallbacks to on-demand. 0.05 costs ~$0.03/hr more than the
 // 0.02 default on a typical bid, cheaper than one on-demand fallback.
@@ -159,27 +154,6 @@ const semaphoreWaiters: Array<() => void> = [];
 
 // Logger injected by start()
 let log: FastifyBaseLogger = console as unknown as FastifyBaseLogger;
-
-// SSH key path — written once on first provision
-const SSH_KEY_PATH = '/tmp/kiki-runpod-key';
-let sshKeyWritten = false;
-
-// Runtime asset paths — flux-klein-server/ files bundled into backend at build
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const RUNTIME_ASSETS_DIR = findRuntimeAssets(__dirname);
-
-function findRuntimeAssets(startDir: string): string {
-  // Walk up from this file's directory looking for a `runtime-assets/` folder.
-  // In dev (tsx): backend/src/modules/orchestrator/ → finds backend/runtime-assets/
-  // In prod Docker image: /app/dist/modules/orchestrator/ → finds /app/runtime-assets/
-  let dir = startDir;
-  for (let i = 0; i < 6; i++) {
-    const candidate = join(dir, 'runtime-assets');
-    if (existsSync(candidate)) return candidate;
-    dir = dirname(dir);
-  }
-  throw new Error(`Could not locate runtime-assets directory starting from ${startDir}`);
-}
 
 // ────────────────────────────────────────────────────────────────────────────
 // Redis session helpers
@@ -233,14 +207,6 @@ async function writeSession(session: RedisSession): Promise<void> {
     .hset(key, fields)
     .expire(key, IDLE_TTL_SECONDS)
     .exec();
-}
-
-/**
- * @deprecated Use `abortSession` for error paths. `deleteStaleSession` only
- * clears Redis and leaks the pod; `abortSession` terminates both.
- */
-export async function deleteStaleSession(sessionId: string): Promise<void> {
-  return deleteSession(sessionId);
 }
 
 async function deleteSession(sessionId: string): Promise<void> {
@@ -788,7 +754,6 @@ type ProvisionPhase =
   | 'placement'
   | 'pod_create'
   | 'runtime_up'
-  | 'setup'
   | 'health_check';
 
 async function provision(sessionId: string, onStatus: (msg: string) => void): Promise<ProvisionResult> {
@@ -857,29 +822,6 @@ async function provision(sessionId: string, onStatus: (msg: string) => void): Pr
             phaseTimings.runtime_up_ms = Date.now() - phaseStart;
             phaseStart = Date.now();
 
-            if (config.FLUX_PROVISION_MODE !== 'baked') {
-              phase = 'setup';
-              await Sentry.startSpan(
-                { name: 'pod.setup', op: 'pod.setup', attributes: { podId, dc: dc ?? 'unknown' } },
-                async () => {
-                  const sshInfo = await waitForSsh(podId as string);
-                  log.info({ sessionId, podId, ssh: `${sshInfo.ip}:${sshInfo.port}` }, 'Pod SSH ready');
-
-                  onStatus('Installing server...');
-                  notifyPodProgress(podId as string, '🔧 Installing server...');
-                  await scpFiles(sshInfo);
-                  onStatus('Downloading AI model (~2 min)...');
-                  notifyPodProgress(podId as string, '⬇️ Downloading AI model...');
-                  await runSetup(sshInfo, (line) => {
-                    if (line.includes('Downloading') && line.includes('FLUX.2-klein')) onStatus('Downloading AI model...');
-                    else if (line.includes('Warming up')) onStatus('Warming up...');
-                  });
-                },
-              );
-              phaseTimings.setup_ms = Date.now() - phaseStart;
-              phaseStart = Date.now();
-            }
-
             // 4. Poll /health via RunPod proxy until the FLUX server reports ready
             phase = 'health_check';
             onStatus('Loading AI model & warming up...');
@@ -896,7 +838,7 @@ async function provision(sessionId: string, onStatus: (msg: string) => void): Pr
             // 5. Build WebSocket URL and return
             const podUrl = `wss://${podId}-8766.proxy.runpod.net/ws`;
             log.info(
-              { sessionId, podId, podUrl, podType, totalMs, mode: config.FLUX_PROVISION_MODE, attempt, dc },
+              { sessionId, podId, podUrl, podType, totalMs, attempt, dc },
               'Pod ready',
             );
             onStatus('Ready');
@@ -907,7 +849,6 @@ async function provision(sessionId: string, onStatus: (msg: string) => void): Pr
               podType,
               attempt,
               outcome: 'success',
-              mode: config.FLUX_PROVISION_MODE,
             });
             trackPodProvisionCompleted({
               userId: sessionId,
@@ -915,7 +856,6 @@ async function provision(sessionId: string, onStatus: (msg: string) => void): Pr
               dc,
               podType,
               attempt,
-              mode: config.FLUX_PROVISION_MODE,
               phaseTimings,
             });
             return { podId, podUrl, podType };
@@ -1037,7 +977,8 @@ async function provision(sessionId: string, onStatus: (msg: string) => void): Pr
 /**
  * A candidate placement: which DC to pin the pod to, and optionally which
  * pre-populated network volume to attach. `null` for both means "let RunPod
- * pick any DC, no volume" — legacy ssh-mode behavior.
+ * pick any DC, no volume" — only hit when NETWORK_VOLUMES_BY_DC is empty
+ * (e.g. local dev without volumes configured).
  */
 interface PlacementTarget {
   dataCenterId: string | null;
@@ -1046,9 +987,9 @@ interface PlacementTarget {
 }
 
 /**
- * In baked mode with a configured NETWORK_VOLUMES_BY_DC, iterate through each
- * volume DC and query spot stock. Returns the first DC with Medium/High stock
- * (with its bid info), or the best-stock DC even if Low (so the caller can
+ * With a configured NETWORK_VOLUMES_BY_DC, iterate through each volume DC and
+ * query spot stock. Returns the first DC with Medium/High stock (with its
+ * bid info), or the best-stock DC even if Low (so the caller can
  * still try spot before falling back to on-demand). Returns `null` only if
  * every DC returns a hard capacity miss.
  *
@@ -1061,7 +1002,7 @@ async function selectPlacement(
 ): Promise<PlacementTarget | null> {
   const volumes = config.NETWORK_VOLUMES_BY_DC;
   const volumeDcs = Object.keys(volumes).filter((dc) => !excludeDcs.has(dc));
-  const useVolumes = config.FLUX_PROVISION_MODE === 'baked' && volumeDcs.length > 0;
+  const useVolumes = volumeDcs.length > 0;
 
   if (!useVolumes) {
     try {
@@ -1129,18 +1070,12 @@ async function createPodWithFallback(
 ): Promise<{ podId: string; podType: PodType; dc: string | null }> {
   const podName = `${POD_PREFIX}${sessionId.slice(0, 16)}`;
 
-  // Image + registry auth depend on provision mode.
-  // ssh mode: stock runpod/pytorch base (Docker Hub, RUNPOD_REGISTRY_AUTH_ID).
-  // baked mode: GHCR image with deps baked in (RUNPOD_GHCR_AUTH_ID). Weights
-  // come from the attached network volume at /workspace/huggingface.
-  const imageName = config.FLUX_PROVISION_MODE === 'baked'
-    ? (config.FLUX_IMAGE || (() => { throw new Error('FLUX_IMAGE env var required when FLUX_PROVISION_MODE=baked'); })())
-    : IMAGE_NAME;
-  const authId = config.FLUX_PROVISION_MODE === 'baked'
-    ? (config.RUNPOD_GHCR_AUTH_ID || undefined)
-    : (config.RUNPOD_REGISTRY_AUTH_ID || undefined);
+  // GHCR image with deps baked in; weights come from the attached network
+  // volume at /workspace/huggingface.
+  const imageName = config.FLUX_IMAGE;
+  const authId = config.RUNPOD_GHCR_AUTH_ID || undefined;
 
-  // ─── Pick DC (+ volume if baked) ─────────────────────────────────────
+  // ─── Pick DC + volume ───────────────────────────────────────────────
   onStatus('Finding available GPU...');
   const target = await selectPlacement(sessionId, excludeDcs);
   if (!target) {
@@ -1274,76 +1209,6 @@ async function createPodWithFallback(
   }
 }
 
-interface SshInfo {
-  ip: string;
-  port: number;
-  podId: string;
-}
-
-async function waitForSsh(podId: string, timeoutMs = 5 * 60 * 1000): Promise<SshInfo> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const pod = await getPod(podId);
-    if (pod?.runtime?.ports) {
-      const ssh = pod.runtime.ports.find((p) => p.privatePort === 22);
-      if (ssh && ssh.ip) {
-        return { ip: ssh.ip, port: ssh.publicPort, podId };
-      }
-    }
-    await sleep(5000);
-  }
-  throw new Error(`Pod ${podId} never got SSH info within ${timeoutMs}ms`);
-}
-
-function ensureSshKey(): void {
-  if (sshKeyWritten) return;
-  const key = config.RUNPOD_SSH_PRIVATE_KEY;
-  writeFileSync(SSH_KEY_PATH, key.endsWith('\n') ? key : key + '\n');
-  chmodSync(SSH_KEY_PATH, 0o600);
-  sshKeyWritten = true;
-}
-
-async function scpFiles(ssh: SshInfo): Promise<void> {
-  ensureSshKey();
-  const { ip, port } = ssh;
-  const scpOpts = ['-i', SSH_KEY_PATH, '-o', 'StrictHostKeyChecking=no', '-P', String(port)];
-  const sshOpts = ['-i', SSH_KEY_PATH, '-o', 'StrictHostKeyChecking=no', '-p', String(port)];
-
-  // Wait for sshd to be responsive
-  await retryCommand('ssh', [...sshOpts, `root@${ip}`, 'echo ok'], 12, 5000);
-
-  // Prepare target dir
-  await runCommand('ssh', [...sshOpts, `root@${ip}`, 'rm -rf /tmp/flux-klein-server && mkdir -p /tmp/flux-klein-server']);
-
-  // SCP the setup script
-  await runCommand('scp', [
-    ...scpOpts,
-    join(RUNTIME_ASSETS_DIR, 'setup-flux-klein.sh'),
-    `root@${ip}:/tmp/setup-flux-klein.sh`,
-  ]);
-
-  // SCP the server files
-  const files = ['server.py', 'pipeline.py', 'config.py', 'requirements.txt'];
-  for (const f of files) {
-    await runCommand('scp', [
-      ...scpOpts,
-      join(RUNTIME_ASSETS_DIR, 'flux-klein-server', f),
-      `root@${ip}:/tmp/flux-klein-server/${f}`,
-    ]);
-  }
-}
-
-async function runSetup(ssh: SshInfo, onLine: (line: string) => void): Promise<void> {
-  ensureSshKey();
-  const { ip, port } = ssh;
-  const sshOpts = ['-i', SSH_KEY_PATH, '-o', 'StrictHostKeyChecking=no', '-p', String(port)];
-  await runCommand(
-    'ssh',
-    [...sshOpts, `root@${ip}`, 'chmod +x /tmp/setup-flux-klein.sh && /tmp/setup-flux-klein.sh'],
-    { onStdoutLine: onLine, timeoutMs: 15 * 60 * 1000 },
-  );
-}
-
 /**
  * Polls the RunPod API until the pod's `runtime` field is non-null, meaning
  * the container image has been pulled and the container process is running.
@@ -1440,68 +1305,6 @@ async function waitForHealth(
     await sleep(10_000);
   }
   throw new Error(`Server at ${healthUrl} never became healthy within ${timeoutMs}ms`);
-}
-
-// ────────────────────────────────────────────────────────────────────────────
-// Child process helpers
-// ────────────────────────────────────────────────────────────────────────────
-
-interface RunCommandOpts {
-  onStdoutLine?: (line: string) => void;
-  timeoutMs?: number;
-}
-
-function runCommand(cmd: string, args: string[], opts: RunCommandOpts = {}): Promise<void> {
-  const timeoutMs = opts.timeoutMs ?? 2 * 60 * 1000;
-  return new Promise((resolve, reject) => {
-    const proc = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-    const timer = setTimeout(() => {
-      proc.kill('SIGKILL');
-      reject(new Error(`${cmd} timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-
-    const onStdoutLine = opts.onStdoutLine;
-    if (onStdoutLine && proc.stdout) {
-      let buf = '';
-      proc.stdout.on('data', (chunk: Buffer) => {
-        buf += chunk.toString('utf8');
-        let idx: number;
-        while ((idx = buf.indexOf('\n')) !== -1) {
-          onStdoutLine(buf.slice(0, idx));
-          buf = buf.slice(idx + 1);
-        }
-      });
-    }
-
-    let stderr = '';
-    proc.stderr?.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString('utf8');
-    });
-
-    proc.on('error', (err) => {
-      clearTimeout(timer);
-      reject(err);
-    });
-    proc.on('exit', (code) => {
-      clearTimeout(timer);
-      if (code === 0) resolve();
-      else reject(new Error(`${cmd} exited ${code}: ${stderr.slice(-500)}`));
-    });
-  });
-}
-
-async function retryCommand(cmd: string, args: string[], attempts: number, delayMs: number): Promise<void> {
-  let lastErr: unknown;
-  for (let i = 0; i < attempts; i++) {
-    try {
-      await runCommand(cmd, args, { timeoutMs: 15_000 });
-      return;
-    } catch (err) {
-      lastErr = err;
-      await sleep(delayMs);
-    }
-  }
-  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
 
 function sleep(ms: number): Promise<void> {

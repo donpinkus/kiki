@@ -68,11 +68,8 @@ Set via `railway variables --set` or the dashboard:
 | Env | Source | Purpose |
 |---|---|---|
 | `RUNPOD_API_KEY` | RunPod Console → Settings → API Keys | GraphQL auth for pod lifecycle |
-| `RUNPOD_SSH_PRIVATE_KEY` | Contents of `~/.runpod/ssh/RunPod-Key-Go` | SSH into pods (legacy ssh mode only) |
-| `RUNPOD_REGISTRY_AUTH_ID` | ID from `myself.containerRegistryCreds` | Docker Hub auth credential ID |
 | `RUNPOD_GHCR_AUTH_ID` | ID from `myself.containerRegistryCreds` | GHCR auth credential ID for pulling the slim image |
-| `FLUX_PROVISION_MODE` | `baked` (production) or `ssh` (legacy) | Which provisioning path to use |
-| `FLUX_IMAGE` | e.g. `ghcr.io/donpinkus/kiki-flux-klein:sha-...` | GHCR image ref for baked mode |
+| `FLUX_IMAGE` | e.g. `ghcr.io/donpinkus/kiki-flux-klein:sha-...` | GHCR image ref (required) |
 | `NETWORK_VOLUMES_BY_DC` | JSON: `{"EUR-NO-1":"49n6i3twuw",...}` | DC → volume ID map for weight mounts |
 | `ONDEMAND_FALLBACK_ENABLED` | `true` | Allow on-demand when spot exhausted |
 | `JWT_ACCESS_SECRET` | ≥32 byte hex | HS256 secret for access tokens |
@@ -89,7 +86,7 @@ Set via `railway variables --set` or the dashboard:
 cd backend && railway up
 ```
 
-Railway builds via `backend/Dockerfile` (includes `openssh-client`). On startup the backend terminates orphan `kiki-session-*` pods and arms the idle reaper.
+Railway builds via `backend/Dockerfile`. On startup the backend terminates orphan `kiki-session-*` pods and arms the idle reaper.
 
 ### Observe
 
@@ -103,7 +100,7 @@ Key log lines:
 - `DC placement ranked dcs=[...]` — spot stock probed per DC.
 - `Pod created (spot) podId=... dc=... costPerHr=0.58` — provisioning started.
 - `Container runtime up podId=... uptimeInSeconds=...` — image pulled, container running.
-- `Pod ready podId=... podUrl=wss://... mode=baked` — fully provisioned.
+- `Pod ready podId=... podUrl=wss://...` — fully provisioned.
 - `Reaping idle pod sessionId=... podId=... idleMs=...` — 30-min timeout hit.
 
 ### Kill everything (cost panic button)
@@ -143,7 +140,7 @@ curl -sS "https://api.runpod.io/graphql?api_key=$RUNPOD_API_KEY" \
 | `backend/src/routes/stream.ts` | WebSocket endpoint: extract Bearer JWT, provision, relay |
 | `backend/src/routes/auth.ts` | `/v1/auth/apple` and `/v1/auth/refresh` endpoints |
 | `backend/scripts/populate-volume.ts` | One-shot network volume populate script |
-| `backend/Dockerfile` | Railway image — Node 22 + openssh-client |
+| `backend/Dockerfile` | Railway image — Node 22 slim |
 | `flux-klein-server/Dockerfile` | Slim GHCR image — PyTorch deps, no weights |
 | `flux-klein-server/server.py` | WebSocket server entry point on the pod |
 | `flux-klein-server/pipeline.py` | FLUX.2-klein pipeline wrapper (loads BF16 base + NVFP4 transformer) |

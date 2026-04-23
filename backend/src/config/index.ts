@@ -2,10 +2,9 @@ export interface AppConfig {
   readonly PORT: number;
   readonly HOST: string;
   readonly RUNPOD_API_KEY: string;
-  readonly RUNPOD_SSH_PRIVATE_KEY: string;
   /** Optional RunPod container registry credential ID for authenticated Docker
-   * Hub pulls. Strongly recommended in production to bypass anonymous rate
-   * limits (100 pulls/6hr per IP). */
+   * Hub pulls. Used only by the one-off probe and populate-volume scripts;
+   * runtime pod creation uses `RUNPOD_GHCR_AUTH_ID`. */
   readonly RUNPOD_REGISTRY_AUTH_ID: string;
 
   // ─── Auth (Workstream 1) ──────────────────────────────────────────────
@@ -35,10 +34,8 @@ export interface AppConfig {
    * removing the spot code path. Default false. */
   readonly ONDEMAND_ONLY_MODE: boolean;
 
-  // ─── Pre-baked Docker image (Workstream 3) ────────────────────────────
-  /** 'ssh' = run setup-flux-klein.sh over SSH (legacy); 'baked' = use FLUX_IMAGE */
-  readonly FLUX_PROVISION_MODE: 'ssh' | 'baked';
-  /** Full image reference (e.g. ghcr.io/owner/kiki-flux-klein:sha-abc). Required when FLUX_PROVISION_MODE=baked. */
+  // ─── Pre-baked Docker image ──────────────────────────────────────────
+  /** Full image reference (e.g. ghcr.io/owner/kiki-flux-klein:sha-abc). Required. */
   readonly FLUX_IMAGE: string;
   /** RunPod registry credential ID for authenticated GHCR pulls. */
   readonly RUNPOD_GHCR_AUTH_ID: string;
@@ -160,9 +157,9 @@ function validateConfig(): AppConfig {
     throw new Error('RUNPOD_API_KEY is required (orchestrator needs it to create/query/terminate pods)');
   }
 
-  const runpodSshKey = process.env['RUNPOD_SSH_PRIVATE_KEY'] ?? '';
-  if (!runpodSshKey) {
-    throw new Error('RUNPOD_SSH_PRIVATE_KEY is required (orchestrator SSHes into pods to run setup)');
+  const fluxImage = process.env['FLUX_IMAGE'] ?? '';
+  if (!fluxImage) {
+    throw new Error('FLUX_IMAGE is required (GHCR image reference for pod provisioning)');
   }
 
   const jwtAccessSecret = process.env['JWT_ACCESS_SECRET'] ?? '';
@@ -195,7 +192,6 @@ function validateConfig(): AppConfig {
     PORT: port,
     HOST: process.env['HOST'] ?? '0.0.0.0',
     RUNPOD_API_KEY: runpodApiKey,
-    RUNPOD_SSH_PRIVATE_KEY: runpodSshKey,
     RUNPOD_REGISTRY_AUTH_ID: process.env['RUNPOD_REGISTRY_AUTH_ID'] ?? '',
     JWT_ACCESS_SECRET: jwtAccessSecret,
     JWT_REFRESH_SECRET: jwtRefreshSecret,
@@ -204,9 +200,7 @@ function validateConfig(): AppConfig {
     FREE_TIER_SECONDS: Number(process.env['FREE_TIER_SECONDS'] ?? 3600),
     ONDEMAND_FALLBACK_ENABLED: process.env['ONDEMAND_FALLBACK_ENABLED'] === 'true',
     ONDEMAND_ONLY_MODE: process.env['ONDEMAND_ONLY_MODE'] === 'true',
-    FLUX_PROVISION_MODE:
-      (process.env['FLUX_PROVISION_MODE'] as 'ssh' | 'baked' | undefined) ?? 'ssh',
-    FLUX_IMAGE: process.env['FLUX_IMAGE'] ?? '',
+    FLUX_IMAGE: fluxImage,
     RUNPOD_GHCR_AUTH_ID: process.env['RUNPOD_GHCR_AUTH_ID'] ?? '',
     NETWORK_VOLUMES_BY_DC: parseVolumesMap(process.env['NETWORK_VOLUMES_BY_DC']),
     REDIS_URL: process.env['REDIS_URL'] ?? '',

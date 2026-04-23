@@ -64,9 +64,6 @@ export type FailureCategory =
   | 'runtime_up_timeout'
   | 'image_pull_stall'
   | 'pod_vanished'
-  | 'ssh_timeout'
-  | 'scp_failed'
-  | 'setup_failed'
   | 'health_timeout'
   | 'monthly_cap'
   | 'transient_runpod'
@@ -88,9 +85,6 @@ export function classifyProvisionError(err: Error): FailureCategory {
     msg.includes('no runpod dc')
   ) return 'spot_capacity';
   if (msg.includes('runtime never appeared')) return 'runtime_up_timeout';
-  if (msg.includes('never got ssh')) return 'ssh_timeout';
-  if (msg.includes('scp') || msg.includes('scpfiles')) return 'scp_failed';
-  if (msg.includes('setup') || msg.includes('setup-flux-klein')) return 'setup_failed';
   if (msg.includes('never became healthy')) return 'health_timeout';
   if (msg.includes('monthly_cap') || msg.includes('cost gate')) return 'monthly_cap';
   if (msg.includes('failed to create') || msg.includes('returned no pod')) return 'pod_create_failed';

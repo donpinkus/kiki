@@ -66,8 +66,7 @@ export function trackPodProvisionCompleted(props: {
   dc: string | null;
   podType: string;
   attempt: number;
-  mode: string;
-  /** Per-phase durations for funnel analysis. Keys: pod_create_ms, runtime_up_ms, setup_ms (optional), health_check_ms. */
+  /** Per-phase durations for funnel analysis. Keys: pod_create_ms, runtime_up_ms, health_check_ms. */
   phaseTimings?: Record<string, number>;
 }): void {
   capture(props.userId, 'pod.provision.completed', {
@@ -75,7 +74,6 @@ export function trackPodProvisionCompleted(props: {
     dc: props.dc ?? 'unknown',
     pod_type: props.podType,
     attempt: props.attempt,
-    mode: props.mode,
     ...(props.phaseTimings ?? {}),
   });
 }

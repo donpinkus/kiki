@@ -31,7 +31,7 @@ npm run build
 npm test
 ```
 
-Environment variables are documented in [`backend/.env.example`](./backend/.env.example). Real RunPod orchestration requires `RUNPOD_API_KEY` and `RUNPOD_SSH_PRIVATE_KEY`.
+Environment variables are documented in [`backend/.env.example`](./backend/.env.example). Real RunPod orchestration requires `RUNPOD_API_KEY` and `FLUX_IMAGE` (the GHCR tag of the pod image).
 
 ### iOS
 
@@ -60,7 +60,7 @@ python3 flux-klein-server/test_client.py --help
 - `backend/`: Fastify server, relay route, RunPod orchestration
 - `flux-klein-server/`: Python image generation server for the pod
 - `documents/`: decisions, plans, content safety, provider references
-- `scripts/`: supporting setup scripts copied into runtime assets
+- `backend/scripts/`: operational one-off scripts (network volume population, capacity probes)
 
 ## Key References
 
