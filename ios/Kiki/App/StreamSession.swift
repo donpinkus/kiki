@@ -348,7 +348,7 @@ final class StreamSession {
         failureCategory: FailureCategory?
     ) {
         switch state {
-        case .queued, .findingGpu, .creatingPod, .fetchingImage, .warmingModel:
+        case .queued, .findingGpu, .creatingPod, .fetchingImage, .warmingModel, .connecting:
             self.warm(message: displayText(for: state, replacementCount: replacementCount))
         case .ready:
             self.setReadiness(.ready)

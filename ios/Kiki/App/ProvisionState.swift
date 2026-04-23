@@ -10,6 +10,7 @@ public enum ProvisionState: String, Decodable, Sendable {
     case creatingPod = "creating_pod"
     case fetchingImage = "fetching_image"
     case warmingModel = "warming_model"
+    case connecting
     case ready
     case failed
     case terminated
@@ -39,6 +40,7 @@ public func displayText(for state: ProvisionState, replacementCount: Int) -> Str
     case .creatingPod:    return "\(prefix)Creating pod..."
     case .fetchingImage:  return "\(prefix)Fetching container..."
     case .warmingModel:   return "\(prefix)Warming up AI model..."
+    case .connecting:     return "\(prefix)Connecting..."
     case .ready:          return "Ready"
     case .failed:         return "Something went wrong"
     case .terminated:     return "Session ended"

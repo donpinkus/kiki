@@ -12,6 +12,7 @@ import {
   touch,
   sessionClosed,
   subscribe,
+  emitState,
 } from '../modules/orchestrator/orchestrator.js';
 import { StreamRelay } from '../modules/relay/streamRelay.js';
 import {
@@ -165,6 +166,9 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
           return;
         }
 
+        // Pod is serving; transition to 'connecting' while we wire up the relay.
+        await emitState(userId, 'connecting');
+
         relay = new StreamRelay(podUrl);
 
         relay.onMessage((data, isBinary) => {
@@ -218,6 +222,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
               // existing broker subscription forwards them to iOS with
               // replacementCount > 0 so the UI prefixes "Replacing — ".
               const { podUrl: newPodUrl } = await replaceSession(userId);
+              await emitState(userId, 'connecting');
 
               // If client left during replacement, clean up the new pod
               if (clientDisconnected || socket.readyState !== socket.OPEN) {
@@ -259,11 +264,12 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
               request.log.info({ userId, newPodUrl }, 'Replacement relay connected');
 
               // Re-send config so the new pod knows prompt/style/params.
-              // Note: state='ready' was already emitted via the broker when
-              // provision() completed; iOS has seen it.
               if (lastConfig) {
                 newRelay.sendConfig(lastConfig);
               }
+
+              // Replacement relay live — iOS can stream again.
+              await emitState(userId, 'ready');
             } catch (err) {
               request.log.error({ userId, err }, 'Replacement failed');
               if (socket.readyState === socket.OPEN) {
@@ -282,8 +288,6 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
 
         await relay.connect();
         request.log.info({ userId }, 'Upstream connected, relaying');
-        // state='ready' was already emitted via the broker when provision()
-        // completed; iOS has seen it.
 
         socket.on('message', (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
           if (!relay) return;
@@ -304,6 +308,10 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             }
           }
         });
+
+        // Relay connected AND message handler registered — iOS frames will
+        // now flow to the pod. Safe to tell iOS we're truly ready.
+        await emitState(userId, 'ready');
       } catch (err) {
         request.log.error({ userId, err }, 'Provisioning or relay failed');
         // If the failure happened essentially-instantly, getOrProvisionPod

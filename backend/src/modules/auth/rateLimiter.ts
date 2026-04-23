@@ -33,7 +33,7 @@ const HISTORY_PREFIX = 'ratelimit:provisions:';
 // reconnect). Mirrors the `State` enum in orchestrator.ts; duplicated here to
 // avoid pulling the orchestrator's module graph into the auth layer.
 const ACTIVE_STATES = new Set([
-  'queued', 'finding_gpu', 'creating_pod', 'fetching_image', 'warming_model', 'ready',
+  'queued', 'finding_gpu', 'creating_pod', 'fetching_image', 'warming_model', 'connecting', 'ready',
 ]);
 
 function historyKey(userId: string): string {
