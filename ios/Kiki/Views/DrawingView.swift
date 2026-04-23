@@ -246,6 +246,19 @@ private struct PromptTitleBar: View {
         .padding(.vertical, 16)
     }
 
+    // Glass-like specular stroke — brighter top, accent-tinted bottom edge.
+    // Fakes the light-catching edge of Apple's Liquid Glass since we can't
+    // use the real `.glassEffect` API on iPadOS 18.
+    private static let glassStroke = LinearGradient(
+        colors: [
+            .white.opacity(0.35),
+            .white.opacity(0.05),
+            Color.accentColor.opacity(0.35)
+        ],
+        startPoint: .top,
+        endPoint: .bottom
+    )
+
     private var styleButton: some View {
         Button {
             coordinator.showStylePicker = true
@@ -264,10 +277,10 @@ private struct PromptTitleBar: View {
             }
             .padding(.horizontal, 6)
             .frame(width: Self.contentHeight, height: Self.contentHeight)
-            .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: Self.cornerRadius))
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: Self.cornerRadius))
             .overlay(
                 RoundedRectangle(cornerRadius: Self.cornerRadius)
-                    .stroke(Color.accentColor.opacity(0.7), lineWidth: 1)
+                    .stroke(Self.glassStroke, lineWidth: 1)
             )
         }
         .buttonStyle(.plain)
@@ -275,22 +288,33 @@ private struct PromptTitleBar: View {
 
     // Multi-line text input. `lineLimit(4, reservesSpace: true)` reserves
     // ~4 lines of height so the bar stays at a fixed initial size; extra
-    // text scrolls internally once the limit is reached.
+    // text scrolls internally once the limit is reached. Leading pencil
+    // icon is the primary affordance — signals "type here."
     private var promptInput: some View {
         @Bindable var coordinator = coordinator
-        return TextField(
-            "Describe your image…",
-            text: $coordinator.promptText,
-            axis: .vertical
-        )
-        .textFieldStyle(.plain)
-        .font(.subheadline)
-        .lineLimit(4, reservesSpace: true)
+        return HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "pencil.line")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .padding(.top, 2)
+            TextField(
+                "Describe your image…",
+                text: $coordinator.promptText,
+                axis: .vertical
+            )
+            .textFieldStyle(.plain)
+            .font(.subheadline)
+            .lineLimit(4, reservesSpace: true)
+        }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .frame(height: Self.contentHeight)
-        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: Self.cornerRadius))
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: Self.cornerRadius))
+        .overlay(
+            RoundedRectangle(cornerRadius: Self.cornerRadius)
+                .stroke(Self.glassStroke, lineWidth: 1)
+        )
     }
 }
 
