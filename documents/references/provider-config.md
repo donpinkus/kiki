@@ -14,9 +14,9 @@ Server image: `ghcr.io/donpinkus/kiki-flux-klein:<tag>` — a slim (~2–3 GB) i
 ## How pod provisioning works
 
 1. iPad sends Apple Sign In identity token → backend issues JWT. Client opens WebSocket to `wss://kiki-backend.../v1/stream` with `Authorization: Bearer <jwt>`.
-2. Backend's `orchestrator.ts` checks its in-memory session registry keyed by `userId`:
-   - **Existing ready pod** → relay immediately.
-   - **In-flight provision** → await the existing promise, forward status messages.
+2. Backend's `orchestrator.ts` checks Redis for the session + its in-memory `inFlightProvisions` map, both keyed by `userId`:
+   - **Existing ready pod** (`state='ready'` + `podUrl`) → relay immediately.
+   - **In-flight provision** (any non-terminal state + promise in `inFlightProvisions`) → await the existing promise. The broker (`subscribe`) fans out current + future state events to all WS connections for the session, so joiners see the current phase immediately.
    - **No record** → acquire semaphore slot (cap 5 concurrent), run placement + provision flow.
 3. Placement: `selectPlacement()` probes all configured volume-DCs in parallel for 5090 spot stock, picks the DC with the best stock level.
 4. Pod creation: tries spot first in the selected DC with the network volume attached. If spot capacity is exhausted and `ONDEMAND_FALLBACK_ENABLED=true`, falls back to on-demand in the same DC.
@@ -25,14 +25,25 @@ Server image: `ghcr.io/donpinkus/kiki-flux-klein:<tag>` — a slim (~2–3 GB) i
 7. A `setInterval` reaper scans the registry every 60s and terminates pods idle >30 min.
 8. On backend restart: `reconcileOrphanPods()` lists all `kiki-session-*` pods and terminates them (prevents cost leaks from crashes).
 
-### Status messages shown to user during provision
+### Provision state machine
 
-1. "Finding available GPU..." — probing DC stock
-2. "Provisioning GPU..." — creating the pod
-3. "Pulling container image..." — waiting for container runtime (image pull)
-4. "Starting server..." — container up, transitioning to health poll
-5. "Loading AI model & warming up..." — FLUX server loading weights + warmup inference
-6. "Ready"
+Backend tracks the provision lifecycle in a single flat `State` enum (see `backend/src/modules/orchestrator/orchestrator.ts`). The wire format is structured — `{ type: 'state', state, stateEnteredAt, replacementCount, failureCategory? }` — and iOS maps state codes to display text locally (see `ios/Kiki/App/ProvisionState.swift`). Backend never emits display strings.
+
+| State | Meaning |
+|---|---|
+| `queued` | Held by the process-wide concurrency semaphore (rare; only fires if ≥ `MAX_CONCURRENT_PROVISIONS` provisions in flight) |
+| `finding_gpu` | `selectPlacement` iterating DCs for 5090 spot stock |
+| `creating_pod` | `createSpotPod` / `createOnDemandPod` RPC in flight |
+| `fetching_image` | Pod created; waiting for `pod.runtime` (GHCR image pull — dominant time) |
+| `warming_model` | Container up; polling `/health` while FLUX model loads into GPU |
+| `connecting` | Pod `/health` ok; backend wiring the iOS↔pod frame relay |
+| `ready` | Relay live; iOS can stream |
+| `failed` | Unrecoverable error; `failureCategory` attached; WS closes after |
+| `terminated` | Session ended (reaped idle / aborted / replaced out) |
+
+`replacementCount` distinguishes fresh provisions (0) from preemption recoveries (1+). iOS prefixes display text with "Replacing — " when `replacementCount > 0`.
+
+Every transition also fires a `pod.state.entered` PostHog event with `previous_state` + `previous_state_duration_ms` — per-stage duration analysis is a one-line HogQL query.
 
 ## Network volumes
 
