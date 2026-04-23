@@ -58,6 +58,20 @@ struct GalleryView: View {
                         .padding(.vertical, 8)
                         .background(.ultraThinMaterial, in: Capsule())
                 }
+
+                Menu {
+                    Button(role: .destructive) {
+                        coordinator.signOut()
+                    } label: {
+                        Label("Sign Out", systemImage: "rectangle.portrait.and.arrow.right")
+                    }
+                } label: {
+                    Image(systemName: "person.crop.circle")
+                        .font(.title2)
+                        .foregroundStyle(.primary)
+                        .frame(width: 36, height: 36)
+                        .background(.ultraThinMaterial, in: Circle())
+                }
             }
             .padding(.horizontal, 24)
             .padding(.top, 16)

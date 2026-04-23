@@ -1,4 +1,5 @@
 import Foundation
+import Sentry
 
 /// Manages user authentication: Sign in with Apple → JWT access/refresh pair.
 ///
@@ -22,6 +23,7 @@ public actor AuthService {
         public let refreshToken: String
         public let accessExpiresAt: Date
         public let userId: String
+        public let email: String?
     }
 
     // MARK: - Private types
@@ -36,6 +38,7 @@ public actor AuthService {
         let refreshToken: String
         let expiresIn: Int
         let userId: String?
+        let email: String?
     }
 
     private struct RefreshRequest: Codable {
@@ -51,6 +54,7 @@ public actor AuthService {
     private static let keychainRefreshToken = "refreshToken"
     private static let keychainAccessExpiresAt = "accessExpiresAt"
     private static let keychainUserId = "userId"
+    private static let keychainEmail = "email"
 
     // MARK: - State
 
@@ -80,12 +84,27 @@ public actor AuthService {
         return currentBundle()?.userId
     }
 
+    /// The signed-in user's email, if the backend has one for this user.
+    /// May be a real address or an Apple private-relay address. Only set for
+    /// users who shared their email with us on first Apple sign-in (or whose
+    /// record has one from a prior sign-in).
+    public var email: String? {
+        return currentBundle()?.email
+    }
+
     /// Exchanges an Apple identity token for a backend-issued access+refresh pair.
     /// Call from the Sign in with Apple completion handler.
     public func signInWithApple(identityToken: String, nonce: String?) async throws {
         let body = AppleLoginRequest(identityToken: identityToken, nonce: nonce)
-        let response: TokenResponse = try await post(path: "/v1/auth/apple", body: body)
-        try save(from: response)
+        do {
+            let response: TokenResponse = try await post(path: "/v1/auth/apple", body: body)
+            try save(from: response)
+        } catch {
+            SentrySDK.capture(error: error) { scope in
+                scope.setTag(value: "auth.signInWithApple", key: "op")
+            }
+            throw error
+        }
     }
 
     /// Returns a valid access token, refreshing if close to expiry.
@@ -113,6 +132,33 @@ public actor AuthService {
         keychain.remove(Self.keychainRefreshToken)
         keychain.remove(Self.keychainAccessExpiresAt)
         keychain.remove(Self.keychainUserId)
+        keychain.remove(Self.keychainEmail)
+    }
+
+    /// Best-effort: ask the backend to terminate the user's pod and delete
+    /// their Redis session. Call BEFORE `signOut()` so the JWT is still
+    /// available for the request. Failures are logged but never thrown — the
+    /// local sign-out must always succeed regardless of backend reachability.
+    public func requestServerSignOut() async {
+        guard let token = currentBundle()?.accessToken else { return }
+        let url = backendURL.appendingPathComponent("/v1/auth/signout")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        do {
+            let (_, response) = try await urlSession.data(for: request)
+            if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+                SentrySDK.capture(message: "auth.serverSignOut.nonOk") { scope in
+                    scope.setLevel(.warning)
+                    scope.setExtra(value: http.statusCode, key: "status")
+                }
+            }
+        } catch {
+            SentrySDK.capture(error: error) { scope in
+                scope.setTag(value: "auth.serverSignOut", key: "op")
+                scope.setLevel(.warning)
+            }
+        }
     }
 
     // MARK: - Private
@@ -131,7 +177,8 @@ public actor AuthService {
             accessToken: access,
             refreshToken: refresh,
             accessExpiresAt: Date(timeIntervalSince1970: expiresAtSec),
-            userId: userId
+            userId: userId,
+            email: keychain.get(Self.keychainEmail)
         )
     }
 
@@ -143,6 +190,12 @@ public actor AuthService {
         if let userId = response.userId {
             try keychain.set(userId, for: Self.keychainUserId)
         }
+        // Only overwrite email when the backend sent one — /v1/auth/refresh
+        // will omit it for users whose record never captured it (Apple only
+        // returns email on the first sign-in).
+        if let email = response.email {
+            try keychain.set(email, for: Self.keychainEmail)
+        }
     }
 
     private func refresh(using refreshToken: String) async throws {
@@ -152,8 +205,17 @@ public actor AuthService {
             try save(from: response)
         } catch AuthError.backendRejected(let message) {
             // Refresh tokens expire or get rotated; clear stale bundle so the caller re-signs in.
+            SentrySDK.capture(message: "auth.refresh.rejected") { scope in
+                scope.setLevel(.warning)
+                scope.setExtra(value: message, key: "backendMessage")
+            }
             signOut()
             throw AuthError.refreshFailed(message)
+        } catch {
+            SentrySDK.capture(error: error) { scope in
+                scope.setTag(value: "auth.refresh", key: "op")
+            }
+            throw error
         }
     }
 

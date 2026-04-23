@@ -124,21 +124,20 @@ struct DrawingTopBar: View {
     }
 
     private var streamStatusColor: Color {
-        switch coordinator.streamConnectionState {
-        case .connected: return .green
-        case .connecting, .provisioning: return .orange
+        switch coordinator.streamReadiness {
+        case .ready: return .green
+        case .warming: return .orange
         case .disconnected: return .gray
-        case .error: return .red
+        case .failed: return .red
         }
     }
 
     private var streamStatusLabel: String {
-        switch coordinator.streamConnectionState {
-        case .connected: return "Streaming"
-        case .connecting: return "Connecting…"
-        case .provisioning(let message): return message
+        switch coordinator.streamReadiness {
+        case .ready: return "Streaming"
+        case .warming(let message, _): return message
         case .disconnected: return "Disconnected"
-        case .error: return "Error"
+        case .failed: return "Error"
         }
     }
 

@@ -1,6 +1,7 @@
 import SwiftUI
 import SwiftData
 import os
+import Sentry
 import CanvasModule
 import NetworkModule
 import ResultModule
@@ -17,6 +18,14 @@ enum AppScreen: Equatable {
     case signIn
     case gallery
     case drawing
+
+    var analyticsName: String {
+        switch self {
+        case .signIn: return "SignIn"
+        case .gallery: return "Gallery"
+        case .drawing: return "Drawing"
+        }
+    }
 }
 
 enum DrawingLayout: String, CaseIterable {
@@ -29,7 +38,12 @@ final class AppCoordinator {
 
     // MARK: - Navigation
 
-    var currentScreen: AppScreen = .gallery
+    var currentScreen: AppScreen = .gallery {
+        didSet {
+            guard currentScreen != oldValue else { return }
+            Analytics.screen(currentScreen.analyticsName)
+        }
+    }
     var currentDrawingId: UUID?
 
     // MARK: - Persistence
@@ -99,13 +113,23 @@ final class AppCoordinator {
     }
     var promptText = "" {
         didSet {
-            if !isSuppressingObservation { scheduleSave() }
+            if !isSuppressingObservation {
+                scheduleSave()
+                if promptText != oldValue {
+                    Analytics.track(.promptChanged, properties: ["prompt_length": promptText.count])
+                }
+            }
             syncStreamConfig()
         }
     }
     var selectedStyle: PromptStyle = .default {
         didSet {
-            if !isSuppressingObservation { scheduleSave() }
+            if !isSuppressingObservation {
+                scheduleSave()
+                if selectedStyle.id != oldValue.id {
+                    Analytics.track(.styleSelected, properties: ["style_id": selectedStyle.id])
+                }
+            }
             syncStreamConfig()
         }
     }
@@ -137,7 +161,17 @@ final class AppCoordinator {
 
     private var streamWasActiveBeforeBackground = false
     private var streamSession: StreamSession?
-    private(set) var streamConnectionState: StreamSession.ConnectionState = .disconnected
+    /// Sentry transaction measuring user-perceived spin-up (tap → first frame).
+    /// Started in `startStream`, finished on first `onImageReceived` callback.
+    private var pendingStartupTransaction: (any Span)?
+    /// Timestamp when the current stream startup began. Paired with first-frame
+    /// arrival to emit PostHog's `stream.first_frame` with a waitMs property.
+    private var streamStartupBeganAt: Date?
+    /// When the user entered the current drawing. Used to compute session
+    /// duration for the `drawing.closed` analytics event. Set in
+    /// `openDrawing`/`newDrawing`, read + cleared in `navigateToGallery`.
+    private var currentDrawingOpenedAt: Date?
+    private(set) var streamReadiness: StreamSession.StreamReadiness = .disconnected
     private(set) var streamFrameCount = 0
 
     // -- Stream parameters --
@@ -176,10 +210,18 @@ final class AppCoordinator {
         // Gate on auth: if no Keychain token, show sign-in. Otherwise the
         // normal gallery/drawing flow resumes.
         let initialUserId = KeychainStore.default.get("userId")
+        let initialEmail = KeychainStore.default.get("email")
         self.signedInUserId = initialUserId
         if initialUserId == nil {
             currentScreen = .signIn
         } else {
+            // Re-bind analytics identity on every relaunch of an already-signed-in
+            // user. `signInWithApple()` is the only other place `identify` fires,
+            // but it only runs on a fresh sign-in — so without this call, returning
+            // users stay bound to their anonymous device ID forever and iOS events
+            // never stitch to the backend-emitted userId.
+            Analytics.identify(userId: initialUserId!, email: initialEmail)
+
             // If no drawings exist, go directly to a new drawing
             let descriptor = FetchDescriptor<Drawing>(sortBy: [SortDescriptor(\.updatedAt, order: .reverse)])
             let count = (try? modelContext.fetchCount(descriptor)) ?? 0
@@ -218,10 +260,25 @@ final class AppCoordinator {
     /// Exchange an Apple identity token for a backend JWT pair, then navigate
     /// to the main app. Called from SignInView.
     func signInWithApple(identityToken: String) async throws {
-        try await authService.signInWithApple(identityToken: identityToken, nonce: nil)
+        let transaction = SentrySDK.startTransaction(name: "auth.signIn", operation: "auth.signIn")
+        do {
+            try await authService.signInWithApple(identityToken: identityToken, nonce: nil)
+            transaction.finish()
+        } catch {
+            SentrySDK.capture(error: error) { scope in
+                scope.setTag(value: "signInWithApple", key: "op")
+            }
+            transaction.finish(status: .internalError)
+            throw error
+        }
         let userId = await authService.userId
+        let email = await authService.email
         await MainActor.run {
             self.signedInUserId = userId
+            if let userId {
+                Analytics.identify(userId: userId, email: email)
+                Analytics.track(.userSignedIn, properties: ["user_id": userId])
+            }
 
             // After sign-in, route to gallery (or create a new drawing if none exist).
             let descriptor = FetchDescriptor<Drawing>(sortBy: [SortDescriptor(\.updatedAt, order: .reverse)])
@@ -245,8 +302,14 @@ final class AppCoordinator {
 
     func signOut() {
         Task {
+            // Ask the backend to terminate the pod and delete the session row
+            // BEFORE clearing the JWT. Best-effort — never throws. Without
+            // this, the pod leaks for ~10 min until the idle reaper catches it.
+            await authService.requestServerSignOut()
             await authService.signOut()
             await MainActor.run {
+                Analytics.track(.userSignedOut)
+                Analytics.reset()
                 self.signedInUserId = nil
                 self.currentScreen = .signIn
                 self.stopStream()
@@ -296,6 +359,7 @@ final class AppCoordinator {
         modelContext.insert(drawing)
         try? modelContext.save()
         currentDrawingId = drawing.id
+        currentDrawingOpenedAt = Date()
 
         // Reset all state
         promptText = ""
@@ -309,6 +373,13 @@ final class AppCoordinator {
         currentScreen = .drawing
         isSuppressingObservation = false
 
+        Analytics.track(.drawingCreated, properties: ["drawing_id": drawing.id.uuidString])
+        Analytics.track(.drawingOpened, properties: [
+            "drawing_id": drawing.id.uuidString,
+            "stroke_count": 0,
+            "is_new": true,
+        ])
+
         startStream()
         seedResultStateForCurrentDrawing()
     }
@@ -317,6 +388,7 @@ final class AppCoordinator {
         isSuppressingObservation = true
 
         currentDrawingId = drawing.id
+        currentDrawingOpenedAt = Date()
 
         // Restore settings
         promptText = drawing.promptText
@@ -340,6 +412,13 @@ final class AppCoordinator {
         currentScreen = .drawing
         isSuppressingObservation = false
 
+        Analytics.track(.drawingOpened, properties: [
+            "drawing_id": drawing.id.uuidString,
+            "has_background_image": drawing.backgroundImageData != nil,
+            "has_generated_image": drawing.generatedImageData != nil,
+            "is_new": false,
+        ])
+
         startStream()
         seedResultStateForCurrentDrawing()
     }
@@ -347,6 +426,17 @@ final class AppCoordinator {
     func navigateToGallery() {
         saveCurrentDrawing()
         saveDebounceTask?.cancel()
+
+        // Emit drawing.closed before we clear the id.
+        if let drawingId = currentDrawingId, let openedAt = currentDrawingOpenedAt {
+            let sessionMs = Int(Date().timeIntervalSince(openedAt) * 1000)
+            Analytics.track(.drawingClosed, properties: [
+                "drawing_id": drawingId.uuidString,
+                "session_duration_ms": sessionMs,
+                "generation_count": streamFrameCount,
+            ])
+        }
+        currentDrawingOpenedAt = nil
 
         // Delete empty drawings
         if let drawingId = currentDrawingId {
@@ -361,6 +451,12 @@ final class AppCoordinator {
 
         stopStream()
         currentDrawingId = nil
+
+        // Track gallery navigation with current drawing count.
+        let descriptor = FetchDescriptor<Drawing>()
+        let drawingCount = (try? modelContext.fetchCount(descriptor)) ?? 0
+        Analytics.track(.galleryOpened, properties: ["drawing_count": drawingCount])
+
         currentScreen = .gallery
     }
 
@@ -395,6 +491,13 @@ final class AppCoordinator {
 
         drawing.updatedAt = Date()
         try? modelContext.save()
+
+        Analytics.track(.drawingSaved, properties: [
+            "drawing_id": drawing.id.uuidString,
+            "has_background_image": drawing.backgroundImageData != nil,
+            "has_generated_image": drawing.generatedImageData != nil,
+            "style_id": selectedStyle.id,
+        ])
     }
 
     private func scheduleSave() {
@@ -432,15 +535,36 @@ final class AppCoordinator {
             return
         }
 
+        // Transaction captures user-perceived spin-up latency: from this call
+        // through pod provisioning to first frame received. `StreamSession`
+        // finishes it via the `onImageReceived` first-frame detection below.
+        let startupTx = SentrySDK.startTransaction(name: "app.stream.startup", operation: "app.stream.startup")
+        self.pendingStartupTransaction = startupTx
+        self.streamStartupBeganAt = Date()
+
         var components = URLComponents(url: backendURL, resolvingAgainstBaseURL: false)!
         components.scheme = backendURL.scheme == "https" ? "wss" : "ws"
         components.path = "/v1/stream"
         guard let wsURL = components.url else {
             streamLog.error("Failed to construct WebSocket URL from \(self.backendURL.absoluteString)")
+            SentrySDK.capture(message: "stream.startup: failed to construct WebSocket URL") { scope in
+                scope.setLevel(.error)
+                scope.setTag(value: self.backendURL.absoluteString, key: "backendURL")
+            }
+            startupTx.finish(status: .internalError)
+            self.pendingStartupTransaction = nil
             return
         }
 
         streamLog.info("Starting stream to \(wsURL.absoluteString)")
+        let startCrumb = Breadcrumb()
+        startCrumb.category = "stream.lifecycle"
+        startCrumb.message = "Starting stream"
+        startCrumb.data = ["wsURL": wsURL.absoluteString]
+        SentrySDK.addBreadcrumb(startCrumb)
+        Analytics.track(.streamStarted, properties: [
+            "drawing_id": currentDrawingId?.uuidString ?? "unknown",
+        ])
 
         // Kick off the async flow to fetch a fresh access token, then connect.
         Task { [weak self] in
@@ -455,7 +579,12 @@ final class AppCoordinator {
             } catch {
                 await MainActor.run {
                     streamLog.error("Auth token fetch failed: \(error.localizedDescription)")
-                    self.streamConnectionState = .error("Please sign in again")
+                    SentrySDK.capture(error: error) { scope in
+                        scope.setTag(value: "stream.authTokenFetch", key: "op")
+                    }
+                    startupTx.finish(status: .unauthenticated)
+                    self.pendingStartupTransaction = nil
+                    self.streamReadiness = .failed(message: "Please sign in again")
                     self.generationError = "Please sign in again"
                     self.signOut()
                 }
@@ -482,20 +611,38 @@ final class AppCoordinator {
             }
 
             let count = self.streamFrameCount
-            if count == 1 || count % 30 == 0 {
-                print("[Stream] Received frame \(count)")
+            if count == 1 {
+                // First generated frame — user-perceived spin-up complete.
+                self.pendingStartupTransaction?.finish()
+                self.pendingStartupTransaction = nil
+                if let startedAt = self.streamStartupBeganAt {
+                    let waitMs = Int(Date().timeIntervalSince(startedAt) * 1000)
+                    Analytics.track(.streamFirstFrame, properties: ["wait_ms": waitMs])
+                }
+                self.streamStartupBeganAt = nil
             }
         }
 
-        session.onConnectionStateChanged = { [weak self] state in
+        session.onReadinessChanged = { [weak self] readiness in
             guard let self else { return }
-            streamLog.info("Connection state changed: \(String(describing: state))")
-            let previousState = self.streamConnectionState
-            self.streamConnectionState = state
-            if case .error(let message) = state {
+            streamLog.info("Readiness changed: \(String(describing: readiness))")
+            self.streamReadiness = readiness
+            if case .failed(let message) = readiness {
                 self.generationError = message
+                // End startup transaction with failure status if we never got a frame.
+                self.pendingStartupTransaction?.finish(status: .internalError)
+                self.pendingStartupTransaction = nil
+                let elapsedMs = self.streamStartupBeganAt.map {
+                    Int(Date().timeIntervalSince($0) * 1000)
+                } ?? 0
+                Analytics.track(.streamFailed, properties: [
+                    "message": message,
+                    "elapsed_ms": elapsedMs,
+                    "frames_received": self.streamFrameCount,
+                    "got_first_frame": self.streamFrameCount > 0,
+                ])
             }
-            self.applyStreamStateToResultState(previousState: previousState, newState: state)
+            self.applyReadinessToResultState(readiness)
         }
 
         self.streamSession = session
@@ -506,11 +653,24 @@ final class AppCoordinator {
     }
 
     private func stopStream() {
+        let hadSession = streamSession != nil
+        let finalFrameCount = streamFrameCount
         streamLog.info("Stopping stream")
         streamSession?.stop()
         streamSession = nil
-        streamConnectionState = .disconnected
+        streamReadiness = .disconnected
         streamFrameCount = 0
+        // If we're stopping before first frame, mark the startup tx as cancelled.
+        pendingStartupTransaction?.finish(status: .cancelled)
+        pendingStartupTransaction = nil
+        streamStartupBeganAt = nil
+
+        if hadSession {
+            Analytics.track(.streamEnded, properties: [
+                "frames_received": finalFrameCount,
+                "reason": "stopped",
+            ])
+        }
 
         if let image = lastSuccessfulImage {
             resultState = .preview(image: image)
@@ -519,98 +679,44 @@ final class AppCoordinator {
         }
     }
 
-    /// Map a stream connection state into the right `resultState`. Used to keep
-    /// the result pane reflecting warm-up progress whenever the connection
-    /// transitions, without overwriting an existing generated image.
-    ///
-    /// Subtlety: `.connected` is reported twice on a cold start — first when
-    /// the WebSocket opens, again when the server sends `status=ready`. We
-    /// only treat the second one as "pod ready" by checking that the previous
-    /// state was `.provisioning` (i.e. we were genuinely in warm-up).
-    private func applyStreamStateToResultState(
-        previousState: StreamSession.ConnectionState,
-        newState: StreamSession.ConnectionState
-    ) {
-        switch newState {
-        case .connecting:
-            // Don't overwrite an existing image or in-flight generation.
-            guard lastSuccessfulImage == nil else {
-                streamLog.info("Stream connecting — keeping existing image")
-                return
-            }
-            if case .provisioning = resultState { return }
-            if case .streaming = resultState { return }
-            streamLog.info("Stream connecting — showing provisioning UI")
-            resultState = .provisioning(message: "Connecting…", startedAt: Date())
-
-        case .provisioning(let message):
-            guard lastSuccessfulImage == nil else {
-                streamLog.info("Stream provisioning (\(message)) — keeping existing image")
-                return
-            }
-            if case .streaming = resultState { return }
-            // Preserve `startedAt` across multiple status updates so the
-            // progress bar keeps advancing instead of resetting on each message.
-            if case .provisioning(_, let startedAt) = resultState {
-                resultState = .provisioning(message: message, startedAt: startedAt)
-            } else {
-                streamLog.info("Stream provisioning — showing warm-up UI")
-                resultState = .provisioning(message: message, startedAt: Date())
-            }
-
-        case .connected:
-            // Two cases that look the same:
-            //   1. WebSocket just opened (came from .connecting). Pod may
-            //      still be cold — keep the warm-up UI; the server will send
-            //      `provisioning` status messages shortly.
-            //   2. Server sent `status=ready` (came from .provisioning). Pod
-            //      is genuinely ready — drop the warm-up UI; the next frame
-            //      will move us to .streaming.
-            if case .provisioning = previousState {
-                if case .provisioning = resultState {
-                    streamLog.info("Stream ready (was provisioning) — clearing warm-up UI")
-                    resultState = lastSuccessfulImage.map { .preview(image: $0) } ?? .empty
-                }
-            }
-
-        case .error(let msg):
-            streamLog.error("Stream error: \(msg)")
-            resultState = .error(message: msg, previousImage: lastSuccessfulImage)
-
+    /// Map stream readiness into `resultState`. Stays out of the way of an
+    /// existing image or active stream — readiness churn alone never blanks
+    /// the result pane.
+    private func applyReadinessToResultState(_ readiness: StreamSession.StreamReadiness) {
+        switch readiness {
         case .disconnected:
             if case .provisioning = resultState {
-                streamLog.info("Stream disconnected during provisioning — clearing warm-up UI")
                 resultState = lastSuccessfulImage.map { .preview(image: $0) } ?? .empty
             }
+        case .warming(let message, let startedAt):
+            // Preserve any existing image or active stream; only show the
+            // warm-up UI when there's nothing else to display. `startedAt`
+            // is owned by StreamSession, so the progress bar stays continuous
+            // across multiple readiness updates and reconnect attempts.
+            if lastSuccessfulImage == nil, !resultState.isStreaming {
+                resultState = .provisioning(message: message, startedAt: startedAt)
+            }
+        case .ready:
+            // Pod is genuinely ready; the first frame will move us to
+            // `.streaming`. Clear any lingering warm-up UI in the meantime.
+            if case .provisioning = resultState {
+                resultState = lastSuccessfulImage.map { .preview(image: $0) } ?? .empty
+            }
+        case .failed(let msg):
+            streamLog.error("Stream failed: \(msg)")
+            resultState = .error(message: msg, previousImage: lastSuccessfulImage)
         }
     }
 
-    /// Seed `resultState` from the current image and stream connection state.
-    /// Called when entering a drawing so the result pane reflects pre-warming
-    /// already in progress, instead of momentarily flashing empty.
+    /// Seed `resultState` when entering a drawing so the result pane reflects
+    /// any pre-warming already in progress, instead of momentarily flashing
+    /// empty. Existing image wins; otherwise sync to current readiness.
     private func seedResultStateForCurrentDrawing() {
         if let image = lastSuccessfulImage {
             resultState = .preview(image: image)
             return
         }
-        // If pre-warming has been running (likely since app launch), preserve
-        // the existing `startedAt` so the progress bar doesn't reset to 0%
-        // when the user enters a drawing partway through warm-up.
-        let preservedStart: Date? = {
-            if case .provisioning(_, let startedAt) = resultState { return startedAt }
-            return nil
-        }()
-        switch streamConnectionState {
-        case .connecting:
-            resultState = .provisioning(message: "Connecting…", startedAt: preservedStart ?? Date())
-        case .provisioning(let message):
-            resultState = .provisioning(message: message, startedAt: preservedStart ?? Date())
-        case .error(let msg):
-            resultState = .error(message: msg, previousImage: nil)
-        case .connected, .disconnected:
-            resultState = .empty
-        }
-
+        applyReadinessToResultState(streamReadiness)
     }
 
     /// Push the current config to the stream session. The capture loop will

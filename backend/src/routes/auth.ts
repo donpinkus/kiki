@@ -14,6 +14,7 @@
 import { randomUUID } from 'node:crypto';
 import type { FastifyPluginAsync } from 'fastify';
 
+import { extractBearer } from '../modules/auth/index.js';
 import { verifyAppleIdentityToken } from '../modules/auth/appleVerifier.js';
 import {
   signAccess,
@@ -21,7 +22,9 @@ import {
   verifyRefresh,
   revokeRefresh,
   ACCESS_TTL_SECONDS,
+  verifyAccess,
 } from '../modules/auth/jwt.js';
+import { abortSession } from '../modules/orchestrator/orchestrator.js';
 
 interface AppleLoginBody {
   identityToken: string;
@@ -96,6 +99,7 @@ export const authRoute: FastifyPluginAsync = async (fastify) => {
           refreshToken,
           expiresIn: ACCESS_TTL_SECONDS,
           userId: user.userId,
+          email: user.email,
         });
       } catch (err) {
         request.log.warn({ err }, 'Apple sign-in failed');
@@ -106,6 +110,27 @@ export const authRoute: FastifyPluginAsync = async (fastify) => {
       }
     },
   );
+
+  // POST /v1/auth/signout — clean up the caller's session: terminate their
+  // pod and delete the Redis session row. The JWT and refresh tokens stay
+  // valid (no server-side revocation today) so the caller can sign back in
+  // freely. Idempotent: safe to call when there's no active session.
+  fastify.post('/v1/auth/signout', async (request, reply) => {
+    const token = extractBearer(request.headers.authorization);
+    if (!token) {
+      return reply.code(401).send({ error: 'authentication_required' });
+    }
+    let userId: string;
+    try {
+      const claims = await verifyAccess(token);
+      userId = claims.sub;
+    } catch {
+      return reply.code(401).send({ error: 'invalid_token' });
+    }
+    await abortSession(userId, 'manual');
+    request.log.info({ userId }, 'Signout: session aborted');
+    return reply.send({ ok: true });
+  });
 
   fastify.post<{ Body: RefreshBody }>(
     '/v1/auth/refresh',
@@ -125,10 +150,13 @@ export const authRoute: FastifyPluginAsync = async (fastify) => {
         revokeRefresh(claims.jti);
         const accessToken = await signAccess(claims.sub);
         const refreshToken = await signRefresh(claims.sub);
+        const user = users.get(claims.sub);
         return reply.send({
           accessToken,
           refreshToken,
           expiresIn: ACCESS_TTL_SECONDS,
+          userId: claims.sub,
+          email: user?.email,
         });
       } catch (err) {
         request.log.warn({ err }, 'Refresh failed');

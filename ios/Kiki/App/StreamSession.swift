@@ -1,4 +1,5 @@
 import UIKit
+import Sentry
 import CanvasModule
 import NetworkModule
 
@@ -13,16 +14,28 @@ final class StreamSession {
 
     // MARK: - Types
 
-    enum ConnectionState {
+    /// Internal WebSocket-and-server state. Captures literal transitions
+    /// (TCP open, server status messages, retry exhaustion). The `.connected`
+    /// case fires twice on a cold start — once for WS open and once for the
+    /// server's `status=ready` — so this enum on its own is not safe for UI
+    /// to consume directly. UI should observe `readiness` instead.
+    private enum ConnectionState {
         case disconnected
         case connecting
-        /// Backend is provisioning a dedicated GPU pod for this session.
-        /// `message` is a human-readable progress string like
-        /// "Creating pod..." or "Downloading model...". Shown to the user
-        /// during the ~3–5 min cold-start wait.
         case provisioning(message: String)
         case connected
         case error(String)
+    }
+
+    /// UI-facing stream state. Hides backend pod vocabulary (provisioning,
+    /// reprovisioning) behind a single `.warming` case, and absorbs the
+    /// double-`.connected` quirk: only an explicit `status=ready` from the
+    /// server transitions to `.ready`; a bare WS open does not.
+    enum StreamReadiness: Equatable {
+        case disconnected
+        case warming(message: String, startedAt: Date)
+        case ready
+        case failed(message: String)
     }
 
     // MARK: - Properties
@@ -51,14 +64,23 @@ final class StreamSession {
     /// change so the unchanged sketch re-generates under the new prompt.
     private var lastSentJpegData: Data?
 
-    /// Current connection state, observed by AppCoordinator.
-    private(set) var connectionState: ConnectionState = .disconnected
+    /// Internal connection state — drives readiness translation, not exposed.
+    private var connectionState: ConnectionState = .disconnected
+
+    /// Current readiness, observed by AppCoordinator.
+    private(set) var readiness: StreamReadiness = .disconnected
+
+    /// Tracks the start of the current warm-up cycle so the UI's progress bar
+    /// is continuous across multiple `provisioning` status updates and reconnect
+    /// attempts. Cleared on the explicit `status=ready` server message,
+    /// `.disconnected`, or `.failed` — not on bare WS-open transitions.
+    private var warmupStartedAt: Date?
 
     /// Called when a new generated image frame is received.
     var onImageReceived: ((UIImage) -> Void)?
 
-    /// Called when connection state changes.
-    var onConnectionStateChanged: ((ConnectionState) -> Void)?
+    /// Called when stream readiness changes.
+    var onReadinessChanged: ((StreamReadiness) -> Void)?
 
     // MARK: - Reconnection
 
@@ -95,7 +117,10 @@ final class StreamSession {
     // MARK: - Control
 
     func start() async {
-        print("[Stream] Starting: url=\(url.absoluteString), prompt=\(config.prompt ?? "(none)")")
+        Self.breadcrumb(category: "stream.lifecycle", message: "Starting", data: [
+            "url": url.absoluteString,
+            "prompt": config.prompt ?? "(none)",
+        ])
         self.isStopped = false
         self.reconnectAttempts = 0
         self.framesSent = 0
@@ -106,7 +131,10 @@ final class StreamSession {
     }
 
     func stop() {
-        print("[Stream] Stopping (sent=\(framesSent), received=\(framesReceived))")
+        Self.breadcrumb(category: "stream.lifecycle", message: "Stopping", data: [
+            "framesSent": framesSent,
+            "framesReceived": framesReceived,
+        ])
         isStopped = true
         cancelAllTasks()
         Task { await client.disconnect() }
@@ -117,55 +145,81 @@ final class StreamSession {
 
     private func connectAndRun() async {
         updateConnectionState(.connecting)
+        let tx = SentrySDK.startTransaction(name: "stream.connection", operation: "stream.connection")
 
         do {
             try await client.connect()
             reconnectAttempts = 0
-            print("[Stream] Connected to server")
+            Self.breadcrumb(category: "stream.connection", message: "Connected to server")
             updateConnectionState(.connected)
 
             try await client.sendConfig(config)
             lastSentConfig = config
-            print("[Stream] Initial config sent")
+            Self.breadcrumb(category: "stream.config", message: "Initial config sent")
+            tx.finish()
 
             startReceiveLoop()
             startCaptureLoop()
         } catch {
-            print("[Stream] Connection failed: \(error.localizedDescription) (stopped=\(isStopped))")
+            Self.breadcrumb(category: "error.connection", message: "Connection failed", data: [
+                "error": error.localizedDescription,
+                "stopped": isStopped,
+            ], level: .error)
+            tx.finish(status: .internalError)
             if !isStopped {
                 await attemptReconnect()
             } else {
-                print("[Stream] Not reconnecting — session stopped")
+                Self.breadcrumb(category: "stream.lifecycle", message: "Not reconnecting — session stopped")
             }
         }
     }
 
     private func attemptReconnect() async {
         guard !isStopped else {
-            print("[Stream] Reconnect skipped — session stopped")
+            Self.breadcrumb(category: "stream.retry", message: "Reconnect skipped — session stopped")
             return
         }
         reconnectAttempts += 1
         let delay = pow(2.0, Double(reconnectAttempts - 1))  // 1, 2, 4, 8, 16s
-        print("[Stream] Reconnect attempt \(reconnectAttempts)/\(Self.maxReconnectAttempts) (backoff: \(delay)s)")
+        Self.breadcrumb(category: "stream.retry", message: "Reconnect attempt", data: [
+            "attempt": reconnectAttempts,
+            "max": Self.maxReconnectAttempts,
+            "backoffSec": delay,
+        ])
+        Analytics.track(.streamReconnect, properties: [
+            "attempt": reconnectAttempts,
+            "backoff_sec": delay,
+        ])
 
         if reconnectAttempts > Self.maxReconnectAttempts {
-            print("[Stream] Giving up after \(Self.maxReconnectAttempts) retries")
+            SentrySDK.capture(message: "stream.reconnect.exhausted") { scope in
+                scope.setLevel(.error)
+                scope.setTag(value: String(Self.maxReconnectAttempts), key: "maxAttempts")
+            }
             updateConnectionState(.error("Unable to connect. Please restart the app."))
             return
         }
+
+        let tx = SentrySDK.startTransaction(name: "stream.reconnect", operation: "stream.reconnect")
+        tx.setData(value: reconnectAttempts, key: "attempt")
+        tx.setData(value: delay, key: "backoffSec")
 
         cancelAllTasks()
         updateConnectionState(.connecting)
 
         try? await Task.sleep(for: .seconds(delay))
         guard !isStopped, !Task.isCancelled else {
-            print("[Stream] Reconnect cancelled during backoff (stopped=\(isStopped), cancelled=\(Task.isCancelled))")
+            Self.breadcrumb(category: "stream.retry", message: "Reconnect cancelled during backoff", data: [
+                "stopped": isStopped,
+                "taskCancelled": Task.isCancelled,
+            ])
+            tx.finish(status: .cancelled)
             return
         }
 
-        print("[Stream] Reconnecting to \(url.absoluteString)")
+        Self.breadcrumb(category: "stream.retry", message: "Reconnecting", data: ["url": url.absoluteString])
         self.client = StreamWebSocketClient(request: request)
+        tx.finish()
         await connectAndRun()
     }
 
@@ -173,7 +227,7 @@ final class StreamSession {
 
     private func startCaptureLoop() {
         captureTask = Task.detached { [weak self] in
-            print("[Stream] Capture loop started")
+            Self.breadcrumb(category: "stream.lifecycle", message: "Capture loop started")
             var count = 0
             while !Task.isCancelled {
                 guard let self else { break }
@@ -200,20 +254,18 @@ final class StreamSession {
                         await MainActor.run { self.lastSentJpegData = jpeg }
                         count += 1
                         await self.setFramesSent(count)
-                        if count == 1 || count % 30 == 0 {
-                            print("[Stream] Sent frame \(count) (\(jpeg.count) bytes)")
-                        }
                     } catch {
-                        print("[Stream] Send error: \(error)")
+                        SentrySDK.capture(error: error) { scope in
+                            scope.setTag(value: "sendFrame", key: "op")
+                            scope.setExtra(value: count, key: "frameCount")
+                        }
                     }
-                } else if count == 0 {
-                    print("[Stream] captureSnapshot returned nil (canvas empty?)")
                 }
 
                 let interval = await self.captureInterval
                 try? await Task.sleep(for: .milliseconds(Int(interval * 1000)))
             }
-            print("[Stream] Capture loop ended (sent \(count) frames)")
+            Self.breadcrumb(category: "stream.lifecycle", message: "Capture loop ended", data: ["framesSent": count])
         }
     }
 
@@ -227,9 +279,13 @@ final class StreamSession {
             try await client.sendConfig(current)
             lastSentConfig = current
             lastSentJpegData = nil
-            print("[Stream] Config auto-sent: prompt=\(current.prompt ?? "(none)")")
+            Self.breadcrumb(category: "stream.config", message: "Config auto-sent", data: [
+                "prompt": current.prompt ?? "(none)",
+            ])
         } catch {
-            print("[Stream] Config send error: \(error)")
+            SentrySDK.capture(error: error) { scope in
+                scope.setTag(value: "sendConfig", key: "op")
+            }
         }
     }
 
@@ -237,7 +293,7 @@ final class StreamSession {
 
     private func startReceiveLoop() {
         receiveTask = Task { [weak self] in
-            print("[Stream] Receive loop started")
+            Self.breadcrumb(category: "stream.lifecycle", message: "Receive loop started")
             guard let self else { return }
             let frames = await client.receivedFrames
             var count = 0
@@ -246,9 +302,6 @@ final class StreamSession {
                 if let image = UIImage(data: frameData) {
                     count += 1
                     await self.setFramesReceived(count)
-                    if count <= 3 || count % 30 == 0 {
-                        print("[Stream] Received frame \(count) (\(frameData.count) bytes, \(Int(image.size.width))x\(Int(image.size.height)))")
-                    }
                     await MainActor.run {
                         self.onImageReceived?(image)
                     }
@@ -256,10 +309,17 @@ final class StreamSession {
             }
             let stopped = await self.isStopped
             if !Task.isCancelled, !stopped {
-                print("[Stream] Receive stream ended unexpectedly (cancelled=\(Task.isCancelled), stopped=\(stopped), frames=\(count)) — attempting reconnect")
+                SentrySDK.capture(message: "stream.receive.unexpected_end") { scope in
+                    scope.setLevel(.warning)
+                    scope.setExtra(value: count, key: "frames")
+                }
                 await self.attemptReconnect()
             } else {
-                print("[Stream] Receive stream ended (cancelled=\(Task.isCancelled), stopped=\(stopped), frames=\(count))")
+                Self.breadcrumb(category: "stream.lifecycle", message: "Receive loop ended", data: [
+                    "cancelled": Task.isCancelled,
+                    "stopped": stopped,
+                    "frames": count,
+                ])
             }
         }
 
@@ -268,11 +328,17 @@ final class StreamSession {
             let statuses = await client.serverStatuses
             for await status in statuses {
                 guard !Task.isCancelled else { break }
-                print("[Stream] Server status: \(status.status) \(status.message ?? "")")
+                Self.breadcrumb(category: "stream.status", message: "Server status", data: [
+                    "status": status.status,
+                    "message": status.message ?? "",
+                ])
                 await MainActor.run {
                     if status.type == "status" && (status.status == "provisioning" || status.status == "reprovisioning") {
                         self.updateConnectionState(.provisioning(message: status.message ?? "Provisioning GPU..."))
                     } else if status.type == "status" && status.status == "ready" {
+                        // Pod is genuinely ready. Clear warm-up tracking so a
+                        // future reconnect/replacement starts a fresh cycle.
+                        self.warmupStartedAt = nil
                         self.updateConnectionState(.connected)
                         // Re-send config now that the server is ready to accept it.
                         // The initial config may have been sent during provisioning.
@@ -281,7 +347,10 @@ final class StreamSession {
                         // Server-sent error (e.g. provisioning failed). Reset
                         // reconnect counter since the next connection is a fresh
                         // provision, not a reconnect to a dead session.
-                        print("[Stream] Server error received: \(status.message ?? "(no message)") — resetting reconnect counter")
+                        SentrySDK.capture(message: "stream.server_error") { scope in
+                            scope.setLevel(.error)
+                            scope.setExtra(value: status.message ?? "(no message)", key: "serverMessage")
+                        }
                         self.reconnectAttempts = 0
                         self.updateConnectionState(.error(status.message ?? "Server error"))
                     }
@@ -319,8 +388,55 @@ final class StreamSession {
     }
 
     private func updateConnectionState(_ state: ConnectionState) {
-        print("[Stream] State: \(state)")
+        Self.breadcrumb(category: "stream.state", message: "State", data: ["state": String(describing: state)])
         connectionState = state
-        onConnectionStateChanged?(state)
+
+        let newReadiness: StreamReadiness
+        switch state {
+        case .disconnected:
+            warmupStartedAt = nil
+            newReadiness = .disconnected
+        case .connecting:
+            if warmupStartedAt == nil { warmupStartedAt = Date() }
+            newReadiness = .warming(message: "Connecting…", startedAt: warmupStartedAt ?? Date())
+        case .provisioning(let message):
+            if warmupStartedAt == nil { warmupStartedAt = Date() }
+            newReadiness = .warming(message: message, startedAt: warmupStartedAt ?? Date())
+        case .connected:
+            // `.connected` fires twice on a cold start: once when the WS opens
+            // (pod may still be cold) and once when the server sends
+            // `status=ready` (pod actually ready). The receive loop clears
+            // warmupStartedAt before calling here on the latter, so its
+            // presence distinguishes the two: keep warming if still set,
+            // transition to .ready only after the server confirms.
+            if warmupStartedAt != nil {
+                newReadiness = readiness  // still warming; no change
+            } else {
+                newReadiness = .ready
+            }
+        case .error(let msg):
+            warmupStartedAt = nil
+            newReadiness = .failed(message: msg)
+        }
+
+        guard newReadiness != readiness else { return }
+        readiness = newReadiness
+        onReadinessChanged?(newReadiness)
+    }
+
+    // MARK: - Breadcrumb helper
+
+    nonisolated private static func breadcrumb(
+        category: String,
+        message: String,
+        data: [String: Any]? = nil,
+        level: SentryLevel = .info
+    ) {
+        let crumb = Breadcrumb()
+        crumb.category = category
+        crumb.message = message
+        crumb.level = level
+        if let data { crumb.data = data }
+        SentrySDK.addBreadcrumb(crumb)
     }
 }

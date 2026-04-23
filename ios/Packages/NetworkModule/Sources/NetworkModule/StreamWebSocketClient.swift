@@ -1,4 +1,5 @@
 import Foundation
+import Sentry
 
 /// WebSocket client for real-time streaming communication with the generation backend.
 /// Uses native `URLSessionWebSocketTask` — no third-party dependencies.
@@ -71,7 +72,9 @@ public actor StreamWebSocketClient {
     public func connect() async throws {
         guard state == .disconnected else { return }
         state = .connecting
-        print("[StreamWS] Connecting to \(request.url?.absoluteString ?? "<nil>")")
+        Self.breadcrumb(category: "ws.connection", message: "Connecting", data: [
+            "url": request.url?.absoluteString ?? "<nil>",
+        ])
 
         let wsTask = session.webSocketTask(with: request)
         self.task = wsTask
@@ -81,35 +84,40 @@ public actor StreamWebSocketClient {
         let message = try await wsTask.receive()
         switch message {
         case .string(let text):
-            print("[StreamWS] Initial message: \(text)")
+            Self.breadcrumb(category: "ws.handshake", message: "Initial string message", data: ["length": text.count])
             // Check for error response (backend sends this if upstream is unavailable)
             if text.contains("\"type\":\"error\"") {
                 let errorMsg = text  // Keep for error message
                 wsTask.cancel(with: .normalClosure, reason: nil)
                 self.task = nil
                 state = .disconnected
-                throw URLError(.cannotConnectToHost, userInfo: [
+                let err = URLError(.cannotConnectToHost, userInfo: [
                     NSLocalizedDescriptionKey: "Server error: \(errorMsg)"
                 ])
+                SentrySDK.capture(error: err) { scope in
+                    scope.setTag(value: "ws.connect.server_error", key: "op")
+                    scope.setExtra(value: errorMsg, key: "serverMessage")
+                }
+                throw err
             }
             if let data = text.data(using: .utf8),
                let status = try? JSONDecoder().decode(ServerStatus.self, from: data) {
                 statusContinuation.yield(status)
             }
         case .data(let data):
-            print("[StreamWS] Initial binary: \(data.count) bytes")
+            Self.breadcrumb(category: "ws.handshake", message: "Initial binary message", data: ["bytes": data.count])
         @unknown default:
             break
         }
 
         state = .connected
-        print("[StreamWS] Connected")
+        Self.breadcrumb(category: "ws.connection", message: "Connected")
         startReceiveLoop()
     }
 
     public func disconnect() {
         guard state == .connected || state == .connecting else { return }
-        print("[StreamWS] Disconnecting")
+        Self.breadcrumb(category: "ws.lifecycle", message: "Disconnecting")
         state = .disconnecting
 
         receiveLoopTask?.cancel()
@@ -126,13 +134,13 @@ public actor StreamWebSocketClient {
 
     public func sendConfig<C: Encodable & Sendable>(_ config: C) async throws {
         guard state == .connected, let task else {
-            print("[StreamWS] sendConfig skipped: state=\(state)")
+            Self.breadcrumb(category: "ws.config", message: "sendConfig skipped", data: ["state": String(describing: state)])
             return
         }
         let data = try JSONEncoder().encode(config)
         let text = String(data: data, encoding: .utf8) ?? "{}"
         try await task.send(.string(text))
-        print("[StreamWS] Config sent")
+        Self.breadcrumb(category: "ws.config", message: "Config sent")
     }
 
     public func sendFrame(_ jpegData: Data) async throws {
@@ -166,7 +174,10 @@ public actor StreamWebSocketClient {
                                 await self.framesContinuation.yield(imageData)
                             } else if type == "status" || type == "error" {
                                 if let status = try? JSONDecoder().decode(ServerStatus.self, from: jsonData) {
-                                    print("[StreamWS] Server status: \(status.status) \(status.message ?? "")")
+                                    Self.breadcrumb(category: "ws.status", message: "Server status", data: [
+                                        "status": status.status,
+                                        "message": status.message ?? "",
+                                    ])
                                     await self.statusContinuation.yield(status)
                                 }
                             }
@@ -177,7 +188,9 @@ public actor StreamWebSocketClient {
                     }
                 } catch {
                     if !Task.isCancelled {
-                        print("[StreamWS] Receive error: \(error)")
+                        SentrySDK.capture(error: error) { scope in
+                            scope.setTag(value: "ws.receive", key: "op")
+                        }
                         await self.handleDisconnect()
                     }
                     break
@@ -187,11 +200,29 @@ public actor StreamWebSocketClient {
     }
 
     private func handleDisconnect() {
-        print("[StreamWS] Unexpected disconnect")
+        SentrySDK.capture(message: "ws.unexpected_disconnect") { scope in
+            scope.setLevel(.warning)
+        }
         state = .disconnected
         task = nil
         receiveLoopTask = nil
         framesContinuation.finish()
         statusContinuation.finish()
+    }
+
+    // MARK: - Breadcrumb helper
+
+    private static func breadcrumb(
+        category: String,
+        message: String,
+        data: [String: Any]? = nil,
+        level: SentryLevel = .info
+    ) {
+        let crumb = Breadcrumb()
+        crumb.category = category
+        crumb.message = message
+        crumb.level = level
+        if let data { crumb.data = data }
+        SentrySDK.addBreadcrumb(crumb)
     }
 }
