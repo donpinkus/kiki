@@ -136,8 +136,8 @@ import { checkProvisionQuota, recordProvision } from './rateLimiter.js';
 
 const SESSION_PREFIX = 'session:';
 
-function setSessionStatus(userId: string, status: string): void {
-  hashStore.set(`${SESSION_PREFIX}${userId}`, { sessionId: userId, status });
+function setSessionState(userId: string, state: string): void {
+  hashStore.set(`${SESSION_PREFIX}${userId}`, { sessionId: userId, state });
 }
 
 describe('checkProvisionQuota', () => {
@@ -153,21 +153,21 @@ describe('checkProvisionQuota', () => {
   });
 
   it('rejects with too_many_active_pods when a ready session exists', async () => {
-    setSessionStatus('user-2', 'ready');
+    setSessionState('user-2', 'ready');
     const result = await checkProvisionQuota('user-2');
     expect(result.allowed).toBe(false);
     expect(result.reason).toBe('too_many_active_pods');
   });
 
-  it('rejects with too_many_active_pods when a provisioning session exists', async () => {
-    setSessionStatus('user-3', 'provisioning');
+  it('rejects with too_many_active_pods when an active provisioning session exists', async () => {
+    setSessionState('user-3', 'fetching_image');
     const result = await checkProvisionQuota('user-3');
     expect(result.allowed).toBe(false);
     expect(result.reason).toBe('too_many_active_pods');
   });
 
-  it('allows when the session row exists but status is terminated', async () => {
-    setSessionStatus('user-4', 'terminated');
+  it('allows when the session row exists but state is terminated', async () => {
+    setSessionState('user-4', 'terminated');
     const result = await checkProvisionQuota('user-4');
     expect(result.allowed).toBe(true);
   });

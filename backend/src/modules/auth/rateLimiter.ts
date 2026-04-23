@@ -28,7 +28,13 @@ const HISTORY_TTL_SECONDS = Math.ceil(DAY_MS / 1000) + 300;
 const SESSION_PREFIX = 'session:';
 const HISTORY_PREFIX = 'ratelimit:provisions:';
 
-const ACTIVE_SESSION_STATUSES = new Set(['provisioning', 'ready', 'replacing']);
+// Active states — non-terminal session states. A user with a session in any
+// of these is considered to already have an active pod (skip rate limiting on
+// reconnect). Mirrors the `State` enum in orchestrator.ts; duplicated here to
+// avoid pulling the orchestrator's module graph into the auth layer.
+const ACTIVE_STATES = new Set([
+  'queued', 'finding_gpu', 'creating_pod', 'fetching_image', 'warming_model', 'ready',
+]);
 
 function historyKey(userId: string): string {
   return `${HISTORY_PREFIX}${userId}`;
@@ -45,9 +51,9 @@ export interface QuotaCheck {
 }
 
 async function getActiveSessionCount(userId: string): Promise<number> {
-  const status = await getRedis().hget(sessionKey(userId), 'status');
-  if (!status) return 0;
-  return ACTIVE_SESSION_STATUSES.has(status) ? 1 : 0;
+  const state = await getRedis().hget(sessionKey(userId), 'state');
+  if (!state) return 0;
+  return ACTIVE_STATES.has(state) ? 1 : 0;
 }
 
 export async function checkProvisionQuota(userId: string): Promise<QuotaCheck> {

@@ -311,21 +311,22 @@ final class StreamSession {
             for await status in statuses {
                 guard !Task.isCancelled else { break }
                 Self.breadcrumb(category: "stream.status", message: "Server status", data: [
-                    "status": status.status,
+                    "type": status.type,
+                    "state": status.state ?? "",
                     "message": status.message ?? "",
                 ])
                 await MainActor.run {
-                    if status.type == "status" && (status.status == "provisioning" || status.status == "reprovisioning") {
-                        self.warm(message: status.message ?? "Provisioning GPU...")
-                    } else if status.type == "status" && status.status == "ready" {
-                        self.setReadiness(.ready)
-                        // Re-send config now that the server is ready to accept it.
-                        // The initial config may have been sent during provisioning.
-                        self.lastSentConfig = nil
-                    } else if (status.type == "status" && status.status == "error") || status.type == "error" {
-                        // Server-sent error (e.g. provisioning failed). Reset
-                        // reconnect counter since the next connection is a fresh
-                        // provision, not a reconnect to a dead session.
+                    if status.type == "state", let stateRaw = status.state,
+                       let state = ProvisionState(rawValue: stateRaw) {
+                        self.handleState(
+                            state,
+                            replacementCount: status.replacementCount ?? 0,
+                            failureCategory: status.failureCategory.flatMap { FailureCategory(rawValue: $0) }
+                        )
+                    } else if status.type == "error" {
+                        // Out-of-band error (auth, entitlement, rate-limit,
+                        // relay failure). Distinct from state=failed, which
+                        // comes through the state flow.
                         SentrySDK.capture(message: "stream.server_error") { scope in
                             scope.setLevel(.error)
                             scope.setExtra(value: status.message ?? "(no message)", key: "serverMessage")
@@ -335,6 +336,29 @@ final class StreamSession {
                     }
                 }
             }
+        }
+    }
+
+    /// Map a server state event to UI readiness. Any non-terminal state
+    /// produces `.warming` with display text derived locally; `ready` and
+    /// `failed` are terminal transitions.
+    private func handleState(
+        _ state: ProvisionState,
+        replacementCount: Int,
+        failureCategory: FailureCategory?
+    ) {
+        switch state {
+        case .queued, .findingGpu, .creatingPod, .fetchingImage, .warmingModel:
+            self.warm(message: displayText(for: state, replacementCount: replacementCount))
+        case .ready:
+            self.setReadiness(.ready)
+            // Re-send config now that the server is ready to accept it.
+            self.lastSentConfig = nil
+        case .failed:
+            self.reconnectAttempts = 0
+            self.setReadiness(.failed(message: displayText(for: failureCategory)))
+        case .terminated:
+            self.setReadiness(.disconnected)
         }
     }
 

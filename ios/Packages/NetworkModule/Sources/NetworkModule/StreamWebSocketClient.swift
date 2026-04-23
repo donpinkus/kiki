@@ -14,11 +14,17 @@ public actor StreamWebSocketClient {
         case disconnecting
     }
 
-    /// Status message received from the server.
+    /// A message from the server about the provision state machine.
+    /// `type == "state"` carries a full state event; `type == "error"` is an
+    /// out-of-band failure (auth, entitlement, rate-limit, relay error) that
+    /// happens outside the state flow.
     public struct ServerStatus: Decodable, Sendable {
         public let type: String
-        public let status: String
-        public let message: String?
+        public let state: String?            // present for type=="state"
+        public let stateEnteredAt: Int64?    // ms epoch, type=="state"
+        public let replacementCount: Int?    // type=="state"
+        public let failureCategory: String?  // type=="state" && state=="failed"
+        public let message: String?          // present for type=="error"
     }
 
     // MARK: - Properties
@@ -172,10 +178,11 @@ public actor StreamWebSocketClient {
                             if type == "frame", let b64 = json["data"] as? String,
                                let imageData = Data(base64Encoded: b64) {
                                 await self.framesContinuation.yield(imageData)
-                            } else if type == "status" || type == "error" {
+                            } else if type == "state" || type == "error" {
                                 if let status = try? JSONDecoder().decode(ServerStatus.self, from: jsonData) {
                                     Self.breadcrumb(category: "ws.status", message: "Server status", data: [
-                                        "status": status.status,
+                                        "type": status.type,
+                                        "state": status.state ?? "",
                                         "message": status.message ?? "",
                                     ])
                                     await self.statusContinuation.yield(status)
