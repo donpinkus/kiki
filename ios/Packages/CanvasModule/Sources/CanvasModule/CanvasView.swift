@@ -2,13 +2,16 @@ import SwiftUI
 
 public struct CanvasView: UIViewRepresentable {
     private let viewModel: CanvasViewModel
+    private let drawingSurfaceSide: CGFloat
 
-    public init(viewModel: CanvasViewModel) {
+    public init(viewModel: CanvasViewModel, drawingSurfaceSide: CGFloat = 0) {
         self.viewModel = viewModel
+        self.drawingSurfaceSide = drawingSurfaceSide
     }
 
     public func makeUIView(context: Context) -> RotatableCanvasContainer {
         let container = RotatableCanvasContainer()
+        container.drawingSurfaceSide = drawingSurfaceSide
         let canvasView = container.canvasView
         viewModel.attach(canvasView, container: container)
 
@@ -54,5 +57,7 @@ public struct CanvasView: UIViewRepresentable {
         return container
     }
 
-    public func updateUIView(_ uiView: RotatableCanvasContainer, context: Context) {}
+    public func updateUIView(_ uiView: RotatableCanvasContainer, context: Context) {
+        uiView.drawingSurfaceSide = drawingSurfaceSide
+    }
 }

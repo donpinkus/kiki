@@ -8,6 +8,14 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
     public private(set) var rotation: CGFloat = 0
     public private(set) var scale: CGFloat = 1.0
     public private(set) var translation: CGPoint = .zero
+
+    /// Side length of the square drawing surface (in points). The container can
+    /// be wider/taller than this to host gestures over the full pane while the
+    /// actual drawing area stays a centered square of this size. 0 means fill
+    /// the container (legacy behavior).
+    public var drawingSurfaceSide: CGFloat = 0 {
+        didSet { setNeedsLayout() }
+    }
     public var onTransformChanged: (() -> Void)?
     public var onInteractionChanged: ((Bool) -> Void)?
     public var onUndoRequested: (() -> Void)?
@@ -53,10 +61,11 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
         clipsToBounds = true
         backgroundColor = .black
 
-        // transformView fills container — use autoresizing so it tracks size
-        // changes without Auto Layout fighting the transform.
+        // transformView is sized in layoutSubviews — either filling the
+        // container (when drawingSurfaceSide == 0) or held as a centered
+        // square of drawingSurfaceSide. We don't use autoresizing so the
+        // transformView's frame isn't fought by the container's resize.
         transformView.frame = bounds
-        transformView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         addSubview(transformView)
 
         // backgroundImageView sits below canvasView — always present, white bg by default.
@@ -121,6 +130,28 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
         addGestureRecognizer(longPress)
     }
 
+    // MARK: - Layout
+
+    public override func layoutSubviews() {
+        super.layoutSubviews()
+
+        let side: CGFloat
+        if drawingSurfaceSide > 0 {
+            side = drawingSurfaceSide
+        } else {
+            side = min(bounds.width, bounds.height)
+        }
+
+        // Preserve any active transform so panning/zooming isn't reset by a
+        // relayout. The square is laid out centered in the container; the user
+        // can pan it anywhere within the container via gestures.
+        let previousTransform = transformView.transform
+        transformView.transform = .identity
+        transformView.bounds = CGRect(x: 0, y: 0, width: side, height: side)
+        transformView.center = CGPoint(x: bounds.midX, y: bounds.midY)
+        transformView.transform = previousTransform
+    }
+
     // MARK: - Gesture Handling
 
     @objc private func handleTouchTracking(_ gesture: TouchTrackingGestureRecognizer) {
@@ -128,7 +159,10 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
         case .began, .changed:
             let location = gesture.location(in: canvasView)
             cursorView.center = location
-            cursorView.isHidden = false
+            // When the container is larger than the drawing surface, the touch
+            // can land outside canvasView's bounds — hide the cursor there so
+            // we don't draw a ring over the empty margin around the canvas.
+            cursorView.isHidden = !canvasView.bounds.contains(location)
 
             // Match BrushConfig.effectiveWidth so the cursor reflects the actual
             // stamp diameter (in view points) — pow(force, gamma) for pressure,
