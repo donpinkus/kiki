@@ -139,6 +139,8 @@ struct DrawingView: View {
             }
         }
         .animation(.easeInOut(duration: 0.3), value: coordinator.generationError != nil)
+        .ignoresSafeArea(.keyboard)
+        .onAppear { KeyboardDismissal.installIfNeeded() }
         .fullScreenCover(isPresented: $coordinator.showStylePicker) {
             StylePickerView()
                 .environment(coordinator)
@@ -156,8 +158,6 @@ struct DrawingView: View {
             )
             .overlay(alignment: .top) {
                 PromptTitleBar()
-                    .padding(.top, 8)
-                    .padding(.horizontal, 24)
             }
             .overlay(alignment: .bottomLeading) {
                 connectionStatusIndicator
@@ -229,46 +229,68 @@ struct DrawingView: View {
 
 private struct PromptTitleBar: View {
     @Environment(AppCoordinator.self) private var coordinator
-    // Plain @State rather than @FocusState — the latter causes SwiftUI to
-    // auto-generate an InputAccessoryGenerator view for prev/next keyboard
-    // navigation, which (on iPad) triggers a constraint conflict with the
-    // SystemInputAssistantView and adds ~1s to TextField tap latency.
-    @State private var isFocused: Bool = false
+    // Fixed content height — both the style tile and the prompt input stay
+    // this tall regardless of text length. Long prompts scroll inside the
+    // TextEditor rather than growing the bar.
+    private static let contentHeight: CGFloat = 92
+    private static let cornerRadius: CGFloat = 10
 
     var body: some View {
         @Bindable var coordinator = coordinator
 
-        VStack(spacing: 10) {
-            Button {
-                coordinator.showStylePicker = true
-            } label: {
-                Text(coordinator.selectedStyle.name.uppercased())
+        HStack(alignment: .center, spacing: 8) {
+            styleButton
+            promptInput
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 16)
+    }
+
+    private var styleButton: some View {
+        Button {
+            coordinator.showStylePicker = true
+        } label: {
+            VStack(spacing: 4) {
+                Text("STYLE")
                     .font(.caption2.weight(.semibold))
-                    .tracking(1.4)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(Color.accentColor.opacity(0.12), in: Capsule())
+                    .tracking(1.2)
+                    .foregroundStyle(.secondary)
+                Text(coordinator.selectedStyle.name)
+                    .font(.subheadline.weight(.semibold))
+                    .multilineTextAlignment(.center)
+                    .minimumScaleFactor(0.75)
+                    .lineLimit(2)
                     .foregroundStyle(Color.accentColor)
             }
-
-            TextField(
-                "Describe your image…",
-                text: $coordinator.promptText,
-                onEditingChanged: { editing in isFocused = editing }
+            .padding(.horizontal, 6)
+            .frame(width: Self.contentHeight, height: Self.contentHeight)
+            .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: Self.cornerRadius))
+            .overlay(
+                RoundedRectangle(cornerRadius: Self.cornerRadius)
+                    .stroke(Color.accentColor.opacity(0.7), lineWidth: 1)
             )
-            .textFieldStyle(.plain)
-            .font(.title3.weight(.medium))
-            .multilineTextAlignment(.center)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-            .overlay(alignment: .bottom) {
-                Rectangle()
-                    .fill(isFocused ? Color.accentColor : Color.secondary.opacity(0.35))
-                    .frame(height: isFocused ? 1.5 : 1)
-                    .animation(.easeInOut(duration: 0.15), value: isFocused)
-            }
-            .frame(maxWidth: 520)
         }
+        .buttonStyle(.plain)
+    }
+
+    // Multi-line text input. `lineLimit(4, reservesSpace: true)` reserves
+    // ~4 lines of height so the bar stays at a fixed initial size; extra
+    // text scrolls internally once the limit is reached.
+    private var promptInput: some View {
+        @Bindable var coordinator = coordinator
+        return TextField(
+            "Describe your image…",
+            text: $coordinator.promptText,
+            axis: .vertical
+        )
+        .textFieldStyle(.plain)
+        .font(.subheadline)
+        .lineLimit(4, reservesSpace: true)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .frame(height: Self.contentHeight)
+        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: Self.cornerRadius))
     }
 }
 
