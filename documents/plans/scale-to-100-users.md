@@ -80,21 +80,33 @@ Ranked by impact, worst first:
 
 **Shipped:** Session registry moved from in-memory `Map` to Redis hashes (`session:<userId>`). Deploys no longer drop active sessions — new process adopts pods from Redis instead of killing everything. Reaper uses `SCAN` + atomic `MULTI`. `touch()` is fire-and-forget HSET + EXPIRE (~2/sec per active user). TTL = idle timeout + 5 min grace. Uses `ioredis` with auto-reconnection. Also unblocks horizontal scaling (multiple replicas sharing one Redis).
 
-### 6. Observability — DONE
+### 6. Observability — DONE (consolidated to Sentry)
 
-**Shipped:** In-process counters + fixed-bucket histograms at `/v1/ops/metrics` (JSON, X-Ops-Key auth). Counters: provision starts/successes/failures (by category), pod creates (by type), session reaps, preemptions, disconnects, semaphore waits. Histograms (p50/p95/p99): provision total, pod creation, container pull, health check, semaphore wait, session lifetime. Failure categorization: spot_capacity, container_pull_timeout, ssh_timeout, health_timeout, pod_create_failed, monthly_cap, unknown. Gauges: semaphore active + queue depth.
+**Shipped:** Sentry Performance is the single analytics system across backend and iOS. No separate metrics module — the earlier in-process `metrics.ts` and `/v1/ops/metrics` endpoint were removed once Sentry's span/tag model covered the same questions with better UX (dashboards, tag-grouping, retention, alerting).
 
-**Approach:**
-- Add a lightweight in-process counter/histogram module (no deps; just `Map<string, number[]>`).
-- Emit structured events on provision lifecycle: `provision.start`, `provision.ssh_ready`, `provision.health_ready`, `provision.failed(reason)`, `session.reaped`, `session.preempted`.
-- Expose at `/v1/ops/metrics` (JSON for our own tooling, or Prometheus-text format if we want to pipe to Grafana Cloud Free later).
-- Log same events as structured JSON lines for long-term retention via Railway's log drain.
+**Backend instrumentation** (`orchestrator.ts` + `stream.ts`):
+- Parent transaction `pod.provision` wraps every `provision()` call. Child spans per phase: `pod.create`, `pod.container_pull`, `pod.setup` (ssh mode only), `pod.health_check`. Attributes (`dc`, `podType`, `attempt`, `outcome`, `mode`) attached to parent span for tag-based slicing.
+- Span `pod.semaphore_wait` wraps queued provision attempts.
+- `Sentry.captureException` on every provision failure, tagged with `category` (from `classifyProvisionError`), `phase`, `attempt`, `dc`.
+- `Sentry.captureMessage` for lifecycle events that aren't errors but matter (image pull stalls, session preemptions, session replacement exhausted).
+- `Sentry.addBreadcrumb` at each phase transition inside the transaction for context on any captured event.
 
-**Effort:** Small (~half day for basics).
+**iOS instrumentation** (`AppCoordinator`, `StreamSession`, `StreamWebSocketClient`, `AuthService`):
+- Parent transaction `app.stream.startup` wraps user-perceived spin-up (tap → first generated image).
+- Transaction `auth.signIn` for Apple → backend JWT exchange.
+- Standalone transactions `stream.connection` and `stream.reconnect` for WebSocket connect/retry attempts. Reconnect carries `attempt` and `backoffSec` as attributes.
+- Breadcrumbs replaced every `print()` call in stream/ws layers. Categories: `stream.lifecycle`, `stream.connection`, `stream.config`, `stream.frame_sent`/`frame_received`, `stream.retry`, `stream.status`, `ws.*`, `error.*`.
+- `SentrySDK.capture(error:)` on: frame send failure, receive-loop error, unexpected disconnect, server-sent error status, reconnect exhausted, auth token failure, sign-in POST failure, refresh rejection.
 
-**Success criteria:**
-- Can answer "what's the p95 time-to-ready over the last hour?" with a single curl.
-- Can answer "which failure reasons are dominating?" without grep-fu.
+**Success criteria — met:**
+- "What's the p95 time-to-ready over the last hour?" — Sentry Performance → `pod.provision` transaction → filter by time, read p95 from the chart.
+- "Which failure reasons are dominating?" — Sentry Issues → group by `tags.category`.
+- "Which DCs stall most?" — Sentry Issues → search `Image pull stalled` → group by `tags.dc`.
+- "How long do iOS users wait from tap to first image?" — Sentry Performance → `app.stream.startup` transaction percentiles.
+
+**Retained (not consolidated to Sentry):**
+- `costMonitor.ts` + Discord webhooks — ops-team alerting channel, different concern from analytics.
+- Pino structured logs → Railway — free grep-friendly log search, zero Sentry quota impact.
 
 ### 7. Graceful preemption handling — DONE
 

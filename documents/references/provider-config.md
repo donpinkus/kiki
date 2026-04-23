@@ -154,4 +154,4 @@ curl -sS "https://api.runpod.io/graphql?api_key=$RUNPOD_API_KEY" \
 ## Known limitations
 
 - **~110–150s cold start** on fresh hosts. Dominated by GHCR image pull (~10 GB base image). Faster on hosts with cached layers.
-- **GHCR image pulls stall on some RunPod hosts** — stuck at "still fetching image" indefinitely. Root cause is RunPod host-level (some hosts can't reach GHCR reliably). Stalled pulls time out at 10 min; the pod is terminated and the user can retry.
+- **GHCR image pulls stall on some RunPod hosts** — stuck at "still fetching image" indefinitely. Root cause is RunPod host-level (some hosts can't reach GHCR reliably). A watchdog in `waitForRuntime` fast-fails with `ImagePullStallError` after `CONTAINER_PULL_STALL_MS` (default 120s); `provision` then terminates the pod, blacklists the DC, and rerolls onto a different DC up to `CONTAINER_PULL_MAX_REROLLS` times (default 2). Each stall is captured to Sentry with `dc`, `podType`, `attempt`, `elapsedSec` tags for per-DC / per-timing analysis. The legacy 10-min hard timeout remains as a safety net for when the watchdog is disabled (`CONTAINER_PULL_WATCHDOG_ENABLED=false`).
