@@ -538,16 +538,25 @@ public final class CanvasRenderer {
                                        format: .BGRA8, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!)
     }
 
-    /// Load a CGImage into a specific layer texture.
+    /// Load a CGImage into a specific layer texture, stretched to fill the canvas.
     func loadImageIntoLayer(at index: Int, _ image: CGImage) {
         guard index >= 0, index < layers.count else { return }
         let texture = layers[index].texture
         var ciImage = CIImage(cgImage: image)
-        ciImage = ciImage.transformed(by: CGAffineTransform(scaleX: 1, y: -1)
-            .translatedBy(x: 0, y: -ciImage.extent.height))
+        let imgW = ciImage.extent.width
+        let imgH = ciImage.extent.height
+        guard imgW > 0, imgH > 0 else { return }
+        let sx = CGFloat(canvasWidth) / imgW
+        let sy = CGFloat(canvasHeight) / imgH
+        ciImage = ciImage.transformed(by: CGAffineTransform(scaleX: sx, y: -sy)
+            .translatedBy(x: 0, y: -imgH))
         let bounds = CGRect(x: 0, y: 0, width: canvasWidth, height: canvasHeight)
+        // linearSRGB — texture is .bgra8Unorm_srgb, so Metal's render pipeline applies
+        // linear→sRGB encoding on store. Passing sRGB here would double-encode (gamma
+        // applied twice → washed-out midtones, e.g. dark grays lifting to mid-gray).
+        // We tell CIContext to output linear values; Metal handles the sRGB encoding.
         ciContext.render(ciImage, to: texture, commandBuffer: nil,
-                         bounds: bounds, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!)
+                         bounds: bounds, colorSpace: CGColorSpace(name: CGColorSpace.linearSRGB)!)
     }
 
     /// Load a CGImage into the active layer (convenience wrapper).

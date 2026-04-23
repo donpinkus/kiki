@@ -27,7 +27,8 @@ CIContext is cached on `CanvasRenderer` (created once at init, backed by the sam
 - `CIContext` working color space
 - `CIImage(mtlTexture:, options: [.colorSpace: ...])` 
 - `CIContext.createCGImage(..., colorSpace: ...)`
-- `CIContext.render(..., colorSpace: ...)`
+
+**EXCEPTION — `CIContext.render(_:to:bounds:colorSpace:)` writing into a `_srgb` Metal texture:** pass `CGColorSpace(name: CGColorSpace.linearSRGB)!`, NOT sRGB. Metal's render pipeline already applies linear→sRGB encoding on store for `_srgb` formats. Passing sRGB makes CIContext also encode → gamma applied twice → midtones lift to mid-gray (deep blacks become medium gray, contrast washes out). Passing linearSRGB tells CIContext to hand off linear values; Metal handles the encoding once.
 
 ### UIGraphicsImageRenderer — Always Force sRGB
 
