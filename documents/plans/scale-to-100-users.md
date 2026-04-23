@@ -8,7 +8,7 @@ This doc captures the bottlenecks and the work to clear them. Each workstream is
 
 As of WS7 completion (2026-04-18) — **all 7 workstreams shipped:**
 
-- Railway backend orchestrator provisions a dedicated RTX 5090 pod per user and terminates it after 10 min of inactivity. See `documents/references/provider-config.md` for ops.
+- Railway backend orchestrator provisions a dedicated RTX 5090 pod per user and terminates it after 30 min of inactivity. See `documents/references/provider-config.md` for ops.
 - **Authentication (WS1 done):** Apple Sign In → JWT. Session registry keyed by `userId`. Per-user rate limiter (1 active pod, 5/hr, 30/day).
 - **On-demand fallback (WS2 done):** Spot first; if capacity exhausted, falls back to on-demand ($0.99/hr) in the same DC.
 - **Fast cold start (WS3 done):** Slim GHCR image (~2-3 GB) + pre-populated network volumes in 5 DCs. ~110–150s cold start (down from 3-5 min). DC-aware placement probes spot stock across all volume-DCs.
@@ -117,9 +117,9 @@ Ranked by impact, worst first:
 ## Also worth naming (not in the main 7)
 
 - **iOS session ID / JWT in Keychain.** Today's UserDefaults storage is fine pre-auth; after Workstream 1 we should store the JWT in Keychain. ~1 hour of work.
-- **Session release endpoint.** Client sends `{"type": "release"}` when navigating away from the drawing canvas → backend immediately terminates the pod. Cuts the 10-min idle tail for users who are explicitly done. ~1 hour.
+- **Session release endpoint.** Client sends `{"type": "release"}` when navigating away from the drawing canvas → backend immediately terminates the pod. Cuts the 30-min idle tail for users who are explicitly done. ~1 hour.
 - **Content safety (NSFW output + prompt input filters).** Already flagged as a pre-TestFlight blocker in `CLAUDE.md`. Adjacent to scale; should ship before any public beta regardless of user count.
-- **Idle timeout tuning.** 10 min was a guess. After a few weeks of real traffic, we'll learn the `p50/p95` of "time between sessions for the same user" and can tune. Easy env-var change.
+- **Idle timeout tuning.** Currently 30 min (was 10 min — bumped after early testing showed users dropped pods mid-session). After more real traffic we'll learn the `p50/p95` of "time between sessions for the same user" and can tune further. Easy code-constant change.
 
 ## Out of scope for 100 users
 

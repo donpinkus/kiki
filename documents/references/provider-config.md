@@ -2,12 +2,12 @@
 
 ## Current Stack
 
-**Each user session gets its own RTX 5090 pod.** The Railway backend (`backend/`) provisions pods on demand when an authenticated client WebSocket opens, and terminates them after 10 minutes of inactivity. FLUX.2-klein-4B runs on the pod with BFL's NVFP4 transformer checkpoint loaded on top of the BF16 pipeline. Custom FastAPI + WebSocket server at `flux-klein-server/`.
+**Each user session gets its own RTX 5090 pod.** The Railway backend (`backend/`) provisions pods on demand when an authenticated client WebSocket opens, and terminates them after 30 minutes of inactivity. FLUX.2-klein-4B runs on the pod with BFL's NVFP4 transformer checkpoint loaded on top of the BF16 pipeline. Custom FastAPI + WebSocket server at `flux-klein-server/`.
 
 - ~1 FPS generation at 768×768 (reference mode, 4 steps, NVFP4)
 - ~110–150s cold start per session (image pull + model load + warmup). Faster when the host has the image cached.
 - ~$0.53–0.58/hr spot bid in secure-cloud datacenters; $0.99/hr on-demand fallback
-- 10-min idle timeout preserves the pod across brief disconnects (reconnect = instant, no cold start)
+- 30-min idle timeout preserves the pod across brief disconnects (reconnect = instant, no cold start)
 
 Server image: `ghcr.io/donpinkus/kiki-flux-klein:<tag>` — a slim (~2–3 GB) image with Python deps only. Model weights live on pre-populated RunPod network volumes mounted at `/workspace`. Built via `.github/workflows/build-flux-image.yml`.
 
@@ -21,8 +21,8 @@ Server image: `ghcr.io/donpinkus/kiki-flux-klein:<tag>` — a slim (~2–3 GB) i
 3. Placement: `selectPlacement()` probes all configured volume-DCs in parallel for 5090 spot stock, picks the DC with the best stock level.
 4. Pod creation: tries spot first in the selected DC with the network volume attached. If spot capacity is exhausted and `ONDEMAND_FALLBACK_ENABLED=true`, falls back to on-demand in the same DC.
 5. Boot: polls RunPod API until `runtime` appears (image pull + container start), then polls the pod's `/health` endpoint until the FLUX server reports ready.
-6. Every relayed frame calls `touch(sessionId)` to reset the 10-min idle timer.
-7. A `setInterval` reaper scans the registry every 60s and terminates pods idle >10 min.
+6. Every relayed frame calls `touch(sessionId)` to reset the 30-min idle timer.
+7. A `setInterval` reaper scans the registry every 60s and terminates pods idle >30 min.
 8. On backend restart: `reconcileOrphanPods()` lists all `kiki-session-*` pods and terminates them (prevents cost leaks from crashes).
 
 ### Status messages shown to user during provision
@@ -104,7 +104,7 @@ Key log lines:
 - `Pod created (spot) podId=... dc=... costPerHr=0.58` — provisioning started.
 - `Container runtime up podId=... uptimeInSeconds=...` — image pulled, container running.
 - `Pod ready podId=... podUrl=wss://... mode=baked` — fully provisioned.
-- `Reaping idle pod sessionId=... podId=... idleMs=...` — 10-min timeout hit.
+- `Reaping idle pod sessionId=... podId=... idleMs=...` — 30-min timeout hit.
 
 ### Kill everything (cost panic button)
 
@@ -128,7 +128,7 @@ curl -sS "https://api.runpod.io/graphql?api_key=$RUNPOD_API_KEY" \
 
 - Spot RTX 5090: ~$0.53/hr bid floor + $0.05 headroom (secure cloud, varies by availability).
 - On-demand fallback: $0.99/hr (secure cloud).
-- Worst-case idle tail per user: 10 min × $0.58/hr ≈ **$0.10** per session.
+- Worst-case idle tail per user: 30 min × $0.99/hr ≈ **$0.50** per session (on-demand only mode).
 - Network volumes: ~$17.50/mo fixed (250 GB across 5 DCs).
 - Railway backend: ~$5/month flat.
 

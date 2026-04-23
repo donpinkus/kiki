@@ -10,7 +10,7 @@ Last updated: 2026-04-19
 
 1. **Cold start provisioning.** User opens the app for the first time (or after a long idle). On the drawing canvas page, the 'generated image' pane shows a warm-up progress bar with status messages (e.g. "Reserving GPU...", "Pulling container image...", "Loading AI model..."). The user can start drawing immediately — the canvas is fully responsive during provisioning. Once the pod is ready, the first generated image appears automatically without any user action.
 
-2. **Warm reconnection.** User closes and reopens the app within 10 minutes. The existing pod is reused — no provisioning delay. Generation resumes immediately.
+2. **Warm reconnection.** User closes and reopens the app within 30 minutes. The existing pod is reused — no provisioning delay. Generation resumes immediately.
 
 3. **Gallery pre-warming.** When the user is on the gallery page, the GPU pod is already provisioning in the background. By the time they tap into a drawing, the pod may already be ready.
 
@@ -66,9 +66,9 @@ Last updated: 2026-04-19
 
 21. **Pod provisioning failure.** If pod provisioning fails (no GPU capacity, container pull timeout, etc.), the app retries automatically with exponential backoff. The user sees provisioning status messages during retry, not a dead "Connecting..." state.
 
-22. **Idle timeout.** If the user leaves the app idle for more than 10 minutes, the pod is terminated to save cost. When the user returns and starts drawing, a new pod is provisioned automatically. The user sees the warm-up progress bar again.
+22. **Idle timeout.** If the user leaves the app idle for more than 30 minutes, the pod is terminated to save cost. When the user returns and starts drawing, a new pod is provisioned automatically. The user sees the warm-up progress bar again.
 
-23. **App background/foreground.** Backgrounding the app stops the stream cleanly. Foregrounding resumes it — reusing the existing pod if within the 10-minute idle window, or provisioning a new one if not.
+23. **App background/foreground.** Backgrounding the app stops the stream cleanly. Foregrounding resumes it — reusing the existing pod if within the 30-minute idle window, or provisioning a new one if not.
 
 24. **Network interruption.** If the network drops briefly during drawing, the app reconnects automatically (up to 5 attempts with backoff). The pod stays alive during the interruption. Once reconnected, generation resumes from the current canvas state.
 

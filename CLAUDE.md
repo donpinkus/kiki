@@ -32,7 +32,7 @@ cd backend && npm run lint         # Lint
 
 **iOS:** SwiftUI for UI. **Metal for drawing** (CAMetalLayer + CADisplayLink, instanced stamp-based brush engine — see Canvas Engine below). Swift Concurrency (actors, async/await) — no Combine. URLSession for networking — no third-party HTTP libs. SwiftData for persistence. 3 local Swift packages via SPM. AppCoordinator (@Observable) injected via environment.
 
-**Backend:** TypeScript + Fastify — no Express. Railway for hosting. Backend is both a WebSocket relay AND a pod orchestrator: it provisions a dedicated RTX 5090 pod per session (JWT-authenticated), relays frames to that pod, and terminates pods idle > 10 min. Redis-backed session registry (survives deploys), semaphore caps concurrent cold starts. See `documents/references/provider-config.md` for the full ops picture.
+**Backend:** TypeScript + Fastify — no Express. Railway for hosting. Backend is both a WebSocket relay AND a pod orchestrator: it provisions a dedicated RTX 5090 pod per session (JWT-authenticated), relays frames to that pod, and terminates pods idle > 30 min. Redis-backed session registry (survives deploys), semaphore caps concurrent cold starts. See `documents/references/provider-config.md` for the full ops picture.
 
 **Generation:** FLUX.2-klein-4B on RunPod RTX 5090 spot, with BFL's NVFP4 transformer checkpoint loaded on top of the BF16 pipeline. Real-time img2img streaming over WebSocket. Canvas captured at ~2 FPS, sent as JPEG, generated images returned ~1 FPS. Reference-mode only: the sketch is VAE-encoded and concatenated with generation latents as conditioning tokens. Server uses frame dropping (single-slot buffer) to prevent queue buildup. ~110–150s cold start (slim GHCR image + pre-populated network volumes).
 
