@@ -11,6 +11,7 @@ import {
   abortSession,
   touch,
   sessionClosed,
+  subscribe,
 } from '../modules/orchestrator/orchestrator.js';
 import { StreamRelay } from '../modules/relay/streamRelay.js';
 import {
@@ -136,6 +137,16 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       let clientDisconnected = false;
       const sessionStartMs = Date.now();
 
+      // Subscribe to provision state events so the iOS client sees every
+      // transition — fresh caller AND joiner both go through this single path.
+      // The broker seeds the handler with the current Redis state (if any),
+      // then forwards every subsequent transition.
+      const unsubscribeState = await subscribe(userId, (event) => {
+        if (socket.readyState === socket.OPEN) {
+          socket.send(JSON.stringify({ type: 'state', ...event }));
+        }
+      });
+
       let getOrProvisionMs = 0;
       try {
         // Record this provision in the sliding-window history for hourly/daily
@@ -146,13 +157,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         }
 
         const getOrProvisionStart = Date.now();
-        const { podUrl } = await getOrProvisionPod(userId, (msg) => {
-          if (socket.readyState === socket.OPEN) {
-            socket.send(
-              JSON.stringify({ type: 'status', status: 'provisioning', message: msg }),
-            );
-          }
-        });
+        const { podUrl } = await getOrProvisionPod(userId);
         getOrProvisionMs = Date.now() - getOrProvisionStart;
 
         if (socket.readyState !== socket.OPEN) {
@@ -208,18 +213,11 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
 
               if (clientDisconnected || socket.readyState !== socket.OPEN) return;
 
-              // Hold client WS open — send reprovisioning status
-              socket.send(
-                JSON.stringify({ type: 'status', status: 'reprovisioning', message: 'Replacing GPU...' }),
-              );
-
-              const { podUrl: newPodUrl } = await replaceSession(userId, (msg) => {
-                if (socket.readyState === socket.OPEN) {
-                  socket.send(
-                    JSON.stringify({ type: 'status', status: 'reprovisioning', message: msg }),
-                  );
-                }
-              });
+              // Hold client WS open. replaceSession emits state transitions
+              // through the broker (finding_gpu → creating_pod → ...) — our
+              // existing broker subscription forwards them to iOS with
+              // replacementCount > 0 so the UI prefixes "Replacing — ".
+              const { podUrl: newPodUrl } = await replaceSession(userId);
 
               // If client left during replacement, clean up the new pod
               if (clientDisconnected || socket.readyState !== socket.OPEN) {
@@ -260,13 +258,11 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
               await newRelay.connect();
               request.log.info({ userId, newPodUrl }, 'Replacement relay connected');
 
-              // Re-send config so the new pod knows prompt/style/params
+              // Re-send config so the new pod knows prompt/style/params.
+              // Note: state='ready' was already emitted via the broker when
+              // provision() completed; iOS has seen it.
               if (lastConfig) {
                 newRelay.sendConfig(lastConfig);
-              }
-
-              if (socket.readyState === socket.OPEN) {
-                socket.send(JSON.stringify({ type: 'status', status: 'ready' }));
               }
             } catch (err) {
               request.log.error({ userId, err }, 'Replacement failed');
@@ -286,10 +282,8 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
 
         await relay.connect();
         request.log.info({ userId }, 'Upstream connected, relaying');
-
-        if (socket.readyState === socket.OPEN) {
-          socket.send(JSON.stringify({ type: 'status', status: 'ready' }));
-        }
+        // state='ready' was already emitted via the broker when provision()
+        // completed; iOS has seen it.
 
         socket.on('message', (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
           if (!relay) return;
@@ -348,11 +342,13 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         request.log.info({ userId }, 'Stream client disconnected');
         trackSessionClosed({ userId, durationMs: Date.now() - sessionStartMs });
         sessionClosed(userId);
+        unsubscribeState();
         relay?.close();
       });
 
       socket.on('error', (err: Error) => {
         request.log.error({ userId, err }, 'Client socket error');
+        unsubscribeState();
         relay?.close();
       });
     })();

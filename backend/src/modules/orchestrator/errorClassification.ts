@@ -40,20 +40,20 @@ export class ImagePullStallError extends Error {
 export class PodVanishedError extends Error {
   readonly podId: string;
   readonly dc: string | null;
-  readonly phase: 'runtime_up' | 'health_check';
+  readonly state: 'fetching_image' | 'warming_model';
   readonly elapsedSec: number;
 
   constructor(
     podId: string,
     dc: string | null,
-    phase: 'runtime_up' | 'health_check',
+    state: 'fetching_image' | 'warming_model',
     elapsedSec: number,
   ) {
-    super(`Pod ${podId} vanished during ${phase} after ${elapsedSec}s (dc=${dc ?? 'unknown'})`);
+    super(`Pod ${podId} vanished during ${state} after ${elapsedSec}s (dc=${dc ?? 'unknown'})`);
     this.name = 'PodVanishedError';
     this.podId = podId;
     this.dc = dc;
-    this.phase = phase;
+    this.state = state;
     this.elapsedSec = elapsedSec;
   }
 }
@@ -61,10 +61,10 @@ export class PodVanishedError extends Error {
 export type FailureCategory =
   | 'spot_capacity'
   | 'pod_create_failed'
-  | 'runtime_up_timeout'
+  | 'fetch_image_timeout'
   | 'image_pull_stall'
   | 'pod_vanished'
-  | 'health_timeout'
+  | 'warm_model_timeout'
   | 'monthly_cap'
   | 'transient_runpod'
   | 'unknown';
@@ -84,8 +84,8 @@ export function classifyProvisionError(err: Error): FailureCategory {
     msg.includes('capacity exhausted') ||
     msg.includes('no runpod dc')
   ) return 'spot_capacity';
-  if (msg.includes('runtime never appeared')) return 'runtime_up_timeout';
-  if (msg.includes('never became healthy')) return 'health_timeout';
+  if (msg.includes('runtime never appeared')) return 'fetch_image_timeout';
+  if (msg.includes('never became healthy')) return 'warm_model_timeout';
   if (msg.includes('monthly_cap') || msg.includes('cost gate')) return 'monthly_cap';
   if (msg.includes('failed to create') || msg.includes('returned no pod')) return 'pod_create_failed';
   // RunPod's generic backend error. Observed on 2026-04-22 during a DC-pull

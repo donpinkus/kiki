@@ -66,7 +66,7 @@ export function trackPodProvisionCompleted(props: {
   dc: string | null;
   podType: string;
   attempt: number;
-  /** Per-phase durations for funnel analysis. Keys: pod_create_ms, runtime_up_ms, health_check_ms. */
+  /** Per-state durations for funnel analysis. Keys: creating_pod_ms, fetching_image_ms, warming_model_ms. */
   phaseTimings?: Record<string, number>;
 }): void {
   capture(props.userId, 'pod.provision.completed', {
@@ -102,14 +102,14 @@ export function trackPodProvisionFailed(props: {
   durationMs: number;
   category: string;
   dc: string | null;
-  phase: string;
+  state: string;
   attempt: number;
 }): void {
   capture(props.userId, 'pod.provision.failed', {
     duration_ms: props.durationMs,
     category: props.category,
     dc: props.dc ?? 'unknown',
-    phase: props.phase,
+    state: props.state,
     attempt: props.attempt,
   });
 }
@@ -138,14 +138,14 @@ export function trackPodProvisionStalled(props: {
 export function trackPodProvisionVanished(props: {
   userId: string;
   dc: string | null;
-  phase: string;
+  state: string;
   elapsedSec: number;
   attempt: number;
   willReroll: boolean;
 }): void {
   capture(props.userId, 'pod.provision.vanished', {
     dc: props.dc ?? 'unknown',
-    phase: props.phase,
+    state: props.state,
     elapsed_sec: props.elapsedSec,
     attempt: props.attempt,
     will_reroll: props.willReroll,

@@ -20,10 +20,10 @@
  * ├─────────────────────────────────────┼──────────────────────────────────────────────────┼──────────────────────────────┤
  * │ 1. Spot pod preempted (disappears)  │ Upstream WS closes with code 1006/1012.          │ stream.ts relay.onClose →    │
  * │                                     │ RunPod deletes pod entirely.                     │ classifyClose → replaceSession│
- * │                                     │                                                  │ provisions new pod. iOS      │
- * │                                     │                                                  │ reconnect joins via          │
- * │                                     │                                                  │ status='replacing' check in  │
- * │                                     │                                                  │ getOrProvisionPod.           │
+ * │                                     │                                                  │ emits finding_gpu (UI resets)│
+ * │                                     │                                                  │ and provisions a new pod.    │
+ * │                                     │                                                  │ Joiners subscribe to the     │
+ * │                                     │                                                  │ broker for state updates.    │
  * ├─────────────────────────────────────┼──────────────────────────────────────────────────┼──────────────────────────────┤
  * │ 2. Pod vanishes during provisioning │ Pod created on RunPod but disappears before      │ waitForRuntime / waitForHealth│
  * │    (spot preempted before serving)  │ becoming serve-ready. getPod() returns null.      │ throw PodVanishedError;       │
@@ -52,15 +52,16 @@
  * ├─────────────────────────────────────┼──────────────────────────────────────────────────┼──────────────────────────────┤
  * │ 6. Railway redeploy during          │ Backend process dies. In-memory                  │ New process boots → reconcile │
  * │    provisioning                     │ inFlightProvisions map lost. Pod may still be    │ adopts or terminates orphans. │
- * │                                     │ provisioning on RunPod.                          │ iOS reconnects → checks Redis │
- * │                                     │                                                  │ status: if 'provisioning',   │
- * │                                     │                                                  │ detected as stale → deleted  │
- * │                                     │                                                  │ → fresh provision.           │
+ * │                                     │ provisioning on RunPod.                          │ iOS reconnects → session in  │
+ * │                                     │                                                  │ any non-ready state without  │
+ * │                                     │                                                  │ an in-flight promise is      │
+ * │                                     │                                                  │ stale → deleted, fresh       │
+ * │                                     │                                                  │ provision starts.            │
  * ├─────────────────────────────────────┼──────────────────────────────────────────────────┼──────────────────────────────┤
- * │ 7. iOS reconnect during replacement │ Spot preempted → replaceSession sets             │ getOrProvisionPod detects    │
- * │    (duplicate pod race)             │ status='replacing'. iOS reconnects and calls     │ status='replacing' → polls   │
- * │                                     │ getOrProvisionPod.                               │ Redis via waitForReplacement │
- * │                                     │                                                  │ until replacement completes. │
+ * │ 7. iOS reconnect during replacement │ replaceSession is live; inFlightProvisions has  │ getOrProvisionPod sees the    │
+ * │    (duplicate pod race)             │ the replacement promise.                         │ in-flight promise → joins    │
+ * │                                     │                                                  │ it. Broker subscribe seeds   │
+ * │                                     │                                                  │ joiner with current state.   │
  * │                                     │                                                  │ No duplicate pod created.    │
  * ├─────────────────────────────────────┼──────────────────────────────────────────────────┼──────────────────────────────┤
  * │ 8. Network glitch during drawing    │ WS momentarily drops. iOS receive loop ends      │ iOS attemptReconnect (3x     │
@@ -106,7 +107,7 @@ import {
 } from './runpodClient.js';
 import { getPolicy } from './policy.js';
 import { notifyPodCreated, notifyPodProgress, notifyPodTerminated } from './costMonitor.js';
-import { ImagePullStallError, PodVanishedError, classifyProvisionError } from './errorClassification.js';
+import { ImagePullStallError, PodVanishedError, classifyProvisionError, type FailureCategory } from './errorClassification.js';
 import {
   trackPodProvisionStarted,
   trackPodProvisionCompleted,
@@ -123,7 +124,31 @@ export { ImagePullStallError } from './errorClassification.js';
 // Types
 // ────────────────────────────────────────────────────────────────────────────
 
-export type SessionStatus = 'provisioning' | 'ready' | 'replacing' | 'terminated';
+/**
+ * Single flat state enum for a session's provisioning lifecycle. Replaces the
+ * old `SessionStatus` + internal `ProvisionPhase` duo. iOS maps state codes to
+ * display text; backend only tracks structured state.
+ *
+ * Active (in-progress) states: 'queued' through 'warming_model'.
+ * Terminal states: 'ready' (pod serving), 'failed', 'terminated'.
+ */
+export type State =
+  | 'queued'          // semaphore-held (too many concurrent provisions in process)
+  | 'finding_gpu'     // selectPlacement: probing DCs for spot stock
+  | 'creating_pod'    // createSpotPod / createOnDemandPod RPC
+  | 'fetching_image'  // pod exists; waiting for pod.runtime (GHCR image pull)
+  | 'warming_model'   // container running; polling /health while model loads
+  | 'ready'           // pod serving traffic
+  | 'failed'          // unrecoverable error; WS closes after
+  | 'terminated';     // session ended (reaped / aborted / replaced out)
+
+const ACTIVE_PROVISION_STATES: readonly State[] = [
+  'queued', 'finding_gpu', 'creating_pod', 'fetching_image', 'warming_model',
+] as const;
+
+export function isActiveProvisioning(state: State): boolean {
+  return (ACTIVE_PROVISION_STATES as readonly string[]).includes(state);
+}
 
 export type PodType = 'spot' | 'onDemand';
 
@@ -164,7 +189,9 @@ interface RedisSession {
   podId: string | null;
   podUrl: string | null;
   podType: PodType | null;
-  status: SessionStatus;
+  state: State;
+  stateEnteredAt: number;       // ms epoch — updated on every state transition
+  failureCategory: FailureCategory | null;  // only non-null when state === 'failed'
   createdAt: number;
   lastActivityAt: number;
   replacementCount: number;
@@ -179,12 +206,18 @@ function sessionKey(sessionId: string): string {
 async function readSession(sessionId: string): Promise<RedisSession | null> {
   const data = await getRedis().hgetall(sessionKey(sessionId));
   if (!data || !data['sessionId']) return null;
+  const rawState = data['state'];
+  // Guard against legacy rows written by the pre-refactor backend (`status` field).
+  // Reconcile / reaper will clean these up; meanwhile treat them as non-existent.
+  if (!rawState) return null;
   return {
     sessionId: data['sessionId']!,
     podId: data['podId'] || null,
     podUrl: data['podUrl'] || null,
     podType: (data['podType'] as PodType) || null,
-    status: (data['status'] as SessionStatus) || 'provisioning',
+    state: rawState as State,
+    stateEnteredAt: Number(data['stateEnteredAt'] ?? 0),
+    failureCategory: (data['failureCategory'] as FailureCategory) || null,
     createdAt: Number(data['createdAt'] ?? 0),
     lastActivityAt: Number(data['lastActivityAt'] ?? 0),
     replacementCount: Number(data['replacementCount'] ?? 0),
@@ -195,13 +228,15 @@ async function writeSession(session: RedisSession): Promise<void> {
   const key = sessionKey(session.sessionId);
   const fields: Record<string, string> = {
     sessionId: session.sessionId,
-    status: session.status,
+    state: session.state,
+    stateEnteredAt: String(session.stateEnteredAt),
     createdAt: String(session.createdAt),
     lastActivityAt: String(session.lastActivityAt),
   };
   if (session.podId) fields['podId'] = session.podId;
   if (session.podUrl) fields['podUrl'] = session.podUrl;
   if (session.podType) fields['podType'] = session.podType;
+  if (session.failureCategory) fields['failureCategory'] = session.failureCategory;
   if (session.replacementCount > 0) fields['replacementCount'] = String(session.replacementCount);
   await getRedis().multi()
     .hset(key, fields)
@@ -211,19 +246,21 @@ async function writeSession(session: RedisSession): Promise<void> {
 
 /**
  * Partial update — only writes the fields in `patch`, refreshes TTL.
- * Safer than `writeSession` for transitions (status changes, pod swaps)
- * because it never risks clobbering a field the caller didn't intend to set.
+ * Safer than `writeSession` for transitions because it never risks clobbering
+ * a field the caller didn't intend to set.
  */
 async function patchSession(
   sessionId: string,
   patch: Partial<Pick<
     RedisSession,
-    'status' | 'podId' | 'podUrl' | 'podType' | 'lastActivityAt' | 'replacementCount'
+    'state' | 'stateEnteredAt' | 'failureCategory' | 'podId' | 'podUrl' | 'podType' | 'lastActivityAt' | 'replacementCount'
   >>,
 ): Promise<void> {
   const key = sessionKey(sessionId);
   const fields: Record<string, string> = {};
-  if (patch.status !== undefined) fields['status'] = patch.status;
+  if (patch.state !== undefined) fields['state'] = patch.state;
+  if (patch.stateEnteredAt !== undefined) fields['stateEnteredAt'] = String(patch.stateEnteredAt);
+  if (patch.failureCategory !== undefined) fields['failureCategory'] = patch.failureCategory ?? '';
   if (patch.podId !== undefined) fields['podId'] = patch.podId ?? '';
   if (patch.podUrl !== undefined) fields['podUrl'] = patch.podUrl ?? '';
   if (patch.podType !== undefined) fields['podType'] = patch.podType ?? '';
@@ -238,6 +275,86 @@ async function patchSession(
 
 async function deleteSession(sessionId: string): Promise<void> {
   await getRedis().del(sessionKey(sessionId));
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Broker — per-process fan-out of state transitions to WS subscribers
+// ────────────────────────────────────────────────────────────────────────────
+//
+// Redis is the source of truth for session state (durable, survives deploys).
+// The broker is just the efficient-push layer: when a provision transitions
+// from one state to the next, every iOS WS currently subscribed to that
+// sessionId gets the event in real time. No in-memory state cache — on
+// subscribe, the handler is seeded with the current Redis state so joiners
+// see whatever phase is active right now, then receives every future emit.
+
+export interface StateEvent {
+  state: State;
+  stateEnteredAt: number;
+  replacementCount: number;
+  failureCategory: FailureCategory | null;
+}
+
+type StateHandler = (event: StateEvent) => void;
+
+const subscribers = new Map<string, Set<StateHandler>>();
+
+/**
+ * Subscribe a handler to a session's state events. Immediately invokes the
+ * handler with the current Redis state (if any) so joiners see their current
+ * phase synchronously. Returns an unsubscribe function — call it when the
+ * client disconnects or the provision settles.
+ */
+export async function subscribe(
+  sessionId: string,
+  handler: StateHandler,
+): Promise<() => void> {
+  const existing = subscribers.get(sessionId);
+  const set = existing ?? new Set<StateHandler>();
+  set.add(handler);
+  if (!existing) subscribers.set(sessionId, set);
+
+  // Seed with current state (if session exists) so joiner sees where we are.
+  const session = await readSession(sessionId);
+  if (session) {
+    handler({
+      state: session.state,
+      stateEnteredAt: session.stateEnteredAt,
+      replacementCount: session.replacementCount,
+      failureCategory: session.failureCategory,
+    });
+  }
+
+  return () => {
+    const s = subscribers.get(sessionId);
+    if (!s) return;
+    s.delete(handler);
+    if (s.size === 0) subscribers.delete(sessionId);
+  };
+}
+
+/**
+ * Write a state transition to Redis and fan out to every subscriber.
+ */
+async function emitState(
+  sessionId: string,
+  state: State,
+  failureCategory: FailureCategory | null = null,
+): Promise<void> {
+  const now = Date.now();
+  await patchSession(sessionId, { state, stateEnteredAt: now, failureCategory });
+  const session = await readSession(sessionId);  // pick up replacementCount
+  const event: StateEvent = {
+    state,
+    stateEnteredAt: now,
+    replacementCount: session?.replacementCount ?? 0,
+    failureCategory,
+  };
+  subscribers.get(sessionId)?.forEach((h) => {
+    try { h(event); } catch (err) {
+      log.warn({ sessionId, err: (err as Error).message }, 'State subscriber threw');
+    }
+  });
 }
 
 /**
@@ -286,102 +403,52 @@ export async function abortSession(
 // Public API
 // ────────────────────────────────────────────────────────────────────────────
 
-const REPLACEMENT_POLL_MS = 3_000;
-const REPLACEMENT_TIMEOUT_MS = 10 * 60 * 1000; // 10 min — same as provision timeout
-
-/**
- * Poll Redis until a 'replacing' session becomes 'ready' or is deleted.
- * Used by getOrProvisionPod when it detects that replaceSession is already
- * handling spot preemption recovery — avoids provisioning a duplicate pod.
- */
-async function waitForReplacement(
-  sessionId: string,
-  onStatus: (msg: string) => void,
-): Promise<string> {
-  const start = Date.now();
-  const deadline = start + REPLACEMENT_TIMEOUT_MS;
-  let polls = 0;
-  while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, REPLACEMENT_POLL_MS));
-    polls++;
-    const session = await readSession(sessionId);
-    if (!session) {
-      log.warn({ sessionId, polls }, 'Session deleted while waiting for replacement');
-      throw new Error('Session deleted while waiting for replacement');
-    }
-    if (session.status === 'ready' && session.podUrl) {
-      const elapsed = Math.round((Date.now() - start) / 1000);
-      log.info({ sessionId, podId: session.podId, elapsedSec: elapsed }, 'Replacement completed — reusing pod');
-      onStatus('Ready');
-      return session.podUrl;
-    }
-    if (session.status !== 'replacing') {
-      log.warn({ sessionId, status: session.status, polls }, 'Unexpected status while waiting for replacement');
-      throw new Error(`Unexpected session status while waiting for replacement: ${session.status}`);
-    }
-    if (polls % 10 === 0) {
-      const elapsed = Math.round((Date.now() - start) / 1000);
-      log.info({ sessionId, elapsedSec: elapsed, status: session.status }, 'Still waiting for replacement');
-    }
-  }
-  throw new Error('Replacement timed out');
-}
-
 /**
  * Returns a healthy pod URL for the given session, provisioning one if needed.
  * If the same sessionId calls this concurrently while a provision is in flight,
  * both calls await the same promise — we don't create two pods.
  *
  * Session state is stored in Redis (survives deploys). In-flight provision
- * promises are kept in a local map for same-process join only.
+ * promises are kept in a local map for same-process join only. State transitions
+ * during provision fan out to the broker; stream.ts subscribes to drive the
+ * WebSocket status envelope.
  */
-export async function getOrProvisionPod(
-  sessionId: string,
-  onStatus: (msg: string) => void,
-): Promise<{ podUrl: string }> {
+export async function getOrProvisionPod(sessionId: string): Promise<{ podUrl: string }> {
   // 1. Check Redis for existing session
   const existing = await readSession(sessionId);
 
-  if (existing?.status === 'ready' && existing.podUrl) {
+  if (existing?.state === 'ready' && existing.podUrl) {
     log.info({ sessionId, podId: existing.podId }, 'Reusing existing session pod');
-    onStatus('Ready');
     return { podUrl: existing.podUrl };
   }
 
-  // 1b. If a replacement is in progress (spot preemption recovery), wait for
-  // it instead of provisioning a duplicate pod. The replacement flow in
-  // replaceSession() writes status='replacing' and will flip to 'ready' once
-  // the new pod is up.
-  if (existing?.status === 'replacing') {
-    log.info({ sessionId }, 'Replacement in progress — waiting');
-    onStatus('Replacing GPU...');
-    const podUrl = await waitForReplacement(sessionId, onStatus);
-    return { podUrl };
-  }
-
-  // 2. Check local in-flight map (same-process concurrent callers)
+  // 2. Check local in-flight map (same-process concurrent callers — fresh
+  // provision OR replacement). Joiners subscribe via broker; here we just
+  // await the same promise.
   const inFlight = inFlightProvisions.get(sessionId);
   if (inFlight) {
-    log.info({ sessionId }, 'Waiting for in-flight provision');
-    onStatus('Pod is starting up...');
+    log.info({ sessionId }, 'Joining in-flight provision');
     return inFlight;
   }
 
-  // 3. If Redis says provisioning but we don't own the promise (post-restart
-  // or different replica), the provision is orphaned. Clean up and re-provision.
-  if (existing?.status === 'provisioning') {
-    log.warn({ sessionId }, 'Stale provisioning session found in Redis — re-provisioning');
+  // 3. If Redis has a non-ready session but we don't own the promise
+  // (post-restart, different replica, or orphaned), clean up and re-provision.
+  if (existing) {
+    log.warn({ sessionId, state: existing.state }, 'Stale session in Redis — re-provisioning');
     await deleteSession(sessionId);
   }
 
-  // 4. Fresh provision — claim in Redis + start
+  // 4. Fresh provision — claim in Redis + start. Initial state is 'finding_gpu';
+  // if we're about to wait on the semaphore we'll flip to 'queued' first.
   const now = Date.now();
   await writeSession({
     sessionId,
     podId: null,
     podUrl: null,
     podType: null,
-    status: 'provisioning',
+    state: 'finding_gpu',
+    stateEnteredAt: now,
+    failureCategory: null,
     createdAt: now,
     lastActivityAt: now,
     replacementCount: 0,
@@ -391,17 +458,12 @@ export async function getOrProvisionPod(
 
   const promise = (async () => {
     try {
-      await acquireSemaphore(onStatus);
+      if (isSemaphoreFull()) await emitState(sessionId, 'queued');
+      await acquireSemaphore();
       try {
-        const result = await provision(sessionId, onStatus);
+        await emitState(sessionId, 'finding_gpu');
+        const result = await provision(sessionId);
         provisionedPodId = result.podId;
-        await patchSession(sessionId, {
-          podId: result.podId,
-          podUrl: result.podUrl,
-          podType: result.podType,
-          status: 'ready',
-          lastActivityAt: Date.now(),
-        });
         return { podUrl: result.podUrl };
       } finally {
         releaseSemaphore();
@@ -416,6 +478,8 @@ export async function getOrProvisionPod(
           log.warn({ podId: provisionedPodId, err: e }, 'Failed to clean up pod after provision failure'),
         );
       }
+      // provision() already emitted state='failed' to subscribers; delete the
+      // Redis row now that downstream has been notified.
       await deleteSession(sessionId).catch(() => {});
       throw err;
     } finally {
@@ -439,15 +503,16 @@ export function touch(sessionId: string): void {
 
 /**
  * Check if a user already has an active pod — used to skip rate limiting on
- * reconnect. "Active" includes `provisioning` and `replacing`, not just
- * `ready`: a user navigating away and back during cold start is reconnecting
- * to their existing in-flight pod, not creating a new one. Treating this as
- * a fresh provision triggers spurious `too_many_active_pods` rejections.
+ * reconnect. "Active" includes all in-progress states (`queued` through
+ * `warming_model`) plus `ready`: a user navigating away and back during cold
+ * start is reconnecting to their existing in-flight pod, not creating a new
+ * one. Treating this as a fresh provision triggers spurious
+ * `too_many_active_pods` rejections.
  */
 export async function hasReadySession(sessionId: string): Promise<boolean> {
   const session = await readSession(sessionId);
   if (!session) return false;
-  return session.status === 'ready' || session.status === 'provisioning' || session.status === 'replacing';
+  return session.state === 'ready' || isActiveProvisioning(session.state);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -462,7 +527,7 @@ export type CloseClassification = 'preempted' | 'crashed' | 'voluntary';
  */
 export async function classifyClose(sessionId: string): Promise<CloseClassification> {
   const session = await readSession(sessionId);
-  if (!session || session.status === 'terminated') return 'voluntary';
+  if (!session || session.state === 'terminated') return 'voluntary';
   if (!session.podId) return 'voluntary';
 
   try {
@@ -492,10 +557,7 @@ export async function classifyClose(sessionId: string): Promise<CloseClassificat
  *
  * Returns the new podUrl. Throws if replacement fails or retry bound exceeded.
  */
-export async function replaceSession(
-  sessionId: string,
-  onStatus: (msg: string) => void,
-): Promise<{ podUrl: string }> {
+export async function replaceSession(sessionId: string): Promise<{ podUrl: string }> {
   const session = await readSession(sessionId);
   if (!session) throw new Error('No session to replace');
 
@@ -513,12 +575,17 @@ export async function replaceSession(
 
   log.info({ sessionId, oldPodId, attempt }, 'Starting session replacement');
 
-  // Mark as replacing in Redis
+  // Bump replacement count + clear old pod info. Then emit finding_gpu so any
+  // current broker subscribers see the UI reset from 'ready' → 'finding_gpu'
+  // (iOS will prefix "Replacing — " because replacementCount > 0).
   await patchSession(sessionId, {
-    status: 'replacing',
+    podId: null,
+    podUrl: null,
+    podType: null,
     lastActivityAt: Date.now(),
     replacementCount: attempt,
   });
+  await emitState(sessionId, 'finding_gpu');
 
   // Clean up old pod (fire-and-forget — may already be gone)
   if (oldPodId) {
@@ -532,55 +599,52 @@ export async function replaceSession(
 
   const t0 = Date.now();
   let newPodId: string | null = null;
-
-  try {
-    await acquireSemaphore(onStatus);
+  const replacementPromise = (async () => {
     try {
-      const result = await provision(sessionId, onStatus);
-      newPodId = result.podId;
-      const replacementMs = Date.now() - t0;
-
-      await patchSession(sessionId, {
-        podId: result.podId,
-        podUrl: result.podUrl,
-        podType: result.podType,
-        status: 'ready',
-        lastActivityAt: Date.now(),
+      if (isSemaphoreFull()) await emitState(sessionId, 'queued');
+      await acquireSemaphore();
+      try {
+        await emitState(sessionId, 'finding_gpu');
+        const result = await provision(sessionId);
+        newPodId = result.podId;
+        const replacementMs = Date.now() - t0;
+        log.info({ sessionId, oldPodId, newPodId: result.podId, replacementMs, attempt }, 'Session replaced');
+        return { podUrl: result.podUrl };
+      } finally {
+        releaseSemaphore();
+      }
+    } catch (err) {
+      log.error({ sessionId, attempt, err }, 'Session replacement failed');
+      Sentry.captureException(err, {
+        tags: { sessionId, attempt: String(attempt), phase: 'session_replacement' },
       });
-
-      log.info({ sessionId, oldPodId, newPodId: result.podId, replacementMs, attempt }, 'Session replaced');
-
-      return { podUrl: result.podUrl };
-    } finally {
-      releaseSemaphore();
-    }
-  } catch (err) {
-    log.error({ sessionId, attempt, err }, 'Session replacement failed');
-    Sentry.captureException(err, {
-      tags: { sessionId, attempt: String(attempt), phase: 'session_replacement' },
-    });
-    // If provision() succeeded but a later step threw (e.g. patchSession),
-    // the new pod is running with no Redis pointer. Terminate it so we don't
-    // leak. The old pod was already terminated above.
-    if (newPodId) {
-      terminatePod(newPodId).catch((e) => {
-        log.warn({ sessionId, newPodId, err: (e as Error).message }, 'Failed to clean up replacement pod');
-        Sentry.captureException(e, {
-          tags: { sessionId, phase: 'replacement_pod_cleanup' },
+      if (newPodId) {
+        terminatePod(newPodId).catch((e) => {
+          log.warn({ sessionId, newPodId, err: (e as Error).message }, 'Failed to clean up replacement pod');
+          Sentry.captureException(e, {
+            tags: { sessionId, phase: 'replacement_pod_cleanup' },
+          });
+        });
+      }
+      await deleteSession(sessionId).catch((delErr) => {
+        log.error(
+          { sessionId, err: (delErr as Error).message },
+          'Failed to delete session after replacement failure',
+        );
+        Sentry.captureException(delErr, {
+          tags: { sessionId, phase: 'replacement_session_cleanup' },
         });
       });
+      throw err;
+    } finally {
+      inFlightProvisions.delete(sessionId);
     }
-    await deleteSession(sessionId).catch((delErr) => {
-      log.error(
-        { sessionId, err: (delErr as Error).message },
-        'Failed to delete session after replacement failure',
-      );
-      Sentry.captureException(delErr, {
-        tags: { sessionId, phase: 'replacement_session_cleanup' },
-      });
-    });
-    throw err;
-  }
+  })();
+
+  // Register in inFlight so concurrent getOrProvisionPod calls join this
+  // replacement instead of starting a duplicate.
+  inFlightProvisions.set(sessionId, replacementPromise);
+  return replacementPromise;
 }
 
 export function sessionClosed(sessionId: string): void {
@@ -624,7 +688,11 @@ export async function start(logger: FastifyBaseLogger): Promise<void> {
 // Semaphore
 // ────────────────────────────────────────────────────────────────────────────
 
-async function acquireSemaphore(onStatus: (msg: string) => void): Promise<void> {
+function isSemaphoreFull(): boolean {
+  return activeProvisions >= MAX_CONCURRENT_PROVISIONS;
+}
+
+async function acquireSemaphore(): Promise<void> {
   if (activeProvisions < MAX_CONCURRENT_PROVISIONS) {
     activeProvisions++;
     return;
@@ -632,7 +700,6 @@ async function acquireSemaphore(onStatus: (msg: string) => void): Promise<void> 
   const queuedAt = Date.now();
   const queueDepth = semaphoreWaiters.length + 1;
   log.info({ active: activeProvisions, cap: MAX_CONCURRENT_PROVISIONS, queueDepth }, 'Provision queued');
-  onStatus(`Waiting for GPU (${queueDepth} in queue)...`);
   await Sentry.startSpan(
     { name: 'pod.semaphore_wait', op: 'pod.semaphore_wait', attributes: { queueDepth } },
     () => new Promise<void>((resolve) => semaphoreWaiters.push(resolve)),
@@ -658,21 +725,21 @@ async function runReaper(): Promise<void> {
   for await (const key of eachSessionKey()) {
     try {
       const data = await redis.hgetall(key);
-      const status = data['status'];
+      const state = data['state'];
       if (!data['sessionId'] || !data['podId']) continue;
-      if (status !== 'ready') continue; // skip provisioning, replacing, terminated
+      if (state !== 'ready') continue; // skip in-progress and terminal states
       const lastActivity = Number(data['lastActivityAt'] ?? 0);
       const idleMs = now - lastActivity;
       if (idleMs <= IDLE_TIMEOUT_MS) continue;
 
-      // Atomic: only reap if status is still 'ready' (prevents two reapers
+      // Atomic: only reap if state is still 'ready' (prevents two reapers
       // both reaping the same session across replicas).
       const claimed = await redis.multi()
-        .hget(key, 'status')
-        .hset(key, 'status', 'terminated')
+        .hget(key, 'state')
+        .hset(key, 'state', 'terminated')
         .exec();
-      const prevStatus = claimed?.[0]?.[1];
-      if (prevStatus !== 'ready') continue; // another reaper got it
+      const prevState = claimed?.[0]?.[1];
+      if (prevState !== 'ready') continue; // another reaper got it
 
       const podId = data['podId']!;
       const sessionId = data['sessionId']!;
@@ -708,17 +775,22 @@ async function reconcileOrphanPods(minAgeSec = 0): Promise<void> {
     const staleKeys: string[] = [];
     for await (const key of eachSessionKey()) {
       const data = await redis.hgetall(key);
-      if (data['podId'] && data['status'] === 'ready') {
+      const state = data['state'];
+      if (data['podId'] && state === 'ready') {
         sessionPodIds.add(data['podId']);
-      } else if (data['status'] === 'provisioning') {
-        // Stale provisioning row (no live promise to resume). Clean up.
+      } else if (state && isActiveProvisioning(state as State)) {
+        // Stale in-progress row (no live promise to resume). Clean up.
+        staleKeys.push(key);
+      } else if (!state) {
+        // Legacy row from pre-refactor backend (had `status` field instead);
+        // treat as stale and clean up.
         staleKeys.push(key);
       }
     }
 
-    // Clean up stale provisioning rows
+    // Clean up stale in-progress rows
     for (const key of staleKeys) {
-      log.warn({ key }, 'Reconcile: deleting stale provisioning session');
+      log.warn({ key }, 'Reconcile: deleting stale in-progress session');
       await redis.del(key);
     }
 
@@ -776,18 +848,12 @@ interface ProvisionResult {
   podType: PodType;
 }
 
-type ProvisionPhase =
-  | 'placement'
-  | 'pod_create'
-  | 'runtime_up'
-  | 'health_check';
-
 /**
  * Classify a provision-attempt error as "recoverable by DC reroll" or not, and
  * emit the structured observability signals (log + Sentry breadcrumb + PostHog
  * event) for the recoverable class. `ImagePullStallError` and `PodVanishedError`
  * are the two recoverable classes — both point at a flaky DC and are handled
- * identically except for the event names and the `phase` attribute.
+ * identically except for the event names and the state attribute.
  *
  * Returns `'retry'` when the caller should blacklist `errDc` and re-enter the
  * reroll loop, `'abort'` when the caller should fall through to the generic
@@ -809,7 +875,7 @@ function handleRecoverableProvisionError(
   const errDc = err.dc ?? ctx.dc;
   const willReroll = ctx.attempt < ctx.maxRerolls;
   const isStall = err instanceof ImagePullStallError;
-  const errPhase: 'runtime_up' | 'health_check' = isStall ? 'runtime_up' : err.phase;
+  const errState: State = isStall ? 'fetching_image' : err.state;
   const message = isStall ? 'Image pull stalled' : 'Pod vanished during provisioning';
 
   log.warn(
@@ -818,7 +884,7 @@ function handleRecoverableProvisionError(
       event: isStall ? 'provision.pull.stall_detected' : 'provision.pod.vanished',
       podId: err.podId,
       dc: errDc,
-      phase: errPhase,
+      state: errState,
       elapsedSec: err.elapsedSec,
       attempt: ctx.attempt,
       willReroll,
@@ -830,7 +896,7 @@ function handleRecoverableProvisionError(
     tags: {
       dc: errDc ?? 'unknown',
       podType: ctx.podType ?? 'unknown',
-      phase: errPhase,
+      state: errState,
       attempt: String(ctx.attempt),
       willReroll: String(willReroll),
     },
@@ -850,7 +916,7 @@ function handleRecoverableProvisionError(
     trackPodProvisionVanished({
       userId: ctx.sessionId,
       dc: errDc,
-      phase: errPhase,
+      state: errState,
       elapsedSec: err.elapsedSec,
       attempt: ctx.attempt,
       willReroll,
@@ -859,7 +925,7 @@ function handleRecoverableProvisionError(
   return { decision: willReroll ? 'retry' : 'abort', errDc };
 }
 
-async function provision(sessionId: string, onStatus: (msg: string) => void): Promise<ProvisionResult> {
+async function provision(sessionId: string): Promise<ProvisionResult> {
   return Sentry.startSpan(
     { name: 'pod.provision', op: 'pod.provision', attributes: { sessionId } },
     async (parentSpan) => {
@@ -871,10 +937,19 @@ async function provision(sessionId: string, onStatus: (msg: string) => void): Pr
         let podId: string | null = null;
         let podType: PodType | null = null;
         let dc: string | null = null;
-        let phase: ProvisionPhase = 'placement';
+        // `currentState` tracks the last state we emitted, used for error-path
+        // analytics tagging. Starts at 'finding_gpu' because caller set that.
+        let currentState: State = 'finding_gpu';
         const attemptStart = Date.now();
         let phaseStart = attemptStart;
         const phaseTimings: Record<string, number> = {};
+
+        // On reroll (attempt > 0), we need to return the UI to 'finding_gpu'
+        // before the next pod create attempt. Idempotent on first iteration.
+        if (attempt > 0) {
+          await emitState(sessionId, 'finding_gpu');
+          currentState = 'finding_gpu';
+        }
 
         trackPodProvisionStarted({
           userId: sessionId,
@@ -883,68 +958,67 @@ async function provision(sessionId: string, onStatus: (msg: string) => void): Pr
         });
 
         try {
-          phase = 'pod_create';
-
-          // 1 + 2. Create a pod — spot first, on-demand fallback if capacity exhausted
+          // 1 + 2. Create a pod — spot first, on-demand fallback if capacity exhausted.
+          // `createPodWithFallback` emits 'creating_pod' right before the create RPC.
           const created = await Sentry.startSpan(
             { name: 'pod.create', op: 'pod.create', attributes: { sessionId, attempt } },
-            () => createPodWithFallback(sessionId, onStatus, blacklistedDcs),
+            () => createPodWithFallback(sessionId, blacklistedDcs),
           );
           podId = created.podId;
           podType = created.podType;
           dc = created.dc;
+          currentState = 'creating_pod';
 
-          phaseTimings.pod_create_ms = Date.now() - phaseStart;
+          phaseTimings.creating_pod_ms = Date.now() - phaseStart;
           phaseStart = Date.now();
 
           Sentry.addBreadcrumb({
             category: 'provision',
             level: 'info',
             message: 'Pod created',
-            data: { podId, dc, podType, attempt, podCreateMs: phaseTimings.pod_create_ms },
+            data: { podId, dc, podType, attempt, creatingPodMs: phaseTimings.creating_pod_ms },
           });
 
           // If any subsequent step fails, terminate the pod we just created to prevent
           // cost leaks. This matters especially for replaceSession() which calls
           // provision() directly without its own pod cleanup.
           try {
-            // 3. Wait for the container to boot. In baked mode the image is slim (~2-3
-            // GB) but the very first pull to a host in a DC can still take a few minutes.
-            // Wall-clock window: image pull (dominant) + container start +
-            // runtime registration. Internally `runtime_up` because that's
-            // the gate (`pod.runtime` field becoming non-null); the
-            // user-facing string emphasizes the dominant cost.
-            phase = 'runtime_up';
-            onStatus('Pulling container image...');
-            notifyPodProgress(podId, '⏳ Pulling container image...');
+            // 3. Wait for container to boot. Dominated by GHCR image pull (~60-90s).
+            await emitState(sessionId, 'fetching_image');
+            currentState = 'fetching_image';
+            notifyPodProgress(podId, '⏳ Fetching container image...');
             await Sentry.startSpan(
-              { name: 'pod.runtime_up', op: 'pod.runtime_up', attributes: { podId, dc: dc ?? 'unknown', attempt } },
-              () => waitForRuntime(podId as string, onStatus),
+              { name: 'pod.fetching_image', op: 'pod.fetching_image', attributes: { podId, dc: dc ?? 'unknown', attempt } },
+              () => waitForRuntime(podId as string),
             );
             notifyPodProgress(podId, `📦 Container runtime up`);
-            phaseTimings.runtime_up_ms = Date.now() - phaseStart;
+            phaseTimings.fetching_image_ms = Date.now() - phaseStart;
             phaseStart = Date.now();
 
             // 4. Poll /health via RunPod proxy until the FLUX server reports ready
-            phase = 'health_check';
-            onStatus('Loading AI model & warming up...');
-            notifyPodProgress(podId, '🧠 Loading AI model & warming up...');
+            await emitState(sessionId, 'warming_model');
+            currentState = 'warming_model';
+            notifyPodProgress(podId, '🧠 Warming up AI model...');
             const healthUrl = `https://${podId}-8766.proxy.runpod.net/health`;
             await Sentry.startSpan(
-              { name: 'pod.health_check', op: 'pod.health_check', attributes: { podId, dc: dc ?? 'unknown' } },
+              { name: 'pod.warming_model', op: 'pod.warming_model', attributes: { podId, dc: dc ?? 'unknown' } },
               () => waitForHealth(podId as string, healthUrl),
             );
-            phaseTimings.health_check_ms = Date.now() - phaseStart;
+            phaseTimings.warming_model_ms = Date.now() - phaseStart;
 
             const totalMs = Date.now() - t0;
 
-            // 5. Build WebSocket URL and return
+            // 5. Build WebSocket URL, persist pod info, transition to ready.
             const podUrl = `wss://${podId}-8766.proxy.runpod.net/ws`;
+            // Persist pod info first so the 'ready' emit's readSession picks it up
+            // for the broker fan-out.
+            await patchSession(sessionId, { podId, podUrl, podType });
+            await emitState(sessionId, 'ready');
+            currentState = 'ready';
             log.info(
               { sessionId, podId, podUrl, podType, totalMs, attempt, dc },
               'Pod ready',
             );
-            onStatus('Ready');
             notifyPodProgress(podId, `✅ **Pod ready** (${Math.round(totalMs / 1000)}s total)`);
 
             parentSpan.setAttributes({
@@ -965,7 +1039,7 @@ async function provision(sessionId: string, onStatus: (msg: string) => void): Pr
           } catch (err) {
             // Pod was created but a later step failed — clean up to prevent cost leak.
             log.warn(
-              { sessionId, podId, err: (err as Error).message, phase, attempt },
+              { sessionId, podId, err: (err as Error).message, state: currentState, attempt },
               'Provision failed after pod creation — terminating pod',
             );
             terminatePod(podId).catch((e) =>
@@ -995,16 +1069,17 @@ async function provision(sessionId: string, onStatus: (msg: string) => void): Pr
             podType: podType ?? 'unknown',
             attempt,
             outcome: 'failure',
-            phase,
+            state: currentState,
           });
 
+          const category = classifyProvisionError(err as Error);
           Sentry.captureException(err, {
             tags: {
               dc: dc ?? 'unknown',
               podType: podType ?? 'unknown',
-              phase,
+              state: currentState,
               attempt: String(attempt),
-              category: classifyProvisionError(err as Error),
+              category,
             },
             contexts: {
               pod: {
@@ -1017,11 +1092,13 @@ async function provision(sessionId: string, onStatus: (msg: string) => void): Pr
           trackPodProvisionFailed({
             userId: sessionId,
             durationMs: Date.now() - attemptStart,
-            category: classifyProvisionError(err as Error),
+            category,
             dc,
-            phase,
+            state: currentState,
             attempt,
           });
+          // Transition to terminal failed state so subscribers see the final event.
+          await emitState(sessionId, 'failed', category);
           throw err;
         }
       }
@@ -1123,7 +1200,6 @@ async function selectPlacement(
  */
 async function createPodWithFallback(
   sessionId: string,
-  onStatus: (msg: string) => void,
   excludeDcs: ReadonlySet<string> = new Set(),
 ): Promise<{ podId: string; podType: PodType; dc: string | null }> {
   const podName = `${POD_PREFIX}${sessionId.slice(0, 16)}`;
@@ -1133,8 +1209,7 @@ async function createPodWithFallback(
   const imageName = config.FLUX_IMAGE;
   const authId = config.RUNPOD_GHCR_AUTH_ID || undefined;
 
-  // ─── Pick DC + volume ───────────────────────────────────────────────
-  onStatus('Finding available GPU...');
+  // ─── Pick DC + volume (state stays 'finding_gpu' during selectPlacement) ──
   const target = await selectPlacement(sessionId, excludeDcs);
   if (!target) {
     const suffix = excludeDcs.size > 0
@@ -1190,7 +1265,7 @@ async function createPodWithFallback(
       },
       'Spot bid discovered',
     );
-    onStatus('Provisioning GPU...');
+    await emitState(sessionId, 'creating_pod');
     try {
       const { id: podId, costPerHr } = await createSpotPod({
         name: podName,
@@ -1240,8 +1315,7 @@ async function createPodWithFallback(
     { sessionId, event: 'provision.fallback.triggered', reason: fallbackReason, dc: target.dataCenterId },
     'Switching to on-demand pod',
   );
-  // Silent to the user — status says "Creating pod..." same as spot path.
-  onStatus('Creating pod...');
+  await emitState(sessionId, 'creating_pod');
   try {
     const { id: podId, costPerHr } = await createOnDemandPod({
       name: podName,
@@ -1270,8 +1344,8 @@ async function createPodWithFallback(
 /**
  * Polls the RunPod API until the pod's `runtime` field is non-null, meaning
  * the container image has been pulled and the container process is running.
- * Emits a status update when the transition happens so the user sees
- * "Pulling container image..." → "Starting server..." in real time.
+ * Caller emits state transitions (fetching_image → warming_model); this just
+ * blocks until pod.runtime appears or the watchdog fires.
  *
  * If `stallMs` is finite and `pod.runtime` stays null longer than that,
  * throws `ImagePullStallError` so the caller can reroll onto a different DC
@@ -1280,7 +1354,6 @@ async function createPodWithFallback(
  */
 async function waitForRuntime(
   podId: string,
-  onStatus: (msg: string) => void,
   opts: { timeoutMs?: number; stallMs?: number } = {},
 ): Promise<void> {
   const timeoutMs = opts.timeoutMs ?? 10 * 60 * 1000;
@@ -1288,33 +1361,31 @@ async function waitForRuntime(
     ?? (config.CONTAINER_PULL_WATCHDOG_ENABLED ? config.CONTAINER_PULL_STALL_MS : Infinity);
   const start = Date.now();
   const deadline = start + timeoutMs;
-  let lastUpdateAt = 0;
+  let lastLogAt = 0;
   let lastDc: string | null = null;
-  onStatus('Pulling container image...');
   while (Date.now() < deadline) {
     const pod = await getPod(podId);
     if (!pod) {
       const elapsed = Math.round((Date.now() - start) / 1000);
-      log.warn({ podId, elapsedSec: elapsed, dc: lastDc }, 'Pod vanished during runtime_up (spot preempted?)');
-      throw new PodVanishedError(podId, lastDc, 'runtime_up', elapsed);
+      log.warn({ podId, elapsedSec: elapsed, dc: lastDc }, 'Pod vanished during fetching_image (spot preempted?)');
+      throw new PodVanishedError(podId, lastDc, 'fetching_image', elapsed);
     }
     if (pod.machine?.dataCenterId) lastDc = pod.machine.dataCenterId;
     if (pod.runtime) {
       log.info({ podId, uptimeInSeconds: pod.runtime.uptimeInSeconds }, 'Container runtime up');
-      onStatus('Starting server...');
       return;
     }
     const elapsedMs = Date.now() - start;
     if (elapsedMs > stallMs) {
       throw new ImagePullStallError(podId, lastDc, Math.round(elapsedMs / 1000));
     }
-    // Send progress updates every 30s so the client knows we're still waiting.
+    // Log periodically so backend observers can see long pulls; iOS gets
+    // per-state elapsed via stateEnteredAt and doesn't need push updates here.
     const now = Date.now();
-    if (now - lastUpdateAt > 30_000) {
+    if (now - lastLogAt > 30_000) {
       const elapsed = Math.round(elapsedMs / 1000);
       log.info({ podId, elapsedSec: elapsed, dc: lastDc }, 'Still waiting for container runtime');
-      onStatus(`Pulling container image... (${elapsed}s)`);
-      lastUpdateAt = now;
+      lastLogAt = now;
     }
     await sleep(5000);
   }
@@ -1349,8 +1420,8 @@ async function waitForHealth(
       const pod = await getPod(podId);
       if (!pod) {
         const elapsed = Math.round((now - start) / 1000);
-        log.warn({ podId, elapsedSec: elapsed, dc: lastDc }, 'Pod vanished during health_check (spot preempted?)');
-        throw new PodVanishedError(podId, lastDc, 'health_check', elapsed);
+        log.warn({ podId, elapsedSec: elapsed, dc: lastDc }, 'Pod vanished during warming_model (spot preempted?)');
+        throw new PodVanishedError(podId, lastDc, 'warming_model', elapsed);
       }
       if (pod.machine?.dataCenterId) lastDc = pod.machine.dataCenterId;
       lastPodProbeAt = now;
