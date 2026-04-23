@@ -133,7 +133,16 @@ final class AppCoordinator {
             syncStreamConfig()
         }
     }
-    var showStylePicker = false
+    var showStylePicker = false {
+        didSet {
+            guard showStylePicker != oldValue else { return }
+            if showStylePicker {
+                enterStylePreviewMode()
+            } else {
+                exitStylePreviewMode()
+            }
+        }
+    }
     var showLayerPanel = false
     var resultState: ResultState = .empty
     var dividerPosition: CGFloat = 0.5
@@ -150,6 +159,8 @@ final class AppCoordinator {
     // MARK: - Modules
 
     let canvasViewModel = CanvasViewModel()
+    let stylePreviewController = StylePreviewController()
+    private var stylePreviewSetupTask: Task<Void, Never>?
     private let backendURL: URL
     private let authService: AuthService
 
@@ -723,6 +734,53 @@ final class AppCoordinator {
     /// detect the change and send it to the server before the next frame.
     private func syncStreamConfig() {
         streamSession?.config = buildStreamConfig()
+    }
+
+    // MARK: - Style Preview
+
+    private func enterStylePreviewMode() {
+        stylePreviewSetupTask?.cancel()
+        stylePreviewController.reset()
+
+        guard let session = streamSession else {
+            // No live pod; show all tiles as failed so they don't shimmer forever.
+            stylePreviewController.markAllFailed(styles: PromptStyle.allStyles)
+            return
+        }
+        guard let jpeg = session.captureFrameJPEG() else {
+            stylePreviewController.markAllFailed(styles: PromptStyle.allStyles)
+            return
+        }
+
+        let basePrompt = promptText
+        let steps = streamSteps
+        let seed = streamSeed
+        let styles = PromptStyle.allStyles
+
+        stylePreviewSetupTask = Task { [weak self, weak session] in
+            guard let session else { return }
+            await session.enterPreviewMode()
+            if Task.isCancelled {
+                session.exitPreviewMode()
+                return
+            }
+            guard let self else { return }
+            self.stylePreviewController.start(
+                canvasJPEG: jpeg,
+                basePrompt: basePrompt,
+                steps: steps,
+                seed: seed,
+                styles: styles,
+                session: session
+            )
+        }
+    }
+
+    private func exitStylePreviewMode() {
+        stylePreviewSetupTask?.cancel()
+        stylePreviewSetupTask = nil
+        stylePreviewController.cancel()
+        streamSession?.exitPreviewMode()
     }
 
     // MARK: - App Lifecycle

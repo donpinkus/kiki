@@ -4,13 +4,20 @@ struct StylePickerView: View {
     @Environment(AppCoordinator.self) private var coordinator
     @Environment(\.dismiss) private var dismiss
 
+    private let columns = [
+        GridItem(.flexible(), spacing: 16),
+        GridItem(.flexible(), spacing: 16),
+        GridItem(.flexible(), spacing: 16)
+    ]
+
     var body: some View {
         NavigationStack {
             ScrollView {
-                LazyVStack(spacing: 16) {
+                LazyVGrid(columns: columns, spacing: 20) {
                     ForEach(PromptStyle.allStyles) { style in
-                        StyleRow(
+                        StyleTile(
                             style: style,
+                            preview: coordinator.stylePreviewController.previews[style.id],
                             isSelected: coordinator.selectedStyle == style
                         ) {
                             coordinator.selectedStyle = style
@@ -36,57 +43,70 @@ struct StylePickerView: View {
     }
 }
 
-// MARK: - Style Row
+// MARK: - Tile
 
-private struct StyleRow: View {
+private struct StyleTile: View {
     let style: PromptStyle
+    let preview: StylePreviewController.PreviewState?
     let isSelected: Bool
     let onSelect: () -> Void
 
     var body: some View {
         Button(action: onSelect) {
-            HStack(spacing: 16) {
-                // Placeholder thumbnail
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(Color(.systemGray5))
-                    .frame(width: 120, height: 80)
-                    .overlay {
-                        Image(systemName: "photo")
-                            .font(.largeTitle)
-                            .foregroundStyle(.tertiary)
-                    }
+            VStack(alignment: .leading, spacing: 8) {
+                header
+                previewImage
+                    .aspectRatio(1, contentMode: .fit)
+                    .frame(maxWidth: .infinity)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
                     .overlay(
                         RoundedRectangle(cornerRadius: 12)
                             .stroke(isSelected ? Color.accentColor : .clear, lineWidth: 3)
                     )
-
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text(style.name)
-                            .font(.headline)
-
-                        if isSelected {
-                            Image(systemName: "checkmark.circle.fill")
-                                .foregroundStyle(Color.accentColor)
-                        }
-                    }
-
-                    if !style.promptSuffix.isEmpty {
-                        Text(style.promptSuffix.trimmingCharacters(in: .whitespaces))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(3)
-                    }
-                }
-
-                Spacer()
             }
-            .padding(12)
-            .background(
-                isSelected ? Color.accentColor.opacity(0.08) : Color(.systemGray6),
-                in: RoundedRectangle(cornerRadius: 16)
-            )
         }
         .buttonStyle(.plain)
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Text(style.name)
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+                if isSelected {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(Color.accentColor)
+                }
+                Spacer(minLength: 0)
+            }
+            if !style.promptSuffix.isEmpty {
+                Text(style.promptSuffix.trimmingCharacters(in: .whitespaces))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private var previewImage: some View {
+        switch preview {
+        case .ready(let image):
+            Image(uiImage: image)
+                .resizable()
+                .transition(.opacity)
+        case .failed:
+            ZStack {
+                Color(.systemGray5)
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.title)
+                    .foregroundStyle(.tertiary)
+            }
+        case .loading, .none:
+            ShimmerView(cornerRadius: 12)
+        }
     }
 }

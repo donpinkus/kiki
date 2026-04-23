@@ -56,6 +56,22 @@ final class StreamSession {
     /// forward across consecutive warming transitions.
     private(set) var readiness: StreamReadiness = .disconnected
 
+    // MARK: - Preview mode (style picker)
+
+    /// Pauses the capture loop so the normal stream doesn't push frames
+    /// while the picker is driving the pod for previews.
+    private var isCapturePaused = false
+
+    /// When true, incoming frames route to `pendingPreviewContinuation`
+    /// instead of `onImageReceived`. Turned on after the drain window so
+    /// in-flight pre-picker responses still reach the main UI normally.
+    private var isPreviewModeActive = false
+
+    /// Continuation for the single in-flight preview request, if any.
+    private var pendingPreviewContinuation: CheckedContinuation<UIImage, Error>?
+
+    enum PreviewError: Error { case invalidImage, cancelled, notActive }
+
     /// Called when a new generated image frame is received.
     var onImageReceived: ((UIImage) -> Void)?
 
@@ -108,6 +124,72 @@ final class StreamSession {
         self.lastSentJpegData = nil
 
         await connectAndRun()
+    }
+
+    // MARK: - Preview mode
+
+    /// Pause the capture loop and (after a short drain) route subsequent
+    /// responses to `sendPreview` continuations. The drain gives any
+    /// already-in-flight user frame time to return through the normal
+    /// `onImageReceived` path before we start attributing responses to
+    /// preview requests.
+    func enterPreviewMode(maxDrainMs: Int = 1200) async {
+        isCapturePaused = true
+        // Give the capture loop ~1 tick to notice the flag before we
+        // read framesSent — otherwise we might undercount if it was
+        // mid-send when we paused.
+        try? await Task.sleep(for: .milliseconds(80))
+
+        let sentAtPause = framesSent
+        if framesReceived < sentAtPause {
+            let deadline = Date().addingTimeInterval(Double(maxDrainMs) / 1000.0)
+            while Date() < deadline, framesReceived < sentAtPause {
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+        }
+
+        isPreviewModeActive = true
+        Self.breadcrumb(category: "stream.preview", message: "Entered preview mode", data: [
+            "drainedFrames": sentAtPause - framesReceived,
+        ])
+    }
+
+    /// Resume the normal capture loop. Clears `lastSentConfig` and
+    /// `lastSentJpegData` so the next tick re-pushes the live config
+    /// (e.g. the newly-selected style) and re-sends the current sketch.
+    func exitPreviewMode() {
+        if let cont = pendingPreviewContinuation {
+            pendingPreviewContinuation = nil
+            cont.resume(throwing: PreviewError.cancelled)
+        }
+        isPreviewModeActive = false
+        isCapturePaused = false
+        lastSentConfig = nil
+        lastSentJpegData = nil
+        Self.breadcrumb(category: "stream.preview", message: "Exited preview mode")
+    }
+
+    /// Send one preview frame and await its generated image. Caller must
+    /// have entered preview mode and must serialize — only one preview
+    /// can be in flight at a time.
+    func sendPreview(jpeg: Data, config: StreamConfig) async throws -> UIImage {
+        guard isPreviewModeActive else { throw PreviewError.notActive }
+        precondition(pendingPreviewContinuation == nil, "sendPreview while another is pending")
+
+        try await client.sendConfig(config)
+        try await client.sendFrame(jpeg)
+
+        return try await withCheckedThrowingContinuation { cont in
+            pendingPreviewContinuation = cont
+        }
+    }
+
+    /// Capture a JPEG at the same size/quality the normal capture loop uses.
+    /// Used by the preview controller so preview and live frames match.
+    func captureFrameJPEG() -> Data? {
+        guard let snapshot = canvasViewModel.captureSnapshot() else { return nil }
+        guard let resized = resizeImage(snapshot.image, to: Self.captureSize) else { return nil }
+        return resized.jpegData(compressionQuality: 0.7)
     }
 
     func stop() {
@@ -217,6 +299,13 @@ final class StreamSession {
                 let stopped = await self.isStopped
                 if stopped { break }
 
+                // Skip while the style picker is driving the pod for previews.
+                let paused = await self.isCapturePaused
+                if paused {
+                    try? await Task.sleep(for: .milliseconds(150))
+                    continue
+                }
+
                 // Send config update if it changed since last send
                 await self.sendConfigIfChanged()
 
@@ -285,7 +374,15 @@ final class StreamSession {
                     count += 1
                     await self.setFramesReceived(count)
                     await MainActor.run {
-                        self.onImageReceived?(image)
+                        // Route to preview-mode continuation if one is
+                        // pending; otherwise fall through to the normal
+                        // result-pane callback.
+                        if self.isPreviewModeActive, let cont = self.pendingPreviewContinuation {
+                            self.pendingPreviewContinuation = nil
+                            cont.resume(returning: image)
+                        } else {
+                            self.onImageReceived?(image)
+                        }
                     }
                 }
             }
