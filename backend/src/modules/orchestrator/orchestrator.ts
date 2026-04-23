@@ -347,9 +347,21 @@ export async function emitState(
   failureCategory: FailureCategory | null = null,
 ): Promise<void> {
   const now = Date.now();
+
+  // Read the *current* (soon-to-be-previous) state so we can attach its
+  // duration to the outgoing PostHog event. This turns per-state duration
+  // analytics into a one-line query: AVG(previous_state_duration_ms) WHERE
+  // previous_state = 'X'. The alternative (post-hoc LEAD() in HogQL) works
+  // but costs a self-join on every dashboard.
+  const prevSession = await readSession(sessionId);
+  const previousState = prevSession?.state ?? null;
+  const previousStateDurationMs = prevSession?.stateEnteredAt
+    ? now - prevSession.stateEnteredAt
+    : null;
+  const replacementCount = prevSession?.replacementCount ?? 0;
+
   await patchSession(sessionId, { state, stateEnteredAt: now, failureCategory });
-  const session = await readSession(sessionId);  // pick up replacementCount
-  const replacementCount = session?.replacementCount ?? 0;
+
   const event: StateEvent = {
     state,
     stateEnteredAt: now,
@@ -369,12 +381,14 @@ export async function emitState(
     category: 'provision',
     level: 'info',
     message: `state → ${state}`,
-    data: { sessionId, state, replacementCount, failureCategory },
+    data: { sessionId, state, previousState, previousStateDurationMs, replacementCount, failureCategory },
   });
   trackPodStateEntered({
     userId: sessionId,
     state,
     stateEnteredAt: now,
+    previousState,
+    previousStateDurationMs,
     replacementCount,
     failureCategory,
   });
