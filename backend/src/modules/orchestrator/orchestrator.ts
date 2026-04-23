@@ -115,6 +115,7 @@ import {
   trackPodProvisionStalled,
   trackPodProvisionVanished,
   trackPodReplacementExhausted,
+  trackPodStateEntered,
   trackPodTerminated,
 } from '../analytics/index.js';
 
@@ -348,16 +349,34 @@ export async function emitState(
   const now = Date.now();
   await patchSession(sessionId, { state, stateEnteredAt: now, failureCategory });
   const session = await readSession(sessionId);  // pick up replacementCount
+  const replacementCount = session?.replacementCount ?? 0;
   const event: StateEvent = {
     state,
     stateEnteredAt: now,
-    replacementCount: session?.replacementCount ?? 0,
+    replacementCount,
     failureCategory,
   };
+
+  // Fan out to in-process subscribers (iOS WebSocket handlers in stream.ts).
   subscribers.get(sessionId)?.forEach((h) => {
     try { h(event); } catch (err) {
       log.warn({ sessionId, err: (err as Error).message }, 'State subscriber threw');
     }
+  });
+
+  // Sentry breadcrumb for error-trace context + PostHog event for funnel analytics.
+  Sentry.addBreadcrumb({
+    category: 'provision',
+    level: 'info',
+    message: `state → ${state}`,
+    data: { sessionId, state, replacementCount, failureCategory },
+  });
+  trackPodStateEntered({
+    userId: sessionId,
+    state,
+    stateEnteredAt: now,
+    replacementCount,
+    failureCategory,
   });
 }
 
