@@ -66,20 +66,7 @@ struct DrawingTopBar: View {
 
             Spacer()
 
-            // MARK: Right — Layers, Pen, Eraser, Lasso, Reset Transform
-            Button {
-                coordinator.showLayerPanel.toggle()
-            } label: {
-                Image(systemName: "square.on.square")
-                    .font(.system(size: 18, weight: .medium))
-                    .foregroundStyle(.primary)
-                    .frame(width: 36, height: 36)
-            }
-            .popover(isPresented: $coordinator.showLayerPanel) {
-                LayerPanelView()
-                    .frame(width: 260, height: 400)
-            }
-
+            // MARK: Right — Pen, Eraser, Lasso, Reset Transform, Layers
             toolButton(icon: "pencil.tip", tool: .brush)
             toolButton(icon: "eraser", tool: .eraser)
             toolButton(icon: "lasso", tool: .lasso)
@@ -101,6 +88,19 @@ struct DrawingTopBar: View {
                     action: coordinator.canvasViewModel.resetViewTransform,
                     disabled: false
                 )
+            }
+
+            Button {
+                coordinator.showLayerPanel.toggle()
+            } label: {
+                Image(systemName: "square.on.square")
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(Color.primary)
+                    .frame(width: 36, height: 36)
+            }
+            .popover(isPresented: $coordinator.showLayerPanel) {
+                LayerPanelView()
+                    .frame(width: 260, height: 400)
             }
         }
         .padding(.horizontal, 16)
