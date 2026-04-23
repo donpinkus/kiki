@@ -2,17 +2,25 @@
 
 Protocol:
   Client -> Server:
-    - Text frame (JSON): { "type": "config", "prompt": "...", "steps": 4, "seed": 42 }
+    - Text frame (JSON): { "type": "config", "prompt": "...", "steps": 4, "seed": 42, "requestId": "..." }
     - Binary frame: Raw JPEG bytes of input sketch
 
   Server -> Client:
     - Text frame (JSON): { "type": "status", "status": "ready" | "warmup" | "error", "message": "..." }
+    - Text frame (JSON): { "type": "frame_meta", "requestId": "..." }  (only when cfg has requestId, immediately precedes binary)
     - Binary frame: Generated JPEG bytes
 
 Frame dropping:
   The client may send frames faster than the server can generate (~1 FPS).
   Only the latest frame is kept; older frames are dropped. This prevents
   frame queue buildup and keeps the output responsive to the current sketch.
+
+Correlation:
+  `requestId` lets the client route responses to specific requests (used by
+  the style-preview picker). The value is snapshotted into cfg at generation
+  start so it survives config updates that arrive mid-generation. Responses
+  for normal streaming frames omit the requestId and the `frame_meta`
+  preamble, preserving the binary-only wire shape on that path.
 """
 from __future__ import annotations
 
@@ -87,6 +95,7 @@ async def websocket_stream(ws: WebSocket):
         "prompt": "",
         "steps": config.STEPS,
         "seed": session_seed,
+        "requestId": None,
     }
 
     # Single-slot frame buffer: only the latest frame is kept.
@@ -123,6 +132,11 @@ async def websocket_stream(ws: WebSocket):
                                 current_config["steps"] = max(1, min(50, int(data["steps"])))
                             if "seed" in data and data["seed"] is not None:
                                 current_config["seed"] = int(data["seed"])
+                            # Snapshotted with cfg in process_loop so the
+                            # outgoing frame_meta matches the frame the client
+                            # will pair it with, even if a new config arrives
+                            # mid-generation.
+                            current_config["requestId"] = data.get("requestId")
 
                             logger.info(
                                 "Client %d config: prompt='%s', steps=%d",
@@ -171,6 +185,12 @@ async def websocket_stream(ws: WebSocket):
                 cfg = dict(current_config)
                 result_jpeg = await asyncio.to_thread(_process_frame, jpeg_data, cfg)
                 if not done:
+                    request_id = cfg.get("requestId")
+                    if request_id is not None:
+                        await ws.send_text(json.dumps({
+                            "type": "frame_meta",
+                            "requestId": request_id,
+                        }))
                     await ws.send_bytes(result_jpeg)
                     frames_processed += 1
             except Exception as e:
