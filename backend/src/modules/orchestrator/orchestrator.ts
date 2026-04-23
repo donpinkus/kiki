@@ -209,8 +209,49 @@ async function writeSession(session: RedisSession): Promise<void> {
     .exec();
 }
 
+/**
+ * Partial update — only writes the fields in `patch`, refreshes TTL.
+ * Safer than `writeSession` for transitions (status changes, pod swaps)
+ * because it never risks clobbering a field the caller didn't intend to set.
+ */
+async function patchSession(
+  sessionId: string,
+  patch: Partial<Pick<
+    RedisSession,
+    'status' | 'podId' | 'podUrl' | 'podType' | 'lastActivityAt' | 'replacementCount'
+  >>,
+): Promise<void> {
+  const key = sessionKey(sessionId);
+  const fields: Record<string, string> = {};
+  if (patch.status !== undefined) fields['status'] = patch.status;
+  if (patch.podId !== undefined) fields['podId'] = patch.podId ?? '';
+  if (patch.podUrl !== undefined) fields['podUrl'] = patch.podUrl ?? '';
+  if (patch.podType !== undefined) fields['podType'] = patch.podType ?? '';
+  if (patch.lastActivityAt !== undefined) fields['lastActivityAt'] = String(patch.lastActivityAt);
+  if (patch.replacementCount !== undefined) fields['replacementCount'] = String(patch.replacementCount);
+  if (Object.keys(fields).length === 0) return;
+  await getRedis().multi()
+    .hset(key, fields)
+    .expire(key, IDLE_TTL_SECONDS)
+    .exec();
+}
+
 async function deleteSession(sessionId: string): Promise<void> {
   await getRedis().del(sessionKey(sessionId));
+}
+
+/**
+ * Yields every session key in Redis. Wraps the `scanStream` + nested
+ * for-await iteration so the three sweep sites (reaper, reconcile pass 1,
+ * reconcile pass 2) don't each re-derive the boilerplate.
+ */
+async function* eachSessionKey(): AsyncIterable<string> {
+  const stream = getRedis().scanStream({ match: `${SESSION_PREFIX}*`, count: 100 });
+  for await (const keys of stream) {
+    for (const key of keys as string[]) {
+      yield key;
+    }
+  }
 }
 
 /**
@@ -354,15 +395,12 @@ export async function getOrProvisionPod(
       try {
         const result = await provision(sessionId, onStatus);
         provisionedPodId = result.podId;
-        await writeSession({
-          sessionId,
+        await patchSession(sessionId, {
           podId: result.podId,
           podUrl: result.podUrl,
           podType: result.podType,
           status: 'ready',
-          createdAt: now,
           lastActivityAt: Date.now(),
-          replacementCount: 0,
         });
         return { podUrl: result.podUrl };
       } finally {
@@ -476,8 +514,7 @@ export async function replaceSession(
   log.info({ sessionId, oldPodId, attempt }, 'Starting session replacement');
 
   // Mark as replacing in Redis
-  await writeSession({
-    ...session,
+  await patchSession(sessionId, {
     status: 'replacing',
     lastActivityAt: Date.now(),
     replacementCount: attempt,
@@ -503,14 +540,12 @@ export async function replaceSession(
       newPodId = result.podId;
       const replacementMs = Date.now() - t0;
 
-      await writeSession({
-        ...session,
+      await patchSession(sessionId, {
         podId: result.podId,
         podUrl: result.podUrl,
         podType: result.podType,
         status: 'ready',
         lastActivityAt: Date.now(),
-        replacementCount: attempt,
       });
 
       log.info({ sessionId, oldPodId, newPodId: result.podId, replacementMs, attempt }, 'Session replaced');
@@ -524,9 +559,9 @@ export async function replaceSession(
     Sentry.captureException(err, {
       tags: { sessionId, attempt: String(attempt), phase: 'session_replacement' },
     });
-    // If provision() succeeded but a later step threw (e.g. writeSession),
+    // If provision() succeeded but a later step threw (e.g. patchSession),
     // the new pod is running with no Redis pointer. Terminate it so we don't
-    // leak. The old pod was already terminated above (line 372).
+    // leak. The old pod was already terminated above.
     if (newPodId) {
       terminatePod(newPodId).catch((e) => {
         log.warn({ sessionId, newPodId, err: (e as Error).message }, 'Failed to clean up replacement pod');
@@ -620,40 +655,37 @@ function releaseSemaphore(): void {
 async function runReaper(): Promise<void> {
   const now = Date.now();
   const redis = getRedis();
-  const stream = redis.scanStream({ match: `${SESSION_PREFIX}*`, count: 100 });
-  for await (const keys of stream) {
-    for (const key of keys as string[]) {
-      try {
-        const data = await redis.hgetall(key);
-        const status = data['status'];
-        if (!data['sessionId'] || !data['podId']) continue;
-        if (status !== 'ready') continue; // skip provisioning, replacing, terminated
-        const lastActivity = Number(data['lastActivityAt'] ?? 0);
-        const idleMs = now - lastActivity;
-        if (idleMs <= IDLE_TIMEOUT_MS) continue;
+  for await (const key of eachSessionKey()) {
+    try {
+      const data = await redis.hgetall(key);
+      const status = data['status'];
+      if (!data['sessionId'] || !data['podId']) continue;
+      if (status !== 'ready') continue; // skip provisioning, replacing, terminated
+      const lastActivity = Number(data['lastActivityAt'] ?? 0);
+      const idleMs = now - lastActivity;
+      if (idleMs <= IDLE_TIMEOUT_MS) continue;
 
-        // Atomic: only reap if status is still 'ready' (prevents two reapers
-        // both reaping the same session across replicas).
-        const claimed = await redis.multi()
-          .hget(key, 'status')
-          .hset(key, 'status', 'terminated')
-          .exec();
-        const prevStatus = claimed?.[0]?.[1];
-        if (prevStatus !== 'ready') continue; // another reaper got it
+      // Atomic: only reap if status is still 'ready' (prevents two reapers
+      // both reaping the same session across replicas).
+      const claimed = await redis.multi()
+        .hget(key, 'status')
+        .hset(key, 'status', 'terminated')
+        .exec();
+      const prevStatus = claimed?.[0]?.[1];
+      if (prevStatus !== 'ready') continue; // another reaper got it
 
-        const podId = data['podId']!;
-        const sessionId = data['sessionId']!;
-        const createdAt = Number(data['createdAt'] ?? 0);
-        const lifetimeMs = createdAt > 0 ? now - createdAt : 0;
-        log.info({ sessionId, podId, idleMs, lifetimeMs }, 'Reaping idle pod');
-        trackPodTerminated({ userId: sessionId, reason: 'idle', lifetimeMs });
-        notifyPodTerminated(podId, `idle ${Math.round(idleMs / 1000)}s`);
-        terminatePod(podId)
-          .then(() => redis.del(key))
-          .catch((err) => log.error({ sessionId, podId, err }, 'Reap failed'));
-      } catch (err) {
-        log.warn({ key, err: (err as Error).message }, 'Reaper error on key');
-      }
+      const podId = data['podId']!;
+      const sessionId = data['sessionId']!;
+      const createdAt = Number(data['createdAt'] ?? 0);
+      const lifetimeMs = createdAt > 0 ? now - createdAt : 0;
+      log.info({ sessionId, podId, idleMs, lifetimeMs }, 'Reaping idle pod');
+      trackPodTerminated({ userId: sessionId, reason: 'idle', lifetimeMs });
+      notifyPodTerminated(podId, `idle ${Math.round(idleMs / 1000)}s`);
+      terminatePod(podId)
+        .then(() => redis.del(key))
+        .catch((err) => log.error({ sessionId, podId, err }, 'Reap failed'));
+    } catch (err) {
+      log.warn({ key, err: (err as Error).message }, 'Reaper error on key');
     }
   }
 }
@@ -674,16 +706,13 @@ async function reconcileOrphanPods(minAgeSec = 0): Promise<void> {
     const redis = getRedis();
     const sessionPodIds = new Set<string>();
     const staleKeys: string[] = [];
-    const stream = redis.scanStream({ match: `${SESSION_PREFIX}*`, count: 100 });
-    for await (const keys of stream) {
-      for (const key of keys as string[]) {
-        const data = await redis.hgetall(key);
-        if (data['podId'] && data['status'] === 'ready') {
-          sessionPodIds.add(data['podId']);
-        } else if (data['status'] === 'provisioning') {
-          // Stale provisioning row (no live promise to resume). Clean up.
-          staleKeys.push(key);
-        }
+    for await (const key of eachSessionKey()) {
+      const data = await redis.hgetall(key);
+      if (data['podId'] && data['status'] === 'ready') {
+        sessionPodIds.add(data['podId']);
+      } else if (data['status'] === 'provisioning') {
+        // Stale provisioning row (no live promise to resume). Clean up.
+        staleKeys.push(key);
       }
     }
 
@@ -723,14 +752,11 @@ async function reconcileOrphanPods(minAgeSec = 0): Promise<void> {
 
     // 4. Clean up Redis sessions whose pods no longer exist on RunPod
     const runpodPodIds = new Set(pods.map((p) => p.id));
-    const sessionStream = redis.scanStream({ match: `${SESSION_PREFIX}*`, count: 100 });
-    for await (const keys of sessionStream) {
-      for (const key of keys as string[]) {
-        const podId = await redis.hget(key, 'podId');
-        if (podId && !runpodPodIds.has(podId)) {
-          log.warn({ key, podId }, 'Reconcile: deleting session for pod no longer on RunPod');
-          await redis.del(key);
-        }
+    for await (const key of eachSessionKey()) {
+      const podId = await redis.hget(key, 'podId');
+      if (podId && !runpodPodIds.has(podId)) {
+        log.warn({ key, podId }, 'Reconcile: deleting session for pod no longer on RunPod');
+        await redis.del(key);
       }
     }
 
