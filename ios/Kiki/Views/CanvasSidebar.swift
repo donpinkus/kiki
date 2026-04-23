@@ -103,6 +103,7 @@ struct CanvasSidebar: View {
                 .foregroundStyle(disabled ? .tertiary : .primary)
                 .frame(width: 36, height: 36)
         }
+        .tint(Color.primary)
         .disabled(disabled)
     }
 }
