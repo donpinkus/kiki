@@ -15,6 +15,7 @@ struct RootView: View {
                 DrawingView()
             }
         }
+        .statusBarHidden(true)
         .animation(.easeInOut(duration: 0.25), value: coordinator.currentScreen)
         .onAppear {
             // didSet on AppCoordinator.currentScreen handles subsequent

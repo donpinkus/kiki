@@ -213,17 +213,7 @@ public struct ResultView: View {
     }
 
     private func streamingView(_ image: UIImage, frameCount: Int) -> some View {
-        ZStack(alignment: .topTrailing) {
-            imageView(image)
-
-            Text("LIVE \(frameCount)")
-                .font(.caption2.weight(.bold).monospacedDigit())
-                .foregroundStyle(.white)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(.red.opacity(0.85), in: Capsule())
-                .padding(12)
-        }
+        imageView(image)
     }
 
     private func imageView(_ image: UIImage) -> some View {
