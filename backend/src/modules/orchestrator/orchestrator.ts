@@ -756,6 +756,83 @@ type ProvisionPhase =
   | 'runtime_up'
   | 'health_check';
 
+/**
+ * Classify a provision-attempt error as "recoverable by DC reroll" or not, and
+ * emit the structured observability signals (log + Sentry breadcrumb + PostHog
+ * event) for the recoverable class. `ImagePullStallError` and `PodVanishedError`
+ * are the two recoverable classes — both point at a flaky DC and are handled
+ * identically except for the event names and the `phase` attribute.
+ *
+ * Returns `'retry'` when the caller should blacklist `errDc` and re-enter the
+ * reroll loop, `'abort'` when the caller should fall through to the generic
+ * failure path (unrecoverable error, or rerolls exhausted).
+ */
+function handleRecoverableProvisionError(
+  err: Error,
+  ctx: {
+    sessionId: string;
+    dc: string | null;
+    podType: PodType | null;
+    attempt: number;
+    maxRerolls: number;
+  },
+): { decision: 'retry' | 'abort'; errDc: string | null } {
+  if (!(err instanceof ImagePullStallError) && !(err instanceof PodVanishedError)) {
+    return { decision: 'abort', errDc: null };
+  }
+  const errDc = err.dc ?? ctx.dc;
+  const willReroll = ctx.attempt < ctx.maxRerolls;
+  const isStall = err instanceof ImagePullStallError;
+  const errPhase: 'runtime_up' | 'health_check' = isStall ? 'runtime_up' : err.phase;
+  const message = isStall ? 'Image pull stalled' : 'Pod vanished during provisioning';
+
+  log.warn(
+    {
+      sessionId: ctx.sessionId,
+      event: isStall ? 'provision.pull.stall_detected' : 'provision.pod.vanished',
+      podId: err.podId,
+      dc: errDc,
+      phase: errPhase,
+      elapsedSec: err.elapsedSec,
+      attempt: ctx.attempt,
+      willReroll,
+    },
+    message,
+  );
+  Sentry.captureMessage(message, {
+    level: 'warning',
+    tags: {
+      dc: errDc ?? 'unknown',
+      podType: ctx.podType ?? 'unknown',
+      phase: errPhase,
+      attempt: String(ctx.attempt),
+      willReroll: String(willReroll),
+    },
+    contexts: {
+      pod: { id: err.podId, sessionId: ctx.sessionId, elapsedSec: err.elapsedSec },
+    },
+  });
+  if (isStall) {
+    trackPodProvisionStalled({
+      userId: ctx.sessionId,
+      dc: errDc,
+      elapsedSec: err.elapsedSec,
+      attempt: ctx.attempt,
+      willReroll,
+    });
+  } else {
+    trackPodProvisionVanished({
+      userId: ctx.sessionId,
+      dc: errDc,
+      phase: errPhase,
+      elapsedSec: err.elapsedSec,
+      attempt: ctx.attempt,
+      willReroll,
+    });
+  }
+  return { decision: willReroll ? 'retry' : 'abort', errDc };
+}
+
 async function provision(sessionId: string, onStatus: (msg: string) => void): Promise<ProvisionResult> {
   return Sentry.startSpan(
     { name: 'pod.provision', op: 'pod.provision', attributes: { sessionId } },
@@ -871,66 +948,21 @@ async function provision(sessionId: string, onStatus: (msg: string) => void): Pr
             throw err;
           }
         } catch (err) {
-          // Two error classes share the same recovery: the DC may be flaky
-          // (image pull stall) or pod was reclaimed (spot preemption / host
-          // failure). In both cases blacklist the DC and reroll if attempts
-          // remain. Falls through to the generic failure path on exhaustion.
-          if (err instanceof ImagePullStallError || err instanceof PodVanishedError) {
-            const errDc = err.dc ?? dc;
-            const willReroll = attempt < maxRerolls;
-            const isStall = err instanceof ImagePullStallError;
-            const errPhase: 'runtime_up' | 'health_check' = isStall ? 'runtime_up' : err.phase;
-
-            log.warn(
-              {
-                sessionId,
-                event: isStall ? 'provision.pull.stall_detected' : 'provision.pod.vanished',
-                podId: err.podId,
-                dc: errDc,
-                phase: errPhase,
-                elapsedSec: err.elapsedSec,
-                attempt,
-                willReroll,
-              },
-              isStall ? 'Image pull stalled' : 'Pod vanished during provisioning',
-            );
-            Sentry.captureMessage(isStall ? 'Image pull stalled' : 'Pod vanished during provisioning', {
-              level: 'warning',
-              tags: {
-                dc: errDc ?? 'unknown',
-                podType: podType ?? 'unknown',
-                phase: errPhase,
-                attempt: String(attempt),
-                willReroll: String(willReroll),
-              },
-              contexts: {
-                pod: { id: err.podId, sessionId, elapsedSec: err.elapsedSec },
-              },
-            });
-            if (isStall) {
-              trackPodProvisionStalled({
-                userId: sessionId,
-                dc: errDc,
-                elapsedSec: err.elapsedSec,
-                attempt,
-                willReroll,
-              });
-            } else {
-              trackPodProvisionVanished({
-                userId: sessionId,
-                dc: errDc,
-                phase: errPhase,
-                elapsedSec: err.elapsedSec,
-                attempt,
-                willReroll,
-              });
-            }
-            if (willReroll) {
-              if (errDc) blacklistedDcs.add(errDc);
-              continue;
-            }
-            // Fall through: exhausted rerolls, capture as exception below.
+          // Recoverable classes (ImagePullStallError, PodVanishedError) come
+          // from a flaky DC. The helper emits observability + decides whether
+          // we have rerolls left; on retry, blacklist the DC and loop.
+          const recovery = handleRecoverableProvisionError(err as Error, {
+            sessionId,
+            dc,
+            podType,
+            attempt,
+            maxRerolls,
+          });
+          if (recovery.decision === 'retry') {
+            if (recovery.errDc) blacklistedDcs.add(recovery.errDc);
+            continue;
           }
+          // Fall through: unrecoverable error, or rerolls exhausted.
 
           parentSpan.setAttributes({
             dc: dc ?? 'unknown',
