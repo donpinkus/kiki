@@ -76,13 +76,13 @@
  * │                                     │                                                  │ within window, reuses pod.   │
  * │                                     │                                                  │ If >10min, fresh provision.  │
  * ├─────────────────────────────────────┼──────────────────────────────────────────────────┼──────────────────────────────┤
- * │ 10. Docker image pull stalls on     │ Pod created but runtime stays null. GHCR blob    │ waitForRuntime throws        │
- * │     a bad RunPod host (known to     │ serve or host-network stall indistinguishable     │ ImagePullStallError after    │
- * │     happen on GHCR + spot).         │ from the outside — pod.runtime stays null.        │ CONTAINER_PULL_STALL_MS      │
- * │                                     │                                                  │ (default 120s). provision()  │
- * │                                     │                                                  │ terminates pod, blacklists   │
- * │                                     │                                                  │ the DC, and rerolls up to    │
- * │                                     │                                                  │ CONTAINER_PULL_MAX_REROLLS.  │
+ * │ 10. Pod boot stalls on a bad host   │ Pod created but runtime stays null. NFS mount    │ waitForRuntime throws        │
+ * │     (stock image pull on fresh      │ delay or stock-image pull on a cold host —       │ PodBootStallError after      │
+ * │     host, NFS mount hang).          │ pod.runtime stays null.                          │ POD_BOOT_STALL_MS (default   │
+ * │                                     │                                                  │ 45s). provision() terminates │
+ * │                                     │                                                  │ pod, blacklists the DC, and  │
+ * │                                     │                                                  │ rerolls up to                │
+ * │                                     │                                                  │ POD_BOOT_MAX_REROLLS.        │
  * │                                     │                                                  │ Sentry captures each stall.  │
  * │                                     │                                                  │ 10-min hard timeout remains  │
  * │                                     │                                                  │ as a safety net when the     │
@@ -107,7 +107,7 @@ import {
 } from './runpodClient.js';
 import { getPolicy } from './policy.js';
 import { notifyPodCreated, notifyPodProgress, notifyPodTerminated } from './costMonitor.js';
-import { ImagePullStallError, PodVanishedError, classifyProvisionError, type FailureCategory } from './errorClassification.js';
+import { PodBootStallError, PodVanishedError, classifyProvisionError, type FailureCategory } from './errorClassification.js';
 import {
   trackPodProvisionStarted,
   trackPodProvisionCompleted,
@@ -119,7 +119,7 @@ import {
   trackPodTerminated,
 } from '../analytics/index.js';
 
-export { ImagePullStallError } from './errorClassification.js';
+export { PodBootStallError } from './errorClassification.js';
 
 // ────────────────────────────────────────────────────────────────────────────
 // Types
@@ -170,6 +170,25 @@ const GPU_TYPE_ID = 'NVIDIA GeForce RTX 5090';
 // fewer needless fallbacks to on-demand. 0.05 costs ~$0.03/hr more than the
 // 0.02 default on a typical bid, cheaper than one on-demand fallback.
 const BID_HEADROOM = 0.05;
+
+// ─── Pod boot configuration ─────────────────────────────────────────────
+// We launch pods from stock `runpod/pytorch` and bootstrap the FLUX server
+// from files on the attached network volume. See scripts/sync-flux-app.ts
+// for how the volume gets populated, and documents/decisions.md entry
+// 2026-04-23 for the full context + rollback procedure.
+const BASE_IMAGE = 'runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404';
+// `bash -lc` sources /etc/profile.d/* for CUDA paths; activate the volume
+// venv (inherits base-image torch via --system-site-packages); exec Python
+// so SIGTERM reaches uvicorn directly.
+const BOOT_DOCKER_ARGS =
+  "bash -lc 'source /workspace/venv/bin/activate && cd /workspace/app && exec python3 -u server.py'";
+const BOOT_ENV: Array<{ key: string; value: string }> = [
+  { key: 'HF_HOME', value: '/workspace/huggingface' },
+  { key: 'HF_HUB_OFFLINE', value: '1' },
+  { key: 'FLUX_HOST', value: '0.0.0.0' },
+  { key: 'FLUX_PORT', value: '8766' },
+  { key: 'FLUX_USE_NVFP4', value: '1' },
+];
 
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 const REAPER_INTERVAL_MS = 60 * 1000;
@@ -888,7 +907,7 @@ interface ProvisionResult {
 /**
  * Classify a provision-attempt error as "recoverable by DC reroll" or not, and
  * emit the structured observability signals (log + Sentry breadcrumb + PostHog
- * event) for the recoverable class. `ImagePullStallError` and `PodVanishedError`
+ * event) for the recoverable class. `PodBootStallError` and `PodVanishedError`
  * are the two recoverable classes — both point at a flaky DC and are handled
  * identically except for the event names and the state attribute.
  *
@@ -906,12 +925,12 @@ function handleRecoverableProvisionError(
     maxRerolls: number;
   },
 ): { decision: 'retry' | 'abort'; errDc: string | null } {
-  if (!(err instanceof ImagePullStallError) && !(err instanceof PodVanishedError)) {
+  if (!(err instanceof PodBootStallError) && !(err instanceof PodVanishedError)) {
     return { decision: 'abort', errDc: null };
   }
   const errDc = err.dc ?? ctx.dc;
   const willReroll = ctx.attempt < ctx.maxRerolls;
-  const isStall = err instanceof ImagePullStallError;
+  const isStall = err instanceof PodBootStallError;
   const errState: State = isStall ? 'fetching_image' : err.state;
   const message = isStall ? 'Image pull stalled' : 'Pod vanished during provisioning';
 
@@ -968,7 +987,7 @@ async function provision(sessionId: string): Promise<ProvisionResult> {
     async (parentSpan) => {
       const t0 = Date.now();
       const blacklistedDcs = new Set<string>();
-      const maxRerolls = Math.max(0, config.CONTAINER_PULL_MAX_REROLLS);
+      const maxRerolls = Math.max(0, config.POD_BOOT_MAX_REROLLS);
 
       for (let attempt = 0; attempt <= maxRerolls; attempt++) {
         let podId: string | null = null;
@@ -1085,7 +1104,7 @@ async function provision(sessionId: string): Promise<ProvisionResult> {
             throw err;
           }
         } catch (err) {
-          // Recoverable classes (ImagePullStallError, PodVanishedError) come
+          // Recoverable classes (PodBootStallError, PodVanishedError) come
           // from a flaky DC. The helper emits observability + decides whether
           // we have rerolls left; on retry, blacklist the DC and loop.
           const recovery = handleRecoverableProvisionError(err as Error, {
@@ -1241,10 +1260,13 @@ async function createPodWithFallback(
 ): Promise<{ podId: string; podType: PodType; dc: string | null }> {
   const podName = `${POD_PREFIX}${sessionId.slice(0, 16)}`;
 
-  // GHCR image with deps baked in; weights come from the attached network
-  // volume at /workspace/huggingface.
-  const imageName = config.FLUX_IMAGE;
-  const authId = config.RUNPOD_GHCR_AUTH_ID || undefined;
+  // Volume-entrypoint mode: stock RunPod pytorch image + our code/deps from
+  // the attached network volume. See BASE_IMAGE / BOOT_DOCKER_ARGS / BOOT_ENV
+  // constants near top of file. Replaces the previous GHCR custom-image flow —
+  // eliminates registry auth, build pipeline, and the image-pull stall mode
+  // that affected ~38% of provisions. See documents/decisions.md entry
+  // 2026-04-23 for context + rollback procedure.
+  const imageName = BASE_IMAGE;
 
   // ─── Pick DC + volume (state stays 'finding_gpu' during selectPlacement) ──
   const target = await selectPlacement(sessionId, excludeDcs);
@@ -1309,7 +1331,8 @@ async function createPodWithFallback(
         imageName,
         gpuTypeId: GPU_TYPE_ID,
         bidPerGpu: bid,
-        ...(authId ? { containerRegistryAuthId: authId } : {}),
+        dockerArgs: BOOT_DOCKER_ARGS,
+        env: BOOT_ENV,
         ...dcField,
         ...volField,
       });
@@ -1359,7 +1382,8 @@ async function createPodWithFallback(
       imageName,
       gpuTypeId: GPU_TYPE_ID,
       cloudType: 'SECURE',
-      ...(authId ? { containerRegistryAuthId: authId } : {}),
+      dockerArgs: BOOT_DOCKER_ARGS,
+      env: BOOT_ENV,
       ...dcField,
       ...volField,
     });
@@ -1385,7 +1409,7 @@ async function createPodWithFallback(
  * blocks until pod.runtime appears or the watchdog fires.
  *
  * If `stallMs` is finite and `pod.runtime` stays null longer than that,
- * throws `ImagePullStallError` so the caller can reroll onto a different DC
+ * throws `PodBootStallError` so the caller can reroll onto a different DC
  * instead of waiting out the full `timeoutMs`. Pass `Infinity` to disable
  * the watchdog and preserve the legacy binary-timeout behavior.
  */
@@ -1395,7 +1419,7 @@ async function waitForRuntime(
 ): Promise<void> {
   const timeoutMs = opts.timeoutMs ?? 10 * 60 * 1000;
   const stallMs = opts.stallMs
-    ?? (config.CONTAINER_PULL_WATCHDOG_ENABLED ? config.CONTAINER_PULL_STALL_MS : Infinity);
+    ?? (config.POD_BOOT_WATCHDOG_ENABLED ? config.POD_BOOT_STALL_MS : Infinity);
   const start = Date.now();
   const deadline = start + timeoutMs;
   let lastLogAt = 0;
@@ -1414,7 +1438,7 @@ async function waitForRuntime(
     }
     const elapsedMs = Date.now() - start;
     if (elapsedMs > stallMs) {
-      throw new ImagePullStallError(podId, lastDc, Math.round(elapsedMs / 1000));
+      throw new PodBootStallError(podId, lastDc, Math.round(elapsedMs / 1000));
     }
     // Log periodically so backend observers can see long pulls; iOS gets
     // per-state elapsed via stateEnteredAt and doesn't need push updates here.

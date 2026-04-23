@@ -1,9 +1,12 @@
 /**
  * Orchestrator-local error types and classification.
  *
- * `ImagePullStallError` is thrown by `waitForRuntime` when `pod.runtime` stays
+ * `PodBootStallError` is thrown by `waitForRuntime` when `pod.runtime` stays
  * null longer than the watchdog threshold. `provision` catches it specifically
- * to terminate the stalled pod and reroll onto a different DC.
+ * to terminate the stalled pod and reroll onto a different DC. Pre-2026-04-23
+ * this was named `ImagePullStallError` and was GHCR-specific; after the switch
+ * to stock image + volume-entrypoint, the same mechanism covers NFS mount
+ * delays and cold-host stock-image pulls.
  *
  * `classifyProvisionError` maps thrown errors into a stable category string
  * used as a Sentry tag so we can group/filter failures without relying on
@@ -12,18 +15,16 @@
  *
  * Capacity detection delegates to `isCapacityError` in `runpodClient.ts` so
  * there's one source of truth for the set of RunPod capacity error phrasings.
- * If RunPod introduces a new phrasing, add it there (where `createPodWithFallback`
- * also consumes it) and this classifier picks it up automatically.
  */
 
-export class ImagePullStallError extends Error {
+export class PodBootStallError extends Error {
   readonly podId: string;
   readonly dc: string | null;
   readonly elapsedSec: number;
 
   constructor(podId: string, dc: string | null, elapsedSec: number) {
-    super(`Pod ${podId} image pull stalled after ${elapsedSec}s (dc=${dc ?? 'unknown'})`);
-    this.name = 'ImagePullStallError';
+    super(`Pod ${podId} boot stalled after ${elapsedSec}s (dc=${dc ?? 'unknown'})`);
+    this.name = 'PodBootStallError';
     this.podId = podId;
     this.dc = dc;
     this.elapsedSec = elapsedSec;
@@ -35,7 +36,7 @@ export class ImagePullStallError extends Error {
  * Most often spot preemption (RunPod reclaiming the GPU under a higher bid),
  * occasionally a RunPod-side host failure. Either way: same DC may be flaky,
  * so `provision()` blacklists the DC and rerolls — symmetric with
- * `ImagePullStallError`.
+ * `PodBootStallError`.
  */
 export class PodVanishedError extends Error {
   readonly podId: string;
@@ -61,8 +62,7 @@ export class PodVanishedError extends Error {
 export type FailureCategory =
   | 'spot_capacity'
   | 'pod_create_failed'
-  | 'fetch_image_timeout'
-  | 'image_pull_stall'
+  | 'pod_boot_stall'
   | 'pod_vanished'
   | 'warm_model_timeout'
   | 'monthly_cap'
@@ -72,7 +72,7 @@ export type FailureCategory =
 import { isCapacityError } from './runpodClient.js';
 
 export function classifyProvisionError(err: Error): FailureCategory {
-  if (err instanceof ImagePullStallError) return 'image_pull_stall';
+  if (err instanceof PodBootStallError) return 'pod_boot_stall';
   if (err instanceof PodVanishedError) return 'pod_vanished';
   // Delegate capacity detection to the single source of truth in runpodClient.
   // Also retain the legacy internal phrasings ("spot capacity", "capacity exhausted",
@@ -84,7 +84,7 @@ export function classifyProvisionError(err: Error): FailureCategory {
     msg.includes('capacity exhausted') ||
     msg.includes('no runpod dc')
   ) return 'spot_capacity';
-  if (msg.includes('runtime never appeared')) return 'fetch_image_timeout';
+  if (msg.includes('runtime never appeared')) return 'pod_boot_stall';
   if (msg.includes('never became healthy')) return 'warm_model_timeout';
   if (msg.includes('monthly_cap') || msg.includes('cost gate')) return 'monthly_cap';
   if (msg.includes('failed to create') || msg.includes('returned no pod')) return 'pod_create_failed';

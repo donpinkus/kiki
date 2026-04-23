@@ -3,8 +3,9 @@ export interface AppConfig {
   readonly HOST: string;
   readonly RUNPOD_API_KEY: string;
   /** Optional RunPod container registry credential ID for authenticated Docker
-   * Hub pulls. Used only by the one-off probe and populate-volume scripts;
-   * runtime pod creation uses `RUNPOD_GHCR_AUTH_ID`. */
+   * Hub pulls. Used only by the one-off probe and populate-volume scripts.
+   * Runtime pod creation does not use a registry credential (stock RunPod base
+   * image is public). */
   readonly RUNPOD_REGISTRY_AUTH_ID: string;
 
   // ─── Auth (Workstream 1) ──────────────────────────────────────────────
@@ -34,15 +35,12 @@ export interface AppConfig {
    * removing the spot code path. Default false. */
   readonly ONDEMAND_ONLY_MODE: boolean;
 
-  // ─── Pre-baked Docker image ──────────────────────────────────────────
-  /** Full image reference (e.g. ghcr.io/owner/kiki-flux-klein:sha-abc). Required. */
-  readonly FLUX_IMAGE: string;
-  /** RunPod registry credential ID for authenticated GHCR pulls. */
-  readonly RUNPOD_GHCR_AUTH_ID: string;
-  /** Map of RunPod datacenter ID → network volume ID, each pre-populated with
-   * FLUX weights at /workspace/huggingface. Baked mode uses this to skip the
-   * 2-3 min model download on cold start. Parse from JSON env var, e.g.
-   * `{"EUR-NO-1":"49n6i3twuw","US-NC-1":"5vz7ubospw"}`. Empty = no volume path. */
+  // ─── Network volumes (pre-populated with weights, venv, app code) ────
+  /** Map of RunPod datacenter ID → network volume ID. Each volume is
+   * pre-populated by scripts/populate-volume.ts (FLUX weights at
+   * /workspace/huggingface) and scripts/sync-flux-app.ts (Python deps at
+   * /workspace/venv, server code at /workspace/app). Parse from JSON env
+   * var, e.g. `{"EUR-NO-1":"49n6i3twuw","US-NC-1":"5vz7ubospw"}`. */
   readonly NETWORK_VOLUMES_BY_DC: Readonly<Record<string, string>>;
 
   // ─── Redis (Workstream 5) ──────────────────────────────────────────────
@@ -94,20 +92,23 @@ export interface AppConfig {
    * self-hosted. */
   readonly POSTHOG_HOST: string;
 
-  // ─── Image-pull stall watchdog ─────────────────────────────────────────
-  /** When true, `waitForRuntime` fast-fails with `ImagePullStallError` once
-   * `pod.runtime` has stayed null longer than `CONTAINER_PULL_STALL_MS`, and
+  // ─── Pod-boot stall watchdog ───────────────────────────────────────────
+  /** When true, `waitForRuntime` fast-fails with `PodBootStallError` once
+   * `pod.runtime` has stayed null longer than `POD_BOOT_STALL_MS`, and
    * `provision` rerolls onto a different DC. Disable to restore legacy binary
-   * 10-min timeout. */
-  readonly CONTAINER_PULL_WATCHDOG_ENABLED: boolean;
+   * 10-min timeout. Covers NFS mount stalls and stock-image pulls on cold
+   * hosts (the watchdog was originally GHCR-focused pre-2026-04-23). */
+  readonly POD_BOOT_WATCHDOG_ENABLED: boolean;
   /** Ms to wait for `pod.runtime` to become non-null before calling a stall.
-   * Default 120000 (2 min). Tune upward if Sentry shows false-positive stalls
-   * on legitimately cold hosts. */
-  readonly CONTAINER_PULL_STALL_MS: number;
+   * Default 45000 (45 s) — tighter than the old 120 s budget because the
+   * stock image usually boots in ~5–90 s on a host with the base cached.
+   * Tune upward if Sentry shows false-positive stalls on legitimately cold
+   * hosts. */
+  readonly POD_BOOT_STALL_MS: number;
   /** Max retries with a different DC per provision attempt. Default 2 (so up
    * to 3 attempts total). Set to 0 to emit Sentry stall events without
    * actually rerolling — useful for a dry-run observation phase. */
-  readonly CONTAINER_PULL_MAX_REROLLS: number;
+  readonly POD_BOOT_MAX_REROLLS: number;
 
   readonly NODE_ENV: 'development' | 'production' | 'test';
   readonly LOG_LEVEL: 'fatal' | 'error' | 'warn' | 'info' | 'debug' | 'trace';
@@ -157,11 +158,6 @@ function validateConfig(): AppConfig {
     throw new Error('RUNPOD_API_KEY is required (orchestrator needs it to create/query/terminate pods)');
   }
 
-  const fluxImage = process.env['FLUX_IMAGE'] ?? '';
-  if (!fluxImage) {
-    throw new Error('FLUX_IMAGE is required (GHCR image reference for pod provisioning)');
-  }
-
   const jwtAccessSecret = process.env['JWT_ACCESS_SECRET'] ?? '';
   if (!jwtAccessSecret || jwtAccessSecret.length < 32) {
     throw new Error(
@@ -200,8 +196,6 @@ function validateConfig(): AppConfig {
     FREE_TIER_SECONDS: Number(process.env['FREE_TIER_SECONDS'] ?? 3600),
     ONDEMAND_FALLBACK_ENABLED: process.env['ONDEMAND_FALLBACK_ENABLED'] === 'true',
     ONDEMAND_ONLY_MODE: process.env['ONDEMAND_ONLY_MODE'] === 'true',
-    FLUX_IMAGE: fluxImage,
-    RUNPOD_GHCR_AUTH_ID: process.env['RUNPOD_GHCR_AUTH_ID'] ?? '',
     NETWORK_VOLUMES_BY_DC: parseVolumesMap(process.env['NETWORK_VOLUMES_BY_DC']),
     REDIS_URL: process.env['REDIS_URL'] ?? '',
     PREEMPTION_REPLACEMENT_ENABLED: process.env['PREEMPTION_REPLACEMENT_ENABLED'] === 'true',
@@ -210,9 +204,9 @@ function validateConfig(): AppConfig {
     RECONCILE_MIN_AGE_SEC: Number(process.env['RECONCILE_MIN_AGE_SEC'] ?? 600),
     POSTHOG_API_KEY: process.env['POSTHOG_API_KEY'] ?? '',
     POSTHOG_HOST: process.env['POSTHOG_HOST'] ?? 'https://us.i.posthog.com',
-    CONTAINER_PULL_WATCHDOG_ENABLED: process.env['CONTAINER_PULL_WATCHDOG_ENABLED'] !== 'false',
-    CONTAINER_PULL_STALL_MS: Number(process.env['CONTAINER_PULL_STALL_MS'] ?? 120_000),
-    CONTAINER_PULL_MAX_REROLLS: Number(process.env['CONTAINER_PULL_MAX_REROLLS'] ?? 2),
+    POD_BOOT_WATCHDOG_ENABLED: process.env['POD_BOOT_WATCHDOG_ENABLED'] !== 'false',
+    POD_BOOT_STALL_MS: Number(process.env['POD_BOOT_STALL_MS'] ?? 45_000),
+    POD_BOOT_MAX_REROLLS: Number(process.env['POD_BOOT_MAX_REROLLS'] ?? 2),
     OPS_API_KEY: process.env['OPS_API_KEY'] ?? '',
     COST_MONITOR_INTERVAL_MS: Number(process.env['COST_MONITOR_INTERVAL_MS'] ?? 300_000),
     COST_ALERT_WEBHOOK_URL: process.env['COST_ALERT_WEBHOOK_URL'] ?? '',

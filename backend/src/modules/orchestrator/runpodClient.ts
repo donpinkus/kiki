@@ -90,13 +90,35 @@ export interface CreateSpotPodInput {
    * (volumes are DC-locked). */
   dataCenterId?: string;
   /** Attach this network volume at /workspace. Pre-populated with FLUX weights
-   * so the server skips the 2-3 min model download on cold start. */
+   * (and /workspace/venv + /workspace/app — see scripts/sync-flux-app.ts) so
+   * the server skips model download + has deps ready. */
   networkVolumeId?: string;
+  /** Container CMD override. Run this at pod boot instead of the image's
+   * default CMD. Used by the volume-entrypoint flow to exec our server from
+   * /workspace/app without a custom image. */
+  dockerArgs?: string;
+  /** Environment variables set at pod-create time. Visible in RunPod UI. */
+  env?: Array<{ key: string; value: string }>;
 }
 
 export interface PodCreateResult {
   id: string;
   costPerHr: number;
+}
+
+// Render optional GraphQL input fields as `, fieldName: value` suffixes.
+// `JSON.stringify` gives us GraphQL-safe string escaping (quotes, backslashes,
+// newlines). GraphQL's string literal grammar is close enough to JSON's that
+// this round-trips correctly for our inputs.
+function renderDockerArgsField(dockerArgs: string | undefined): string {
+  if (!dockerArgs) return '';
+  return `, dockerArgs: ${JSON.stringify(dockerArgs)}`;
+}
+
+function renderEnvField(env: Array<{ key: string; value: string }> | undefined): string {
+  if (!env || env.length === 0) return '';
+  const entries = env.map((e) => `{ key: ${JSON.stringify(e.key)}, value: ${JSON.stringify(e.value)} }`);
+  return `, env: [${entries.join(', ')}]`;
 }
 
 export interface CreateOnDemandPodInput {
@@ -113,6 +135,10 @@ export interface CreateOnDemandPodInput {
   containerRegistryAuthId?: string;
   dataCenterId?: string;
   networkVolumeId?: string;
+  /** See CreateSpotPodInput.dockerArgs. */
+  dockerArgs?: string;
+  /** See CreateSpotPodInput.env. */
+  env?: Array<{ key: string; value: string }>;
 }
 
 /**
@@ -133,6 +159,8 @@ export async function createOnDemandPod(input: CreateOnDemandPodInput): Promise<
     containerRegistryAuthId,
     dataCenterId,
     networkVolumeId,
+    dockerArgs,
+    env,
   } = input;
   const authField = containerRegistryAuthId
     ? `, containerRegistryAuthId: "${containerRegistryAuthId}"`
@@ -140,10 +168,12 @@ export async function createOnDemandPod(input: CreateOnDemandPodInput): Promise<
   const dcField = dataCenterId ? `, dataCenterId: "${dataCenterId}"` : '';
   // When a network volume is attached, RunPod requires an explicit mount path
   // or container create fails with "field Target must not be empty". We always
-  // mount at /workspace — the Dockerfile's HF_HOME points into it.
+  // mount at /workspace.
   const volField = networkVolumeId
     ? `, networkVolumeId: "${networkVolumeId}", volumeMountPath: "/workspace"`
     : '';
+  const dockerArgsField = renderDockerArgsField(dockerArgs);
+  const envField = renderEnvField(env);
   const query = `mutation {
     podFindAndDeployOnDemand(input: {
       name: "${name}",
@@ -156,7 +186,7 @@ export async function createOnDemandPod(input: CreateOnDemandPodInput): Promise<
       minMemoryInGb: ${minMemoryInGb},
       minVcpuCount: ${minVcpuCount},
       ports: "${ports}",
-      startSsh: true${authField}${dcField}${volField}
+      startSsh: true${authField}${dcField}${volField}${dockerArgsField}${envField}
     }) { id desiredStatus costPerHr }
   }`;
   const data = await gql<{ podFindAndDeployOnDemand: { id: string; costPerHr: number } | null }>(query);
@@ -196,6 +226,8 @@ export async function createSpotPod(input: CreateSpotPodInput): Promise<PodCreat
     containerRegistryAuthId,
     dataCenterId,
     networkVolumeId,
+    dockerArgs,
+    env,
   } = input;
   const authField = containerRegistryAuthId
     ? `, containerRegistryAuthId: "${containerRegistryAuthId}"`
@@ -203,10 +235,12 @@ export async function createSpotPod(input: CreateSpotPodInput): Promise<PodCreat
   const dcField = dataCenterId ? `, dataCenterId: "${dataCenterId}"` : '';
   // When a network volume is attached, RunPod requires an explicit mount path
   // or container create fails with "field Target must not be empty". We always
-  // mount at /workspace — the Dockerfile's HF_HOME points into it.
+  // mount at /workspace.
   const volField = networkVolumeId
     ? `, networkVolumeId: "${networkVolumeId}", volumeMountPath: "/workspace"`
     : '';
+  const dockerArgsField = renderDockerArgsField(dockerArgs);
+  const envField = renderEnvField(env);
   const query = `mutation {
     podRentInterruptable(input: {
       name: "${name}",
@@ -220,7 +254,7 @@ export async function createSpotPod(input: CreateSpotPodInput): Promise<PodCreat
       minMemoryInGb: ${minMemoryInGb},
       minVcpuCount: ${minVcpuCount},
       ports: "${ports}",
-      startSsh: true${authField}${dcField}${volField}
+      startSsh: true${authField}${dcField}${volField}${dockerArgsField}${envField}
     }) { id desiredStatus costPerHr }
   }`;
   const data = await gql<{ podRentInterruptable: { id: string; costPerHr: number } | null }>(query);

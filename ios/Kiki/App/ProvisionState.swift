@@ -21,8 +21,7 @@ public enum ProvisionState: String, Decodable, Sendable {
 public enum FailureCategory: String, Decodable, Sendable {
     case spotCapacity = "spot_capacity"
     case podCreateFailed = "pod_create_failed"
-    case fetchImageTimeout = "fetch_image_timeout"
-    case imagePullStall = "image_pull_stall"
+    case podBootStall = "pod_boot_stall"
     case podVanished = "pod_vanished"
     case warmModelTimeout = "warm_model_timeout"
     case monthlyCap = "monthly_cap"
@@ -55,8 +54,8 @@ public func displayText(for failureCategory: FailureCategory?) -> String {
     switch category {
     case .spotCapacity, .podCreateFailed, .transientRunpod:
         return "GPU capacity is temporarily exhausted — try again shortly"
-    case .fetchImageTimeout, .imagePullStall:
-        return "Container image took too long to pull — try again"
+    case .podBootStall:
+        return "Pod took too long to start — try again"
     case .warmModelTimeout:
         return "AI model took too long to start — try again"
     case .podVanished:

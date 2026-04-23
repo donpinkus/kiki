@@ -3,8 +3,6 @@
 const DUMMY_SECRET = 'x'.repeat(64);
 
 process.env['RUNPOD_API_KEY'] = process.env['RUNPOD_API_KEY'] ?? 'test-runpod-key';
-process.env['FLUX_IMAGE'] =
-  process.env['FLUX_IMAGE'] ?? 'ghcr.io/test/kiki-flux-klein:test';
 process.env['JWT_ACCESS_SECRET'] =
   process.env['JWT_ACCESS_SECRET'] ?? DUMMY_SECRET;
 process.env['JWT_REFRESH_SECRET'] =
