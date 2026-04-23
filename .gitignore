@@ -36,3 +36,6 @@ __pycache__/
 .vscode/
 *.swp
 *~
+
+# Claude Code session state (per-checkout, don't commit)
+.claude/
