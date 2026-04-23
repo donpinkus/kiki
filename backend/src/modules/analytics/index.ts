@@ -60,6 +60,29 @@ export function trackPodProvisionStarted(props: {
   });
 }
 
+/**
+ * Fires on every provision-state transition (one event per state change).
+ * Lets PostHog funnels answer: "what % of users reach warming_model?",
+ * "where do users fail?", "how long between each state?". The per-event
+ * `state_entered_at` pairs with PostHog's own event timestamp for duration
+ * math; `replacement_count` distinguishes fresh provisions from preemption
+ * recoveries.
+ */
+export function trackPodStateEntered(props: {
+  userId: string;
+  state: string;
+  stateEnteredAt: number;
+  replacementCount: number;
+  failureCategory: string | null;
+}): void {
+  capture(props.userId, 'pod.state.entered', {
+    state: props.state,
+    state_entered_at: props.stateEnteredAt,
+    replacement_count: props.replacementCount,
+    ...(props.failureCategory ? { failure_category: props.failureCategory } : {}),
+  });
+}
+
 export function trackPodProvisionCompleted(props: {
   userId: string;
   durationMs: number;
