@@ -83,9 +83,8 @@ MetalCanvasView (UIView, CAMetalLayer)
 │   ├── selectionTexture — floating lasso selection (Metal-rendered, no UIImageView)
 │   ├── brushMaskTexture (R8Unorm, 64×64 soft circle)
 │   ├── brushStampPSO — instanced quads, source-over blend
-│   ├── eraserStampPSO — instanced quads, destination-out blend
+│   ├── eraserStampPSO — instanced quads, programmable blend (dst *= 1-mask, snap near-clear to zero)
 │   ├── compositorPSO — fullscreen quad, source-over (layer compositing + selection display)
-│   ├── flattenPSO — fullscreen quad, destination-out (eraser flatten)
 │   ├── maskedCopyPSO — fullscreen quad, no blend (lasso extraction: canvas × mask → selection)
 │   └── maskedClearPSO — fullscreen quad, destination-out (lasso clear: uses maskedClearFragment)
 ├── Stamp generation (CPU: arc-length resample, adaptive spacing)

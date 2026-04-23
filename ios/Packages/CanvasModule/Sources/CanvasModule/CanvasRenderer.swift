@@ -26,7 +26,6 @@ public final class CanvasRenderer {
     private let brushStampPSO: MTLRenderPipelineState
     private let eraserStampPSO: MTLRenderPipelineState
     private let compositorPSO: MTLRenderPipelineState
-    private let flattenPSO: MTLRenderPipelineState
 
     /// Cached CIContext for texture→CGImage conversion. CIImage handles sRGB
     /// conversion and premultiplied alpha correctly, avoiding the color artifacts
@@ -131,14 +130,12 @@ public final class CanvasRenderer {
         // Build pipeline states.
         guard let brushPSO = Self.makeBrushStampPSO(device: device, library: lib, eraser: false),
               let erasePSO = Self.makeBrushStampPSO(device: device, library: lib, eraser: true),
-              let compPSO = Self.makeCompositorPSO(device: device, library: lib),
-              let flatPSO = Self.makeFlattenPSO(device: device, library: lib) else {
+              let compPSO = Self.makeCompositorPSO(device: device, library: lib) else {
             return nil
         }
         self.brushStampPSO = brushPSO
         self.eraserStampPSO = erasePSO
         self.compositorPSO = compPSO
-        self.flattenPSO = flatPSO
         self.maskedCopyPSO = Self.makeMaskedCopyPSO(device: device, library: lib)
         self.maskedClearPSO = Self.makeMaskedClearPSO(device: device, library: lib)
 
@@ -317,8 +314,9 @@ public final class CanvasRenderer {
     }
 
     /// Flatten the scratch texture into the active layer (stroke completion).
-    /// Uses source-over for brush, or a custom "erase" pass for eraser.
-    func flattenScratchIntoCanvas(isEraser: Bool) {
+    /// Source-over blend. Eraser does not use this path — it writes directly
+    /// to the canvas via `applyEraserStamps`.
+    func flattenScratchIntoCanvas() {
         guard let canvas = activeLayerTexture, let scratch = scratchTexture else { return }
         guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
 
@@ -329,14 +327,7 @@ public final class CanvasRenderer {
 
         guard let enc = cmdBuf.makeRenderCommandEncoder(descriptor: rpd) else { return }
 
-        if isEraser {
-            // Eraser: destination-out blend (clear pixels under the stamp mask).
-            enc.setRenderPipelineState(flattenPSO)
-        } else {
-            // Brush: source-over blend.
-            enc.setRenderPipelineState(compositorPSO)
-        }
-
+        enc.setRenderPipelineState(compositorPSO)
         enc.setFragmentTexture(scratch, index: 0)
         var opacity: Float = 1.0
         enc.setFragmentBytes(&opacity, length: MemoryLayout<Float>.size, index: 0)
@@ -860,22 +851,22 @@ public final class CanvasRenderer {
     private static func makeBrushStampPSO(device: MTLDevice, library: MTLLibrary, eraser: Bool) -> MTLRenderPipelineState? {
         let desc = MTLRenderPipelineDescriptor()
         desc.vertexFunction = library.makeFunction(name: "brushStampVertex")
-        desc.fragmentFunction = library.makeFunction(name: "brushStampFragment")
         desc.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
 
         let ca = desc.colorAttachments[0]!
-        ca.isBlendingEnabled = true
-        ca.rgbBlendOperation = .add
-        ca.alphaBlendOperation = .add
 
         if eraser {
-            // Destination-out: dst = dst * (1 - src.alpha). Erases canvas under the stamp.
-            ca.sourceRGBBlendFactor = .zero
-            ca.destinationRGBBlendFactor = .oneMinusSourceAlpha
-            ca.sourceAlphaBlendFactor = .zero
-            ca.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+            // Programmable blend: eraserStampFragment reads [[color(0)]], computes
+            // dst * (1 - mask), and snaps near-clear results to exact zero. Fixed-
+            // function blending is off — the shader returns the final pixel value.
+            desc.fragmentFunction = library.makeFunction(name: "eraserStampFragment")
+            ca.isBlendingEnabled = false
         } else {
             // Source-over (premultiplied): dst = src + dst * (1 - src.alpha).
+            desc.fragmentFunction = library.makeFunction(name: "brushStampFragment")
+            ca.isBlendingEnabled = true
+            ca.rgbBlendOperation = .add
+            ca.alphaBlendOperation = .add
             ca.sourceRGBBlendFactor = .one
             ca.destinationRGBBlendFactor = .oneMinusSourceAlpha
             ca.sourceAlphaBlendFactor = .one
@@ -898,25 +889,6 @@ public final class CanvasRenderer {
         ca.sourceRGBBlendFactor = .one
         ca.destinationRGBBlendFactor = .oneMinusSourceAlpha
         ca.sourceAlphaBlendFactor = .one
-        ca.destinationAlphaBlendFactor = .oneMinusSourceAlpha
-
-        return try? device.makeRenderPipelineState(descriptor: desc)
-    }
-
-    private static func makeFlattenPSO(device: MTLDevice, library: MTLLibrary) -> MTLRenderPipelineState? {
-        let desc = MTLRenderPipelineDescriptor()
-        desc.vertexFunction = library.makeFunction(name: "compositorVertex")
-        desc.fragmentFunction = library.makeFunction(name: "compositorFragment")
-        desc.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
-
-        // Destination-out blend for eraser flattening.
-        let ca = desc.colorAttachments[0]!
-        ca.isBlendingEnabled = true
-        ca.rgbBlendOperation = .add
-        ca.alphaBlendOperation = .add
-        ca.sourceRGBBlendFactor = .zero
-        ca.destinationRGBBlendFactor = .oneMinusSourceAlpha
-        ca.sourceAlphaBlendFactor = .zero
         ca.destinationAlphaBlendFactor = .oneMinusSourceAlpha
 
         return try? device.makeRenderPipelineState(descriptor: desc)
@@ -1048,6 +1020,22 @@ public final class CanvasRenderer {
         constexpr sampler maskSampler(filter::linear, address::clamp_to_zero);
         float mask = brushMask.sample(maskSampler, in.texCoord).r;
         return in.color * mask;
+    }
+
+    // Programmable-blend eraser: reads current framebuffer value, applies
+    // destination-out (dst *= 1 - mask) in-shader, and snaps near-clear pixels
+    // to exact zero. Without the snap, the soft brush mask leaves partial-alpha
+    // residue at the eraser's periphery — visually invisible but encodes as
+    // a faint stroke-color ghost in the JPEG sent to the generator.
+    fragment float4 eraserStampFragment(
+        StampVaryings in [[stage_in]],
+        texture2d<float> brushMask [[texture(0)]],
+        float4 dst [[color(0)]]
+    ) {
+        constexpr sampler maskSampler(filter::linear, address::clamp_to_zero);
+        float mask = brushMask.sample(maskSampler, in.texCoord).r;
+        float4 result = dst * (1.0 - mask);
+        return result.a < (4.0 / 255.0) ? float4(0.0) : result;
     }
 
     // ── Compositor (full-screen quad) ────────────────────────────────────

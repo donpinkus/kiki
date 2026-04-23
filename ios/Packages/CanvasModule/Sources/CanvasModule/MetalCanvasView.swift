@@ -421,7 +421,7 @@ public final class MetalCanvasView: UIView {
         for stamp in activeStrokeStamps {
             renderer.appendStamp(stamp)
         }
-        renderer.flattenScratchIntoCanvas(isEraser: false)
+        renderer.flattenScratchIntoCanvas()
 
         strokeCount += 1
         onDrawingChanged?()
