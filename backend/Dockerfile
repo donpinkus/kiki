@@ -1,12 +1,10 @@
-# Railway-deployed backend. The orchestrator shells out to ssh/scp to
-# provision per-session pods on RunPod, which the default Node runtime
-# image doesn't ship — hence openssh-client in the runtime layer.
+# Railway-deployed backend. Node + Fastify only — GPU orchestration happens
+# on RunPod pods via their HTTP API.
 FROM node:22-slim
 
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      openssh-client \
       ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
@@ -14,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY package.json package-lock.json ./
 RUN npm ci
 
-# App source (tsconfig, src/, runtime-assets/, etc.)
+# App source (tsconfig, src/, etc.)
 COPY . .
 
 RUN npm run build
