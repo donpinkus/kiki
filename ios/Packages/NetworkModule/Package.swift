@@ -7,7 +7,15 @@ let package = Package(
     products: [
         .library(name: "NetworkModule", targets: ["NetworkModule"]),
     ],
+    dependencies: [
+        .package(url: "https://github.com/getsentry/sentry-cocoa", from: "9.10.0"),
+    ],
     targets: [
-        .target(name: "NetworkModule"),
+        .target(
+            name: "NetworkModule",
+            dependencies: [
+                .product(name: "Sentry", package: "sentry-cocoa"),
+            ]
+        ),
     ]
 )

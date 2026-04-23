@@ -12,6 +12,7 @@
 		404C38372F69891C00EB39C6 /* CanvasModule in Frameworks */ = {isa = PBXBuildFile; productRef = 40949E012F5E400100AF4CF7 /* CanvasModule */; };
 		404C383A2F69891C00EB39C6 /* NetworkModule in Frameworks */ = {isa = PBXBuildFile; productRef = 40949E012F5E400400AF4CF7 /* NetworkModule */; };
 		404C383B2F69891C00EB39C6 /* ResultModule in Frameworks */ = {isa = PBXBuildFile; productRef = 40949E012F5E400500AF4CF7 /* ResultModule */; };
+		5050000000000000000000A3 /* PostHog in Frameworks */ = {isa = PBXBuildFile; productRef = 5050000000000000000000A2 /* PostHog */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -36,6 +37,7 @@
 				404C383A2F69891C00EB39C6 /* NetworkModule in Frameworks */,
 				404C38372F69891C00EB39C6 /* CanvasModule in Frameworks */,
 				4000D6752F94095B0044E86F /* Sentry in Frameworks */,
+				5050000000000000000000A3 /* PostHog in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -83,6 +85,7 @@
 				40949E012F5E400400AF4CF7 /* NetworkModule */,
 				40949E012F5E400500AF4CF7 /* ResultModule */,
 				4000D6742F94095B0044E86F /* Sentry */,
+				5050000000000000000000A2 /* PostHog */,
 			);
 			productName = Kiki;
 			productReference = 40949DDB2F5E235500AF4CF7 /* Kiki.app */;
@@ -117,6 +120,7 @@
 				40949E002F5E400400AF4CF7 /* XCLocalSwiftPackageReference "Packages/NetworkModule" */,
 				40949E002F5E400500AF4CF7 /* XCLocalSwiftPackageReference "Packages/ResultModule" */,
 				4000D6732F94095B0044E86F /* XCRemoteSwiftPackageReference "sentry-cocoa" */,
+				5050000000000000000000A1 /* XCRemoteSwiftPackageReference "posthog-ios" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 40949DDC2F5E235500AF4CF7 /* Products */;
@@ -380,6 +384,14 @@
 				minimumVersion = 9.10.0;
 			};
 		};
+		5050000000000000000000A1 /* XCRemoteSwiftPackageReference "posthog-ios" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/PostHog/posthog-ios";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 3.25.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -399,6 +411,11 @@
 		40949E012F5E400500AF4CF7 /* ResultModule */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = ResultModule;
+		};
+		5050000000000000000000A2 /* PostHog */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 5050000000000000000000A1 /* XCRemoteSwiftPackageReference "posthog-ios" */;
+			productName = PostHog;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
