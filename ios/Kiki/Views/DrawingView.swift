@@ -49,10 +49,17 @@ struct DrawingView: View {
                     geometry.size.width * coordinator.dividerPosition,
                     geometry.size.height
                 )
+                // The gesture container fills the full drawing pane so pan/zoom/
+                // rotate aren't clipped by the drawing surface's square footprint.
+                // The drawing surface itself stays a centered `canvasSide` square
+                // inside the container (see RotatableCanvasContainer).
+                let canvasPaneWidth = coordinator.drawingLayout == .splitScreen
+                    ? geometry.size.width * coordinator.dividerPosition
+                    : geometry.size.width
 
                 ZStack(alignment: .topLeading) {
-                    CanvasView(viewModel: coordinator.canvasViewModel)
-                        .frame(width: canvasSide, height: canvasSide)
+                    CanvasView(viewModel: coordinator.canvasViewModel, drawingSurfaceSide: canvasSide)
+                        .frame(width: canvasPaneWidth, height: geometry.size.height)
                         .frame(
                             maxWidth: .infinity,
                             maxHeight: .infinity,
