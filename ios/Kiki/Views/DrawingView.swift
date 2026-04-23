@@ -229,7 +229,11 @@ struct DrawingView: View {
 
 private struct PromptTitleBar: View {
     @Environment(AppCoordinator.self) private var coordinator
-    @FocusState private var isFocused: Bool
+    // Plain @State rather than @FocusState — the latter causes SwiftUI to
+    // auto-generate an InputAccessoryGenerator view for prev/next keyboard
+    // navigation, which (on iPad) triggers a constraint conflict with the
+    // SystemInputAssistantView and adds ~1s to TextField tap latency.
+    @State private var isFocused: Bool = false
 
     var body: some View {
         @Bindable var coordinator = coordinator
@@ -247,20 +251,23 @@ private struct PromptTitleBar: View {
                     .foregroundStyle(Color.accentColor)
             }
 
-            TextField("Describe your image…", text: $coordinator.promptText)
-                .textFieldStyle(.plain)
-                .font(.title3.weight(.medium))
-                .multilineTextAlignment(.center)
-                .focused($isFocused)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 8)
-                .overlay(alignment: .bottom) {
-                    Rectangle()
-                        .fill(isFocused ? Color.accentColor : Color.secondary.opacity(0.35))
-                        .frame(height: isFocused ? 1.5 : 1)
-                        .animation(.easeInOut(duration: 0.15), value: isFocused)
-                }
-                .frame(maxWidth: 520)
+            TextField(
+                "Describe your image…",
+                text: $coordinator.promptText,
+                onEditingChanged: { editing in isFocused = editing }
+            )
+            .textFieldStyle(.plain)
+            .font(.title3.weight(.medium))
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .overlay(alignment: .bottom) {
+                Rectangle()
+                    .fill(isFocused ? Color.accentColor : Color.secondary.opacity(0.35))
+                    .frame(height: isFocused ? 1.5 : 1)
+                    .animation(.easeInOut(duration: 0.15), value: isFocused)
+            }
+            .frame(maxWidth: 520)
         }
     }
 }
