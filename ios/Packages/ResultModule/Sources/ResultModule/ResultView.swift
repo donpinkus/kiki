@@ -179,6 +179,13 @@ public struct ResultView: View {
                         .multilineTextAlignment(.center)
                         .padding(.horizontal, 40)
                 }
+                // Layered shadow for depth: tight crisp shadow for edge
+                // definition + softer diffuse halo for separation from the
+                // underlying image. Both low-opacity so the gradient stays
+                // clean — this is the pattern Apple uses for titles atop
+                // photo/video backgrounds (Photos, TV app captions).
+                .shadow(color: .black.opacity(0.4), radius: 2, y: 1)
+                .shadow(color: .black.opacity(0.3), radius: 12, y: 6)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .contentShape(Rectangle())
