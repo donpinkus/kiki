@@ -18,12 +18,13 @@
  * ┌─────────────────────────────────────┬──────────────────────────────────────────────────┬──────────────────────────────┐
  * │ Scenario                            │ What happens                                     │ Handling                     │
  * ├─────────────────────────────────────┼──────────────────────────────────────────────────┼──────────────────────────────┤
- * │ 1. Spot pod preempted (disappears)  │ Upstream WS closes with code 1006/1012.          │ stream.ts relay.onClose →    │
- * │                                     │ RunPod deletes pod entirely.                     │ classifyClose → replaceSession│
- * │                                     │                                                  │ emits finding_gpu (UI resets)│
- * │                                     │                                                  │ and provisions a new pod.    │
- * │                                     │                                                  │ Joiners subscribe to the     │
- * │                                     │                                                  │ broker for state updates.    │
+ * │ 1. Spot pod preempted (disappears)  │ Upstream WS closes with code 1006/1012.          │ stream.ts relay.onClose      │
+ * │                                     │ RunPod deletes pod entirely.                     │ tries same-pod reconnect     │
+ * │                                     │                                                  │ (fails fast — pod is gone),  │
+ * │                                     │                                                  │ falls through to             │
+ * │                                     │                                                  │ replaceSession which emits   │
+ * │                                     │                                                  │ finding_gpu and provisions a │
+ * │                                     │                                                  │ fresh pod.                   │
  * ├─────────────────────────────────────┼──────────────────────────────────────────────────┼──────────────────────────────┤
  * │ 2. Pod vanishes during provisioning │ Pod created on RunPod but disappears before      │ waitForRuntime / waitForHealth│
  * │    (spot preempted before serving)  │ becoming serve-ready. getPod() returns null.      │ throw PodVanishedError;       │
@@ -574,38 +575,6 @@ export async function hasReadySession(sessionId: string): Promise<boolean> {
 // ────────────────────────────────────────────────────────────────────────────
 // Preemption handling (WS7)
 // ────────────────────────────────────────────────────────────────────────────
-
-export type CloseClassification = 'preempted' | 'crashed' | 'voluntary';
-
-/**
- * Classify an upstream WS close. Probes RunPod to determine whether the pod
- * was preempted, crashed, or voluntarily terminated by us.
- */
-export async function classifyClose(sessionId: string): Promise<CloseClassification> {
-  const session = await readSession(sessionId);
-  if (!session || session.state === 'terminated') return 'voluntary';
-  if (!session.podId) return 'voluntary';
-
-  try {
-    const pod = await getPod(session.podId);
-    if (!pod || pod.desiredStatus === 'EXITED' || pod.desiredStatus === 'TERMINATED') {
-      return 'preempted';
-    }
-    if (pod.desiredStatus === 'RUNNING' && pod.runtime) {
-      // Pod is alive — check if server is healthy
-      try {
-        const healthUrl = `https://${session.podId}-8766.proxy.runpod.net/health`;
-        const res = await fetch(healthUrl, { signal: AbortSignal.timeout(5000) });
-        if (res.ok) return 'voluntary'; // pod healthy, close was intentional
-      } catch { /* health failed */ }
-      return 'crashed';
-    }
-    return 'preempted';
-  } catch {
-    // RunPod API error — assume preemption (safer to replace than ignore)
-    return 'preempted';
-  }
-}
 
 /**
  * Replace a session's pod after preemption or crash. Holds the existing session

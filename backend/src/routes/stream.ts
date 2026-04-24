@@ -6,7 +6,6 @@ import { verifyAccess } from '../modules/auth/jwt.js';
 import {
   getOrProvisionPod,
   hasReadySession,
-  classifyClose,
   replaceSession,
   abortSession,
   touch,
@@ -134,6 +133,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       }
 
       let relay: StreamRelay | null = null;
+      let currentPodUrl: string | null = null;
       let lastConfig: Record<string, unknown> | null = null;
       let clientDisconnected = false;
       const sessionStartMs = Date.now();
@@ -147,6 +147,109 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
           socket.send(JSON.stringify({ type: 'state', ...event }));
         }
       });
+
+      // Wire a fresh StreamRelay to `podUrl`: install message/close/error
+      // handlers, connect, resend lastConfig. On success, `relay` and
+      // `currentPodUrl` are updated. Used for the initial connect, same-pod
+      // reconnects after a transient upstream drop, and replacement pods.
+      const wireRelay = async (podUrl: string): Promise<void> => {
+        relay?.close();
+        relay = null;
+        const newRelay = new StreamRelay(podUrl);
+        newRelay.onMessage((data, isBinary) => {
+          if (socket.readyState !== socket.OPEN) return;
+          touch(userId);
+          if (isBinary) {
+            const base64 = (data as Buffer).toString('base64');
+            socket.send(JSON.stringify({ type: 'frame', data: base64 }));
+          } else {
+            socket.send(data);
+          }
+        });
+        newRelay.onClose(handleUpstreamClose);
+        newRelay.onError((err) => {
+          request.log.error({ userId, err }, 'Upstream error');
+        });
+        await newRelay.connect();
+        relay = newRelay;
+        currentPodUrl = podUrl;
+        if (lastConfig) newRelay.sendConfig(lastConfig);
+      };
+
+      // Recover from an upstream close. If the iPad WS is still open, always
+      // attempt recovery: first a same-pod reconnect (transient transport
+      // drop — RunPod proxy idle timeout, network blip), then a full
+      // replaceSession if that fails (pod actually gone). There is no
+      // "voluntary upstream close while client is connected" case — the
+      // user-left-the-app path closes the iPad WS first and is filtered by
+      // the clientDisconnected check.
+      function handleUpstreamClose(code: number, reason: string): void {
+        request.log.info({ userId, code, reason }, 'Upstream closed');
+
+        if (!config.PREEMPTION_REPLACEMENT_ENABLED) {
+          // Legacy escape hatch: tear down immediately, no recovery.
+          if (socket.readyState === socket.OPEN) {
+            socket.send(
+              JSON.stringify({ type: 'error', message: 'Pod terminated (possible spot preemption)' }),
+            );
+            socket.close(1001, 'Upstream closed');
+          }
+          return;
+        }
+
+        // Stop any residual events from the dead relay.
+        relay?.close();
+        relay = null;
+
+        void (async () => {
+          try {
+            if (clientDisconnected || socket.readyState !== socket.OPEN) return;
+
+            await emitState(userId, 'connecting');
+
+            // Fast path: reconnect to the same pod. If the close was a
+            // transient transport drop the pod is still serving and this
+            // succeeds in ~1–2 s — no full re-provision cost, no UI
+            // "Replacing — …" flash.
+            if (currentPodUrl) {
+              try {
+                await wireRelay(currentPodUrl);
+                if (clientDisconnected || socket.readyState !== socket.OPEN) return;
+                await emitState(userId, 'ready');
+                return;
+              } catch (reconnectErr) {
+                request.log.info(
+                  { userId, err: (reconnectErr as Error).message },
+                  'Same-pod reconnect failed; falling through to replaceSession',
+                );
+              }
+            }
+
+            // Slow path: pod is truly gone. Full replacement (~90 s).
+            // `replaceSession` emits state transitions through the broker with
+            // replacementCount > 0 so the iOS UI prefixes "Replacing — ".
+            // MAX_SESSION_REPLACEMENTS protects against flapping pods — if
+            // exhausted, replaceSession throws and the outer catch bounces iPad.
+            trackPodPreempted({ userId, replacementAttempt: 1 });
+            const { podUrl: newPodUrl } = await replaceSession(userId);
+            if (clientDisconnected || socket.readyState !== socket.OPEN) {
+              request.log.info({ userId }, 'Client disconnected during replacement — pod will idle-reap');
+              return;
+            }
+            await wireRelay(newPodUrl);
+            if (clientDisconnected || socket.readyState !== socket.OPEN) return;
+            await emitState(userId, 'ready');
+          } catch (err) {
+            request.log.error({ userId, err }, 'Upstream recovery failed');
+            if (socket.readyState === socket.OPEN) {
+              socket.send(
+                JSON.stringify({ type: 'error', message: `Recovery failed: ${(err as Error).message}` }),
+              );
+              socket.close(1011, 'Recovery failed');
+            }
+          }
+        })();
+      }
 
       let getOrProvisionMs = 0;
       try {
@@ -168,125 +271,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
 
         // Pod is serving; transition to 'connecting' while we wire up the relay.
         await emitState(userId, 'connecting');
-
-        relay = new StreamRelay(podUrl);
-
-        relay.onMessage((data, isBinary) => {
-          if (socket.readyState !== socket.OPEN) return;
-          touch(userId);
-          if (isBinary) {
-            const base64 = (data as Buffer).toString('base64');
-            socket.send(JSON.stringify({ type: 'frame', data: base64 }));
-          } else {
-            socket.send(data);
-          }
-        });
-
-        relay.onClose((code, reason) => {
-          request.log.info({ userId, code, reason }, 'Upstream closed');
-
-          if (!config.PREEMPTION_REPLACEMENT_ENABLED) {
-            // Legacy behavior: close client immediately
-            if (socket.readyState === socket.OPEN) {
-              socket.send(
-                JSON.stringify({ type: 'error', message: 'Pod terminated (possible spot preemption)' }),
-              );
-              socket.close(1001, 'Upstream closed');
-            }
-            return;
-          }
-
-          // WS7: classify the close, attempt transparent replacement
-          // Close old relay to prevent ghost events from triggering a second replacement.
-          relay?.close();
-          relay = null;
-
-          void (async () => {
-            try {
-              const classification = await classifyClose(userId);
-              request.log.info({ userId, classification }, 'Close classified');
-
-              if (classification === 'voluntary') {
-                if (socket.readyState === socket.OPEN) {
-                  socket.close(1000, 'Session ended');
-                }
-                return;
-              }
-
-              trackPodPreempted({ userId, replacementAttempt: 1 });
-
-              if (clientDisconnected || socket.readyState !== socket.OPEN) return;
-
-              // Hold client WS open. replaceSession emits state transitions
-              // through the broker (finding_gpu → creating_pod → ...) — our
-              // existing broker subscription forwards them to iOS with
-              // replacementCount > 0 so the UI prefixes "Replacing — ".
-              const { podUrl: newPodUrl } = await replaceSession(userId);
-              await emitState(userId, 'connecting');
-
-              // If client left during replacement, clean up the new pod
-              if (clientDisconnected || socket.readyState !== socket.OPEN) {
-                request.log.info({ userId }, 'Client disconnected during replacement — pod will idle-reap');
-                return;
-              }
-
-              // Wire up new relay
-              const newRelay = new StreamRelay(newPodUrl);
-              relay = newRelay;
-
-              newRelay.onMessage((data, isBinary) => {
-                if (socket.readyState !== socket.OPEN) return;
-                touch(userId);
-                if (isBinary) {
-                  const base64 = (data as Buffer).toString('base64');
-                  socket.send(JSON.stringify({ type: 'frame', data: base64 }));
-                } else {
-                  socket.send(data);
-                }
-              });
-
-              newRelay.onClose((c, r) => {
-                request.log.info({ userId, code: c, reason: r }, 'Replacement upstream closed');
-                // Don't recurse — if replacement also preempted, let client reconnect
-                if (socket.readyState === socket.OPEN) {
-                  socket.send(
-                    JSON.stringify({ type: 'error', message: 'Replacement pod also lost' }),
-                  );
-                  socket.close(1001, 'Replacement upstream closed');
-                }
-              });
-
-              newRelay.onError((err) => {
-                request.log.error({ userId, err }, 'Replacement upstream error');
-              });
-
-              await newRelay.connect();
-              request.log.info({ userId, newPodUrl }, 'Replacement relay connected');
-
-              // Re-send config so the new pod knows prompt/style/params.
-              if (lastConfig) {
-                newRelay.sendConfig(lastConfig);
-              }
-
-              // Replacement relay live — iOS can stream again.
-              await emitState(userId, 'ready');
-            } catch (err) {
-              request.log.error({ userId, err }, 'Replacement failed');
-              if (socket.readyState === socket.OPEN) {
-                socket.send(
-                  JSON.stringify({ type: 'error', message: `Replacement failed: ${(err as Error).message}` }),
-                );
-                socket.close(1011, 'Replacement failed');
-              }
-            }
-          })();
-        });
-
-        relay.onError((err) => {
-          request.log.error({ userId, err }, 'Upstream error');
-        });
-
-        await relay.connect();
+        await wireRelay(podUrl);
         request.log.info({ userId }, 'Upstream connected, relaying');
 
         socket.on('message', (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
