@@ -25,7 +25,8 @@ final class StreamSession {
         case failed(message: String)
         /// Backend reaper terminated the pod after 30 min of no frame activity.
         /// User can resume by tapping the right-pane overlay or starting to draw.
-        case idleTimeout(message: String)
+        /// No message carried — the UI uses a hardcoded title.
+        case idleTimeout
     }
 
     // MARK: - Properties
@@ -452,7 +453,7 @@ final class StreamSession {
             // old pod) carry no failureCategory and fall through to
             // .disconnected as before.
             if failureCategory == .idleTimeout {
-                self.stop(finalReadiness: .idleTimeout(message: displayText(for: failureCategory)))
+                self.stop(finalReadiness: .idleTimeout)
             } else {
                 self.setReadiness(.disconnected)
             }

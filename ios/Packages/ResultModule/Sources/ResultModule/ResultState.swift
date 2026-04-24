@@ -48,7 +48,7 @@ public enum ResultState {
     /// User taps the overlay or starts drawing to resume; both call resumeStream().
     /// `previousImage` is displayed under a semi-transparent overlay so the
     /// user can see their last-generated image is still waiting for them.
-    case idleTimeout(message: String, previousImage: UIImage?)
+    case idleTimeout(previousImage: UIImage?)
 
     public var isPreview: Bool {
         if case .preview = self { return true }

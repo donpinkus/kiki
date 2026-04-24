@@ -63,8 +63,8 @@ public struct ResultView: View {
             case .error(let message, let previousImage):
                 errorView(message: message, previousImage: previousImage)
 
-            case .idleTimeout(let message, let previousImage):
-                idleTimeoutView(message: message, previousImage: previousImage)
+            case .idleTimeout(let previousImage):
+                idleTimeoutView(previousImage: previousImage)
 
             }
 
@@ -154,7 +154,7 @@ public struct ResultView: View {
 
     // MARK: - Idle Timeout
 
-    private func idleTimeoutView(message _: String, previousImage: UIImage?) -> some View {
+    private func idleTimeoutView(previousImage: UIImage?) -> some View {
         Button(action: { onResumeTapped?() }) {
             ZStack {
                 // Last generated image stays visible underneath as a reminder

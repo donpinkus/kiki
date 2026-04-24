@@ -14,6 +14,50 @@ Record implementation decisions here as they are made. Newest first. This preven
 
 ---
 
+### 2026-04-24 — Idle-timeout reap: user-visible "Session Paused" UX with tap / draw to resume
+**Context:** The 30-min idle reaper (`orchestrator.ts:runReaper`) used to terminate a user's pod silently from the iPad's perspective: the Redis row was deleted, the upstream WS closed, the new always-recover path attempted `replaceSession`, which threw `"No session to replace"` and bounced the iPad with a generic 1011 close. User had no idea what happened.
+**Decision:** Reaper emits a `terminated` state through the broker with a new `failureCategory='idle_timeout'` BEFORE killing the pod. Stream.ts's broker subscriber closes the iPad WS cleanly with code 1000 on `state='terminated'`, setting the `clientDisconnected` flag so the upstream-close recovery path exits early (no fallback `replaceSession` attempt). iOS `StreamReadiness` gains an `.idleTimeout` case; `ResultState.idleTimeout(previousImage:)` renders a semi-transparent overlay on top of the last-generated image with an SF Symbol moon-zzz icon and "Session Paused - Draw to Resume" title in a teal→purple gradient with Apple-style layered drop shadows. Two resume paths — both wired to a new public `coordinator.resumeStream()`:
+1. Tap anywhere on the overlay (button).
+2. Start drawing — new `CanvasViewModel.onUserActivity` callback (fired from the existing `MetalCanvasView.onInteractionBegan` → `handleInteractionBegan`) notifies AppCoordinator, which auto-resumes if readiness is `.idleTimeout`.
+
+`StreamSession.stop()` gained an optional `finalReadiness` parameter so the idle-timeout path can tear down without passing through `.disconnected` first.
+
+Other `state='terminated'` paths (manual abort, `replaceSession` cleanup of the old pod) carry no `failureCategory` → iOS routes those to `.disconnected` as before. `idle_timeout` is the only category that triggers the new overlay.
+
+**Alternatives considered:**
+- **Leave the overlay generic / re-use `.failed`**: failure UI is red/alarming; idle timeout is routine and deserves calm visual tone.
+- **Auto-resume silently on next stroke without a message**: tested poorly conceptually — user sees their session flip to "Finding GPU..." with no explanation for the interruption. Explicit acknowledgment is clearer.
+- **Require page navigation to resume** (gallery → back to drawing): annoying friction; user explicitly pushed back on this path.
+- **Carry a backend-authored message through to the overlay**: considered, but the UI hardcodes "Session Paused - Draw to Resume" so the message string is unused. Trimmed `message` out of `StreamReadiness.idleTimeout` and `ResultState.idleTimeout`; backend still emits a `failureCategory` which iOS maps locally. Less data, same result.
+
+**Consequences:**
+- Backend changes: add `idle_timeout` to `FailureCategory`; reaper calls `emitState(sessionId, 'terminated', 'idle_timeout')` before `terminatePod`; stream.ts broker subscriber closes iPad WS on `state='terminated'`.
+- iOS changes: `FailureCategory.idleTimeout`, `StreamReadiness.idleTimeout`, `ResultState.idleTimeout(previousImage:)`. New `idleTimeoutView` in ResultView. Badge handling in DrawingView. `AppCoordinator.resumeStream()` public; `handleUserActivity()` bridges canvas strokes to it. `CanvasViewModel.onUserActivity` callback fires from `handleInteractionBegan`.
+- Wire protocol unchanged — `failureCategory='idle_timeout'` is a new string value in an existing field. An old iOS build receiving it maps to `.unknown` and shows the generic "Something went wrong" message (graceful degradation, no crash).
+- Testing: because the reaper only fires on 30 min of zero frame activity AND the capture loop touches `lastActivityAt` on every frame (~5 Hz), triggering this naturally while a session is live is near-impossible. Added `POST /v1/ops/test/idle-timeout/:userId` (gated by existing `X-Ops-Key` preHandler) that directly calls `emitState` to simulate the reaper event for UX testing. Future ops test-simulators land in the same file under `/v1/ops/test/*`.
+
+---
+
+### 2026-04-24 — Always recover the iPad session when upstream WS drops (delete classifyClose)
+**Context:** Backend proxies `iPad ↔ Railway ↔ RunPod pod`. When the upstream (backend↔pod) WS closed mid-stream, the old `classifyClose` function decided whether to (a) replace the pod, (b) mark the close as `'crashed'` and replace, or (c) classify as `'voluntary'` and tell iPad the session is over. The `voluntary` branch checked only pod health: if `/health` returned 200, it assumed the close was client-initiated. Observed failure on 2026-04-24 07:56 UTC: upstream WS closed with code 1006 after ~10 min of no drawing — almost certainly a RunPod proxy idle timeout — pod was fine, classifier returned `voluntary`, backend closed iPad with code 1000 (clean close), iOS reconnect logic (which only retries on abnormal closures) did nothing. App stuck on "Connecting…" with no retry.
+**Decision:** Delete `classifyClose` + `CloseClassification` entirely. Invariant: **if the iPad WS is still open when upstream closes, the user expects frames**. Always recover — there is no legitimate "voluntary upstream close while iPad is connected" case, because the user-left-the-app flow closes the iPad WS first and is already filtered by the `clientDisconnected || socket.readyState !== socket.OPEN` check at the top of `relay.onClose`. New flow:
+1. Try reconnecting to the same `podUrl` first (~1–2 s if pod is still healthy — common for transient RunPod proxy idle timeouts and network blips; no full re-provision needed).
+2. If that connect fails, call `replaceSession` (existing flow — provisions a fresh pod, ~90 s "Replacing — …" UX).
+
+Extracted shared relay-wiring into a single `wireRelay(podUrl)` helper inside the `/v1/stream` route handler, used for the initial connect, same-pod reconnects, and replacement pods. Eliminated the duplicated-with-slight-variations code blocks.
+
+**Alternatives considered:**
+- **Fix at the transport layer** (WS keep-alive pings on the upstream): would reduce how often drops happen, but drops still happen on real network issues and cold hosts. Recovery at the handler level is needed regardless; keep-alive is a separate optimization.
+- **Keep `classifyClose` but fix the `voluntary` branch** (e.g., inspect the close code): the upstream WS close code is 1006 for both "client abrupt disconnect → upstream sees abnormal" and "transport-level drop with pod alive." Not actually distinguishable. Simpler to always recover.
+- **Tear down and restart after one failed replacement** (non-recursive onClose for the replacement relay): kept previously as belt-and-suspenders. `replaceSession`'s `MAX_SESSION_REPLACEMENTS` cap is the real protection against flapping pods — it throws when exhausted and the outer `try/catch` bounces iPad with a real error. Deleted the redundant non-recursive handler.
+
+**Consequences:**
+- `orchestrator.ts` loses `classifyClose` (~25 lines) + the `CloseClassification` type. `stream.ts` shrinks from ~290 lines of relay setup + onClose logic to ~150 lines with a shared `wireRelay` helper. Net: +112 insertions / -158 deletions across the commit.
+- Transient WS drops (common: RunPod proxy idle timeout, brief network blips) now recover transparently in ~2–5 s with no "Replacing — …" UX flash. Real pod preemption still goes through the existing `replaceSession` flow unchanged.
+- No Redis schema changes, no wire protocol changes. Single-commit rollback restores the `classifyClose` flow.
+
+---
+
 ### 2026-04-23 — Deploy Python deps + app code via network volume (eliminate custom GHCR image)
 **Context:** Each user session's pod was built from a slim `ghcr.io/donpinkus/kiki-flux-klein:<sha>` image layered on top of `runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404`. PostHog data over the last 7 days showed ~38 % of provisions hit a GHCR pull stall: `pod.runtime` stayed null past the 120 s watchdog deadline on a specific subset of RunPod hosts unable to pull reliably from ghcr.io. Each stall added ~120 s of user-visible wait before the orchestrator rerolled to a different DC; real user wait on affected provisions was 200–310 s vs. the p50 of 83 s. Per-phase timing breakdown showed `fetching_image` = 18–28 s clean, `warming_model` = ~55 s; model load (not image pull) was the dominant chunk. 23 stall events / week (16 in EUR-NO-1). The custom image was originally introduced to avoid runtime `pip install` + HF weight downloads; weights moved onto network volumes shortly after (the image couldn't fit ~28 GB), but deps + app code stayed baked.
 **Decision:** Remove the custom image entirely. Pods launch directly from the stock `runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404` (publicly cached on most RunPod hosts). Python deps + app code live on the attached network volume at `/workspace/venv/` (created via `python3 -m venv --system-site-packages` — base-image torch/CUDA visible so pip skips reinstalling them) and `/workspace/app/` (rsynced server code). Pod boot uses RunPod's `dockerArgs` to override CMD with `bash -lc 'source /workspace/venv/bin/activate && cd /workspace/app && exec python3 -u server.py'`, plus create-time `env:[]` for `HF_HOME`, `HF_HUB_OFFLINE`, `FLUX_*`. Deploy flow: `npx tsx backend/scripts/sync-flux-app.ts --dc <X> --volume-id <Y>` once per DC; idempotent (rsync/pip skip unchanged). Watchdog renamed `ImagePullStallError` → `PodBootStallError` (covers NFS mount stalls and cold-host stock-image pulls that can still occur, just much rarer); budget lowered 120 s → 45 s.
