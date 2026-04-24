@@ -46,7 +46,9 @@ public enum ResultState {
     case error(message: String, previousImage: UIImage?)
     /// Backend reaper paused the session after 30 min of no frame activity.
     /// User taps the overlay or starts drawing to resume; both call resumeStream().
-    case idleTimeout(message: String)
+    /// `previousImage` is displayed under a semi-transparent overlay so the
+    /// user can see their last-generated image is still waiting for them.
+    case idleTimeout(message: String, previousImage: UIImage?)
 
     public var isPreview: Bool {
         if case .preview = self { return true }

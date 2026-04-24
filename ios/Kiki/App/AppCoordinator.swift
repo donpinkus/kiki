@@ -746,9 +746,10 @@ final class AppCoordinator {
             streamLog.error("Stream failed: \(msg)")
             resultState = .error(message: msg, previousImage: lastSuccessfulImage)
         case .idleTimeout(let message):
-            // Reaper paused the session. Show the dedicated overlay; user can
-            // tap it (or start drawing) to resume — both routes call resumeStream().
-            resultState = .idleTimeout(message: message)
+            // Reaper paused the session. Show the dedicated overlay on top of
+            // the last generated image so the user sees their work is still
+            // waiting for them. Tap or start drawing to resume.
+            resultState = .idleTimeout(message: message, previousImage: lastSuccessfulImage)
         }
     }
 

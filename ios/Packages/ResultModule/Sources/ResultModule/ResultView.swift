@@ -63,8 +63,8 @@ public struct ResultView: View {
             case .error(let message, let previousImage):
                 errorView(message: message, previousImage: previousImage)
 
-            case .idleTimeout(let message):
-                idleTimeoutView(message: message)
+            case .idleTimeout(let message, let previousImage):
+                idleTimeoutView(message: message, previousImage: previousImage)
 
             }
 
@@ -154,47 +154,44 @@ public struct ResultView: View {
 
     // MARK: - Idle Timeout
 
-    private func idleTimeoutView(message: String) -> some View {
+    private func idleTimeoutView(message _: String, previousImage: UIImage?) -> some View {
         Button(action: { onResumeTapped?() }) {
-            VStack(spacing: 24) {
-                Spacer(minLength: 0)
+            ZStack {
+                // Last generated image stays visible underneath as a reminder
+                // that the user's work hasn't gone anywhere.
+                if let image = previousImage {
+                    imageView(image)
+                }
+                // Semi-opaque dim on top — mostly covers the image so the
+                // paused state reads clearly, but the image is still faintly
+                // visible behind it.
+                Color.black.opacity(0.55)
+                    .ignoresSafeArea()
 
-                Image(systemName: "moon.zzz.fill")
-                    .font(.system(size: 56, weight: .light))
-                    .foregroundStyle(.secondary)
+                VStack(spacing: 20) {
+                    Image(systemName: "moon.zzz.fill")
+                        .font(.system(size: 48, weight: .light))
+                        .foregroundStyle(idleGradient)
 
-                VStack(spacing: 8) {
-                    Text("Session paused")
+                    Text("Session Paused - Draw to Resume")
                         .font(.title2.weight(.semibold))
-                        .foregroundStyle(.primary)
-
-                    Text(message)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(idleGradient)
                         .multilineTextAlignment(.center)
                         .padding(.horizontal, 40)
                 }
-
-                Label {
-                    Text("Tap anywhere or start drawing to resume.")
-                        .font(.callout)
-                        .foregroundStyle(.primary)
-                } icon: {
-                    Image(systemName: "hand.tap")
-                        .foregroundStyle(.tint)
-                }
-                .padding(16)
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
-                .padding(.horizontal, 32)
-
-                Spacer(minLength: 0)
             }
-            .padding(.horizontal, 24)
-            .padding(.vertical, 32)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+
+    private var idleGradient: LinearGradient {
+        LinearGradient(
+            colors: [.teal, .purple],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
     }
 
     private var provisioningGradient: LinearGradient {
