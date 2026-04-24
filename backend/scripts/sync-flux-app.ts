@@ -58,10 +58,21 @@ if (!SSH_KEY) {
 
 // ─── Constants ────────────────────────────────────────────────────────────
 
-// CPU-only pod type; we don't need a GPU for pip install + rsync.
-// Kept as RTX 5090 on-demand for simplicity — if a CPU-only type is reliably
-// available for this use case, switch here.
-const GPU_TYPE_ID = 'NVIDIA GeForce RTX 5090';
+// We don't need a GPU for pip install + rsync — we just need a pod that can
+// mount the network volume. RunPod requires gpuCount ≥ 1, so we try an
+// ordered list of cheap GPUs (cheapest first) and use whichever one has
+// capacity in the target DC. Set SYNC_GPU_TYPE_ID to pin a specific type.
+const DEFAULT_GPU_CANDIDATES = [
+  'NVIDIA RTX 2000 Ada Generation',
+  'NVIDIA RTX A4000',
+  'NVIDIA GeForce RTX 3090',
+  'NVIDIA L4',
+  'NVIDIA GeForce RTX 4090',
+  'NVIDIA GeForce RTX 5090',
+];
+const GPU_CANDIDATES = process.env['SYNC_GPU_TYPE_ID']
+  ? [process.env['SYNC_GPU_TYPE_ID']!]
+  : DEFAULT_GPU_CANDIDATES;
 // Must match the pinned base used by runtime pods (orchestrator.ts / runpodClient.ts).
 // Base image determines torch/CUDA ABI; venv + pip installs are tied to this.
 const IMAGE_NAME = 'runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404';
@@ -89,33 +100,46 @@ async function gql<T>(query: string): Promise<T> {
 
 // ─── Pod lifecycle ────────────────────────────────────────────────────────
 
-async function createPod(): Promise<{ id: string; costPerHr: number }> {
+async function createPod(): Promise<{ id: string; costPerHr: number; gpuType: string }> {
   const authField = REGISTRY_AUTH_ID
     ? `, containerRegistryAuthId: "${REGISTRY_AUTH_ID}"`
     : '';
-  const query = `mutation {
-    podFindAndDeployOnDemand(input: {
-      name: "${POD_NAME}",
-      imageName: "${IMAGE_NAME}",
-      gpuTypeId: "${GPU_TYPE_ID}",
-      gpuCount: 1,
-      cloudType: SECURE,
-      volumeInGb: 0,
-      containerDiskInGb: 40,
-      minMemoryInGb: 16,
-      minVcpuCount: 4,
-      ports: "22/tcp",
-      startSsh: true,
-      dataCenterId: "${DC}",
-      networkVolumeId: "${VOLUME_ID}",
-      volumeMountPath: "/workspace"${authField}
-    }) { id desiredStatus costPerHr }
-  }`;
-  const data = await gql<{ podFindAndDeployOnDemand: { id: string; costPerHr: number } | null }>(query);
-  if (!data.podFindAndDeployOnDemand) {
-    throw new Error(`Failed to create sync pod in ${DC} — capacity?`);
+  const failures: string[] = [];
+  for (const gpuType of GPU_CANDIDATES) {
+    const query = `mutation {
+      podFindAndDeployOnDemand(input: {
+        name: "${POD_NAME}",
+        imageName: "${IMAGE_NAME}",
+        gpuTypeId: "${gpuType}",
+        gpuCount: 1,
+        cloudType: SECURE,
+        volumeInGb: 0,
+        containerDiskInGb: 40,
+        minMemoryInGb: 16,
+        minVcpuCount: 4,
+        ports: "22/tcp",
+        startSsh: true,
+        dataCenterId: "${DC}",
+        networkVolumeId: "${VOLUME_ID}",
+        volumeMountPath: "/workspace"${authField}
+      }) { id desiredStatus costPerHr }
+    }`;
+    try {
+      const data = await gql<{ podFindAndDeployOnDemand: { id: string; costPerHr: number } | null }>(query);
+      if (data.podFindAndDeployOnDemand) {
+        return { ...data.podFindAndDeployOnDemand, gpuType };
+      }
+      failures.push(`${gpuType}: no capacity`);
+      console.log(`[sync] ${gpuType} unavailable in ${DC}, trying next...`);
+    } catch (e) {
+      const msg = (e as Error).message;
+      failures.push(`${gpuType}: ${msg}`);
+      console.log(`[sync] ${gpuType} create failed (${msg}), trying next...`);
+    }
   }
-  return data.podFindAndDeployOnDemand;
+  throw new Error(
+    `Failed to create sync pod in ${DC} — exhausted ${GPU_CANDIDATES.length} GPU types:\n  ${failures.join('\n  ')}`,
+  );
 }
 
 interface PodRuntime {
@@ -253,8 +277,8 @@ async function main(): Promise<void> {
   ensureSshKey();
 
   console.log(`[sync] creating on-demand pod in ${DC}...`);
-  const { id: podId, costPerHr } = await createPod();
-  console.log(`[sync] pod ${podId} created ($${costPerHr}/hr)`);
+  const { id: podId, costPerHr, gpuType } = await createPod();
+  console.log(`[sync] pod ${podId} created on ${gpuType} ($${costPerHr}/hr)`);
 
   try {
     console.log('[sync] waiting for SSH...');
