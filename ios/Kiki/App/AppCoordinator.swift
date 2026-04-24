@@ -263,6 +263,12 @@ final class AppCoordinator {
         canvasViewModel.currentBrushColorProvider = { [weak self] in
             UIColor(self?.currentColor ?? .black)
         }
+        // Auto-resume after idle timeout: any stroke fires this, and if the
+        // session is paused we kick a fresh provision without requiring the
+        // user to navigate or tap an overlay.
+        canvasViewModel.onUserActivity = { [weak self] in
+            self?.handleUserActivity()
+        }
     }
 
     // MARK: - Auth
@@ -662,6 +668,30 @@ final class AppCoordinator {
         }
     }
 
+    /// Public entry point for resuming a paused/idle session. Used by:
+    ///   • The right-pane "Session paused" overlay (tap target)
+    ///   • Stroke-triggered auto-resume (canvas onUserActivity)
+    /// Tears down the existing (stopped) session and starts a fresh one. The
+    /// `startStream()` early-return on `streamSession != nil` would otherwise
+    /// no-op, since the session is technically present but stopped.
+    func resumeStream() {
+        if streamSession != nil {
+            streamLog.info("Resume requested — tearing down stopped session")
+            streamSession?.stop()
+            streamSession = nil
+        }
+        startStream()
+    }
+
+    /// Called whenever the user starts a canvas stroke. If the session is
+    /// idle-timed-out, this auto-resumes — no need to navigate or tap.
+    fileprivate func handleUserActivity() {
+        if case .idleTimeout = streamReadiness {
+            streamLog.info("User activity detected during idle timeout — resuming stream")
+            resumeStream()
+        }
+    }
+
     private func stopStream() {
         let hadSession = streamSession != nil
         let finalFrameCount = streamFrameCount
@@ -715,6 +745,10 @@ final class AppCoordinator {
         case .failed(let msg):
             streamLog.error("Stream failed: \(msg)")
             resultState = .error(message: msg, previousImage: lastSuccessfulImage)
+        case .idleTimeout(let message):
+            // Reaper paused the session. Show the dedicated overlay; user can
+            // tap it (or start drawing) to resume — both routes call resumeStream().
+            resultState = .idleTimeout(message: message)
         }
     }
 

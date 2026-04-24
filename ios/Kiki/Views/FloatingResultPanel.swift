@@ -100,6 +100,22 @@ struct FloatingResultPanel: View {
                     .controlSize(.regular)
             }
 
+        case .idleTimeout:
+            // Floating panel mirrors split-screen "Session paused" treatment
+            // but in a simpler form — the larger right-pane overlay is the
+            // primary affordance for resume; this is just a status hint.
+            ZStack {
+                Color(.systemGray6)
+                VStack(spacing: 8) {
+                    Image(systemName: "moon.zzz.fill")
+                        .font(.system(size: 28))
+                        .foregroundStyle(.secondary)
+                    Text("Session paused")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
         case .error(_, let previousImage):
             if let prev = previousImage {
                 pickableImage(prev).padding(4)

@@ -11,6 +11,7 @@ public struct ResultView: View {
     private let state: ResultState
     private let currentBrushColor: Color
     private let onColorPicked: ((Color) -> Void)?
+    private let onResumeTapped: (() -> Void)?
 
     @State private var showToast = false
     @State private var toastMessage = ""
@@ -27,11 +28,13 @@ public struct ResultView: View {
     public init(
         state: ResultState = .empty,
         currentBrushColor: Color = .black,
-        onColorPicked: ((Color) -> Void)? = nil
+        onColorPicked: ((Color) -> Void)? = nil,
+        onResumeTapped: (() -> Void)? = nil
     ) {
         self.state = state
         self.currentBrushColor = currentBrushColor
         self.onColorPicked = onColorPicked
+        self.onResumeTapped = onResumeTapped
     }
 
     // MARK: - Body
@@ -59,6 +62,9 @@ public struct ResultView: View {
 
             case .error(let message, let previousImage):
                 errorView(message: message, previousImage: previousImage)
+
+            case .idleTimeout(let message):
+                idleTimeoutView(message: message)
 
             }
 
@@ -144,6 +150,51 @@ public struct ResultView: View {
             .padding(.horizontal, 24)
             .padding(.vertical, 32)
         }
+    }
+
+    // MARK: - Idle Timeout
+
+    private func idleTimeoutView(message: String) -> some View {
+        Button(action: { onResumeTapped?() }) {
+            VStack(spacing: 24) {
+                Spacer(minLength: 0)
+
+                Image(systemName: "moon.zzz.fill")
+                    .font(.system(size: 56, weight: .light))
+                    .foregroundStyle(.secondary)
+
+                VStack(spacing: 8) {
+                    Text("Session paused")
+                        .font(.title2.weight(.semibold))
+                        .foregroundStyle(.primary)
+
+                    Text(message)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 40)
+                }
+
+                Label {
+                    Text("Tap anywhere or start drawing to resume.")
+                        .font(.callout)
+                        .foregroundStyle(.primary)
+                } icon: {
+                    Image(systemName: "hand.tap")
+                        .foregroundStyle(.tint)
+                }
+                .padding(16)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+                .padding(.horizontal, 32)
+
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 32)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private var provisioningGradient: LinearGradient {

@@ -66,6 +66,7 @@ export type FailureCategory =
   | 'pod_vanished'
   | 'warm_model_timeout'
   | 'monthly_cap'
+  | 'idle_timeout'
   | 'transient_runpod'
   | 'unknown';
 

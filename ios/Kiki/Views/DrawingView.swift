@@ -154,7 +154,8 @@ struct DrawingView: View {
             ResultView(
                 state: coordinator.resultState,
                 currentBrushColor: coordinator.currentColor,
-                onColorPicked: { coordinator.currentColor = $0 }
+                onColorPicked: { coordinator.currentColor = $0 },
+                onResumeTapped: { coordinator.resumeStream() }
             )
             .overlay(alignment: .top) {
                 PromptTitleBar()
@@ -203,6 +204,7 @@ struct DrawingView: View {
         case .warming: return .orange
         case .disconnected: return .gray
         case .failed: return .red
+        case .idleTimeout: return .blue
         }
     }
 
@@ -212,6 +214,7 @@ struct DrawingView: View {
         case .warming(let message, _): return message
         case .disconnected: return "Disconnected"
         case .failed: return "Error"
+        case .idleTimeout: return "Paused"
         }
     }
 

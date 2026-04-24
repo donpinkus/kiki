@@ -44,6 +44,9 @@ public enum ResultState {
     case preview(image: UIImage)
     case streaming(image: UIImage, frameCount: Int = 0)
     case error(message: String, previousImage: UIImage?)
+    /// Backend reaper paused the session after 30 min of no frame activity.
+    /// User taps the overlay or starts drawing to resume; both call resumeStream().
+    case idleTimeout(message: String)
 
     public var isPreview: Bool {
         if case .preview = self { return true }

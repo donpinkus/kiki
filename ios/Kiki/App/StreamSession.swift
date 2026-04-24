@@ -23,6 +23,9 @@ final class StreamSession {
         case warming(message: String, startedAt: Date)
         case ready
         case failed(message: String)
+        /// Backend reaper terminated the pod after 30 min of no frame activity.
+        /// User can resume by tapping the right-pane overlay or starting to draw.
+        case idleTimeout(message: String)
     }
 
     // MARK: - Properties
@@ -179,7 +182,7 @@ final class StreamSession {
         return resized.jpegData(compressionQuality: 0.7)
     }
 
-    func stop() {
+    func stop(finalReadiness: StreamReadiness = .disconnected) {
         Self.breadcrumb(category: "stream.lifecycle", message: "Stopping", data: [
             "framesSent": framesSent,
             "framesReceived": framesReceived,
@@ -187,7 +190,7 @@ final class StreamSession {
         isStopped = true
         cancelAllTasks()
         Task { await client.disconnect() }
-        setReadiness(.disconnected)
+        setReadiness(finalReadiness)
     }
 
     // MARK: - Connection
@@ -440,7 +443,19 @@ final class StreamSession {
             self.reconnectAttempts = 0
             self.setReadiness(.failed(message: displayText(for: failureCategory)))
         case .terminated:
-            self.setReadiness(.disconnected)
+            // Idle reaper sends terminated + idle_timeout. Stop the session
+            // cleanly so attemptReconnect doesn't fight the deliberate close;
+            // user resumes via coordinator.resumeStream() (tap-to-resume on
+            // the overlay or starting a stroke).
+            //
+            // Other terminated paths (manual abort, replaceSession cleanup of
+            // old pod) carry no failureCategory and fall through to
+            // .disconnected as before.
+            if failureCategory == .idleTimeout {
+                self.stop(finalReadiness: .idleTimeout(message: displayText(for: failureCategory)))
+            } else {
+                self.setReadiness(.disconnected)
+            }
         }
     }
 

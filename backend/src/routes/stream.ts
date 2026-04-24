@@ -142,9 +142,19 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       // transition — fresh caller AND joiner both go through this single path.
       // The broker seeds the handler with the current Redis state (if any),
       // then forwards every subsequent transition.
+      //
+      // On state='terminated' (e.g. idle reaper), we also close the iPad WS
+      // cleanly with code 1000. This sets clientDisconnected via the existing
+      // socket.on('close') handler — so when the upstream pod is killed next
+      // and relay.onClose fires, the recovery path's clientDisconnected check
+      // returns early. iPad sees a clean close + the terminated state event
+      // (with failureCategory) instead of a "Recovery failed" error bounce.
       const unsubscribeState = await subscribe(userId, (event) => {
         if (socket.readyState === socket.OPEN) {
           socket.send(JSON.stringify({ type: 'state', ...event }));
+          if (event.state === 'terminated') {
+            socket.close(1000, event.failureCategory ?? 'session_ended');
+          }
         }
       });
 

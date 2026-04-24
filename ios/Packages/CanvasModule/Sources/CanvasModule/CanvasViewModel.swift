@@ -56,6 +56,11 @@ public final class CanvasViewModel {
     /// The AppCoordinator sets this to update its currentColor.
     public var onColorPicked: ((UIColor) -> Void)?
 
+    /// Fires once per stroke (on touch-down). The AppCoordinator uses this
+    /// to auto-resume after an idle-timeout so the user can just start
+    /// drawing instead of needing to tap an overlay or navigate pages.
+    public var onUserActivity: (() -> Void)?
+
     /// Supplies the current brush color so the preview ring can show it as the "previous" half.
     /// The AppCoordinator sets this.
     public var currentBrushColorProvider: (() -> UIColor)?
@@ -329,7 +334,10 @@ public final class CanvasViewModel {
         translation = container?.translation ?? .zero
     }
 
-    public func handleInteractionBegan() { isInteracting = true }
+    public func handleInteractionBegan() {
+        isInteracting = true
+        onUserActivity?()
+    }
     public func handleInteractionEnded() { isInteracting = false }
 
     func handleColorPicked(_ color: UIColor) {

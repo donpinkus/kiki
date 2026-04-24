@@ -773,6 +773,13 @@ async function runReaper(): Promise<void> {
       log.info({ sessionId, podId, idleMs, lifetimeMs }, 'Reaping idle pod');
       trackPodTerminated({ userId: sessionId, reason: 'idle', lifetimeMs });
       notifyPodTerminated(podId, `idle ${Math.round(idleMs / 1000)}s`);
+      // Emit through the broker so the iPad sees state='terminated' with
+      // failure_category='idle_timeout' BEFORE we close the upstream pod WS.
+      // stream.ts's broker subscriber will close the iPad WS cleanly with
+      // code 1000, so when relay.onClose fires from the pod kill below,
+      // the recovery path's clientDisconnected check exits early — no
+      // confusing "Recovery failed" bounce.
+      await emitState(sessionId, 'terminated', 'idle_timeout');
       terminatePod(podId)
         .then(() => redis.del(key))
         .catch((err) => log.error({ sessionId, podId, err }, 'Reap failed'));

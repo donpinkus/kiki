@@ -25,6 +25,7 @@ public enum FailureCategory: String, Decodable, Sendable {
     case podVanished = "pod_vanished"
     case warmModelTimeout = "warm_model_timeout"
     case monthlyCap = "monthly_cap"
+    case idleTimeout = "idle_timeout"
     case transientRunpod = "transient_runpod"
     case unknown
 }
@@ -62,6 +63,8 @@ public func displayText(for failureCategory: FailureCategory?) -> String {
         return "Pod was reclaimed during setup — try again"
     case .monthlyCap:
         return "Monthly usage cap reached"
+    case .idleTimeout:
+        return "Session paused after idle. Tap or draw to resume."
     case .unknown:
         return "Something went wrong"
     }
