@@ -7,7 +7,6 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		4000D6722F93FC430044E86F /* File.txt in Resources */ = {isa = PBXBuildFile; fileRef = 4000D6712F93FC430044E86F /* File.txt */; };
 		4000D6752F94095B0044E86F /* Sentry in Frameworks */ = {isa = PBXBuildFile; productRef = 4000D6742F94095B0044E86F /* Sentry */; };
 		404C38372F69891C00EB39C6 /* CanvasModule in Frameworks */ = {isa = PBXBuildFile; productRef = 40949E012F5E400100AF4CF7 /* CanvasModule */; };
 		404C383A2F69891C00EB39C6 /* NetworkModule in Frameworks */ = {isa = PBXBuildFile; productRef = 40949E012F5E400400AF4CF7 /* NetworkModule */; };
@@ -16,7 +15,6 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		4000D6712F93FC430044E86F /* File.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = File.txt; sourceTree = "<group>"; };
 		40949DDB2F5E235500AF4CF7 /* Kiki.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Kiki.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -47,7 +45,6 @@
 		40949DD22F5E235500AF4CF7 = {
 			isa = PBXGroup;
 			children = (
-				4000D6712F93FC430044E86F /* File.txt */,
 				40949DDD2F5E235500AF4CF7 /* Kiki */,
 				40949DDC2F5E235500AF4CF7 /* Products */,
 			);
@@ -137,7 +134,6 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				4000D6722F93FC430044E86F /* File.txt in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
