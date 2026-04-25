@@ -249,17 +249,14 @@ private struct PromptTitleBar: View {
         .padding(.vertical, 16)
     }
 
-    // Glass-like specular stroke — brighter top, accent-tinted bottom edge.
-    // Fakes the light-catching edge of Apple's Liquid Glass since we can't
-    // use the real `.glassEffect` API on iPadOS 18.
-    private static let glassStroke = LinearGradient(
-        colors: [
-            .white.opacity(0.35),
-            .white.opacity(0.05),
-            Color.accentColor.opacity(0.35)
-        ],
-        startPoint: .top,
-        endPoint: .bottom
+    // Teal→purple diagonal gradient — matches the idle-timeout overlay's
+    // visual identity for a unified accent across the app's accent surfaces.
+    // Diagonal (top-leading → bottom-trailing) mirrors the title gradient
+    // direction so the two designs feel related.
+    private static let gradientStroke = LinearGradient(
+        colors: [.teal, .purple],
+        startPoint: .topLeading,
+        endPoint: .bottomTrailing
     )
 
     private var styleButton: some View {
@@ -283,7 +280,12 @@ private struct PromptTitleBar: View {
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: Self.cornerRadius))
             .overlay(
                 RoundedRectangle(cornerRadius: Self.cornerRadius)
-                    .stroke(Self.glassStroke, lineWidth: 1)
+                    .stroke(Self.gradientStroke, lineWidth: 1.5)
+                    // Layered shadow on the stroke — same shape as the idle
+                    // title's drop shadow but lower opacity since this sits
+                    // on a light background, not over a darkened image.
+                    .shadow(color: .black.opacity(0.18), radius: 2, y: 1)
+                    .shadow(color: .black.opacity(0.12), radius: 8, y: 4)
             )
         }
         .buttonStyle(.plain)
@@ -316,7 +318,9 @@ private struct PromptTitleBar: View {
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: Self.cornerRadius))
         .overlay(
             RoundedRectangle(cornerRadius: Self.cornerRadius)
-                .stroke(Self.glassStroke, lineWidth: 1)
+                .stroke(Self.gradientStroke, lineWidth: 1.5)
+                .shadow(color: .black.opacity(0.18), radius: 2, y: 1)
+                .shadow(color: .black.opacity(0.12), radius: 8, y: 4)
         )
     }
 }
