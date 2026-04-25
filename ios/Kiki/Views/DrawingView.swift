@@ -69,7 +69,6 @@ struct DrawingView: View {
                         .zIndex(coordinator.canvasOnTop ? 2 : 0)
 
                     CanvasSidebar()
-                        .padding(.leading, 12)
                         .frame(maxHeight: .infinity, alignment: .leading)
                         .zIndex(3)
 

@@ -4,6 +4,7 @@ import CanvasModule
 struct DrawingTopBar: View {
     @Environment(AppCoordinator.self) private var coordinator
     @State private var showSettings = false
+    @State private var showColorPicker = false
 
     var body: some View {
         @Bindable var coordinator = coordinator
@@ -92,10 +93,48 @@ struct DrawingTopBar: View {
                 LayerPanelView()
                     .frame(width: 260, height: 400)
             }
+
+            colorSwatch
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
         .background(.bar)
+    }
+
+    // MARK: - Color swatch
+
+    private var colorSwatch: some View {
+        @Bindable var coordinator = coordinator
+        let isDark = coordinator.currentColor.isDark
+
+        return Button {
+            showColorPicker.toggle()
+        } label: {
+            Circle()
+                .fill(coordinator.currentColor)
+                .frame(width: 28, height: 28)
+                .overlay {
+                    if isDark {
+                        // Thin black inner ring (fake inner shadow) — stroke inset
+                        // so half the line sits inside the fill, blurred for softness.
+                        Circle()
+                            .inset(by: 1)
+                            .stroke(Color.black.opacity(0.5), lineWidth: 1.25)
+                            .blur(radius: 0.75)
+                            .mask(Circle())
+                        // White outer outline for contrast against bar background.
+                        Circle()
+                            .strokeBorder(Color.white, lineWidth: 1.5)
+                    } else {
+                        Circle()
+                            .strokeBorder(Color.primary.opacity(0.3), lineWidth: 1.5)
+                    }
+                }
+        }
+        .popover(isPresented: $showColorPicker) {
+            DiskColorPicker(color: $coordinator.currentColor)
+        }
+        .frame(width: 36, height: 36)
     }
 
     // MARK: - Helpers
@@ -121,5 +160,15 @@ struct DrawingTopBar: View {
                 .frame(width: 36, height: 36)
         }
         .disabled(disabled)
+    }
+}
+
+private extension Color {
+    // Perceived-luminance check (Rec. 601 weights). Used to decide whether a
+    // color swatch needs a high-contrast (white + inner-dark) border.
+    var isDark: Bool {
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        UIColor(self).getRed(&r, green: &g, blue: &b, alpha: &a)
+        return (0.299 * r + 0.587 * g + 0.114 * b) < 0.55
     }
 }

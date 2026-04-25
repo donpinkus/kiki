@@ -5,7 +5,6 @@ struct CanvasSidebar: View {
     @Environment(AppCoordinator.self) private var coordinator
     @State private var isDraggingSize = false
     @State private var isDraggingOpacity = false
-    @State private var showColorPicker = false
 
     private let widthRange = BrushConfig.widthRange
 
@@ -13,22 +12,6 @@ struct CanvasSidebar: View {
         @Bindable var coordinator = coordinator
 
         VStack(spacing: 12) {
-            // Color swatch — tap to show disk picker popover
-            Button {
-                showColorPicker.toggle()
-            } label: {
-                Circle()
-                    .fill(coordinator.currentColor)
-                    .frame(width: 30, height: 30)
-                    .overlay(Circle().stroke(.primary.opacity(0.3), lineWidth: 1.5))
-            }
-            .popover(isPresented: $showColorPicker) {
-                DiskColorPicker(color: $coordinator.currentColor)
-            }
-            .frame(width: 36, height: 36)
-
-            Divider().frame(width: 24)
-
             // Vertical size slider
             Slider(value: $coordinator.toolSize, in: widthRange) { editing in
                 isDraggingSize = editing
@@ -88,8 +71,13 @@ struct CanvasSidebar: View {
         }
         .padding(.vertical, 16)
         .padding(.horizontal, 10)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
-        .shadow(color: .black.opacity(0.15), radius: 8, y: 4)
+        .background(
+            .ultraThinMaterial,
+            in: UnevenRoundedRectangle(
+                cornerRadii: .init(topLeading: 0, bottomLeading: 0, bottomTrailing: 16, topTrailing: 16)
+            )
+        )
+        .shadow(color: .black.opacity(0.15), radius: 8, x: 2, y: 0)
     }
 
     // MARK: - Helpers
