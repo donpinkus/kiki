@@ -249,6 +249,18 @@ private struct PromptTitleBar: View {
         .padding(.vertical, 16)
     }
 
+    // Glass-like specular stroke — brighter top, accent-tinted bottom edge.
+    // Fakes the light-catching edge of Apple's Liquid Glass.
+    private static let glassStroke = LinearGradient(
+        colors: [
+            .white.opacity(0.35),
+            .white.opacity(0.05),
+            Color.accentColor.opacity(0.35)
+        ],
+        startPoint: .top,
+        endPoint: .bottom
+    )
+
     private var styleButton: some View {
         Button {
             coordinator.showStylePicker = true
@@ -268,9 +280,10 @@ private struct PromptTitleBar: View {
             .padding(.horizontal, 6)
             .frame(width: Self.contentHeight, height: Self.contentHeight)
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: Self.cornerRadius))
-            // Layered shadow gives the surface a subtle lift off the
-            // background. Edges are defined by the material contrast, not
-            // a stroke — modern iOS pattern (Photos, Notes, Apple Music).
+            .overlay(
+                RoundedRectangle(cornerRadius: Self.cornerRadius)
+                    .stroke(Self.glassStroke, lineWidth: 1)
+            )
             .shadow(color: .black.opacity(0.18), radius: 2, y: 1)
             .shadow(color: .black.opacity(0.12), radius: 8, y: 4)
         }
@@ -302,6 +315,10 @@ private struct PromptTitleBar: View {
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .frame(height: Self.contentHeight)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: Self.cornerRadius))
+        .overlay(
+            RoundedRectangle(cornerRadius: Self.cornerRadius)
+                .stroke(Self.glassStroke, lineWidth: 1)
+        )
         .shadow(color: .black.opacity(0.18), radius: 2, y: 1)
         .shadow(color: .black.opacity(0.12), radius: 8, y: 4)
     }
