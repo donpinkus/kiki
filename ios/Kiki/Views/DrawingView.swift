@@ -249,16 +249,6 @@ private struct PromptTitleBar: View {
         .padding(.vertical, 16)
     }
 
-    // Teal→purple diagonal gradient — matches the idle-timeout overlay's
-    // visual identity for a unified accent across the app's accent surfaces.
-    // Diagonal (top-leading → bottom-trailing) mirrors the title gradient
-    // direction so the two designs feel related.
-    private static let gradientStroke = LinearGradient(
-        colors: [.teal, .purple],
-        startPoint: .topLeading,
-        endPoint: .bottomTrailing
-    )
-
     private var styleButton: some View {
         Button {
             coordinator.showStylePicker = true
@@ -278,15 +268,11 @@ private struct PromptTitleBar: View {
             .padding(.horizontal, 6)
             .frame(width: Self.contentHeight, height: Self.contentHeight)
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: Self.cornerRadius))
-            .overlay(
-                RoundedRectangle(cornerRadius: Self.cornerRadius)
-                    .stroke(Self.gradientStroke, lineWidth: 1.5)
-                    // Layered shadow on the stroke — same shape as the idle
-                    // title's drop shadow but lower opacity since this sits
-                    // on a light background, not over a darkened image.
-                    .shadow(color: .black.opacity(0.18), radius: 2, y: 1)
-                    .shadow(color: .black.opacity(0.12), radius: 8, y: 4)
-            )
+            // Layered shadow gives the surface a subtle lift off the
+            // background. Edges are defined by the material contrast, not
+            // a stroke — modern iOS pattern (Photos, Notes, Apple Music).
+            .shadow(color: .black.opacity(0.18), radius: 2, y: 1)
+            .shadow(color: .black.opacity(0.12), radius: 8, y: 4)
         }
         .buttonStyle(.plain)
     }
@@ -316,12 +302,8 @@ private struct PromptTitleBar: View {
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .frame(height: Self.contentHeight)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: Self.cornerRadius))
-        .overlay(
-            RoundedRectangle(cornerRadius: Self.cornerRadius)
-                .stroke(Self.gradientStroke, lineWidth: 1.5)
-                .shadow(color: .black.opacity(0.18), radius: 2, y: 1)
-                .shadow(color: .black.opacity(0.12), radius: 8, y: 4)
-        )
+        .shadow(color: .black.opacity(0.18), radius: 2, y: 1)
+        .shadow(color: .black.opacity(0.12), radius: 8, y: 4)
     }
 }
 
