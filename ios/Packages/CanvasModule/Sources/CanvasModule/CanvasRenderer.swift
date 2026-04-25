@@ -1036,6 +1036,12 @@ public final class CanvasRenderer {
     // to exact zero. Without the snap, the soft brush mask leaves partial-alpha
     // residue at the eraser's periphery — visually invisible but encodes as
     // a faint stroke-color ghost in the JPEG sent to the generator.
+    //
+    // The shared brushMask uses a (1-r²)² falloff that's right for paint build-up
+    // but too gradual for erasing — at half-radius only ~50% of alpha is removed,
+    // forcing several passes to clear a region. We remap the mask to a near-hard
+    // disc (smoothstep over the very tail of the falloff) so a single pass fully
+    // erases inside the stamp radius, with a thin AA rim to avoid jaggies.
     fragment float4 eraserStampFragment(
         StampVaryings in [[stage_in]],
         texture2d<float> brushMask [[texture(0)]],
@@ -1043,6 +1049,7 @@ public final class CanvasRenderer {
     ) {
         constexpr sampler maskSampler(filter::linear, address::clamp_to_zero);
         float mask = brushMask.sample(maskSampler, in.texCoord).r;
+        mask = smoothstep(0.0, 0.02, mask);
         float4 result = dst * (1.0 - mask);
         return result.a < (4.0 / 255.0) ? float4(0.0) : result;
     }
