@@ -162,16 +162,33 @@ final class StreamSession {
     /// Send one preview frame and await its generated image. The
     /// `requestId` (passed inside `config`) is echoed back by the pod so
     /// responses pair deterministically regardless of arrival order.
+    ///
+    /// Order matters: register the continuation BEFORE sending. The previous
+    /// "send then register" version raced — if the pod responded between
+    /// `sendFrame` returning and the continuation landing in the map, the
+    /// receive loop would find no match and route the frame to
+    /// `onImageReceived` (the live result pane) as a stale frame. The
+    /// preview tile would then shimmer until the 20 s timeout.
     func sendPreview(jpeg: Data, config: StreamConfig) async throws -> UIImage {
         guard let requestId = config.requestId else {
             preconditionFailure("sendPreview requires config.requestId to be set")
         }
 
-        try await client.sendConfig(config)
-        try await client.sendFrame(jpeg)
-
         return try await withCheckedThrowingContinuation { cont in
             pendingPreviewContinuations[requestId] = cont
+            Task { [weak self] in
+                guard let self else { return }
+                do {
+                    try await self.client.sendConfig(config)
+                    try await self.client.sendFrame(jpeg)
+                } catch {
+                    // Send failed — fail the continuation if it's still pending.
+                    // (Receive loop may have already resolved it; that's fine.)
+                    if let stranded = self.pendingPreviewContinuations.removeValue(forKey: requestId) {
+                        stranded.resume(throwing: error)
+                    }
+                }
+            }
         }
     }
 
