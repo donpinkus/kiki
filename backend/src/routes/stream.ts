@@ -281,7 +281,23 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
 
         // Pod is serving; transition to 'connecting' while we wire up the relay.
         await emitState(userId, 'connecting');
-        await wireRelay(podUrl);
+        // Retry initial relay connect once. Occasionally RunPod's proxy
+        // fails to upgrade the first WS to a freshly-ready pod: /health
+        // returns ok but the /ws upgrade on the same pod 10 s later hangs
+        // (observed 2026-04-25 02:30 UTC — pod was healthy, connect
+        // timed out). A brief second attempt usually succeeds; if it
+        // doesn't, the outer catch aborts the session cleanly.
+        try {
+          await wireRelay(podUrl);
+        } catch (firstErr) {
+          if (clientDisconnected || socket.readyState !== socket.OPEN) throw firstErr;
+          request.log.warn(
+            { userId, podUrl, err: (firstErr as Error).message },
+            'Initial relay connect failed, retrying in 2s',
+          );
+          await new Promise((r) => setTimeout(r, 2000));
+          await wireRelay(podUrl);
+        }
         request.log.info({ userId }, 'Upstream connected, relaying');
 
         socket.on('message', (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
