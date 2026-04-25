@@ -1,1 +1,0 @@
-Can you look at the logs on Railway and wherever else you need to (like Xcode) and determine what went wrong? I'm going to attach the Xcode logs now.
