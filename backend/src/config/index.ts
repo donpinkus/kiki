@@ -35,6 +35,13 @@ export interface AppConfig {
    * removing the spot code path. Default false. */
   readonly ONDEMAND_ONLY_MODE: boolean;
 
+  /** When true, stream.ts provisions a video pod alongside the image pod for
+   * each session. When false, sessions are image-only and queueEmpty triggers
+   * log 'video_skipped: relay_disconnected' (same code path as a runtime
+   * provision failure). Lets us deploy backend-side video changes ahead of
+   * the pod-side code reaching every network volume. Default false. */
+  readonly VIDEO_POD_ENABLED: boolean;
+
   // ─── Network volumes (pre-populated with weights, venv, app code) ────
   /** Map of RunPod datacenter ID → network volume ID. Each volume is
    * pre-populated by scripts/populate-volume.ts (FLUX weights at
@@ -195,6 +202,7 @@ function validateConfig(): AppConfig {
     AUTH_REQUIRED: process.env['AUTH_REQUIRED'] === 'true',
     FREE_TIER_SECONDS: Number(process.env['FREE_TIER_SECONDS'] ?? 3600),
     ONDEMAND_FALLBACK_ENABLED: process.env['ONDEMAND_FALLBACK_ENABLED'] === 'true',
+    VIDEO_POD_ENABLED: process.env['VIDEO_POD_ENABLED'] === 'true',
     ONDEMAND_ONLY_MODE: process.env['ONDEMAND_ONLY_MODE'] === 'true',
     NETWORK_VOLUMES_BY_DC: parseVolumesMap(process.env['NETWORK_VOLUMES_BY_DC']),
     REDIS_URL: process.env['REDIS_URL'] ?? '',

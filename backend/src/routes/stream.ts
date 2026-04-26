@@ -453,13 +453,14 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         }
         request.log.info({ userId }, 'Upstream connected, relaying');
 
-        // Kick off video pod provisioning in the background. We don't await
-        // — the user's image flow is unblocked the moment the image relay
-        // is up. When the video pod resolves, we wire it; if it fails or
-        // takes too long, queueEmpty triggers log 'video_skipped' and the
-        // session continues image-only. See provisionVideoPod for the
-        // best-effort semantics.
-        void (async () => {
+        // Kick off video pod provisioning in the background, gated by
+        // VIDEO_POD_ENABLED so we can deploy backend-side changes ahead
+        // of the pod-side code reaching the network volume. When disabled,
+        // queueEmpty triggers log 'video_skipped: relay_disconnected' and
+        // the session continues image-only — same code path as a runtime
+        // video provision failure.
+        if (config.VIDEO_POD_ENABLED) {
+          void (async () => {
           try {
             const result = await provisionVideoPod(userId);
             if (!result || clientDisconnected || socket.readyState !== socket.OPEN) {
@@ -494,7 +495,14 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             );
             videoSessionEnabled = false;
           }
-        })();
+          })();
+        } else {
+          request.log.info(
+            { userId, event: '[provision/video] disabled by config' },
+            'video pod disabled (VIDEO_POD_ENABLED=false); session is image-only',
+          );
+          videoSessionEnabled = false;
+        }
 
         socket.on('message', (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
           if (!relay) return;
