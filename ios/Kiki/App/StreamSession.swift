@@ -424,7 +424,8 @@ final class StreamSession {
                         self.handleState(
                             state,
                             replacementCount: status.replacementCount ?? 0,
-                            failureCategory: status.failureCategory.flatMap { FailureCategory(rawValue: $0) }
+                            failureCategory: status.failureCategory.flatMap { FailureCategory(rawValue: $0) },
+                            warmingStartedAt: status.warmingStartedAt.map { Date(timeIntervalSince1970: TimeInterval($0) / 1000) }
                         )
                     } else if status.type == "error" {
                         // Out-of-band error (auth, entitlement, rate-limit,
@@ -448,11 +449,12 @@ final class StreamSession {
     private func handleState(
         _ state: ProvisionState,
         replacementCount: Int,
-        failureCategory: FailureCategory?
+        failureCategory: FailureCategory?,
+        warmingStartedAt: Date?
     ) {
         switch state {
         case .queued, .findingGpu, .creatingPod, .fetchingImage, .warmingModel, .connecting:
-            self.warm(message: displayText(for: state, replacementCount: replacementCount))
+            self.warm(message: displayText(for: state, replacementCount: replacementCount), serverStartedAt: warmingStartedAt)
         case .ready:
             self.setReadiness(.ready)
             // Re-send config now that the server is ready to accept it.
@@ -505,13 +507,17 @@ final class StreamSession {
         }
     }
 
-    /// Transition to `.warming`. If we're already in `.warming`, the existing
-    /// `startedAt` is carried forward so the progress bar stays continuous
-    /// across multiple status updates and reconnect attempts. Otherwise a
-    /// fresh `Date()` starts the warm-up cycle.
-    private func warm(message: String) {
+    /// Transition to `.warming`. The server's `warmingStartedAt` (when present)
+    /// is authoritative — it's the original pod-warm-cycle start, stable across
+    /// reconnects, so the progress bar resumes correctly even after a fresh
+    /// session is created (e.g. on gallery↔drawing navigation). Falls back to
+    /// the existing readiness's startedAt, then `Date()`, when the server hasn't
+    /// supplied a timestamp.
+    private func warm(message: String, serverStartedAt: Date? = nil) {
         let startedAt: Date
-        if case .warming(_, let existing) = readiness {
+        if let serverStartedAt {
+            startedAt = serverStartedAt
+        } else if case .warming(_, let existing) = readiness {
             startedAt = existing
         } else {
             startedAt = Date()

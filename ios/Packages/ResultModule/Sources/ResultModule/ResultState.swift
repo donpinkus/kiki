@@ -39,7 +39,9 @@ public enum ResultState {
     case empty
     /// Backend GPU pod is being provisioned. `startedAt` lets the UI compute
     /// elapsed time for a smooth progress bar across many `message` updates.
-    case provisioning(message: String, startedAt: Date)
+    /// `previousImage`, when present, is shown dimmed underneath the warm-up
+    /// overlay so the user keeps seeing their last result while we reconnect.
+    case provisioning(message: String, startedAt: Date, previousImage: UIImage?)
     case generating(progress: GenerationProgress, previousImage: UIImage?)
     case preview(image: UIImage)
     case streaming(image: UIImage, frameCount: Int = 0)
@@ -49,14 +51,4 @@ public enum ResultState {
     /// `previousImage` is displayed under a semi-transparent overlay so the
     /// user can see their last-generated image is still waiting for them.
     case idleTimeout(previousImage: UIImage?)
-
-    public var isPreview: Bool {
-        if case .preview = self { return true }
-        return false
-    }
-
-    public var isStreaming: Bool {
-        if case .streaming = self { return true }
-        return false
-    }
 }

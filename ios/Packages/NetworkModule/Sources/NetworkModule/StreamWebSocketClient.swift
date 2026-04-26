@@ -22,6 +22,10 @@ public actor StreamWebSocketClient {
         public let type: String
         public let state: String?            // present for type=="state"
         public let stateEnteredAt: Int64?    // ms epoch, type=="state"
+        /// Ms epoch when the current pod-warm cycle began. Stable across all
+        /// state transitions for a given session — drives the warm-up progress
+        /// bar so reconnecting clients resume instead of restarting.
+        public let warmingStartedAt: Int64?  // type=="state"
         public let replacementCount: Int?    // type=="state"
         public let failureCategory: String?  // type=="state" && state=="failed"
         public let message: String?          // present for type=="error"
