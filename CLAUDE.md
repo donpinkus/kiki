@@ -116,7 +116,7 @@ When diagnosing a failure, separate observations from inferences. Do not collaps
 
 ## Deploy Process
 
-**Backend (Fastify on Railway):** `cd backend && railway up`. No git push.
+**Backend (Fastify on Railway):** `cd backend && npm run deploy`. The deploy script writes the local git HEAD SHA to `backend/.git-sha` and then runs `railway up` — the file gets baked into the Docker image so the orchestrator can read its own deploy SHA at runtime (Railway's `RAILWAY_GIT_COMMIT_SHA` env var is empty for `railway up` deploys, only set for git-triggered ones). Without this, the volume-version-drift check silently no-ops. Plain `railway up` still works but ships a stale SHA — only use it if you know what you're doing.
 
 **Pod app code (`flux-klein-server/*.py` + Python deps):** Pods boot from stock `runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404` (hardcoded as `BASE_IMAGE` in `orchestrator.ts`) and read `/workspace/app/server.py` plus `/workspace/venv/` off the attached network volume. To deploy code changes: run `backend/scripts/sync-flux-app.ts` once per pre-populated DC volume (5 of them — IDs in `provider-config.md`). Needs `RUNPOD_API_KEY` and `RUNPOD_SSH_PRIVATE_KEY="$(cat ~/.ssh/id_ed25519)"`. Existing running pods keep the old in-memory copy; new pods pick up changes on next provision. To force a user onto the new code, terminate their pod and let the orchestrator reprovision.
 

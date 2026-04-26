@@ -91,6 +91,7 @@
  * └─────────────────────────────────────┴──────────────────────────────────────────────────┴──────────────────────────────┘
  */
 
+import { readFileSync } from 'node:fs';
 import type { FastifyBaseLogger } from 'fastify';
 import * as Sentry from '@sentry/node';
 
@@ -195,12 +196,23 @@ const IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 const REAPER_INTERVAL_MS = 60 * 1000;
 const MAX_CONCURRENT_PROVISIONS = Number(process.env['MAX_CONCURRENT_PROVISIONS'] ?? 5);
 
-// Git SHA the backend was built from. Railway injects RAILWAY_GIT_COMMIT_SHA
-// at build time. Used by checkVersionDrift to flag pods whose volumes were
-// stamped against a different commit (i.e. someone deployed the backend but
-// forgot to re-run sync-flux-app per DC). Empty string = not running on
-// Railway / unset; drift checks no-op.
-const BACKEND_GIT_SHA = process.env['RAILWAY_GIT_COMMIT_SHA'] ?? '';
+// Git SHA the backend was built from. Two sources tried in order:
+//   1. RAILWAY_GIT_COMMIT_SHA — auto-injected by Railway for git-triggered
+//      deploys, but EMPTY for `railway up` CLI deploys (which is how we ship).
+//   2. /app/.git-sha — written into the build context by `npm run deploy`
+//      (`git rev-parse HEAD > .git-sha && railway up`). The file gets baked
+//      into the Docker image because there's no .dockerignore and the
+//      Dockerfile does `COPY . .`.
+// Empty string = neither source set; drift checks no-op.
+const BACKEND_GIT_SHA = (() => {
+  const fromEnv = process.env['RAILWAY_GIT_COMMIT_SHA'];
+  if (fromEnv) return fromEnv.trim();
+  try {
+    return readFileSync('/app/.git-sha', 'utf-8').trim();
+  } catch {
+    return '';
+  }
+})();
 
 // Semaphore state
 let activeProvisions = 0;
@@ -718,6 +730,7 @@ export async function start(logger: FastifyBaseLogger): Promise<void> {
       maxConcurrent: MAX_CONCURRENT_PROVISIONS,
       reconcileIntervalMs: config.RECONCILE_INTERVAL_MS,
       reconcileMinAgeSec: config.RECONCILE_MIN_AGE_SEC,
+      backendGitSha: BACKEND_GIT_SHA ? BACKEND_GIT_SHA.slice(0, 8) : '(unset — drift checks disabled)',
     },
     'Orchestrator started',
   );
