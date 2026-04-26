@@ -16,11 +16,15 @@ final class StreamSession {
 
     /// UI-facing stream state. Server status messages drive transitions —
     /// a bare WS open is just a breadcrumb. The `.warming` case carries
-    /// `startedAt` for a continuous progress bar across multiple status
-    /// updates and reconnect attempts.
+    /// `startedAt` (the original pod-warm-cycle origin, server-supplied
+    /// via `warmingStartedAt`) for a continuous progress bar across
+    /// multiple status updates and reconnect attempts. `nil` means we
+    /// haven't received the timestamp yet — the UI must NOT render a
+    /// 0%-filled bar in that window or it looks like the warm-up is
+    /// restarting on each reconnect.
     enum StreamReadiness: Equatable {
         case disconnected
-        case warming(message: String, startedAt: Date)
+        case warming(message: String, startedAt: Date?)
         case ready
         case failed(message: String)
         /// Backend reaper terminated the pod after 30 min of no frame activity.
@@ -507,20 +511,22 @@ final class StreamSession {
         }
     }
 
-    /// Transition to `.warming`. The server's `warmingStartedAt` (when present)
-    /// is authoritative — it's the original pod-warm-cycle start, stable across
-    /// reconnects, so the progress bar resumes correctly even after a fresh
-    /// session is created (e.g. on gallery↔drawing navigation). Falls back to
-    /// the existing readiness's startedAt, then `Date()`, when the server hasn't
-    /// supplied a timestamp.
+    /// Transition to `.warming`. The server's `warmingStartedAt` (when
+    /// present) is authoritative — it's the original pod-warm-cycle start,
+    /// stable across reconnects, so the progress bar resumes correctly even
+    /// after a fresh session is created (e.g. on gallery↔drawing navigation).
+    /// Carries forward an existing readiness's startedAt when the server
+    /// hasn't supplied one yet (e.g. the pre-WS-open "Connecting…" call).
+    /// Never falls back to `Date()` — a fresh fallback timestamp would
+    /// render the progress bar at 0%, which looks like a restart.
     private func warm(message: String, serverStartedAt: Date? = nil) {
-        let startedAt: Date
+        let startedAt: Date?
         if let serverStartedAt {
             startedAt = serverStartedAt
         } else if case .warming(_, let existing) = readiness {
             startedAt = existing
         } else {
-            startedAt = Date()
+            startedAt = nil
         }
         applyReadiness(.warming(message: message, startedAt: startedAt))
     }

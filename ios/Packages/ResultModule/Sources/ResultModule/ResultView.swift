@@ -53,6 +53,7 @@ public struct ResultView: View {
 
             case .provisioning(let message, let startedAt, let previousImage):
                 provisioningView(message: message, startedAt: startedAt, previousImage: previousImage)
+                    .accessibilityElement(children: .combine)
 
             case .generating(let progress, let previousImage):
                 generatingView(progress: progress, previousImage: previousImage)
@@ -96,12 +97,17 @@ public struct ResultView: View {
 
     // MARK: - Provisioning
 
-    private func provisioningView(message: String, startedAt: Date, previousImage: UIImage?) -> some View {
+    private func provisioningView(message: String, startedAt: Date?, previousImage: UIImage?) -> some View {
         TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: false)) { context in
             // Asymptotic curve approaching 95% — starts fast, slows down.
             // t=15s ≈ 39%, t=30s ≈ 63%, t=60s ≈ 87%, t=90s ≈ 95%.
-            let elapsed = max(0, context.date.timeIntervalSince(startedAt))
-            let progress = min(0.95, 1.0 - exp(-elapsed / 30.0))
+            // Both `progress` and `elapsedSec` are nil until the server tells
+            // us when the warm-up cycle began. Until then, the UI shows the
+            // overlay text but no progress bar — we never want to flash 0%
+            // and look like the cycle is restarting.
+            let elapsed: TimeInterval? = startedAt.map { max(0, context.date.timeIntervalSince($0)) }
+            let progress: Double? = elapsed.map { min(0.95, 1.0 - exp(-$0 / 30.0)) }
+            let elapsedSec: Int? = elapsed.map { Int($0) }
 
             ZStack {
                 if let previousImage {
@@ -118,12 +124,17 @@ public struct ResultView: View {
                     ParticleField(isEmitting: isUserDrawing)
                 }
 
-                provisioningContent(message: message, progress: progress, hasBackground: previousImage != nil)
+                provisioningContent(
+                    message: message,
+                    progress: progress,
+                    elapsedSec: elapsedSec,
+                    hasBackground: previousImage != nil
+                )
             }
         }
     }
 
-    private func provisioningContent(message: String, progress: Double, hasBackground: Bool) -> some View {
+    private func provisioningContent(message: String, progress: Double?, elapsedSec: Int?, hasBackground: Bool) -> some View {
         VStack(spacing: 28) {
             Spacer(minLength: 0)
 
@@ -141,12 +152,25 @@ public struct ResultView: View {
                 Text("Ready in about 90 seconds")
                     .font(.subheadline)
                     .foregroundStyle(hasBackground ? AnyShapeStyle(Color.white.opacity(0.85)) : AnyShapeStyle(HierarchicalShapeStyle.secondary))
+
+                // Live elapsed counter — same monospaced digit width to avoid
+                // bouncing as seconds tick. Hidden until we have the server
+                // timestamp; visible thereafter so the user can see time
+                // continue across navigations.
+                if let elapsedSec {
+                    Text(elapsedTimerText(seconds: elapsedSec))
+                        .font(.caption2)
+                        .monospacedDigit()
+                        .foregroundStyle(hasBackground ? AnyShapeStyle(Color.white.opacity(0.7)) : AnyShapeStyle(HierarchicalShapeStyle.tertiary))
+                }
             }
 
             VStack(spacing: 12) {
-                provisioningProgressBar(progress: progress)
-                    .frame(height: 8)
-                    .frame(maxWidth: 320)
+                if let progress {
+                    provisioningProgressBar(progress: progress)
+                        .frame(height: 8)
+                        .frame(maxWidth: 320)
+                }
 
                 Text(message)
                     .font(.caption)
@@ -161,6 +185,13 @@ public struct ResultView: View {
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 32)
+    }
+
+    private func elapsedTimerText(seconds: Int) -> String {
+        if seconds >= 90 {
+            return "\(seconds)s elapsed · almost ready"
+        }
+        return "\(seconds)s elapsed"
     }
 
     /// Title legibility on a dimmed image background — same recipe as
@@ -489,6 +520,14 @@ public struct ResultView: View {
 
 #Preview("Empty") {
     ResultView(state: .empty)
+}
+
+#Preview("Provisioning – No server timestamp yet") {
+    ResultView(state: .provisioning(
+        message: "Connecting…",
+        startedAt: nil,
+        previousImage: nil
+    ))
 }
 
 #Preview("Provisioning – Just started") {
