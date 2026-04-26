@@ -182,6 +182,11 @@ final class AppCoordinator {
     /// `openDrawing`/`newDrawing`, read + cleared in `navigateToGallery`.
     private var currentDrawingOpenedAt: Date?
     private(set) var streamReadiness: StreamSession.StreamReadiness = .disconnected
+
+    /// Currently-playing video MP4 temp path. Tracked so we can delete it
+    /// when the user resumes drawing (state leaves video) and avoid
+    /// littering NSTemporaryDirectory across many idle/draw cycles.
+    private var currentVideoMP4URL: URL?
     private(set) var streamFrameCount = 0
 
     // -- Stream parameters --
@@ -661,6 +666,11 @@ final class AppCoordinator {
             self.applyReadinessToResultState(readiness)
         }
 
+        session.onVideoEvent = { [weak self] event in
+            guard let self else { return }
+            self.handleVideoEvent(event)
+        }
+
         self.streamSession = session
 
         Task {
@@ -704,6 +714,12 @@ final class AppCoordinator {
         pendingStartupTransaction?.finish(status: .cancelled)
         pendingStartupTransaction = nil
         streamStartupBeganAt = nil
+        // Clean up the looping MP4 temp file (if any) so we don't leave
+        // junk in NSTemporaryDirectory across many sessions.
+        if let url = currentVideoMP4URL {
+            try? FileManager.default.removeItem(at: url)
+            currentVideoMP4URL = nil
+        }
 
         if hadSession {
             Analytics.track(.streamEnded, properties: [
@@ -762,6 +778,58 @@ final class AppCoordinator {
             return
         }
         applyReadinessToResultState(streamReadiness)
+    }
+
+    /// Map a video pod event into ResultState transitions. Overall flow:
+    ///   .streaming → .videoStreaming(latestFrame) → .videoLooping(mp4) → ...
+    /// New img2img frames automatically clobber the video state via
+    /// onImageReceived's `.streaming` set, so cancellation of an in-flight
+    /// video on resume-drawing happens implicitly. The .cancelled event
+    /// here covers the case where the pod aborted before any image
+    /// arrived (e.g. during model warmup).
+    private func handleVideoEvent(_ event: StreamWebSocketClient.VideoEvent) {
+        let prev = String(describing: resultState).prefix(40)
+        switch event {
+        case .frame(_, let imageData, let index, let total):
+            guard let frame = UIImage(data: imageData),
+                  let fallback = lastSuccessfulImage else {
+                streamLog.warning("[result] video_frame ignored (no fallback or decode failed)")
+                return
+            }
+            resultState = .videoStreaming(latestFrame: frame, fallback: fallback)
+            streamLog.info("[result] \(prev) → videoStreaming index=\(index ?? -1)/\(total ?? -1)")
+        case .complete(_, let mp4Data, _, let frames):
+            guard let fallback = lastSuccessfulImage else { return }
+            // Clean up any prior MP4 we wrote — only one in flight at a time.
+            if let prior = currentVideoMP4URL {
+                try? FileManager.default.removeItem(at: prior)
+            }
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("kiki-video-\(UUID().uuidString).mp4")
+            do {
+                try mp4Data.write(to: url, options: .atomic)
+                currentVideoMP4URL = url
+                resultState = .videoLooping(mp4URL: url, fallback: fallback)
+                streamLog.info("[result] \(prev) → videoLooping bytes=\(mp4Data.count) frames=\(frames ?? -1)")
+            } catch {
+                streamLog.error("[result] mp4 write failed: \(error.localizedDescription)")
+                SentrySDK.capture(error: error) { scope in
+                    scope.setTag(value: "video.mp4_write", key: "op")
+                }
+            }
+        case .cancelled(_, let atStep, let error):
+            // If we're not currently in a video state, nothing to revert
+            // (img2img already drove us out). Otherwise pop back to
+            // .streaming on the last image.
+            if resultState.isVideo, let img = lastSuccessfulImage {
+                resultState = .streaming(image: img, frameCount: streamFrameCount)
+            }
+            if let prior = currentVideoMP4URL {
+                try? FileManager.default.removeItem(at: prior)
+                currentVideoMP4URL = nil
+            }
+            streamLog.info("[result] video_cancelled atStep=\(atStep ?? -1) err=\(error ?? "")")
+        }
     }
 
     /// Push the current config to the stream session. The capture loop will

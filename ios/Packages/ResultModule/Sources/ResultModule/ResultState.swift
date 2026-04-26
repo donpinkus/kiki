@@ -49,6 +49,13 @@ public enum ResultState {
     /// `previousImage` is displayed under a semi-transparent overlay so the
     /// user can see their last-generated image is still waiting for them.
     case idleTimeout(previousImage: UIImage?)
+    /// Pre-MP4: the video pod is streaming JPEG frames as they decode.
+    /// `latestFrame` is the most recent decoded frame; `fallback` is the
+    /// last successful still (kept around so we never blank the pane —
+    /// Constraint #2 — if anything fails mid-stream).
+    case videoStreaming(latestFrame: UIImage, fallback: UIImage)
+    /// Final state: looping the encoded MP4 from disk.
+    case videoLooping(mp4URL: URL, fallback: UIImage)
 
     public var isPreview: Bool {
         if case .preview = self { return true }
@@ -58,5 +65,12 @@ public enum ResultState {
     public var isStreaming: Bool {
         if case .streaming = self { return true }
         return false
+    }
+
+    public var isVideo: Bool {
+        switch self {
+        case .videoStreaming, .videoLooping: return true
+        default: return false
+        }
     }
 }

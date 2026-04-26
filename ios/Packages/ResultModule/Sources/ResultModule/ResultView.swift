@@ -1,3 +1,5 @@
+import AVFoundation
+import AVKit
 import SwiftUI
 
 /// Displays the generated image result with support for loading, error, and empty states.
@@ -65,6 +67,13 @@ public struct ResultView: View {
 
             case .idleTimeout(let previousImage):
                 idleTimeoutView(previousImage: previousImage)
+
+            case .videoStreaming(let latestFrame, _):
+                imageView(latestFrame)
+
+            case .videoLooping(let mp4URL, let fallback):
+                LoopingVideoView(url: mp4URL, fallback: fallback)
+                    .shadow(color: .black.opacity(0.25), radius: 12, x: 0, y: 6)
 
             }
 
@@ -518,4 +527,114 @@ public struct ResultView: View {
         message: "Server error 200: Generation timed out after 120s",
         previousImage: nil
     ))
+}
+
+// MARK: - LoopingVideoView
+
+/// AVPlayerLooper-backed seamless MP4 loop for `.videoLooping`.
+///
+/// Renders into a CALayer via AVPlayerLayer (no AVPlayerViewController
+/// chrome). Looping is via AVPlayerLooper against an AVQueuePlayer so the
+/// transition between iterations is seamless — AVPlayer's `.seekToZero`
+/// approach has a visible blink on H.264.
+///
+/// `fallback` is shown if the player item enters `.failed` (file gone,
+/// decode error). Constraint #2: never clear the right pane.
+private struct LoopingVideoView: UIViewRepresentable {
+    let url: URL
+    let fallback: UIImage
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIView(context: Context) -> PlayerContainerView {
+        let view = PlayerContainerView()
+        view.fallbackImage = fallback
+        attach(view: view, coordinator: context.coordinator)
+        return view
+    }
+
+    func updateUIView(_ view: PlayerContainerView, context: Context) {
+        view.fallbackImage = fallback
+        // If the URL changed, rebuild the player. Same URL → keep looping.
+        if context.coordinator.currentURL != url {
+            attach(view: view, coordinator: context.coordinator)
+        }
+    }
+
+    static func dismantleUIView(_ view: PlayerContainerView, coordinator: Coordinator) {
+        coordinator.player?.pause()
+        coordinator.looper = nil
+        coordinator.player = nil
+        coordinator.currentURL = nil
+    }
+
+    private func attach(view: PlayerContainerView, coordinator: Coordinator) {
+        let item = AVPlayerItem(url: url)
+        let player = AVQueuePlayer()
+        // Mute by default — the right pane is purely visual.
+        player.isMuted = true
+        coordinator.looper = AVPlayerLooper(player: player, templateItem: item)
+        coordinator.player = player
+        coordinator.currentURL = url
+        view.attach(player: player)
+        player.play()
+    }
+
+    final class Coordinator {
+        var player: AVQueuePlayer?
+        var looper: AVPlayerLooper?
+        var currentURL: URL?
+    }
+}
+
+/// UIView host for AVPlayerLayer. Falls back to a static image if the
+/// player item fails.
+final class PlayerContainerView: UIView {
+    private var playerLayer: AVPlayerLayer?
+    private let fallbackImageView = UIImageView()
+    private var failureObserver: NSKeyValueObservation?
+
+    var fallbackImage: UIImage? {
+        didSet { fallbackImageView.image = fallbackImage }
+    }
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        fallbackImageView.contentMode = .scaleAspectFit
+        fallbackImageView.frame = bounds
+        fallbackImageView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        fallbackImageView.isHidden = true
+        addSubview(fallbackImageView)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) not used") }
+
+    func attach(player: AVPlayer) {
+        playerLayer?.removeFromSuperlayer()
+        let layer = AVPlayerLayer(player: player)
+        layer.videoGravity = .resizeAspect
+        layer.frame = bounds
+        self.layer.addSublayer(layer)
+        playerLayer = layer
+
+        // Watch for failure → show fallback.
+        failureObserver = player.currentItem?.observe(\.status, options: [.new]) { [weak self] item, _ in
+            guard let self else { return }
+            DispatchQueue.main.async {
+                if item.status == .failed {
+                    self.fallbackImageView.isHidden = false
+                    layer.isHidden = true
+                } else {
+                    self.fallbackImageView.isHidden = true
+                    layer.isHidden = false
+                }
+            }
+        }
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        playerLayer?.frame = bounds
+    }
 }
