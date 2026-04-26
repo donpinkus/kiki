@@ -306,7 +306,11 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
               if (t === 'video_frame' || t === 'video_complete') {
                 pendingVideoBinaryWrapper = { type: t as string, meta: parsed };
               } else if (t === 'video_cancelled') {
-                videoCancelled++;
+                if (parsed['error']) {
+                  videoFailed++;
+                } else {
+                  videoCancelled++;
+                }
                 inFlightVideoRequestId = null;
                 pendingVideoBinaryWrapper = null;
               }
