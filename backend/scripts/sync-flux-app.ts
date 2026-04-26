@@ -334,7 +334,7 @@ python3 -c "import diffusers; print('diffusers:', diffusers.__version__, diffuse
 
 echo "=== SMOKE TEST ==="
 # Asserts (1) base-image torch is still active (venv didn't accidentally install
-# a conflicting torch), and (2) all runtime imports resolve.
+# a conflicting torch), and (2) all runtime imports resolve (image + video pods).
 python3 - <<'PYEOF'
 import sys
 import torch
@@ -343,8 +343,15 @@ assert '/usr/local/lib/python3.12/dist-packages' in torch.__file__, f'torch path
 assert torch.cuda.is_available(), 'CUDA not available'
 # Runtime imports — any ImportError here means the sync is broken for prod use.
 from diffusers import Flux2KleinPipeline  # noqa: F401
+from diffusers import LTXImageToVideoPipeline, LTXVideoTransformer3DModel  # noqa: F401
 import transformers, accelerate, safetensors, huggingface_hub, PIL, fastapi, uvicorn, websockets, sentencepiece  # noqa: F401
-print('smoke OK')
+import imageio_ffmpeg  # noqa: F401  -- video pod MP4 encoder
+# Ensure the bundled ffmpeg binary is actually present (imageio-ffmpeg lazy-
+# downloads it on first call to get_ffmpeg_exe; do that here so first video
+# request doesn't pay that cost on a cold pod).
+ff = imageio_ffmpeg.get_ffmpeg_exe()
+import os; assert os.path.exists(ff), f'ffmpeg missing: {ff}'
+print('smoke OK; ffmpeg at', ff)
 PYEOF
 
 echo "=== DONE ==="
