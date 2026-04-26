@@ -223,6 +223,107 @@ Trigger flow:
    `swift test --package-path ios/Packages/CanvasModule`,
    `cd backend && npm test`.
 
+## Diagnostics & Logging
+
+A correlation ID flows through every video request so we can grep one ID
+across all four log streams (iPad → backend → image pod → video pod).
+Source it from the iPad's `config.requestId` (already supported); the
+image pod echoes it in `frame_meta`; backend stamps the same ID onto the
+`video_request`; video pod echoes it on every `video_frame` /
+`video_complete` / `video_cancelled`.
+
+### Image pod (`server.py`)
+- Per generated frame, one INFO line including the new flag:
+  `frame: req=<id> queueEmpty=<bool> gen_ms=<ms> dropped_since_last=<n>`.
+- One INFO line on the false→true edge:
+  `queue drained: req=<id> last_generated_set=true`. Confirms the
+  trigger boundary cleanly.
+- On disconnect, summary: `session: frames=<n> queue_drained_count=<n>`.
+
+### Video pod (`video_server.py`, `video_pipeline.py`)
+- Pipeline load: `loaded LTXV: model=<id> dtype=<bf16> vram_used_gb=<n>
+  load_ms=<n>`.
+- Connection: `client connected: in_flight=<n>` /
+  `client disconnected: reason=<...>`.
+- Request: `video_request: req=<id> prompt='<truncated 60ch>'
+  image=<WxH> seed=<n>`.
+- Per decoded frame (every Nth, INFO):
+  `frame <i>/<total> decoded elapsed_ms=<ms>`.
+- Per step (DEBUG, gated on `LTXV_DEBUG=1` env so prod stays quiet):
+  `step <i>/<N> took_ms=<n>`.
+- Cancellation: `cancelled: req=<id> at_step=<i> elapsed_ms=<ms>`.
+- Completion: `complete: req=<id> frames=<N> gen_ms=<ms>
+  encode_ms=<ms> mp4_bytes=<n>`.
+- Pipeline error: full traceback + `req=<id>` so we can correlate.
+
+### Backend orchestrator
+- Distinct log prefixes for the two provisions: `[provision/image]` and
+  `[provision/video]`. Existing structured logger already includes
+  sessionKey — add a `pod_kind: 'image' | 'video'` field for filtering.
+- Image-pod provision failures stay `level=error` (fatal). Video-pod
+  failures `level=warn` (non-fatal) with a Sentry **breadcrumb**, not a
+  capture (would be too noisy).
+- Reaper: `[reaper] terminating session=<id> kind=<image|video>
+  idle_min=<n>`.
+- Reconcile on boot: `[reconcile] orphans found: image=<n> video=<n>`.
+
+### Backend `stream.ts`
+- One structured log per trigger:
+  `video_trigger: user=<id> req=<id> prompt_cached=<bool>
+   video_relay_connected=<bool>`.
+- Drop reasons logged distinctly:
+  - `video_skipped: reason=prompt_not_cached` (queueEmpty before iPad
+    sent its first `config` — bug-prone edge case worth alerting on).
+  - `video_skipped: reason=relay_disconnected`.
+  - `video_skipped: reason=already_in_flight` (defensive — should not
+    happen given queueEmpty semantics, but log if it does).
+- Cancel: `video_cancel_sent: user=<id> req=<id> elapsed_since_request_ms=<n>`.
+- Video relay close (uninitiated):
+  `video_relay_closed: user=<id> reason=<code> session_disabled=<bool>`.
+- Per-session counters emitted at WS close:
+  `session_close: user=<id> frames_relayed=<n> videos_triggered=<n>
+   videos_completed=<n> videos_cancelled=<n> videos_failed=<n>
+   duration_s=<n>`.
+
+### iPad
+- `StreamSession.captureLoop` — rate-limited (max 1/s) DEBUG line:
+  `frame skipped (strokeCount=<n> unchanged)` so we can verify the
+  dirty check without log spam.
+- `StreamSession` — INFO on every `video_*` event with bytes:
+  `[video] req=<id> type=<t> bytes=<n>`.
+- `AppCoordinator` — INFO on every `ResultState` transition:
+  `[result] <prev> → <next> req=<id>`. Lets us confirm the
+  `.streaming` ↔ `.videoStreaming` ↔ `.videoLooping` cycle.
+- `LoopingVideoView` — log `AVPlayerItem.status` changes,
+  `failedToPlayToEndTime` notifications, and any `AVPlayerLooper`
+  error. These are the only sources of "video shows but doesn't
+  loop" bugs.
+
+### Health endpoints (prod observability)
+- Image pod `/health` — add: `frames_total`, `queue_drained_count`,
+  `last_queue_empty_at` (ISO ts), `last_frame_gen_ms`.
+- Video pod `/health` — add: `videos_total`, `videos_cancelled`,
+  `videos_failed`, `last_gen_ms`, `last_encode_ms`, `vram_free_gb`.
+- Both surfaced via the orchestrator's existing health-poll path so
+  they show up in cost-monitor breadcrumbs.
+
+### Triage cookbook (paste into PR description)
+- **Trigger not firing**: grep image pod for `queue drained`. Absent =
+  iPad still sending; verify dirty check via the `frame skipped` line.
+- **Trigger firing, video not requested**: grep `stream.ts` for
+  `video_skipped`. The `reason=` says why.
+- **video_request sent, video pod silent**: hit video pod `/health`
+  directly; check `video_ready`. If false, model still loading.
+- **Generation starts, no MP4**: search video pod for `complete` for
+  that req=<id>. If only `cancelled`, look at backend for the
+  preceding `video_cancel_sent`. If neither, search for traceback.
+- **Looping playback stutters**: re-encode with `-movflags +faststart`
+  in the ffmpeg call, and check `LoopingVideoView` logs for buffering
+  events.
+- **iPad swaps to video too aggressively**: filter
+  `[result] streaming → videoStreaming` and verify each lines up with
+  exactly one `queue drained` on the image pod.
+
 ## Open risks / follow-ups
 
 - LTXV streaming-decode in current diffusers may not yield per-frame; if
