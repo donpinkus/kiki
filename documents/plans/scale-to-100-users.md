@@ -11,7 +11,7 @@ As of WS7 completion (2026-04-18) — **all 7 workstreams shipped:**
 - Railway backend orchestrator provisions a dedicated RTX 5090 pod per user and terminates it after 30 min of inactivity. See `documents/references/provider-config.md` for ops.
 - **Authentication (WS1 done):** Apple Sign In → JWT. Session registry keyed by `userId`. Per-user rate limiter (1 active pod, 5/hr, 30/day).
 - **On-demand fallback (WS2 done):** Spot first; if capacity exhausted, falls back to on-demand ($0.99/hr) in the same DC.
-- **Fast cold start (WS3 done):** Slim GHCR image (~2-3 GB) + pre-populated network volumes in 5 DCs. ~110–150s cold start (down from 3-5 min). DC-aware placement probes spot stock across all volume-DCs.
+- **Fast cold start (WS3 done, then revised 2026-04-23):** Pods boot from stock `runpod/pytorch` and read app code + venv off pre-populated network volumes in 5 DCs (FLUX weights also on the volume). ~96s avg cold start (p95 ~157s). DC-aware placement probes spot stock across all volume-DCs. The original WS3 design used a slim custom GHCR image; that was cut over to volume-entrypoint after ~38% of pulls were stalling on specific RunPod hosts (see `documents/decisions.md` 2026-04-23).
 - In-memory session registry (`Map<userId, Session>`) on a single Railway instance.
 - Semaphore caps concurrent cold-start provisions at 5 (env-tunable).
 - Observability = Railway logs. No metrics, no dashboards, no cost tracking beyond the RunPod billing page.
@@ -66,11 +66,13 @@ Ranked by impact, worst first:
 - When spot returns "None", a pod still provisions within 5 min.
 - On-demand usage is distinguishable from spot in logs (`podType: "spot" | "onDemand"`).
 
-### 3. Fast cold start (network volumes) — DONE
+### 3. Fast cold start (network volumes) — DONE (revised 2026-04-23)
 
-**Shipped:** Slim GHCR image (~2-3 GB, deps only) + pre-populated RunPod network volumes (5 DCs, 50 GB each) holding FLUX.2-klein BF16 + NVFP4 weights. Orchestrator's `selectPlacement()` probes all volume-DCs in parallel, pins pod to best-stocked DC with volume attached at `/workspace`. Originally planned as baked-weights image (28 GB) but pivoted to network volumes after the large image exceeded RunPod's 10-min pull timeout.
+**Shipped (original):** Slim GHCR image (~2-3 GB, deps only) + pre-populated RunPod network volumes (5 DCs, 50 GB each) holding FLUX.2-klein BF16 + NVFP4 weights. Orchestrator's `selectPlacement()` probes all volume-DCs in parallel, pins pod to best-stocked DC with volume attached at `/workspace`. Originally planned as baked-weights image (28 GB) but pivoted to network volumes after the large image exceeded RunPod's 10-min pull timeout.
 
-**Result:** ~110-150s cold start (down from 3-5 min). Faster on hosts with cached images.
+**Revised 2026-04-23 — volume-entrypoint:** Eliminated the custom GHCR image entirely after ~38% of provisions were stalling on a subset of RunPod hosts that couldn't reliably pull from ghcr.io. Pods now boot from stock `runpod/pytorch` and read both Python deps (`/workspace/venv/`) and app code (`/workspace/app/`) off the same network volume. `backend/scripts/sync-flux-app.ts` is the deploy mechanism. See `documents/decisions.md` 2026-04-23 entry for full context + rollback procedure.
+
+**Result:** ~96s avg cold start (p95 ~157s) — down from ~110–150s pre-cutover. Pull stalls eliminated; dominant phase is now `warming_model` (FLUX weights → GPU + first-inference compile, ~62s).
 
 ### 4. Cost monitoring + alerting — DONE
 
@@ -112,7 +114,7 @@ Ranked by impact, worst first:
 
 **Shipped:** On upstream WS close, `classifyClose()` probes RunPod API to distinguish preemption/crash/voluntary. On preemption: holds client WS open, sends `reprovisioning` status, provisions replacement pod through same placement + semaphore flow, swaps relay transparently, re-sends config. Gated behind `PREEMPTION_REPLACEMENT_ENABLED` env flag. Max 2 replacement attempts per session. Pods are terminated on provision failure to prevent cost leaks.
 
-**Known limitation:** GHCR image pulls stall on some RunPod hosts (stuck at "still fetching image" indefinitely). Root cause is RunPod host-level — some hosts can't reach GHCR reliably. Successful pulls take ~3.5 min; stalled pulls time out at 10 min. Not fixable from our side.
+**Resolved 2026-04-23:** Originally a known limitation here was GHCR-image-pull stalls on some RunPod hosts (~38% of provisions). Fixed at the architecture level by the volume-entrypoint cutover — the custom image is no longer pulled at all. Pods now pull only the stock `runpod/pytorch` base, which is widely cached. `PodBootStallError` watchdog remains as a generic safeguard.
 
 ## Also worth naming (not in the main 7)
 
@@ -140,7 +142,7 @@ These are real concerns at 1000+ users but overkill for 100:
 4. **Is 100 concurrent a hard KPI or aspirational?**: **hard KPI with a deadline**. Sequence aggressively.
 5. **Age gate**: **17+** (standard for generative AI apps).
 6. **Auth scope**: **Apple Sign In only**, hard require. No anonymous fallback for v1.
-7. **Docker registry**: **`ghcr.io/donpinkus`** (personal account).
+7. **Docker registry**: **`ghcr.io/donpinkus`** (personal account). *(Superseded 2026-04-23 — no custom image; pods boot from stock `runpod/pytorch` and read app code from network volume.)*
 8. **Cost alert destination**: **Discord webhook**.
 9. **Redis rollout**: **no feature flag** — Redis default from first deploy (accepts deploy-day risk for simpler code).
 10. **On-demand fallback message**: **silent** — user sees normal "Ready" path.

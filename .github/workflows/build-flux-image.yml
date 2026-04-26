@@ -1,3 +1,13 @@
+# INACTIVE — retained for rollback only.
+#
+# As of the 2026-04-23 cutover (see documents/decisions.md), live pods boot
+# from stock runpod/pytorch and read app code off a network volume. The image
+# this workflow publishes is no longer pulled by any provision path.
+#
+# The workflow is intentionally still enabled on push so a recent image stays
+# available if rollback to the GHCR custom-image flow becomes necessary.
+# Slated for deletion at stage-3 cleanup once the volume-entrypoint architecture
+# has baked.
 name: Build FLUX.2-klein image
 
 on:

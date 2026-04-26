@@ -31,7 +31,7 @@ npm run build
 npm test
 ```
 
-Environment variables are documented in [`backend/.env.example`](./backend/.env.example). Real RunPod orchestration requires `RUNPOD_API_KEY` and `FLUX_IMAGE` (the GHCR tag of the pod image).
+Environment variables are documented in [`backend/.env.example`](./backend/.env.example). Real RunPod orchestration requires `RUNPOD_API_KEY` and `NETWORK_VOLUMES_BY_DC` (the pre-populated weight/code volumes — pods boot from stock `runpod/pytorch` and read app code off these volumes; see `documents/references/provider-config.md`).
 
 ### iOS
 

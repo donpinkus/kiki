@@ -5,11 +5,11 @@
 **Each user session gets its own RTX 5090 pod.** The Railway backend (`backend/`) provisions pods on demand when an authenticated client WebSocket opens, and terminates them after 30 minutes of inactivity. FLUX.2-klein-4B runs on the pod with BFL's NVFP4 transformer checkpoint loaded on top of the BF16 pipeline. Custom FastAPI + WebSocket server at `flux-klein-server/`.
 
 - ~1 FPS generation at 768×768 (reference mode, 4 steps, NVFP4)
-- ~110–150s cold start per session (image pull + model load + warmup). Faster when the host has the image cached.
+- ~96s avg cold start per session (p95 ~157s) — dominated by `warming_model` (~62s loading FLUX weights into GPU + warmup inference). Faster on hosts that already have the base image cached.
 - ~$0.53–0.58/hr spot bid in secure-cloud datacenters; $0.99/hr on-demand fallback
 - 30-min idle timeout preserves the pod across brief disconnects (reconnect = instant, no cold start)
 
-Server image: `ghcr.io/donpinkus/kiki-flux-klein:<tag>` — a slim (~2–3 GB) image with Python deps only. Model weights live on pre-populated RunPod network volumes mounted at `/workspace`. Built via `.github/workflows/build-flux-image.yml`.
+**Pod boot model (volume-entrypoint, since 2026-04-23):** Pods launch from stock `runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404` (hardcoded as `BASE_IMAGE` in `orchestrator.ts`). The attached network volume holds both the FLUX weights (`/workspace/huggingface`) and the FastAPI server code + Python deps (`/workspace/app/`, `/workspace/venv/`). Boot command activates the venv and execs `python3 -u server.py`. No custom image, no registry pull, no GHCR auth. The pre-2026-04-23 GHCR custom-image flow is retained as inactive code in `flux-klein-server/Dockerfile` + `.github/workflows/build-flux-image.yml` for emergency rollback only — see `documents/decisions.md` 2026-04-23 entry for the rollback procedure.
 
 ## How pod provisioning works
 
@@ -34,7 +34,7 @@ Backend tracks the provision lifecycle in a single flat `State` enum (see `backe
 | `queued` | Held by the process-wide concurrency semaphore (rare; only fires if ≥ `MAX_CONCURRENT_PROVISIONS` provisions in flight) |
 | `finding_gpu` | `selectPlacement` iterating DCs for 5090 spot stock |
 | `creating_pod` | `createSpotPod` / `createOnDemandPod` RPC in flight |
-| `fetching_image` | Pod created; waiting for `pod.runtime` (GHCR image pull — dominant time) |
+| `fetching_image` | Pod created; waiting for `pod.runtime` (RunPod pulls the stock `runpod/pytorch` base image — ~22s avg, often cached) |
 | `warming_model` | Container up; polling `/health` while FLUX model loads into GPU |
 | `connecting` | Pod `/health` ok; backend wiring the iOS↔pod frame relay |
 | `ready` | Relay live; iOS can stream |
@@ -79,15 +79,15 @@ Set via `railway variables --set` or the dashboard:
 | Env | Source | Purpose |
 |---|---|---|
 | `RUNPOD_API_KEY` | RunPod Console → Settings → API Keys | GraphQL auth for pod lifecycle |
-| `RUNPOD_GHCR_AUTH_ID` | ID from `myself.containerRegistryCreds` | GHCR auth credential ID for pulling the slim image |
-| `FLUX_IMAGE` | e.g. `ghcr.io/donpinkus/kiki-flux-klein:sha-...` | GHCR image ref (required) |
-| `NETWORK_VOLUMES_BY_DC` | JSON: `{"EUR-NO-1":"49n6i3twuw",...}` | DC → volume ID map for weight mounts |
+| `NETWORK_VOLUMES_BY_DC` | JSON: `{"EUR-NO-1":"49n6i3twuw",...}` | DC → volume ID map for weights + app code |
 | `ONDEMAND_FALLBACK_ENABLED` | `true` | Allow on-demand when spot exhausted |
 | `JWT_ACCESS_SECRET` | ≥32 byte hex | HS256 secret for access tokens |
 | `JWT_REFRESH_SECRET` | ≥32 byte hex | HS256 secret for refresh tokens |
 | `APPLE_BUNDLE_ID` | iOS bundle ID | Apple identity token audience |
 | `AUTH_REQUIRED` | `true` | Reject unauthenticated connections |
 | `MAX_CONCURRENT_PROVISIONS` | default 5 | Semaphore cap on concurrent cold starts |
+
+`FLUX_IMAGE` and `RUNPOD_GHCR_AUTH_ID` are no longer used by the live provision path. They remain set on Railway for now so the rollback procedure in the 2026-04-23 decision entry is a single env-var flip.
 
 ## Operations
 
@@ -98,6 +98,17 @@ cd backend && railway up
 ```
 
 Railway builds via `backend/Dockerfile`. On startup the backend terminates orphan `kiki-session-*` pods and arms the idle reaper.
+
+### Deploy pod app code (`flux-klein-server/*.py`)
+
+```bash
+cd backend
+RUNPOD_API_KEY=... \
+RUNPOD_SSH_PRIVATE_KEY="$(cat ~/.ssh/id_ed25519)" \
+  npx tsx scripts/sync-flux-app.ts --dc <DC> --volume-id <id>
+```
+
+Run once per pre-populated DC volume (5 of them; see Network volumes table above). The script rsyncs `flux-klein-server/*.py` to `/workspace/app/` and ensures `/workspace/venv/` is up to date with `requirements.txt`. Idempotent — safe to re-run. New pods pick up changes on next provision; existing running pods keep the in-memory copy of the old code until terminated.
 
 ### Observe
 
@@ -150,16 +161,17 @@ curl -sS "https://api.runpod.io/graphql?api_key=$RUNPOD_API_KEY" \
 | `backend/src/modules/auth/` | JWT signing/verification, Apple identity token verification, rate limiter |
 | `backend/src/routes/stream.ts` | WebSocket endpoint: extract Bearer JWT, provision, relay |
 | `backend/src/routes/auth.ts` | `/v1/auth/apple` and `/v1/auth/refresh` endpoints |
-| `backend/scripts/populate-volume.ts` | One-shot network volume populate script |
+| `backend/scripts/populate-volume.ts` | One-shot network volume populate script (weights) |
+| `backend/scripts/sync-flux-app.ts` | Per-DC sync of `flux-klein-server/*.py` + venv to network volume |
 | `backend/Dockerfile` | Railway image — Node 22 slim |
-| `flux-klein-server/Dockerfile` | Slim GHCR image — PyTorch deps, no weights |
 | `flux-klein-server/server.py` | WebSocket server entry point on the pod |
 | `flux-klein-server/pipeline.py` | FLUX.2-klein pipeline wrapper (loads BF16 base + NVFP4 transformer) |
 | `flux-klein-server/config.py` | Env-var-backed runtime config on the pod |
-| `.github/workflows/build-flux-image.yml` | Builds + pushes slim GHCR image on `flux-klein-server/` changes |
+| `flux-klein-server/Dockerfile` | **INACTIVE** — retained for GHCR rollback only |
+| `.github/workflows/build-flux-image.yml` | **INACTIVE** — retained for GHCR rollback only |
 | `.github/workflows/stop-pods.yml` | Manual "kill everything" button |
 
 ## Known limitations
 
-- **~110–150s cold start** on fresh hosts. Dominated by GHCR image pull (~10 GB base image). Faster on hosts with cached layers.
-- **GHCR image pulls stall on some RunPod hosts** — stuck at "still fetching image" indefinitely. Root cause is RunPod host-level (some hosts can't reach GHCR reliably). A watchdog in `waitForRuntime` fast-fails with `ImagePullStallError` after `CONTAINER_PULL_STALL_MS` (default 120s); `provision` then terminates the pod, blacklists the DC, and rerolls onto a different DC up to `CONTAINER_PULL_MAX_REROLLS` times (default 2). Each stall is captured to Sentry with `dc`, `podType`, `attempt`, `elapsedSec` tags for per-DC / per-timing analysis. The legacy 10-min hard timeout remains as a safety net for when the watchdog is disabled (`CONTAINER_PULL_WATCHDOG_ENABLED=false`).
+- **~96s avg cold start** (p95 ~157s). Dominant phase is `warming_model` (~62s — FLUX weights to GPU + first-inference kernel compile). `fetching_image` is now a stock-image pull (~22s avg, often cached). See PostHog `pod.provision.completed` for live numbers.
+- **Pod-boot stall safeguard.** A watchdog in `waitForRuntime` fast-fails with `PodBootStallError` after `POD_BOOT_STALL_MS` (default 45s) if the container fails to come up. `provision` then terminates the pod, blacklists the DC, and rerolls onto a different DC up to `POD_BOOT_MAX_REROLLS` times. Each stall is captured to Sentry with `dc`, `podType`, `attempt`, `elapsedSec` tags. (Pre-cutover this was tuned to 120s for GHCR pulls; the lower default suits stock-image boots, which complete in ~20–30s when not stalled.)
