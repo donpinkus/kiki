@@ -12,6 +12,10 @@ import {
   sessionClosed,
   subscribe,
   emitState,
+  provisionVideoPod,
+  terminateVideoPod,
+  setVideoPod,
+  clearVideoPod,
 } from '../modules/orchestrator/orchestrator.js';
 import { StreamRelay } from '../modules/relay/streamRelay.js';
 import {
@@ -138,6 +142,29 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       let clientDisconnected = false;
       const sessionStartMs = Date.now();
 
+      // ─── Video pod state (best-effort, see provisionVideoPod) ─────────
+      let videoRelay: StreamRelay | null = null;
+      let videoPodId: string | null = null;
+      // Once the upstream video relay closes uninitiated we don't try
+      // again for this session — image gen continues normally.
+      let videoSessionEnabled = true;
+      // Captured from the last frame_meta JSON; consumed when the
+      // following binary lands. The pair tells us "this image is video-
+      // eligible" — pod-side authoritative, more robust than a backend
+      // counter.
+      let nextImageBinaryQueueEmpty = false;
+      let nextImageBinaryRequestId: string | null = null;
+      // Set when we forward a binary from the video pod. The next text
+      // preamble gets matched with the binary that immediately follows.
+      let pendingVideoBinaryWrapper: { type: string; meta: Record<string, unknown> } | null = null;
+      let inFlightVideoRequestId: string | null = null;
+      // Counters reported in the session_close summary (paste-friendly
+      // for the triage cookbook in documents/plans/drawing-animation.md).
+      let videoTriggered = 0;
+      let videoCompleted = 0;
+      let videoCancelled = 0;
+      let videoFailed = 0;
+
       // Subscribe to provision state events so the iOS client sees every
       // transition — fresh caller AND joiner both go through this single path.
       // The broker seeds the handler with the current Redis state (if any),
@@ -170,10 +197,71 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
           if (socket.readyState !== socket.OPEN) return;
           touch(userId);
           if (isBinary) {
-            const base64 = (data as Buffer).toString('base64');
+            const buf = data as Buffer;
+            const base64 = buf.toString('base64');
             socket.send(JSON.stringify({ type: 'frame', data: base64 }));
+
+            // Video trigger: the immediately preceding frame_meta said
+            // queueEmpty:true, so this JPEG is the just-completed
+            // generation that the user is now idle on. Forward it to
+            // the video pod for animation. Pod-side queueEmpty is the
+            // authoritative idle signal — see flux-klein-server/server.py.
+            if (nextImageBinaryQueueEmpty) {
+              if (!videoSessionEnabled) {
+                request.log.info(
+                  { userId, reason: 'session_disabled', event: 'video_skipped' },
+                  'video_skipped',
+                );
+              } else if (!videoRelay) {
+                request.log.info(
+                  { userId, reason: 'relay_disconnected', event: 'video_skipped' },
+                  'video_skipped',
+                );
+              } else if (!lastConfig || typeof lastConfig['prompt'] !== 'string') {
+                request.log.warn(
+                  { userId, reason: 'prompt_not_cached', event: 'video_skipped' },
+                  'video_skipped',
+                );
+              } else {
+                const reqId = nextImageBinaryRequestId ?? `vid-${Date.now()}`;
+                videoRelay.sendConfig({
+                  type: 'video_request',
+                  requestId: reqId,
+                  image_b64: base64,
+                  prompt: lastConfig['prompt'],
+                });
+                inFlightVideoRequestId = reqId;
+                videoTriggered++;
+                request.log.info(
+                  {
+                    userId,
+                    req: reqId,
+                    promptCached: true,
+                    videoRelayConnected: true,
+                    event: 'video_trigger',
+                  },
+                  'video_trigger',
+                );
+              }
+            }
+            nextImageBinaryQueueEmpty = false;
+            nextImageBinaryRequestId = null;
           } else {
+            // Forward text frames (frame_meta, status, error) to the iPad
+            // unchanged. Sniff frame_meta to capture queueEmpty for the
+            // following binary.
             socket.send(data);
+            if (typeof data === 'string') {
+              try {
+                const parsed = JSON.parse(data) as Record<string, unknown>;
+                if (parsed['type'] === 'frame_meta') {
+                  nextImageBinaryQueueEmpty = parsed['queueEmpty'] === true;
+                  nextImageBinaryRequestId = (parsed['requestId'] as string | null) ?? null;
+                }
+              } catch {
+                // Not JSON; ignore — relay forwards opaquely.
+              }
+            }
           }
         });
         newRelay.onClose(handleUpstreamClose);
@@ -184,6 +272,67 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         relay = newRelay;
         currentPodUrl = podUrl;
         if (lastConfig) newRelay.sendConfig(lastConfig);
+      };
+
+      // ─── Video relay wiring ────────────────────────────────────────────
+      // Best-effort: provisionVideoPod returns null on any failure, in which
+      // case videoRelay stays null and queueEmpty triggers log a single
+      // 'video_skipped: relay_disconnected' line. No iPad-visible error.
+      const wireVideoRelay = async (podUrl: string): Promise<void> => {
+        const newRelay = new StreamRelay(podUrl);
+        newRelay.onMessage((data, isBinary) => {
+          if (socket.readyState !== socket.OPEN) return;
+          touch(userId);
+          if (isBinary) {
+            const buf = data as Buffer;
+            const base64 = buf.toString('base64');
+            // The text preamble that arrived just before this binary tells
+            // us how to wrap it for the iPad. Falls back to a generic
+            // wrapper if (somehow) no preamble was seen — iPad will log
+            // and drop the frame.
+            const wrap = pendingVideoBinaryWrapper;
+            pendingVideoBinaryWrapper = null;
+            const wrapperType = wrap?.type === 'video_complete' ? 'video_complete_data'
+              : wrap?.type === 'video_frame' ? 'video_frame_data'
+              : 'video_unknown_data';
+            socket.send(JSON.stringify({ type: wrapperType, data: base64, meta: wrap?.meta ?? {} }));
+          } else if (typeof data === 'string') {
+            // Forward text frames and update counters. The pod sends the
+            // type before the binary, so we cache the type for the
+            // upcoming binary to consume.
+            try {
+              const parsed = JSON.parse(data) as Record<string, unknown>;
+              const t = parsed['type'];
+              if (t === 'video_frame' || t === 'video_complete') {
+                pendingVideoBinaryWrapper = { type: t as string, meta: parsed };
+              } else if (t === 'video_cancelled') {
+                videoCancelled++;
+                inFlightVideoRequestId = null;
+                pendingVideoBinaryWrapper = null;
+              }
+              if (t === 'video_complete') {
+                videoCompleted++;
+                inFlightVideoRequestId = null;
+              }
+            } catch {
+              // Not JSON; ignore.
+            }
+            socket.send(data);
+          }
+        });
+        newRelay.onClose((code, reason) => {
+          request.log.warn(
+            { userId, code, reason, event: 'video_relay_closed', sessionDisabled: true },
+            'video_relay_closed',
+          );
+          videoSessionEnabled = false;
+          videoRelay = null;
+        });
+        newRelay.onError((err) => {
+          request.log.warn({ userId, err: err.message }, 'video relay error');
+        });
+        await newRelay.connect();
+        videoRelay = newRelay;
       };
 
       // Recover from an upstream close. If the iPad WS is still open, always
@@ -300,12 +449,76 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         }
         request.log.info({ userId }, 'Upstream connected, relaying');
 
+        // Kick off video pod provisioning in the background. We don't await
+        // — the user's image flow is unblocked the moment the image relay
+        // is up. When the video pod resolves, we wire it; if it fails or
+        // takes too long, queueEmpty triggers log 'video_skipped' and the
+        // session continues image-only. See provisionVideoPod for the
+        // best-effort semantics.
+        void (async () => {
+          try {
+            const result = await provisionVideoPod(userId);
+            if (!result || clientDisconnected || socket.readyState !== socket.OPEN) {
+              if (result) {
+                // Client left during provision — clean up immediately.
+                terminateVideoPod(result.podId).catch(() => {});
+              }
+              return;
+            }
+            videoPodId = result.podId;
+            await setVideoPod(userId, result.podId);
+            try {
+              await wireVideoRelay(result.podUrl);
+              request.log.info(
+                { userId, videoPodId, event: '[provision/video] relay wired' },
+                'video relay wired',
+              );
+            } catch (err) {
+              request.log.warn(
+                { userId, videoPodId, err: (err as Error).message, event: '[provision/video] relay connect failed' },
+                'video relay connect failed; terminating pod',
+              );
+              terminateVideoPod(result.podId).catch(() => {});
+              videoPodId = null;
+              await clearVideoPod(userId);
+              videoSessionEnabled = false;
+            }
+          } catch (err) {
+            request.log.warn(
+              { userId, err: (err as Error).message, event: '[provision/video] unexpected throw' },
+              'provisionVideoPod unexpectedly threw (returns null on failure normally)',
+            );
+            videoSessionEnabled = false;
+          }
+        })();
+
         socket.on('message', (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
           if (!relay) return;
           const buf = Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data as ArrayBuffer);
           touch(userId);
           if (isBinary) {
             relay.sendFrame(buf);
+            // A new sketch from the iPad supersedes any in-flight video.
+            // Send video_cancel on EVERY iPad frame while a video request
+            // is in flight; the pod treats it idempotently. Once the
+            // video pod responds with video_cancelled, we clear the id.
+            if (inFlightVideoRequestId && videoRelay) {
+              const t0 = Date.now();
+              videoRelay.sendConfig({
+                type: 'video_cancel',
+                requestId: inFlightVideoRequestId,
+              });
+              request.log.info(
+                {
+                  userId,
+                  req: inFlightVideoRequestId,
+                  elapsedSinceRequestMs: t0 - sessionStartMs,
+                  event: 'video_cancel_sent',
+                },
+                'video_cancel_sent',
+              );
+              inFlightVideoRequestId = null;
+            }
           } else {
             const text = buf.toString('utf-8');
             try {
@@ -358,17 +571,46 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
 
       socket.on('close', () => {
         clientDisconnected = true;
-        request.log.info({ userId }, 'Stream client disconnected');
-        trackSessionClosed({ userId, durationMs: Date.now() - sessionStartMs });
+        const durationMs = Date.now() - sessionStartMs;
+        request.log.info(
+          {
+            userId,
+            durationMs,
+            videoTriggered,
+            videoCompleted,
+            videoCancelled,
+            videoFailed,
+            event: 'session_close',
+          },
+          'session_close',
+        );
+        trackSessionClosed({ userId, durationMs });
         sessionClosed(userId);
         unsubscribeState();
         relay?.close();
+        videoRelay?.close();
+        // Terminate the video pod immediately on stream close — it has no
+        // useful work to do once the iPad is gone, and the reaper would
+        // only catch it on the next minute boundary.
+        if (videoPodId) {
+          const podIdAtClose = videoPodId;
+          videoPodId = null;
+          terminateVideoPod(podIdAtClose).catch(() => {});
+          clearVideoPod(userId).catch(() => {});
+        }
       });
 
       socket.on('error', (err: Error) => {
         request.log.error({ userId, err }, 'Client socket error');
         unsubscribeState();
         relay?.close();
+        videoRelay?.close();
+        if (videoPodId) {
+          const podIdAtClose = videoPodId;
+          videoPodId = null;
+          terminateVideoPod(podIdAtClose).catch(() => {});
+          clearVideoPod(userId).catch(() => {});
+        }
       });
     })();
   });
