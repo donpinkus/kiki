@@ -7,7 +7,11 @@ Protocol:
 
   Server -> Client:
     - Text frame (JSON): { "type": "status", "status": "ready" | "warmup" | "error", "message": "..." }
-    - Text frame (JSON): { "type": "frame_meta", "requestId": "..." }  (only when cfg has requestId, immediately precedes binary)
+    - Text frame (JSON): { "type": "frame_meta", "requestId": "..."|null, "queueEmpty": <bool> }
+        Always sent immediately before each generated binary. `queueEmpty`
+        is true when the input buffer was empty at frame-completion time —
+        the backend uses this as the trigger to dispatch the just-sent
+        image to the video pod for animation.
     - Binary frame: Generated JPEG bytes
 
 Frame dropping:
@@ -18,9 +22,9 @@ Frame dropping:
 Correlation:
   `requestId` lets the client route responses to specific requests (used by
   the style-preview picker). The value is snapshotted into cfg at generation
-  start so it survives config updates that arrive mid-generation. Responses
-  for normal streaming frames omit the requestId and the `frame_meta`
-  preamble, preserving the binary-only wire shape on that path.
+  start so it survives config updates that arrive mid-generation. The same
+  ID propagates to the video pod via the backend, so a single grep matches
+  the full lifecycle.
 """
 from __future__ import annotations
 
@@ -105,12 +109,20 @@ async def websocket_stream(ws: WebSocket):
     frames_received = 0
     frames_processed = 0
     frames_dropped = 0
+    # Per-send dropped counter for the diagnostic log; reset after each emit.
+    frames_dropped_since_last_send = 0
+    # Count of false->true transitions on queueEmpty (i.e. distinct trigger
+    # opportunities for the video pod). Useful in disconnect summary + /health.
+    queue_drained_count = 0
+    # Last queueEmpty value seen, for edge detection.
+    prev_queue_empty: bool | None = None
     session_start = time.time()
     done = False
 
     async def receive_loop():
         """Read messages from the client. Keep only the latest binary frame."""
         nonlocal latest_frame, frames_received, frames_dropped, done, current_config
+        nonlocal frames_dropped_since_last_send
 
         try:
             while not done:
@@ -152,6 +164,7 @@ async def websocket_stream(ws: WebSocket):
                 if "bytes" in message:
                     if latest_frame is not None:
                         frames_dropped += 1
+                        frames_dropped_since_last_send += 1
                     latest_frame = message["bytes"]
                     frames_received += 1
                     frame_event.set()
@@ -167,6 +180,7 @@ async def websocket_stream(ws: WebSocket):
     async def process_loop():
         """Process the latest frame whenever one is available."""
         nonlocal latest_frame, frames_processed, done
+        nonlocal frames_dropped_since_last_send, queue_drained_count, prev_queue_empty
 
         while not done:
             await frame_event.wait()
@@ -183,16 +197,39 @@ async def websocket_stream(ws: WebSocket):
 
             try:
                 cfg = dict(current_config)
+                gen_start = time.time()
                 result_jpeg = await asyncio.to_thread(_process_frame, jpeg_data, cfg)
+                gen_ms = int((time.time() - gen_start) * 1000)
                 if not done:
                     request_id = cfg.get("requestId")
-                    if request_id is not None:
-                        await ws.send_text(json.dumps({
-                            "type": "frame_meta",
-                            "requestId": request_id,
-                        }))
+                    # Evaluated at frame-completion time: if no new frame has
+                    # arrived during generation, the iPad has stopped drawing
+                    # and this image is eligible for video animation.
+                    queue_empty = latest_frame is None
+                    await ws.send_text(json.dumps({
+                        "type": "frame_meta",
+                        "requestId": request_id,
+                        "queueEmpty": queue_empty,
+                    }))
                     await ws.send_bytes(result_jpeg)
                     frames_processed += 1
+
+                    # Edge log: false -> true transition. This is the moment
+                    # the backend will dispatch the just-sent image to the
+                    # video pod. Single grep target during triage.
+                    if queue_empty and prev_queue_empty is not True:
+                        queue_drained_count += 1
+                        logger.info(
+                            "queue drained: req=%s last_generated_set=true",
+                            request_id,
+                        )
+                    prev_queue_empty = queue_empty
+
+                    logger.info(
+                        "frame: req=%s queueEmpty=%s gen_ms=%d dropped_since_last=%d",
+                        request_id, queue_empty, gen_ms, frames_dropped_since_last_send,
+                    )
+                    frames_dropped_since_last_send = 0
             except Exception as e:
                 logger.error("Frame processing error: %s", e, exc_info=True)
                 if not done:
@@ -214,8 +251,8 @@ async def websocket_stream(ws: WebSocket):
         elapsed = time.time() - session_start
         fps = frames_processed / elapsed if elapsed > 0 else 0
         logger.info(
-            "Client %d disconnected. Received %d, processed %d, dropped %d, %.1f FPS over %.1fs",
-            client_id, frames_received, frames_processed, frames_dropped, fps, elapsed,
+            "Client %d disconnected. Received %d, processed %d, dropped %d, queue_drained %d, %.1f FPS over %.1fs",
+            client_id, frames_received, frames_processed, frames_dropped, queue_drained_count, fps, elapsed,
         )
 
 

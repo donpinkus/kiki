@@ -65,35 +65,46 @@ async def run_test(args):
             await ws.send(jpeg_data)
 
             try:
+                # Server sends frame_meta (text) then binary, in that order,
+                # for every generated frame.
+                meta_msg = await asyncio.wait_for(ws.recv(), timeout=30.0)
+                assert isinstance(meta_msg, str), (
+                    f"expected frame_meta text before binary, got {type(meta_msg)}"
+                )
+                meta = json.loads(meta_msg)
+                if meta.get("type") == "status" and meta.get("status") == "error":
+                    print(f"\nServer error: {meta.get('message')}")
+                    continue
+                assert meta.get("type") == "frame_meta", f"unexpected: {meta}"
+                assert "queueEmpty" in meta, "frame_meta missing queueEmpty"
+
                 response = await asyncio.wait_for(ws.recv(), timeout=30.0)
+                assert isinstance(response, bytes), (
+                    f"expected binary after frame_meta, got {type(response)}"
+                )
 
-                if isinstance(response, bytes):
-                    results_received += 1
-                    size_kb = len(response) / 1024
-                    elapsed = time.time() - t_start
-                    fps = results_received / elapsed if elapsed > 0 else 0
+                results_received += 1
+                size_kb = len(response) / 1024
+                elapsed = time.time() - t_start
+                fps = results_received / elapsed if elapsed > 0 else 0
 
-                    if num_frames == 1:
-                        output_path = "output.jpg"
-                        with open(output_path, "wb") as f:
-                            f.write(response)
-                        print(f"Result saved to {output_path} ({size_kb:.1f} KB)")
-                        result_img = Image.open(io.BytesIO(response))
-                        print(f"Output resolution: {result_img.size}")
-                    else:
-                        print(
-                            f"Frame {i+1}/{num_frames}: "
-                            f"received {size_kb:.1f} KB, "
-                            f"{fps:.1f} FPS avg",
-                            end="\r",
-                        )
-
-                elif isinstance(response, str):
-                    data = json.loads(response)
-                    if data.get("type") == "status" and data.get("status") == "error":
-                        print(f"\nServer error: {data.get('message')}")
-                    else:
-                        print(f"\nServer message: {data}")
+                if num_frames == 1:
+                    output_path = "output.jpg"
+                    with open(output_path, "wb") as f:
+                        f.write(response)
+                    print(
+                        f"Result saved to {output_path} ({size_kb:.1f} KB) "
+                        f"queueEmpty={meta['queueEmpty']} reqId={meta.get('requestId')}"
+                    )
+                    result_img = Image.open(io.BytesIO(response))
+                    print(f"Output resolution: {result_img.size}")
+                else:
+                    print(
+                        f"Frame {i+1}/{num_frames}: "
+                        f"{size_kb:.1f} KB, {fps:.1f} FPS avg, "
+                        f"queueEmpty={meta['queueEmpty']}",
+                        end="\r",
+                    )
 
             except asyncio.TimeoutError:
                 print(f"\nTimeout waiting for frame {i+1}")
