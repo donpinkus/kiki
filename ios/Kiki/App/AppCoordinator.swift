@@ -150,6 +150,11 @@ final class AppCoordinator {
     var canvasOnTop = false
     var generationError: String?
 
+    /// One-time NUX tooltip for QuickShape. Set true on first successful snap;
+    /// DrawingView observes this and auto-clears it after 5s. AppStorage flag
+    /// in DrawingView ensures we only show it once per device, ever.
+    var shouldShowQuickShapeTooltip: Bool = false
+
     // MARK: - Layout
 
     var drawingLayout: DrawingLayout = .splitScreen {
@@ -268,6 +273,67 @@ final class AppCoordinator {
         // user to navigate or tap an overlay.
         canvasViewModel.onUserActivity = { [weak self] in
             self?.handleUserActivity()
+        }
+        // QuickShape telemetry — forward recognizer lifecycle events to PostHog.
+        canvasViewModel.onSnapEvent = { event in
+            Self.trackSnapEvent(event)
+        }
+        // QuickShape NUX tooltip — observed by DrawingView via @Observable.
+        canvasViewModel.onFirstBrushStrokeCommitted = { [weak self] in
+            self?.shouldShowQuickShapeTooltip = true
+        }
+    }
+
+    /// Translate a SnapEvent into a typed Analytics call. Property keys are
+    /// snake_case to match the rest of our event schema.
+    private static func trackSnapEvent(_ event: SnapEvent) {
+        switch event {
+        case .committed(let info):
+            Analytics.track(.strokeSnapCommitted, properties: [
+                "verdict": info.verdict,
+                "confidence": info.confidence,
+                "stroke_duration_sec": info.strokeDurationSec,
+                "path_length": Double(info.snapshot.pathLength),
+                "bbox_diagonal": Double(info.snapshot.bboxDiagonal),
+                "sagitta_ratio": Double(info.snapshot.sagittaRatio),
+                "signed_turn_deg": Double(info.snapshot.totalSignedTurnDeg),
+                "abs_turn_deg": Double(info.snapshot.totalAbsTurnDeg),
+                "line_norm_rms": Double(info.snapshot.lineNormRMS),
+                "resampled_n": info.snapshot.resampledPointCount,
+                "line_score": Double(info.snapshot.lineScore),
+            ])
+        case .abstained(let info):
+            var props: [String: Any] = [
+                "reason": info.reason,
+                "confidence": info.confidence,
+            ]
+            if let s = info.snapshot {
+                props["path_length"] = Double(s.pathLength)
+                props["bbox_diagonal"] = Double(s.bboxDiagonal)
+                props["sagitta_ratio"] = Double(s.sagittaRatio)
+                props["signed_turn_deg"] = Double(s.totalSignedTurnDeg)
+                props["abs_turn_deg"] = Double(s.totalAbsTurnDeg)
+                props["line_norm_rms"] = Double(s.lineNormRMS)
+                props["resampled_n"] = s.resampledPointCount
+                props["line_score"] = Double(s.lineScore)
+            }
+            Analytics.track(.strokeSnapAbstained, properties: props)
+        case .undoneWithin2s(let info):
+            var props: [String: Any] = [
+                "original_verdict": info.originalVerdict,
+                "elapsed_sec": info.elapsedSec,
+            ]
+            if let s = info.snapshot {
+                props["sagitta_ratio"] = Double(s.sagittaRatio)
+                props["signed_turn_deg"] = Double(s.totalSignedTurnDeg)
+                props["line_norm_rms"] = Double(s.lineNormRMS)
+                props["line_score"] = Double(s.lineScore)
+            }
+            Analytics.track(.strokeSnapUndoneWithin2s, properties: props)
+        case .previewCanceled(let info):
+            Analytics.track(.strokeSnapPreviewCanceled, properties: [
+                "reason": info.reason,
+            ])
         }
     }
 
@@ -712,55 +778,42 @@ final class AppCoordinator {
             ])
         }
 
-        if let image = lastSuccessfulImage {
-            resultState = .preview(image: image)
-        } else if case .provisioning = resultState {
-            resultState = .empty
-        }
+        resultState = lastSuccessfulImage.map { .preview(image: $0) } ?? .empty
     }
 
-    /// Map stream readiness into `resultState`. Stays out of the way of an
-    /// existing image or active stream — readiness churn alone never blanks
-    /// the result pane.
+    /// Direct map from stream readiness to `resultState`. The single rule:
+    /// `.ready` shows the bottom-left badge over a preview/streaming image;
+    /// every other readiness state shows the corresponding overlay, with
+    /// `lastSuccessfulImage` dimmed underneath when one exists.
     private func applyReadinessToResultState(_ readiness: StreamSession.StreamReadiness) {
         switch readiness {
         case .disconnected:
-            if case .provisioning = resultState {
-                resultState = lastSuccessfulImage.map { .preview(image: $0) } ?? .empty
-            }
+            resultState = lastSuccessfulImage.map { .preview(image: $0) } ?? .empty
         case .warming(let message, let startedAt):
-            // Preserve any existing image or active stream; only show the
-            // warm-up UI when there's nothing else to display. `startedAt`
-            // is owned by StreamSession, so the progress bar stays continuous
-            // across multiple readiness updates and reconnect attempts.
-            if lastSuccessfulImage == nil, !resultState.isStreaming {
-                resultState = .provisioning(message: message, startedAt: startedAt)
-            }
+            // `startedAt` is server-authoritative (orchestrator's session.createdAt
+            // threaded through state events), so the progress bar reflects the
+            // real pod-warm-cycle origin even after gallery↔drawing nav.
+            resultState = .provisioning(
+                message: message,
+                startedAt: startedAt,
+                previousImage: lastSuccessfulImage
+            )
         case .ready:
             // Pod is genuinely ready; the first frame will move us to
-            // `.streaming`. Clear any lingering warm-up UI in the meantime.
-            if case .provisioning = resultState {
-                resultState = lastSuccessfulImage.map { .preview(image: $0) } ?? .empty
-            }
+            // `.streaming`. Show preview (or empty) until then.
+            resultState = lastSuccessfulImage.map { .preview(image: $0) } ?? .empty
         case .failed(let msg):
             streamLog.error("Stream failed: \(msg)")
             resultState = .error(message: msg, previousImage: lastSuccessfulImage)
         case .idleTimeout:
-            // Reaper paused the session. Show the dedicated overlay on top of
-            // the last generated image so the user sees their work is still
-            // waiting for them. Tap or start drawing to resume.
             resultState = .idleTimeout(previousImage: lastSuccessfulImage)
         }
     }
 
     /// Seed `resultState` when entering a drawing so the result pane reflects
     /// any pre-warming already in progress, instead of momentarily flashing
-    /// empty. Existing image wins; otherwise sync to current readiness.
+    /// empty.
     private func seedResultStateForCurrentDrawing() {
-        if let image = lastSuccessfulImage {
-            resultState = .preview(image: image)
-            return
-        }
         applyReadinessToResultState(streamReadiness)
     }
 

@@ -46,6 +46,12 @@ enum AnalyticsEvent: String {
     // Drawing controls
     case styleSelected = "style.selected"
     case promptChanged = "prompt.changed"
+
+    // QuickShape (stroke recognizer)
+    case strokeSnapCommitted = "stroke.snap.committed"
+    case strokeSnapAbstained = "stroke.snap.abstained"
+    case strokeSnapUndoneWithin2s = "stroke.snap.undone_within_2s"
+    case strokeSnapPreviewCanceled = "stroke.snap.preview_canceled"
 }
 
 enum Analytics {
