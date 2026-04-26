@@ -33,6 +33,9 @@ public struct CanvasView: UIViewRepresentable {
         canvasView.onLassoSelectionStarted = { [weak viewModel] path, bounds in
             viewModel?.handleLassoSelectionStarted(path: path, bounds: bounds)
         }
+        canvasView.onSnapEvent = { [weak viewModel] event in
+            viewModel?.handleSnapEvent(event)
+        }
 
         // Wire container callbacks.
         container.onTransformChanged = { [weak viewModel] in

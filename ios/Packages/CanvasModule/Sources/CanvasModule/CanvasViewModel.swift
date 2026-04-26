@@ -65,6 +65,16 @@ public final class CanvasViewModel {
     /// The AppCoordinator sets this.
     public var currentBrushColorProvider: (() -> UIColor)?
 
+    /// Telemetry callback for QuickShape lifecycle events. Set by the
+    /// AppCoordinator to forward to PostHog via `Analytics.track`.
+    public var onSnapEvent: ((SnapEvent) -> Void)?
+
+    /// Fires the first time per app launch that a brush stroke commits with
+    /// QuickShape enabled. AppCoordinator uses this to drive the one-time
+    /// NUX tooltip ("Hold to snap…").
+    public var onFirstBrushStrokeCommitted: (() -> Void)?
+    private var hasFiredFirstBrushStrokeThisSession: Bool = false
+
     // MARK: - Lifecycle
 
     public init() {
@@ -342,6 +352,19 @@ public final class CanvasViewModel {
 
     func handleColorPicked(_ color: UIColor) {
         onColorPicked?(color)
+    }
+
+    /// Forward a snap event from the canvas to the AppCoordinator's analytics
+    /// handler. Also fires the one-time NUX tooltip on first brush commit.
+    func handleSnapEvent(_ event: SnapEvent) {
+        onSnapEvent?(event)
+        // Tooltip trigger: first time per session that the user successfully
+        // snaps. (We could trigger on first brush stroke regardless of snap,
+        // but anchoring on a successful snap teaches the gesture.)
+        if case .committed = event, !hasFiredFirstBrushStrokeThisSession {
+            hasFiredFirstBrushStrokeThisSession = true
+            onFirstBrushStrokeCommitted?()
+        }
     }
 
     /// Sync @Observable properties from the canvas view. Called automatically
