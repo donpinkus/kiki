@@ -13,23 +13,59 @@ interface GraphQLResponse<T> {
   errors?: Array<{ message: string }>;
 }
 
-async function gql<T>(query: string): Promise<T> {
-  const res = await fetch(API_URL(), {
+// 5xx from api.runpod.io is almost always transient (Cloudflare→origin
+// glitch, brief RunPod GraphQL gateway hiccup). We've observed sub-minute
+// outages that hard-failed user provisions; retrying the call quietly
+// here is much better UX than surfacing a single 520 to the iPad.
+// 3 attempts with exponential backoff covers most observed outages
+// without dragging out failures when RunPod is genuinely down.
+const TRANSIENT_RETRY_DELAYS_MS = [500, 1500, 4500];
+
+async function fetchOnce(query: string): Promise<Response> {
+  return fetch(API_URL(), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ query }),
   });
-  if (!res.ok) {
-    throw new Error(`RunPod API HTTP ${res.status}: ${await res.text()}`);
+}
+
+async function gql<T>(query: string): Promise<T> {
+  let lastErr: Error | null = null;
+  for (let attempt = 0; attempt <= TRANSIENT_RETRY_DELAYS_MS.length; attempt++) {
+    if (attempt > 0) {
+      const delay = TRANSIENT_RETRY_DELAYS_MS[attempt - 1]!;
+      console.warn(`[runpod] gql retry attempt ${attempt} after ${delay}ms (${lastErr?.message?.slice(0, 120) ?? 'unknown'})`);
+      await new Promise((r) => setTimeout(r, delay));
+    }
+    let res: Response;
+    try {
+      res = await fetchOnce(query);
+    } catch (e) {
+      // Network-level failure (DNS, TCP, TLS). Retryable.
+      lastErr = e as Error;
+      continue;
+    }
+    if (res.status >= 500 && res.status < 600) {
+      // Server-side / Cloudflare gateway error. Retryable.
+      const bodyText = await res.text().catch(() => '');
+      lastErr = new Error(`RunPod API HTTP ${res.status}: ${bodyText}`);
+      continue;
+    }
+    if (!res.ok) {
+      // 4xx — auth, malformed query, etc. Not retryable; surface immediately.
+      throw new Error(`RunPod API HTTP ${res.status}: ${await res.text()}`);
+    }
+    const body = (await res.json()) as GraphQLResponse<T>;
+    if (body.errors && body.errors.length > 0) {
+      throw new Error(`RunPod API error: ${body.errors.map((e) => e.message).join('; ')}`);
+    }
+    if (!body.data) {
+      throw new Error('RunPod API returned no data');
+    }
+    return body.data;
   }
-  const body = (await res.json()) as GraphQLResponse<T>;
-  if (body.errors && body.errors.length > 0) {
-    throw new Error(`RunPod API error: ${body.errors.map((e) => e.message).join('; ')}`);
-  }
-  if (!body.data) {
-    throw new Error('RunPod API returned no data');
-  }
-  return body.data;
+  // Exhausted retries — surface the last error so callers see why.
+  throw lastErr ?? new Error('RunPod API: retries exhausted (unknown cause)');
 }
 
 export interface SpotBidInfo {

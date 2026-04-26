@@ -195,6 +195,13 @@ const IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 const REAPER_INTERVAL_MS = 60 * 1000;
 const MAX_CONCURRENT_PROVISIONS = Number(process.env['MAX_CONCURRENT_PROVISIONS'] ?? 5);
 
+// Git SHA the backend was built from. Railway injects RAILWAY_GIT_COMMIT_SHA
+// at build time. Used by checkVersionDrift to flag pods whose volumes were
+// stamped against a different commit (i.e. someone deployed the backend but
+// forgot to re-run sync-flux-app per DC). Empty string = not running on
+// Railway / unset; drift checks no-op.
+const BACKEND_GIT_SHA = process.env['RAILWAY_GIT_COMMIT_SHA'] ?? '';
+
 // Semaphore state
 let activeProvisions = 0;
 const semaphoreWaiters: Array<() => void> = [];
@@ -898,6 +905,77 @@ interface ProvisionResult {
  * reroll loop, `'abort'` when the caller should fall through to the generic
  * failure path (unrecoverable error, or rerolls exhausted).
  */
+/**
+ * Compare the FLUX pod's reported app version (from /health, originally
+ * written into /workspace/app/.version.json by sync-flux-app.ts) against the
+ * backend's own git SHA. Logs + Sentry-captures any of:
+ *   - missing version: pod booted from a volume that was synced before the
+ *     version-stamping era. Indicates that volume hasn't been re-synced
+ *     since 2026-04-26 and is on stale code.
+ *   - sha mismatch: volume stamped against a different commit than the
+ *     backend was deployed from. Indicates "deployed backend but forgot to
+ *     run sync-flux-app per DC" — a class of bug that's caused real silent
+ *     drift in this repo.
+ * Sentry's grouping handles dedup (one issue per dc + actual_sha pair) so
+ * sustained drift won't flood event volume.
+ *
+ * No-ops when BACKEND_GIT_SHA is unset (local dev, non-Railway).
+ */
+function checkVersionDrift(
+  appVersion: Record<string, string | number | boolean>,
+  ctx: { sessionId: string; podId: string; dc: string | null },
+): void {
+  if (!BACKEND_GIT_SHA) return;
+  const actualSha = typeof appVersion['app_git_sha'] === 'string'
+    ? (appVersion['app_git_sha'] as string)
+    : '';
+  if (!actualSha) {
+    log.warn(
+      {
+        sessionId: ctx.sessionId,
+        podId: ctx.podId,
+        dc: ctx.dc,
+        backendSha: BACKEND_GIT_SHA.slice(0, 8),
+        event: 'volume.version.missing',
+      },
+      'Pod has no app_version on /health — volume predates version stamping',
+    );
+    Sentry.captureMessage('Pod volume missing app_version stamp', {
+      level: 'warning',
+      tags: {
+        dc: ctx.dc ?? 'unknown',
+        backend_sha: BACKEND_GIT_SHA.slice(0, 8),
+        kind: 'missing_stamp',
+      },
+      contexts: { pod: { id: ctx.podId, sessionId: ctx.sessionId } },
+    });
+    return;
+  }
+  if (actualSha !== BACKEND_GIT_SHA) {
+    log.warn(
+      {
+        sessionId: ctx.sessionId,
+        podId: ctx.podId,
+        dc: ctx.dc,
+        backendSha: BACKEND_GIT_SHA.slice(0, 8),
+        volumeSha: actualSha.slice(0, 8),
+        event: 'volume.version.drift',
+      },
+      'Pod volume git_sha differs from backend git_sha',
+    );
+    Sentry.captureMessage('Pod volume version drift', {
+      level: 'warning',
+      tags: {
+        dc: ctx.dc ?? 'unknown',
+        backend_sha: BACKEND_GIT_SHA.slice(0, 8),
+        volume_sha: actualSha.slice(0, 8),
+        kind: 'sha_mismatch',
+      },
+      contexts: { pod: { id: ctx.podId, sessionId: ctx.sessionId } },
+    });
+  }
+}
+
 function handleRecoverableProvisionError(
   err: Error,
   ctx: {
@@ -1082,6 +1160,10 @@ async function provision(sessionId: string): Promise<ProvisionResult> {
               phaseTimings,
               metadata: healthResult.appVersion,
             });
+            // Flag silent-drift cases: missing version stamp, or volume on a
+            // different commit than the backend was built from. Provision still
+            // succeeds — this is observability, not a gate.
+            checkVersionDrift(healthResult.appVersion, { sessionId, podId, dc });
             return { podId, podUrl, podType };
           } catch (err) {
             // Pod was created but a later step failed — clean up to prevent cost leak.
