@@ -26,8 +26,9 @@
  * to leave on the volume.
  */
 
-import { spawn } from 'node:child_process';
+import { spawn, execSync } from 'node:child_process';
 import { chmodSync, writeFileSync } from 'node:fs';
+import { hostname, userInfo } from 'node:os';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -269,6 +270,35 @@ function runRsync(ssh: SshInfo, localPath: string, remotePath: string, timeoutMs
   });
 }
 
+// ─── Version stamp ────────────────────────────────────────────────────────
+
+/**
+ * Build the .version.json payload that gets written to /workspace/app/ on
+ * each sync. Pipeline reads this at boot and surfaces it on /health, so
+ * PostHog records per-DC version skew on every cold start. See
+ * `documents/references/provider-config.md` "Volume version tracking".
+ */
+function buildVersionStamp(): Record<string, string | boolean> {
+  const REPO_ROOT = resolve(__dirname, '..', '..');
+  let gitSha = 'unknown';
+  let gitDirty = false;
+  try {
+    gitSha = execSync('git rev-parse HEAD', { cwd: REPO_ROOT }).toString().trim();
+    const dirty = execSync('git status --porcelain', { cwd: REPO_ROOT }).toString().trim();
+    gitDirty = dirty.length > 0;
+  } catch (e) {
+    console.warn('[sync] git lookup failed; version stamp will be partial:', (e as Error).message);
+  }
+  return {
+    git_sha: gitSha,
+    git_dirty: gitDirty,
+    synced_at_utc: new Date().toISOString(),
+    synced_by: `${userInfo().username}@${hostname()}`,
+    dc: DC,
+    volume_id: VOLUME_ID,
+  };
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -352,6 +382,17 @@ echo "=== DONE ==="
 
     console.log('[sync] creating venv + pip installing (takes 2-5 min first time, <30s idempotent reruns)...');
     await runSsh(ssh, installCmd, 20 * 60 * 1000);
+
+    // 3. Write version stamp AFTER all other steps succeed — its presence
+    //    is the signal that this volume is fully provisioned at this version.
+    //    A pod that boots and sees no .version.json knows something interrupted.
+    const stamp = buildVersionStamp();
+    const stampJson = JSON.stringify(stamp, null, 2).replace(/'/g, "'\\''");
+    console.log(`[sync] stamping version (sha=${stamp['git_sha'].toString().slice(0, 8)}${stamp['git_dirty'] ? '+dirty' : ''})...`);
+    await runSsh(ssh, `cat > /workspace/app/.version.json <<'VEREOF'
+${stampJson}
+VEREOF`);
+
     console.log('[sync] sync complete');
   } finally {
     console.log(`[sync] terminating pod ${podId}...`);

@@ -313,6 +313,10 @@ async function deleteSession(sessionId: string): Promise<void> {
 export interface StateEvent {
   state: State;
   stateEnteredAt: number;
+  /// Ms epoch when this warm-up cycle began (= session.createdAt). Stable
+  /// across all state transitions so a reconnecting client can resume the
+  /// progress bar instead of restarting from zero.
+  warmingStartedAt: number;
   replacementCount: number;
   failureCategory: FailureCategory | null;
 }
@@ -342,6 +346,7 @@ export async function subscribe(
     handler({
       state: session.state,
       stateEnteredAt: session.stateEnteredAt,
+      warmingStartedAt: session.createdAt,
       replacementCount: session.replacementCount,
       failureCategory: session.failureCategory,
     });
@@ -379,12 +384,14 @@ export async function emitState(
     ? now - prevSession.stateEnteredAt
     : null;
   const replacementCount = prevSession?.replacementCount ?? 0;
+  const warmingStartedAt = prevSession?.createdAt ?? now;
 
   await patchSession(sessionId, { state, stateEnteredAt: now, failureCategory });
 
   const event: StateEvent = {
     state,
     stateEnteredAt: now,
+    warmingStartedAt,
     replacementCount,
     failureCategory,
   };
@@ -1032,11 +1039,18 @@ async function provision(sessionId: string): Promise<ProvisionResult> {
             currentState = 'warming_model';
             notifyPodProgress(podId, '🧠 Warming up AI model...');
             const healthUrl = `https://${podId}-8766.proxy.runpod.net/health`;
-            await Sentry.startSpan(
+            const healthResult = await Sentry.startSpan(
               { name: 'pod.warming_model', op: 'pod.warming_model', attributes: { podId, dc: dc ?? 'unknown' } },
               () => waitForHealth(podId as string, healthUrl),
             );
             phaseTimings.warming_model_ms = Date.now() - phaseStart;
+            // Merge per-substage warmup timings reported by the FLUX server's
+            // /health response. Keys: from_pretrained_ms, nvfp4_load_ms,
+            // to_cuda_ms, warmup_inference_ms. Lets us see which substage
+            // dominates the ~62s warming_model phase in PostHog.
+            for (const [k, v] of Object.entries(healthResult.phaseTimingsMs)) {
+              if (typeof v === 'number') phaseTimings[k] = v;
+            }
 
             const totalMs = Date.now() - t0;
 
@@ -1066,6 +1080,7 @@ async function provision(sessionId: string): Promise<ProvisionResult> {
               podType,
               attempt,
               phaseTimings,
+              metadata: healthResult.appVersion,
             });
             return { podId, podUrl, podType };
           } catch (err) {
@@ -1433,7 +1448,10 @@ async function waitForHealth(
   podId: string,
   healthUrl: string,
   timeoutMs = 10 * 60 * 1000,
-): Promise<void> {
+): Promise<{
+  phaseTimingsMs: Record<string, number>;
+  appVersion: Record<string, string | number | boolean>;
+}> {
   const start = Date.now();
   const deadline = start + timeoutMs;
   let lastLogAt = 0;
@@ -1443,8 +1461,17 @@ async function waitForHealth(
     try {
       const res = await fetch(healthUrl, { signal: AbortSignal.timeout(10_000) });
       if (res.ok) {
-        const body = (await res.json()) as { status?: string };
-        if (body.status === 'ok') return;
+        const body = (await res.json()) as {
+          status?: string;
+          phase_timings_ms?: Record<string, number>;
+          app_version?: Record<string, string | number | boolean>;
+        };
+        if (body.status === 'ok') {
+          return {
+            phaseTimingsMs: body.phase_timings_ms ?? {},
+            appVersion: body.app_version ?? {},
+          };
+        }
       }
     } catch {
       // Ignore — health check hasn't come up yet
