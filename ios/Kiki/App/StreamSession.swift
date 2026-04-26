@@ -38,6 +38,7 @@ final class StreamSession {
     private var captureTask: Task<Void, Never>?
     private var receiveTask: Task<Void, Never>?
     private var statusTask: Task<Void, Never>?
+    private var videoTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
 
     /// How often to capture and send frames (default ~2 FPS for FLUX.2-klein).
@@ -77,6 +78,10 @@ final class StreamSession {
 
     /// Called when a new generated image frame is received.
     var onImageReceived: ((UIImage) -> Void)?
+
+    /// Called for every event from the video pod (idle-state animation):
+    /// streamed frames, the final MP4, or a cancellation.
+    var onVideoEvent: ((StreamWebSocketClient.VideoEvent) -> Void)?
 
     /// Called when stream readiness changes.
     var onReadinessChanged: ((StreamReadiness) -> Void)?
@@ -422,6 +427,20 @@ final class StreamSession {
             }
         }
 
+        videoTask = Task { [weak self] in
+            guard let self else { return }
+            let events = await client.videoEvents
+            for await event in events {
+                guard !Task.isCancelled else { break }
+                Self.breadcrumb(category: "stream.video", message: "video event", data: [
+                    "case": String(describing: event),
+                ])
+                await MainActor.run {
+                    self.onVideoEvent?(event)
+                }
+            }
+        }
+
         statusTask = Task { [weak self] in
             guard let self else { return }
             let statuses = await client.serverStatuses
@@ -508,6 +527,8 @@ final class StreamSession {
         receiveTask = nil
         statusTask?.cancel()
         statusTask = nil
+        videoTask?.cancel()
+        videoTask = nil
         reconnectTask?.cancel()
         reconnectTask = nil
     }

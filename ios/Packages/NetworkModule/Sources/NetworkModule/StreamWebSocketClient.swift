@@ -35,6 +35,16 @@ public actor StreamWebSocketClient {
         public let data: Data
     }
 
+    /// Events from the video pod path: streamed JPEG frames during
+    /// generation, the final MP4 for smooth looping, and cancellation
+    /// notices. The same correlation `requestId` propagates through every
+    /// event so the UI can match them to a specific trigger.
+    public enum VideoEvent: Sendable {
+        case frame(requestId: String?, image: Data, index: Int?, total: Int?)
+        case complete(requestId: String?, mp4: Data, fps: Int?, frames: Int?)
+        case cancelled(requestId: String?, atStep: Int?, error: String?)
+    }
+
     // MARK: - Properties
 
     private let request: URLRequest
@@ -49,6 +59,9 @@ public actor StreamWebSocketClient {
 
     private let statusContinuation: AsyncStream<ServerStatus>.Continuation
     public let serverStatuses: AsyncStream<ServerStatus>
+
+    private let videoContinuation: AsyncStream<VideoEvent>.Continuation
+    public let videoEvents: AsyncStream<VideoEvent>
 
     /// Most recent `frame_meta` from the pod, waiting to be paired with
     /// the next binary frame. Cleared each time a binary is emitted.
@@ -68,6 +81,10 @@ public actor StreamWebSocketClient {
         var statusCont: AsyncStream<ServerStatus>.Continuation!
         self.serverStatuses = AsyncStream { statusCont = $0 }
         self.statusContinuation = statusCont
+
+        var videoCont: AsyncStream<VideoEvent>.Continuation!
+        self.videoEvents = AsyncStream { videoCont = $0 }
+        self.videoContinuation = videoCont
     }
 
     // MARK: - Connection
@@ -85,6 +102,10 @@ public actor StreamWebSocketClient {
         var statusCont: AsyncStream<ServerStatus>.Continuation!
         self.serverStatuses = AsyncStream { statusCont = $0 }
         self.statusContinuation = statusCont
+
+        var videoCont: AsyncStream<VideoEvent>.Continuation!
+        self.videoEvents = AsyncStream { videoCont = $0 }
+        self.videoContinuation = videoCont
     }
 
     public func connect() async throws {
@@ -146,6 +167,7 @@ public actor StreamWebSocketClient {
         state = .disconnected
         framesContinuation.finish()
         statusContinuation.finish()
+        videoContinuation.finish()
     }
 
     // MARK: - Sending
@@ -203,7 +225,50 @@ public actor StreamWebSocketClient {
                                     ])
                                     await self.statusContinuation.yield(status)
                                 }
+                            } else if type == "video_frame_data", let b64 = json["data"] as? String,
+                                      let imageData = Data(base64Encoded: b64) {
+                                let meta = json["meta"] as? [String: Any] ?? [:]
+                                let event = StreamWebSocketClient.VideoEvent.frame(
+                                    requestId: meta["requestId"] as? String,
+                                    image: imageData,
+                                    index: meta["index"] as? Int,
+                                    total: meta["total"] as? Int
+                                )
+                                Self.breadcrumb(category: "ws.video", message: "video_frame", data: [
+                                    "bytes": imageData.count,
+                                    "index": (meta["index"] as? Int) ?? -1,
+                                    "total": (meta["total"] as? Int) ?? -1,
+                                ])
+                                await self.videoContinuation.yield(event)
+                            } else if type == "video_complete_data", let b64 = json["data"] as? String,
+                                      let mp4Data = Data(base64Encoded: b64) {
+                                let meta = json["meta"] as? [String: Any] ?? [:]
+                                let event = StreamWebSocketClient.VideoEvent.complete(
+                                    requestId: meta["requestId"] as? String,
+                                    mp4: mp4Data,
+                                    fps: meta["fps"] as? Int,
+                                    frames: meta["frames"] as? Int
+                                )
+                                Self.breadcrumb(category: "ws.video", message: "video_complete", data: [
+                                    "bytes": mp4Data.count,
+                                    "frames": (meta["frames"] as? Int) ?? -1,
+                                ])
+                                await self.videoContinuation.yield(event)
+                            } else if type == "video_cancelled" {
+                                let event = StreamWebSocketClient.VideoEvent.cancelled(
+                                    requestId: json["requestId"] as? String,
+                                    atStep: json["atStep"] as? Int,
+                                    error: json["error"] as? String
+                                )
+                                Self.breadcrumb(category: "ws.video", message: "video_cancelled", data: [
+                                    "atStep": (json["atStep"] as? Int) ?? -1,
+                                    "error": (json["error"] as? String) ?? "",
+                                ])
+                                await self.videoContinuation.yield(event)
                             }
+                            // Other types (video_frame, video_complete preambles)
+                            // are intentionally ignored — the *_data wrappers
+                            // above carry their meta as a sibling field.
                         }
 
                     @unknown default:
@@ -241,6 +306,7 @@ public actor StreamWebSocketClient {
         receiveLoopTask = nil
         framesContinuation.finish()
         statusContinuation.finish()
+        videoContinuation.finish()
     }
 
     // MARK: - Breadcrumb helper
