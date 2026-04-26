@@ -183,6 +183,14 @@ const BASE_IMAGE = 'runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404';
 // so SIGTERM reaches uvicorn directly.
 const BOOT_DOCKER_ARGS =
   "bash -lc 'source /workspace/venv/bin/activate && cd /workspace/app && exec python3 -u server.py'";
+// Video pod runs LTXV i2v on a separate pod (see flux-klein-server/video_server.py).
+// Same volume / venv / port as the image pod — only the entry script differs.
+const BOOT_DOCKER_ARGS_VIDEO =
+  "bash -lc 'source /workspace/venv/bin/activate && cd /workspace/app && exec python3 -u video_server.py'";
+// Pod name prefix for video pods. Distinct from POD_PREFIX so reconcile
+// can list them separately and so RunPod console / Discord alerts are
+// unambiguous about which kind died.
+const VIDEO_POD_PREFIX = 'kiki-vsession-';
 const BOOT_ENV: Array<{ key: string; value: string }> = [
   { key: 'HF_HOME', value: '/workspace/huggingface' },
   { key: 'HF_HUB_OFFLINE', value: '1' },
@@ -217,6 +225,12 @@ interface RedisSession {
   createdAt: number;
   lastActivityAt: number;
   replacementCount: number;
+  // Best-effort video pod tracking. Set by setVideoPod() once
+  // provisionVideoPod resolves; cleared by clearVideoPod() on stream close
+  // or by the reaper. The image pod can serve without these — they only
+  // exist to (a) drive reconcile so we don't orphan video pods after
+  // crashes, and (b) let the reaper terminate both pods together.
+  videoPodId: string | null;
 }
 
 const IDLE_TTL_SECONDS = Math.ceil(IDLE_TIMEOUT_MS / 1000) + IDLE_GRACE_SECONDS;
@@ -243,6 +257,7 @@ async function readSession(sessionId: string): Promise<RedisSession | null> {
     createdAt: Number(data['createdAt'] ?? 0),
     lastActivityAt: Number(data['lastActivityAt'] ?? 0),
     replacementCount: Number(data['replacementCount'] ?? 0),
+    videoPodId: data['videoPodId'] || null,
   };
 }
 
@@ -275,7 +290,7 @@ async function patchSession(
   sessionId: string,
   patch: Partial<Pick<
     RedisSession,
-    'state' | 'stateEnteredAt' | 'failureCategory' | 'podId' | 'podUrl' | 'podType' | 'lastActivityAt' | 'replacementCount'
+    'state' | 'stateEnteredAt' | 'failureCategory' | 'podId' | 'podUrl' | 'podType' | 'lastActivityAt' | 'replacementCount' | 'videoPodId'
   >>,
 ): Promise<void> {
   const key = sessionKey(sessionId);
@@ -288,6 +303,7 @@ async function patchSession(
   if (patch.podType !== undefined) fields['podType'] = patch.podType ?? '';
   if (patch.lastActivityAt !== undefined) fields['lastActivityAt'] = String(patch.lastActivityAt);
   if (patch.replacementCount !== undefined) fields['replacementCount'] = String(patch.replacementCount);
+  if (patch.videoPodId !== undefined) fields['videoPodId'] = patch.videoPodId ?? '';
   if (Object.keys(fields).length === 0) return;
   await getRedis().multi()
     .hset(key, fields)
@@ -450,6 +466,11 @@ export async function abortSession(
         log.warn({ sessionId, podId: session.podId, err: (err as Error).message }, 'abortSession: terminatePod failed'),
       );
     }
+    if (session?.videoPodId) {
+      terminatePod(session.videoPodId).catch((err) =>
+        log.warn({ sessionId, videoPodId: session.videoPodId, err: (err as Error).message }, 'abortSession: terminate video pod failed'),
+      );
+    }
     await deleteSession(sessionId);
   } catch (err) {
     log.warn({ sessionId, err: (err as Error).message }, 'abortSession failed');
@@ -509,6 +530,7 @@ export async function getOrProvisionPod(sessionId: string): Promise<{ podUrl: st
     createdAt: now,
     lastActivityAt: now,
     replacementCount: 0,
+    videoPodId: null,
   });
 
   let provisionedPodId: string | null = null;
@@ -768,9 +790,10 @@ async function runReaper(): Promise<void> {
 
       const podId = data['podId']!;
       const sessionId = data['sessionId']!;
+      const videoPodId = data['videoPodId'] || null;
       const createdAt = Number(data['createdAt'] ?? 0);
       const lifetimeMs = createdAt > 0 ? now - createdAt : 0;
-      log.info({ sessionId, podId, idleMs, lifetimeMs }, 'Reaping idle pod');
+      log.info({ sessionId, podId, videoPodId, idleMs, lifetimeMs, kind: 'image' }, '[reaper] terminating session=' + sessionId + ' kind=image');
       trackPodTerminated({ userId: sessionId, reason: 'idle', lifetimeMs });
       notifyPodTerminated(podId, `idle ${Math.round(idleMs / 1000)}s`);
       // Emit through the broker so the iPad sees state='terminated' with
@@ -783,6 +806,12 @@ async function runReaper(): Promise<void> {
       terminatePod(podId)
         .then(() => redis.del(key))
         .catch((err) => log.error({ sessionId, podId, err }, 'Reap failed'));
+      if (videoPodId) {
+        log.info({ sessionId, videoPodId, kind: 'video' }, '[reaper] terminating session=' + sessionId + ' kind=video');
+        terminatePod(videoPodId).catch((err) =>
+          log.error({ sessionId, videoPodId, err }, 'Reap video pod failed'),
+        );
+      }
     } catch (err) {
       log.warn({ key, err: (err as Error).message }, 'Reaper error on key');
     }
@@ -804,6 +833,7 @@ async function reconcileOrphanPods(minAgeSec = 0): Promise<void> {
     // 1. Read all session keys from Redis
     const redis = getRedis();
     const sessionPodIds = new Set<string>();
+    const sessionVideoPodIds = new Set<string>();
     const staleKeys: string[] = [];
     for await (const key of eachSessionKey()) {
       const data = await redis.hgetall(key);
@@ -818,6 +848,14 @@ async function reconcileOrphanPods(minAgeSec = 0): Promise<void> {
         // treat as stale and clean up.
         staleKeys.push(key);
       }
+      // Video pods: in use whenever a session row references them, regardless
+      // of the image pod's state — the video provision happens after image
+      // 'ready', so the row's state is always 'ready' by the time videoPodId
+      // is set. But guard with the same `state === 'ready'` filter to avoid
+      // adopting a videoPodId from a row that's mid-cleanup.
+      if (data['videoPodId'] && state === 'ready') {
+        sessionVideoPodIds.add(data['videoPodId']);
+      }
     }
 
     // Clean up stale in-progress rows
@@ -826,10 +864,11 @@ async function reconcileOrphanPods(minAgeSec = 0): Promise<void> {
       await redis.del(key);
     }
 
-    // 2. List RunPod pods
+    // 2. List RunPod pods (image + video, separately so we count distinctly).
     const pods = await listPodsByPrefix(POD_PREFIX);
+    const videoPods = await listPodsByPrefix(VIDEO_POD_PREFIX);
 
-    // 3. Adopt, skip young, or terminate
+    // 3. Adopt, skip young, or terminate (image pods)
     let adopted = 0;
     let skippedYoung = 0;
     let terminated = 0;
@@ -854,17 +893,65 @@ async function reconcileOrphanPods(minAgeSec = 0): Promise<void> {
       );
     }
 
+    // 3b. Same logic for video pods. Source of truth: videoPodId fields on
+    // Redis session rows. Anything else under the kiki-vsession-* prefix is
+    // an orphan (backend crash mid-stream, or stream.ts close handler missed
+    // the terminate). Boot reconcile (minAgeSec=0) is aggressive — there
+    // are no live sessions yet — and periodic respects skip-young.
+    let videoAdopted = 0;
+    let videoSkippedYoung = 0;
+    let videoTerminated = 0;
+    for (const pod of videoPods) {
+      if (sessionVideoPodIds.has(pod.id)) {
+        videoAdopted++;
+        continue;
+      }
+      if (minAgeSec > 0) {
+        const uptime = pod.runtime?.uptimeInSeconds ?? 0;
+        if (pod.runtime === null || uptime < minAgeSec) {
+          videoSkippedYoung++;
+          continue;
+        }
+      }
+      log.warn({ podId: pod.id, name: pod.name, kind: 'video' }, '[reconcile] orphans found terminating video pod');
+      videoTerminated++;
+      await terminatePod(pod.id).catch((err) =>
+        log.error({ podId: pod.id, name: pod.name, err }, 'Failed to terminate orphan video pod'),
+      );
+    }
+
     // 4. Clean up Redis sessions whose pods no longer exist on RunPod
     const runpodPodIds = new Set(pods.map((p) => p.id));
+    const runpodVideoPodIds = new Set(videoPods.map((p) => p.id));
     for await (const key of eachSessionKey()) {
       const podId = await redis.hget(key, 'podId');
       if (podId && !runpodPodIds.has(podId)) {
         log.warn({ key, podId }, 'Reconcile: deleting session for pod no longer on RunPod');
         await redis.del(key);
+        continue;
+      }
+      // Image pod still exists; clear stale videoPodId if the video pod is gone.
+      const stashedVideoPodId = await redis.hget(key, 'videoPodId');
+      if (stashedVideoPodId && !runpodVideoPodIds.has(stashedVideoPodId)) {
+        log.warn(
+          { key, videoPodId: stashedVideoPodId },
+          'Reconcile: clearing stale videoPodId on session (video pod gone)',
+        );
+        await redis.hdel(key, 'videoPodId');
       }
     }
 
-    log.info({ adopted, terminated, skippedYoung, staleProvisioning: staleKeys.length, minAgeSec }, 'Reconcile complete');
+    log.info(
+      {
+        adopted, terminated, skippedYoung, staleProvisioning: staleKeys.length,
+        videoAdopted, videoTerminated, videoSkippedYoung,
+        minAgeSec,
+        event: '[reconcile] orphans found',
+        image: pods.length,
+        video: videoPods.length,
+      },
+      'Reconcile complete',
+    );
   } catch (err) {
     log.error({ err }, 'Reconcile failed (continuing anyway)');
   }
@@ -1139,6 +1226,144 @@ async function provision(sessionId: string): Promise<ProvisionResult> {
       throw new Error('provision: reroll loop exited without resolution');
     },
   );
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Video pod (best-effort, on-demand only, no replacement)
+// ────────────────────────────────────────────────────────────────────────────
+//
+// Lifecycle and tracking decisions:
+//   - One video pod per session, provisioned by stream.ts AFTER the image pod
+//     resolves 'ready' (so the user's image flow is unblocked while video
+//     warms up).
+//   - Best-effort: if creation/health fails, log + warn and return null.
+//     Image gen continues normally; the iPad sees no error.
+//   - Tracked via `videoPodId` on the existing session row (no separate
+//     Redis key) so the reaper terminates both pods together when image is
+//     idle-reaped, and reconcile can match orphans against active sessions.
+//   - On-demand only for v1. Spot would help cost but adds replacement
+//     complexity that's not justified for a feature whose worst-case
+//     degradation is "no video animation this session".
+
+export async function provisionVideoPod(
+  sessionId: string,
+): Promise<{ podId: string; podUrl: string } | null> {
+  const t0 = Date.now();
+  let target: PlacementTarget | null;
+  try {
+    target = await selectPlacement(sessionId);
+  } catch (err) {
+    log.warn(
+      { sessionId, err: (err as Error).message, event: '[provision/video] selectPlacement failed' },
+      '[provision/video] selectPlacement threw',
+    );
+    return null;
+  }
+  if (!target) {
+    log.warn({ sessionId, event: '[provision/video] no DC capacity' }, '[provision/video] no DC capacity for video pod');
+    return null;
+  }
+
+  const podName = `${VIDEO_POD_PREFIX}${sessionId.slice(0, 16)}`;
+  const dcField = target.dataCenterId ? { dataCenterId: target.dataCenterId } : {};
+  const volField = target.networkVolumeId ? { networkVolumeId: target.networkVolumeId } : {};
+
+  log.info(
+    { sessionId, dc: target.dataCenterId, pod_kind: 'video', event: '[provision/video] start' },
+    '[provision/video] creating on-demand pod',
+  );
+
+  let podId: string;
+  try {
+    const result = await createOnDemandPod({
+      name: podName,
+      imageName: BASE_IMAGE,
+      gpuTypeId: GPU_TYPE_ID,
+      cloudType: 'SECURE',
+      dockerArgs: BOOT_DOCKER_ARGS_VIDEO,
+      env: BOOT_ENV,
+      ...dcField,
+      ...volField,
+    });
+    podId = result.id;
+    log.info(
+      { sessionId, podId, costPerHr: result.costPerHr, pod_kind: 'video', event: '[provision/video] created' },
+      '[provision/video] pod created',
+    );
+  } catch (err) {
+    log.warn(
+      { sessionId, err: (err as Error).message, pod_kind: 'video', event: '[provision/video] create failed' },
+      '[provision/video] createOnDemandPod failed',
+    );
+    Sentry.addBreadcrumb({
+      category: 'provision/video',
+      level: 'warning',
+      message: 'Video pod create failed',
+      data: { sessionId, err: (err as Error).message },
+    });
+    return null;
+  }
+
+  try {
+    await waitForRuntime(podId);
+    const healthUrl = `https://${podId}-8766.proxy.runpod.net/health`;
+    await waitForHealth(podId, healthUrl);
+    const podUrl = `wss://${podId}-8766.proxy.runpod.net/ws`;
+    log.info(
+      { sessionId, podId, podUrl, totalMs: Date.now() - t0, pod_kind: 'video', event: '[provision/video] ready' },
+      '[provision/video] pod ready',
+    );
+    return { podId, podUrl };
+  } catch (err) {
+    log.warn(
+      { sessionId, podId, err: (err as Error).message, pod_kind: 'video', event: '[provision/video] runtime/health failed' },
+      '[provision/video] failed runtime/health; terminating pod',
+    );
+    terminatePod(podId).catch((e) =>
+      log.warn({ podId, err: (e as Error).message }, '[provision/video] terminate-after-fail failed'),
+    );
+    return null;
+  }
+}
+
+/** Terminate a video pod by ID. Never throws. */
+export async function terminateVideoPod(podId: string): Promise<void> {
+  try {
+    await terminatePod(podId);
+    log.info({ podId, pod_kind: 'video', event: '[provision/video] terminated' }, '[provision/video] terminated');
+  } catch (err) {
+    log.warn(
+      { podId, err: (err as Error).message, pod_kind: 'video' },
+      '[provision/video] terminate failed (will be cleaned by reconcile)',
+    );
+  }
+}
+
+/** Stash the just-provisioned video pod ID on the session row so reaper +
+ *  reconcile can find it. Best-effort: if the session row doesn't exist
+ *  (somehow already cleaned up), silently skip — the reconciler will
+ *  terminate this pod as an orphan within a minute. */
+export async function setVideoPod(sessionId: string, videoPodId: string): Promise<void> {
+  try {
+    await patchSession(sessionId, { videoPodId });
+  } catch (err) {
+    log.warn(
+      { sessionId, videoPodId, err: (err as Error).message },
+      'setVideoPod patchSession failed (orphan will be reconciled)',
+    );
+  }
+}
+
+/** Clear videoPodId on session row (e.g. after stream close). Never throws. */
+export async function clearVideoPod(sessionId: string): Promise<void> {
+  try {
+    await patchSession(sessionId, { videoPodId: null });
+  } catch (err) {
+    log.warn(
+      { sessionId, err: (err as Error).message },
+      'clearVideoPod patchSession failed',
+    );
+  }
 }
 
 /**
