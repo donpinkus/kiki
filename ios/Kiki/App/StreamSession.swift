@@ -301,6 +301,13 @@ final class StreamSession {
         captureTask = Task.detached { [weak self] in
             Self.breadcrumb(category: "stream.lifecycle", message: "Capture loop started")
             var count = 0
+            // Tracks whether the previous tick was suppressed by the dirty
+            // check, so we breadcrumb only the idle/resume transitions
+            // (zero spam during steady-state drawing or steady-state idle).
+            // The transition to idle is the iPad-side counterpart of the
+            // image pod's `queue drained` log — together they confirm the
+            // trigger boundary.
+            var lastTickSkipped = false
             while !Task.isCancelled {
                 guard let self else { break }
 
@@ -333,12 +340,19 @@ final class StreamSession {
                         await MainActor.run { self.lastSentJpegData = jpeg }
                         count += 1
                         await self.setFramesSent(count)
+                        if lastTickSkipped {
+                            Self.breadcrumb(category: "stream.capture", message: "resumed (canvas changed)")
+                            lastTickSkipped = false
+                        }
                     } catch {
                         SentrySDK.capture(error: error) { scope in
                             scope.setTag(value: "sendFrame", key: "op")
                             scope.setExtra(value: count, key: "frameCount")
                         }
                     }
+                } else if !lastTickSkipped {
+                    Self.breadcrumb(category: "stream.capture", message: "idle (canvas unchanged)")
+                    lastTickSkipped = true
                 }
 
                 let interval = await self.captureInterval
