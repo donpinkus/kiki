@@ -929,6 +929,19 @@ interface ProvisionResult {
  * failure path (unrecoverable error, or rerolls exhausted).
  */
 /**
+ * Drift status the volume's flux_app_version reflects relative to the backend's
+ * expected version:
+ *   - 'current'        — volume is on the same flux-klein-server tree as backend
+ *   - 'drift'          — volume has a different flux_app_version than backend
+ *   - 'missing_stamp'  — volume predates flux_app_version stamping (pre-2026-04-26)
+ *   - 'unknown'        — backend has no expected version (local dev / no .flux-app-version)
+ * Returned from checkVersionDrift and surfaced on every pod.provision.completed
+ * PostHog event as `volume_status` so we can query drift trends without going
+ * to Sentry.
+ */
+type VolumeStatus = 'current' | 'drift' | 'missing_stamp' | 'unknown';
+
+/**
  * Compare the FLUX pod's reported flux_app_version (from /health, originally
  * written into /workspace/app/.version.json by sync-flux-app.ts) against the
  * backend's expected flux_app_version. Both are git tree-hashes of the
@@ -936,21 +949,20 @@ interface ProvisionResult {
  * change when files that actually get rsynced to volumes change. Doc/iOS/
  * backend commits don't false-trigger.
  *
- * Logs + Sentry-captures:
- *   - missing version: pod booted from a volume synced before flux_app_version
- *     stamping (i.e. before 2026-04-26 second pass). Re-sync needed.
- *   - mismatch: volume stamped against a different flux-klein-server tree
- *     than the backend expects. Indicates "deployed backend but forgot to
- *     re-run sync-flux-app per DC after a flux-klein-server change."
- * Sentry's grouping handles dedup (one issue per dc + actual_version pair).
+ * Side effects on non-current status:
+ *   - log.warn with structured fields (Railway logs)
+ *   - Sentry.captureMessage at warning level (Sentry dedups by dc + version pair)
+ * Caller forwards the returned status onto pod.provision.completed as
+ * `volume_status` for PostHog visibility.
  *
- * No-ops when BACKEND_FLUX_APP_VERSION is unset (local dev / no .flux-app-version).
+ * Returns 'unknown' when BACKEND_FLUX_APP_VERSION is unset (local dev / no
+ * .flux-app-version baked into the image) — drift cannot be evaluated.
  */
 function checkVersionDrift(
   appVersion: Record<string, string | number | boolean>,
   ctx: { sessionId: string; podId: string; dc: string | null },
-): void {
-  if (!BACKEND_FLUX_APP_VERSION) return;
+): VolumeStatus {
+  if (!BACKEND_FLUX_APP_VERSION) return 'unknown';
   const actualVersion = typeof appVersion['app_flux_app_version'] === 'string'
     ? (appVersion['app_flux_app_version'] as string)
     : '';
@@ -974,7 +986,7 @@ function checkVersionDrift(
       },
       contexts: { pod: { id: ctx.podId, sessionId: ctx.sessionId } },
     });
-    return;
+    return 'missing_stamp';
   }
   if (actualVersion !== BACKEND_FLUX_APP_VERSION) {
     log.warn(
@@ -998,7 +1010,9 @@ function checkVersionDrift(
       },
       contexts: { pod: { id: ctx.podId, sessionId: ctx.sessionId } },
     });
+    return 'drift';
   }
+  return 'current';
 }
 
 function handleRecoverableProvisionError(
@@ -1176,6 +1190,15 @@ async function provision(sessionId: string): Promise<ProvisionResult> {
               attempt,
               outcome: 'success',
             });
+            // Evaluate volume drift BEFORE emitting the event so volume_status
+            // lands on pod.provision.completed in PostHog. Side effects (log +
+            // Sentry) fire inside checkVersionDrift; we just forward the
+            // returned status. Provision still succeeds regardless — this is
+            // observability, not a gate.
+            const volumeStatus = checkVersionDrift(
+              healthResult.appVersion,
+              { sessionId, podId, dc },
+            );
             trackPodProvisionCompleted({
               userId: sessionId,
               durationMs: Date.now() - attemptStart,
@@ -1183,12 +1206,8 @@ async function provision(sessionId: string): Promise<ProvisionResult> {
               podType,
               attempt,
               phaseTimings,
-              metadata: healthResult.appVersion,
+              metadata: { ...healthResult.appVersion, volume_status: volumeStatus },
             });
-            // Flag silent-drift cases: missing version stamp, or volume on a
-            // different commit than the backend was built from. Provision still
-            // succeeds — this is observability, not a gate.
-            checkVersionDrift(healthResult.appVersion, { sessionId, podId, dc });
             return { podId, podUrl, podType };
           } catch (err) {
             // Pod was created but a later step failed — clean up to prevent cost leak.
