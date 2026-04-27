@@ -207,6 +207,65 @@ const IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 const REAPER_INTERVAL_MS = 60 * 1000;
 const MAX_CONCURRENT_PROVISIONS = Number(process.env['MAX_CONCURRENT_PROVISIONS'] ?? 5);
 
+// ────────────────────────────────────────────────────────────────────────────
+// Pod kinds: one operation (provision a pod) parameterized by a small static
+// config. POD_CONFIGS holds the six values that genuinely differ between
+// image and video pods. Everything else — DC selection, reroll on stall,
+// runtime+health waits, in-process inFlight dedup, idle reaping, reconcile —
+// is shared machinery in `_runProvisionLoop` / `_getOrProvisionPod` /
+// `_replacePodSession` (this file). Public per-kind exports (getOrProvisionPod,
+// getOrProvisionVideoPod, replaceSession, replaceVideoSession) are thin
+// wrappers expressing the per-kind contract differences (image: throws on
+// failure; video: returns null, best-effort).
+//
+// Adding a new pod kind = add a row to POD_CONFIGS + thin public wrappers.
+// No new architecture, no new Redis schema field, no new inFlight map.
+// ────────────────────────────────────────────────────────────────────────────
+
+export type PodKind = 'image' | 'video';
+
+interface PodKindConfig {
+  /** Pod name prefix (must be unique per kind so reconcile + Discord alerts
+   *  can list each kind separately). */
+  namePrefix: string;
+  /** Container entrypoint. Differs by kind only in which python script. */
+  bootDockerArgs: string;
+  /** RunPod proxy port for this pod's HTTP/WS service. */
+  port: number;
+  /** Watchdog budget for `waitForRuntime`. Image: 45 s (handles by reroll).
+   *  Video: 180 s (cold image pulls on a fresh host need more headroom; we
+   *  do still reroll, just give each DC more time before giving up). */
+  stallMs: number;
+  /** Create a pod for the chosen DC. Image: spot then on-demand fallback.
+   *  Video: on-demand only (preemption recovery via replaceVideoSession is
+   *  cleaner than spot complexity at our scale). */
+  createPodForDc: (
+    target: PlacementTarget,
+    sessionId: string,
+  ) => Promise<{ podId: string; podType: PodType; dc: string | null }>;
+  /** Look up a reusable pod from an existing session row. null if none.
+   *  Image: trusts row.state === 'ready' && row.podUrl (fast Redis-only).
+   *  Video: row.videoPodId set AND getPod returns RUNNING+runtime
+   *  (~500 ms RunPod query — needed because video doesn't have a state
+   *  field; deferred state-emit follow-up would let video also do
+   *  Redis-only). */
+  getReusableFromRow: (
+    row: RedisSession,
+  ) => Promise<{ podId: string; podUrl: string } | null>;
+  /** Stamp the row with the new pod's identity after provision succeeds.
+   *  Image: { podId, podUrl, podType } — full set, since image's reuse
+   *  check reads podUrl from the row. Video: { videoPodId } — minimal,
+   *  since video's reuse check uses RunPod query. */
+  stampRow: (
+    sessionId: string,
+    pod: { podId: string; podUrl: string; podType: PodType },
+  ) => Promise<void>;
+}
+
+// `POD_CONFIGS: Record<PodKind, PodKindConfig>` is defined further below,
+// after the helper functions it closes over (createPodWithFallback,
+// createOnDemandPod, getPod, patchSession). Search for `const POD_CONFIGS`.
+
 // Semaphore state
 let activeProvisions = 0;
 const semaphoreWaiters: Array<() => void> = [];
@@ -1048,186 +1107,40 @@ function handleRecoverableProvisionError(
   return { decision: willReroll ? 'retry' : 'abort', errDc };
 }
 
+/**
+ * Thin image-pod wrapper around _runProvisionLoop. Adds image-specific
+ * outer concerns: parent Sentry span; emitState + Discord notify between
+ * phases (drives the iPad's "Finding GPU... Creating pod..." overlay);
+ * terminal `failed` state emit on giveup.
+ *
+ * The helper does the actual mechanics (selectPlacement → create → wait
+ * for runtime + health, retry across DCs on stall/vanish) and the cross-
+ * kind concerns (analytics, Sentry exception capture).
+ */
 async function provision(sessionId: string): Promise<ProvisionResult> {
   return Sentry.startSpan(
     { name: 'pod.provision', op: 'pod.provision', attributes: { sessionId } },
-    async (parentSpan) => {
-      const t0 = Date.now();
-      const blacklistedDcs = new Set<string>();
-      const maxRerolls = Math.max(0, config.POD_BOOT_MAX_REROLLS);
-
-      for (let attempt = 0; attempt <= maxRerolls; attempt++) {
-        let podId: string | null = null;
-        let podType: PodType | null = null;
-        let dc: string | null = null;
-        // `currentState` tracks the last state we emitted, used for error-path
-        // analytics tagging. Starts at 'finding_gpu' because caller set that.
-        let currentState: State = 'finding_gpu';
-        const attemptStart = Date.now();
-        let phaseStart = attemptStart;
-        const phaseTimings: Record<string, number> = {};
-
-        // On reroll (attempt > 0), we need to return the UI to 'finding_gpu'
-        // before the next pod create attempt. Idempotent on first iteration.
-        if (attempt > 0) {
-          await emitState(sessionId, 'finding_gpu');
-          currentState = 'finding_gpu';
-        }
-
-        trackPodProvisionStarted({
-          userId: sessionId,
-          attempt,
-          excludedDcs: Array.from(blacklistedDcs),
+    async () => {
+      try {
+        const result = await _runProvisionLoop('image', sessionId, {
+          onProvisionPhase: async (phase, podId) => {
+            await emitState(sessionId, phase);
+            if (podId && phase === 'fetching_image') {
+              notifyPodProgress(podId, '⏳ Fetching container image...');
+            } else if (podId && phase === 'warming_model') {
+              notifyPodProgress(podId, '🧠 Warming up AI model...');
+            }
+          },
         });
-
-        try {
-          // 1 + 2. Create a pod — spot first, on-demand fallback if capacity exhausted.
-          // `createPodWithFallback` emits 'creating_pod' right before the create RPC.
-          const created = await Sentry.startSpan(
-            { name: 'pod.create', op: 'pod.create', attributes: { sessionId, attempt } },
-            () => createPodWithFallback(sessionId, blacklistedDcs),
-          );
-          podId = created.podId;
-          podType = created.podType;
-          dc = created.dc;
-          currentState = 'creating_pod';
-
-          phaseTimings.creating_pod_ms = Date.now() - phaseStart;
-          phaseStart = Date.now();
-
-          Sentry.addBreadcrumb({
-            category: 'provision',
-            level: 'info',
-            message: 'Pod created',
-            data: { podId, dc, podType, attempt, creatingPodMs: phaseTimings.creating_pod_ms },
-          });
-
-          // If any subsequent step fails, terminate the pod we just created to prevent
-          // cost leaks. This matters especially for replaceSession() which calls
-          // provision() directly without its own pod cleanup.
-          try {
-            // 3. Wait for container to boot. Dominated by GHCR image pull (~60-90s).
-            await emitState(sessionId, 'fetching_image');
-            currentState = 'fetching_image';
-            notifyPodProgress(podId, '⏳ Fetching container image...');
-            await Sentry.startSpan(
-              { name: 'pod.fetching_image', op: 'pod.fetching_image', attributes: { podId, dc: dc ?? 'unknown', attempt } },
-              () => waitForRuntime(podId as string),
-            );
-            notifyPodProgress(podId, `📦 Container runtime up`);
-            phaseTimings.fetching_image_ms = Date.now() - phaseStart;
-            phaseStart = Date.now();
-
-            // 4. Poll /health via RunPod proxy until the FLUX server reports ready
-            await emitState(sessionId, 'warming_model');
-            currentState = 'warming_model';
-            notifyPodProgress(podId, '🧠 Warming up AI model...');
-            const healthUrl = `https://${podId}-8766.proxy.runpod.net/health`;
-            await Sentry.startSpan(
-              { name: 'pod.warming_model', op: 'pod.warming_model', attributes: { podId, dc: dc ?? 'unknown' } },
-              () => waitForHealth(podId as string, healthUrl),
-            );
-            phaseTimings.warming_model_ms = Date.now() - phaseStart;
-
-            const totalMs = Date.now() - t0;
-
-            // 5. Pod is serving. Persist pod info and return — stream.ts will
-            // emit 'connecting' / 'ready' once it wires up the iOS↔pod relay.
-            // Keeping the 'ready' emit out of provision() prevents a window
-            // where iOS sees 'ready' but the backend's relay isn't yet set up
-            // to forward its frames to the pod.
-            const podUrl = `wss://${podId}-8766.proxy.runpod.net/ws`;
-            await patchSession(sessionId, { podId, podUrl, podType });
-            log.info(
-              { sessionId, podId, podUrl, podType, totalMs, attempt, dc },
-              'Pod serving — awaiting relay',
-            );
-            notifyPodProgress(podId, `✅ **Pod serving** (${Math.round(totalMs / 1000)}s total)`);
-
-            parentSpan.setAttributes({
-              dc: dc ?? 'unknown',
-              podType,
-              attempt,
-              outcome: 'success',
-            });
-            trackPodProvisionCompleted({
-              userId: sessionId,
-              durationMs: Date.now() - attemptStart,
-              dc,
-              podType,
-              attempt,
-              phaseTimings,
-            });
-            return { podId, podUrl, podType };
-          } catch (err) {
-            // Pod was created but a later step failed — clean up to prevent cost leak.
-            log.warn(
-              { sessionId, podId, err: (err as Error).message, state: currentState, attempt },
-              'Provision failed after pod creation — terminating pod',
-            );
-            terminatePod(podId).catch((e) =>
-              log.warn({ podId, err: (e as Error).message }, 'Failed to terminate pod after provision failure'),
-            );
-            throw err;
-          }
-        } catch (err) {
-          // Recoverable classes (PodBootStallError, PodVanishedError) come
-          // from a flaky DC. The helper emits observability + decides whether
-          // we have rerolls left; on retry, blacklist the DC and loop.
-          const recovery = handleRecoverableProvisionError(err as Error, {
-            sessionId,
-            dc,
-            podType,
-            attempt,
-            maxRerolls,
-          });
-          if (recovery.decision === 'retry') {
-            if (recovery.errDc) blacklistedDcs.add(recovery.errDc);
-            continue;
-          }
-          // Fall through: unrecoverable error, or rerolls exhausted.
-
-          parentSpan.setAttributes({
-            dc: dc ?? 'unknown',
-            podType: podType ?? 'unknown',
-            attempt,
-            outcome: 'failure',
-            state: currentState,
-          });
-
-          const category = classifyProvisionError(err as Error);
-          Sentry.captureException(err, {
-            tags: {
-              dc: dc ?? 'unknown',
-              podType: podType ?? 'unknown',
-              state: currentState,
-              attempt: String(attempt),
-              category,
-            },
-            contexts: {
-              pod: {
-                id: podId ?? 'none',
-                sessionId,
-                elapsedSec: Math.round((Date.now() - t0) / 1000),
-              },
-            },
-          });
-          trackPodProvisionFailed({
-            userId: sessionId,
-            durationMs: Date.now() - attemptStart,
-            category,
-            dc,
-            state: currentState,
-            attempt,
-          });
-          // Transition to terminal failed state so subscribers see the final event.
-          await emitState(sessionId, 'failed', category);
-          throw err;
-        }
+        notifyPodProgress(result.podId, '✅ **Pod serving**');
+        return { podId: result.podId, podUrl: result.podUrl, podType: result.podType };
+      } catch (err) {
+        // Helper has already done analytics + Sentry capture. Layer on the
+        // image-only terminal-state emit so iPad subscribers see 'failed'.
+        const category = classifyProvisionError(err as Error);
+        await emitState(sessionId, 'failed', category);
+        throw err;
       }
-
-      // Unreachable — loop body either returns or throws. Kept for type-checker.
-      throw new Error('provision: reroll loop exited without resolution');
     },
   );
 }
@@ -1587,10 +1500,10 @@ async function selectPlacement(
  */
 async function createPodWithFallback(
   sessionId: string,
-  excludeDcs: ReadonlySet<string> = new Set(),
+  target: PlacementTarget,
+  podName: string,
+  bootDockerArgs: string,
 ): Promise<{ podId: string; podType: PodType; dc: string | null }> {
-  const podName = `${POD_PREFIX}${sessionId.slice(0, 16)}`;
-
   // Volume-entrypoint mode: stock RunPod pytorch image + our code/deps from
   // the attached network volume. See BASE_IMAGE / BOOT_DOCKER_ARGS / BOOT_ENV
   // constants near top of file. Replaces the previous GHCR custom-image flow —
@@ -1598,15 +1511,6 @@ async function createPodWithFallback(
   // that affected ~38% of provisions. See documents/decisions.md entry
   // 2026-04-23 for context + rollback procedure.
   const imageName = BASE_IMAGE;
-
-  // ─── Pick DC + volume (state stays 'finding_gpu' during selectPlacement) ──
-  const target = await selectPlacement(sessionId, excludeDcs);
-  if (!target) {
-    const suffix = excludeDcs.size > 0
-      ? ` (excluding ${Array.from(excludeDcs).join(',')} after earlier stall)`
-      : '';
-    throw new Error(`No RunPod DC has 5090 capacity right now (all volume-DCs exhausted)${suffix}`);
-  }
   const bidInfo = target.bidInfo;
   const dcField = target.dataCenterId ? { dataCenterId: target.dataCenterId } : {};
   const volField = target.networkVolumeId ? { networkVolumeId: target.networkVolumeId } : {};
@@ -1655,14 +1559,13 @@ async function createPodWithFallback(
       },
       'Spot bid discovered',
     );
-    await emitState(sessionId, 'creating_pod');
     try {
       const { id: podId, costPerHr } = await createSpotPod({
         name: podName,
         imageName,
         gpuTypeId: GPU_TYPE_ID,
         bidPerGpu: bid,
-        dockerArgs: BOOT_DOCKER_ARGS,
+        dockerArgs: bootDockerArgs,
         env: BOOT_ENV,
         containerRegistryAuthId: config.RUNPOD_REGISTRY_AUTH_ID,
         ...dcField,
@@ -1707,14 +1610,13 @@ async function createPodWithFallback(
     { sessionId, event: 'provision.fallback.triggered', reason: fallbackReason, dc: target.dataCenterId },
     'Switching to on-demand pod',
   );
-  await emitState(sessionId, 'creating_pod');
   try {
     const { id: podId, costPerHr } = await createOnDemandPod({
       name: podName,
       imageName,
       gpuTypeId: GPU_TYPE_ID,
       cloudType: 'SECURE',
-      dockerArgs: BOOT_DOCKER_ARGS,
+      dockerArgs: bootDockerArgs,
       env: BOOT_ENV,
       containerRegistryAuthId: config.RUNPOD_REGISTRY_AUTH_ID,
       ...dcField,
@@ -1733,6 +1635,264 @@ async function createPodWithFallback(
     );
     throw err;
   }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// POD_CONFIGS — see PodKindConfig declaration near top of file for the rules.
+// Defined here so it can close over createPodWithFallback / createOnDemandPod.
+// ────────────────────────────────────────────────────────────────────────────
+
+const POD_CONFIGS: Record<PodKind, PodKindConfig> = {
+  image: {
+    namePrefix: POD_PREFIX,
+    bootDockerArgs: BOOT_DOCKER_ARGS,
+    port: 8765,
+    stallMs: config.POD_BOOT_WATCHDOG_ENABLED ? config.POD_BOOT_STALL_MS : Infinity,
+    createPodForDc: (target, sessionId) => {
+      const podName = `${POD_PREFIX}${sessionId.slice(0, 16)}`;
+      return createPodWithFallback(sessionId, target, podName, BOOT_DOCKER_ARGS);
+    },
+    // Image: trust the row's persisted state. `state === 'ready'` is set by
+    // stream.ts after the relay is wired (full session readiness), so this
+    // single Redis hash read replaces a ~500 ms RunPod query. The rare
+    // "row says ready but pod is gone" case is handled downstream by
+    // `wireRelay`'s onClose → replaceSession path.
+    getReusableFromRow: async (row) => {
+      if (row.state === 'ready' && row.podUrl && row.podId) {
+        return { podId: row.podId, podUrl: row.podUrl };
+      }
+      return null;
+    },
+    stampRow: (sessionId, pod) =>
+      patchSession(sessionId, { podId: pod.podId, podUrl: pod.podUrl, podType: pod.podType }),
+  },
+  video: {
+    namePrefix: VIDEO_POD_PREFIX,
+    bootDockerArgs: BOOT_DOCKER_ARGS_VIDEO,
+    port: 8766,
+    // Cold image pulls on a fresh host take 60-180s. Image pod can reroll
+    // on stall fast (45s); video pod also rerolls now via _runProvisionLoop,
+    // but giving each attempt more headroom reduces total reroll cost.
+    stallMs: 180_000,
+    createPodForDc: async (target, sessionId) => {
+      const podName = `${VIDEO_POD_PREFIX}${sessionId.slice(0, 16)}`;
+      const dcField = target.dataCenterId ? { dataCenterId: target.dataCenterId } : {};
+      const volField = target.networkVolumeId ? { networkVolumeId: target.networkVolumeId } : {};
+      const result = await createOnDemandPod({
+        name: podName,
+        imageName: BASE_IMAGE,
+        gpuTypeId: GPU_TYPE_ID,
+        cloudType: 'SECURE',
+        dockerArgs: BOOT_DOCKER_ARGS_VIDEO,
+        env: BOOT_ENV,
+        containerRegistryAuthId: config.RUNPOD_REGISTRY_AUTH_ID,
+        ...dcField,
+        ...volField,
+      });
+      return { podId: result.id, podType: 'onDemand', dc: target.dataCenterId };
+    },
+    // Video: row only has `videoPodId`; no state field. Probe RunPod for
+    // RUNNING+runtime as the readiness signal. ~500ms cost on every
+    // reconnect — acceptable because video reconnects are less frequent
+    // than image's per-message touch traffic.
+    getReusableFromRow: async (row) => {
+      if (!row.videoPodId) return null;
+      const pod = await getPod(row.videoPodId).catch(() => null);
+      if (pod && pod.desiredStatus === 'RUNNING' && pod.runtime !== null) {
+        return {
+          podId: row.videoPodId,
+          podUrl: `wss://${row.videoPodId}-8766.proxy.runpod.net/ws`,
+        };
+      }
+      return null;
+    },
+    stampRow: (sessionId, pod) =>
+      patchSession(sessionId, { videoPodId: pod.podId }),
+  },
+};
+
+/**
+ * Shared pod-spinup mechanics: select a DC, create a pod for it, wait for
+ * runtime + health, retry across DCs on stall/vanish. The kind parameter
+ * drives all pod-specific differences via `POD_CONFIGS[kind]` — no
+ * conditionals on `kind` in the loop body.
+ *
+ * Caller hooks:
+ *   - `opts.onProvisionPhase(phase, podId)`: called inside the loop at each
+ *     state transition. Image pod's `provision()` wrapper supplies a
+ *     callback that does `emitState` + `notifyPodProgress`. Video doesn't
+ *     supply one, so video provisioning is silent on the broker.
+ *   - `opts.preferredDc`: if set, floats to the top of the placement
+ *     ranking when stock is non-zero. Used by video to co-locate with
+ *     the image pod's DC.
+ *
+ * Throws `PodBootStallError` / `PodVanishedError` (recoverable, but only
+ * after exhausting `POD_BOOT_MAX_REROLLS`) or any other error from the
+ * underlying RunPod / health-check APIs (terminal). Image's `provision()`
+ * wrapper catches these and re-throws after analytics; video's caller
+ * catches and returns null for best-effort behavior.
+ */
+async function _runProvisionLoop(
+  kind: PodKind,
+  sessionId: string,
+  opts: {
+    preferredDc?: string;
+    onProvisionPhase?: (phase: State, podId: string | null) => Promise<void>;
+  } = {},
+): Promise<{ podId: string; podUrl: string; podType: PodType; dc: string | null }> {
+  const cfg = POD_CONFIGS[kind];
+  const t0 = Date.now();
+  const blacklistedDcs = new Set<string>();
+  const maxRerolls = Math.max(0, config.POD_BOOT_MAX_REROLLS);
+
+  for (let attempt = 0; attempt <= maxRerolls; attempt++) {
+    let podId: string | null = null;
+    let podType: PodType | null = null;
+    let dc: string | null = null;
+    let currentState: State = 'finding_gpu';
+    const attemptStart = Date.now();
+    let phaseStart = attemptStart;
+    const phaseTimings: Record<string, number> = {};
+
+    // On reroll, return the UI to 'finding_gpu' before the next pod create.
+    if (attempt > 0) {
+      await opts.onProvisionPhase?.('finding_gpu', null);
+      currentState = 'finding_gpu';
+    }
+
+    trackPodProvisionStarted({
+      userId: sessionId,
+      attempt,
+      excludedDcs: Array.from(blacklistedDcs),
+    });
+
+    try {
+      // 1 + 2. DC selection + pod create. Both are kind-specific via
+      // POD_CONFIGS[kind].createPodForDc — image goes spot-then-on-demand,
+      // video goes straight on-demand.
+      const target = await selectPlacement(sessionId, blacklistedDcs, opts.preferredDc);
+      if (!target) {
+        const suffix = blacklistedDcs.size > 0
+          ? ` (excluding ${Array.from(blacklistedDcs).join(',')} after earlier stall)`
+          : '';
+        throw new Error(`No RunPod DC has 5090 capacity right now (all volume-DCs exhausted)${suffix}`);
+      }
+      await opts.onProvisionPhase?.('creating_pod', null);
+      currentState = 'creating_pod';
+      const created = await Sentry.startSpan(
+        { name: 'pod.create', op: 'pod.create', attributes: { sessionId, kind, attempt } },
+        () => cfg.createPodForDc(target, sessionId),
+      );
+      podId = created.podId;
+      podType = created.podType;
+      dc = created.dc;
+
+      phaseTimings.creating_pod_ms = Date.now() - phaseStart;
+      phaseStart = Date.now();
+
+      Sentry.addBreadcrumb({
+        category: 'provision',
+        level: 'info',
+        message: 'Pod created',
+        data: { podId, dc, podType, kind, attempt, creatingPodMs: phaseTimings.creating_pod_ms },
+      });
+
+      try {
+        // 3. Wait for container to boot. Dominated by image pull.
+        await opts.onProvisionPhase?.('fetching_image', podId);
+        currentState = 'fetching_image';
+        await Sentry.startSpan(
+          { name: 'pod.fetching_image', op: 'pod.fetching_image', attributes: { podId, kind, dc: dc ?? 'unknown', attempt } },
+          () => waitForRuntime(podId as string, { stallMs: cfg.stallMs }),
+        );
+        phaseTimings.fetching_image_ms = Date.now() - phaseStart;
+        phaseStart = Date.now();
+
+        // 4. Poll /health until the server reports ready.
+        await opts.onProvisionPhase?.('warming_model', podId);
+        currentState = 'warming_model';
+        const healthUrl = `https://${podId}-${cfg.port}.proxy.runpod.net/health`;
+        await Sentry.startSpan(
+          { name: 'pod.warming_model', op: 'pod.warming_model', attributes: { podId, kind, dc: dc ?? 'unknown' } },
+          () => waitForHealth(podId as string, healthUrl),
+        );
+        phaseTimings.warming_model_ms = Date.now() - phaseStart;
+
+        const totalMs = Date.now() - t0;
+        const podUrl = `wss://${podId}-${cfg.port}.proxy.runpod.net/ws`;
+
+        // 5. Stamp the row with the kind-appropriate fields. Image:
+        // {podId, podUrl, podType}; video: {videoPodId}.
+        await cfg.stampRow(sessionId, { podId, podUrl, podType });
+
+        log.info(
+          { sessionId, kind, podId, podUrl, podType, totalMs, attempt, dc },
+          'Pod serving — awaiting relay',
+        );
+        trackPodProvisionCompleted({
+          userId: sessionId,
+          durationMs: Date.now() - attemptStart,
+          dc,
+          podType,
+          attempt,
+          phaseTimings,
+        });
+        return { podId, podUrl, podType, dc };
+      } catch (err) {
+        // Pod was created but a later step failed — clean up.
+        log.warn(
+          { sessionId, kind, podId, err: (err as Error).message, state: currentState, attempt },
+          'Provision failed after pod creation — terminating pod',
+        );
+        terminatePod(podId).catch((e) =>
+          log.warn({ podId, err: (e as Error).message }, 'Failed to terminate pod after provision failure'),
+        );
+        throw err;
+      }
+    } catch (err) {
+      // Recoverable classes (PodBootStallError, PodVanishedError) come from
+      // a flaky DC. The helper emits observability + decides whether we
+      // have rerolls left; on retry, blacklist the DC and loop.
+      const recovery = handleRecoverableProvisionError(err as Error, {
+        sessionId,
+        dc,
+        podType,
+        attempt,
+        maxRerolls,
+      });
+      if (recovery.decision === 'retry') {
+        if (recovery.errDc) blacklistedDcs.add(recovery.errDc);
+        continue;
+      }
+      // Terminal: classify, fire analytics, propagate.
+      const category = classifyProvisionError(err as Error);
+      Sentry.captureException(err, {
+        tags: {
+          dc: dc ?? 'unknown',
+          podType: podType ?? 'unknown',
+          state: currentState,
+          attempt: String(attempt),
+          category,
+          kind,
+        },
+        contexts: {
+          pod: { id: podId ?? 'none', sessionId, elapsedSec: Math.round((Date.now() - t0) / 1000) },
+        },
+      });
+      trackPodProvisionFailed({
+        userId: sessionId,
+        durationMs: Date.now() - attemptStart,
+        category,
+        dc,
+        state: currentState,
+        attempt,
+      });
+      throw err;
+    }
+  }
+
+  // Unreachable: loop body either returns or throws.
+  throw new Error('_runProvisionLoop: reroll loop exited without resolution');
 }
 
 /**
