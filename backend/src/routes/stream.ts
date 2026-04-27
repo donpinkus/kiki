@@ -413,8 +413,13 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
               { userId, videoPodId, err: (err as Error).message },
               'video replacement relay-wire failed; image-only',
             );
-            videoSessionEnabled = false;
+            // The replacement pod is alive but unreachable. Eagerly clean
+            // up so it doesn't sit idle until reconcile. Mirrors the
+            // initial-provision wire-failure handling above.
+            terminateVideoPod(result.podId).catch(() => {});
+            await clearVideoPod(userId).catch(() => {});
             videoPodId = null;
+            videoSessionEnabled = false;
           }
         })();
       }
