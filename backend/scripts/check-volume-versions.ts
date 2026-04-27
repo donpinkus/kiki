@@ -1,13 +1,17 @@
 /**
- * Read-only status check: report the deployed app version on each network
- * volume by querying PostHog for the most recent `pod.provision.completed`
- * event per DC.
+ * Read-only status check: report the deployed flux-klein-server version on
+ * each network volume by querying PostHog for the most recent
+ * `pod.provision.completed` event per DC.
  *
- * Compares each DC's `app_version_git_sha` against local git HEAD and flags
- * drift. DCs with no recent provision (e.g. low-traffic ones that haven't
- * spun up a pod since the last sync) show as "no recent data" — for those,
- * trigger a manual provision or accept the unknown until natural traffic
- * exposes the version.
+ * Drift signal is `app_flux_app_version` — the git tree-hash of
+ * `flux-klein-server/` at sync time. This only changes when files in that
+ * subtree change, so commits to docs / iOS / backend code don't false-flag
+ * drift. `app_git_sha` is shown for forensic context only ("what commit was
+ * this synced from") but isn't used for the drift comparison.
+ *
+ * DCs with no recent provision show as "no recent data" — for those, trigger
+ * a manual provision or accept the unknown until natural traffic exposes the
+ * version.
  *
  * Usage (run from backend/):
  *   POSTHOG_PERSONAL_API_KEY=phx_... POSTHOG_PROJECT_ID=389365 \
@@ -21,9 +25,11 @@
  * Limitations:
  *   - Only tells you about volumes that have served a recent cold start. A
  *     volume that's been stale for 30 days won't show in PostHog.
- *   - The "stale" check compares against local git HEAD — if the working tree
- *     is dirty or you haven't pulled, the comparison is to whatever you've
- *     got checked out.
+ *   - Compares against local working-tree state. If you haven't pulled, the
+ *     comparison is to whatever you've got checked out.
+ *   - Tree-hash reflects committed state only — uncommitted edits don't
+ *     change it. Pair with the gitDirty flag (in stamp metadata) if you
+ *     deploy uncommitted.
  */
 
 import { execSync } from 'node:child_process';
@@ -72,7 +78,8 @@ const VOLUMES: Record<string, string> = {
 interface DcVersion {
   dc: string;
   volumeId: string;
-  gitSha: string | null;
+  fluxAppVersion: string | null;  // git tree-hash of flux-klein-server/ — drift signal
+  gitSha: string | null;          // commit SHA at sync time — forensic context only
   gitDirty: boolean | null;
   syncedAtUtc: string | null;
   syncedBy: string | null;
@@ -81,11 +88,13 @@ interface DcVersion {
 
 async function queryDcVersions(): Promise<DcVersion[]> {
   // Window is wide (30d) so we catch even slow-rolling DCs. Pick the most
-  // recent app_version_git_sha per DC — that's what the latest cold start
-  // saw on the volume.
+  // recent stamp per DC — that's what the latest cold start saw on the volume.
+  // Drift is derived from app_flux_app_version (subtree hash, only changes when
+  // flux-klein-server/ files change). app_git_sha is shown for context only.
   const query = `
     SELECT
       properties.dc AS dc,
+      argMax(properties.app_flux_app_version, timestamp) AS flux_app_version,
       argMax(properties.app_git_sha, timestamp) AS git_sha,
       argMax(properties.app_git_dirty, timestamp) AS git_dirty,
       argMax(properties.app_synced_at_utc, timestamp) AS synced_at_utc,
@@ -94,7 +103,7 @@ async function queryDcVersions(): Promise<DcVersion[]> {
     FROM events
     WHERE event = 'pod.provision.completed'
       AND timestamp > now() - INTERVAL 30 DAY
-      AND properties.app_git_sha IS NOT NULL
+      AND (properties.app_flux_app_version IS NOT NULL OR properties.app_git_sha IS NOT NULL)
     GROUP BY dc
   `;
 
@@ -117,12 +126,14 @@ async function queryDcVersions(): Promise<DcVersion[]> {
 
   const seen = new Map<string, DcVersion>();
   for (const row of rows) {
-    const [dc, gitSha, gitDirty, syncedAtUtc, syncedBy, lastProvisionAt] = row as [
-      string, string | null, boolean | string | null, string | null, string | null, string | null,
+    const [dc, fluxAppVersion, gitSha, gitDirty, syncedAtUtc, syncedBy, lastProvisionAt] = row as [
+      string, string | null, string | null, boolean | string | null,
+      string | null, string | null, string | null,
     ];
     seen.set(dc, {
       dc,
       volumeId: VOLUMES[dc] ?? '?',
+      fluxAppVersion,
       gitSha,
       gitDirty: typeof gitDirty === 'string' ? gitDirty === 'true' : gitDirty,
       syncedAtUtc,
@@ -137,7 +148,8 @@ async function queryDcVersions(): Promise<DcVersion[]> {
       seen.set(dc, {
         dc,
         volumeId: VOLUMES[dc]!,
-        gitSha: null, gitDirty: null, syncedAtUtc: null, syncedBy: null, lastProvisionAt: null,
+        fluxAppVersion: null, gitSha: null, gitDirty: null,
+        syncedAtUtc: null, syncedBy: null, lastProvisionAt: null,
       });
     }
   }
@@ -145,6 +157,15 @@ async function queryDcVersions(): Promise<DcVersion[]> {
 }
 
 // ─── Local git lookup ─────────────────────────────────────────────────────
+
+/** Tree-hash of flux-klein-server/ at HEAD. Matches what the deploy writes. */
+function localFluxAppVersion(): string {
+  try {
+    return execSync('git rev-parse HEAD:flux-klein-server', { cwd: REPO_ROOT }).toString().trim();
+  } catch {
+    return 'unknown';
+  }
+}
 
 function localGitSha(): string {
   try {
@@ -154,56 +175,43 @@ function localGitSha(): string {
   }
 }
 
-function commitsBetween(remote: string, local: string): number | null {
-  if (remote === local) return 0;
-  try {
-    const out = execSync(`git rev-list --count ${remote}..${local}`, { cwd: REPO_ROOT }).toString().trim();
-    return Number(out);
-  } catch {
-    // Remote SHA isn't in local history (e.g. user hasn't pulled, or remote is dirty/lost commit).
-    return null;
-  }
-}
-
 // ─── Render ───────────────────────────────────────────────────────────────
 
 function fmt(s: string | null, w: number): string {
   return (s ?? '—').padEnd(w);
 }
 
-function renderTable(rows: DcVersion[], localHead: string): void {
-  const localShort = localHead.slice(0, 8);
-  console.log(`\nLocal HEAD: ${localShort}\n`);
+function renderTable(rows: DcVersion[], localFlux: string, localGit: string): void {
+  console.log(`\nLocal flux_app_version: ${localFlux.slice(0, 8)}    Local HEAD: ${localGit.slice(0, 8)}\n`);
   console.log(
     [
       fmt('DC', 10),
       fmt('volume', 12),
+      fmt('flux_app_v', 12),
       fmt('git_sha', 12),
       fmt('synced_at_utc', 22),
-      fmt('synced_by', 26),
       fmt('drift', 24),
     ].join(' '),
   );
-  console.log('-'.repeat(108));
+  console.log('-'.repeat(96));
   for (const r of rows) {
     let drift: string;
-    if (r.gitSha === null) {
+    if (r.fluxAppVersion === null && r.gitSha === null) {
       drift = 'no recent data';
-    } else if (r.gitSha === localHead) {
+    } else if (r.fluxAppVersion === null) {
+      drift = 'pre-flux_app_version stamp';
+    } else if (r.fluxAppVersion === localFlux) {
       drift = r.gitDirty ? 'current (dirty sync)' : 'current';
     } else {
-      const n = commitsBetween(r.gitSha, localHead);
-      if (n === null) drift = 'diverged (unknown)';
-      else if (n > 0) drift = `${n} commit${n === 1 ? '' : 's'} behind`;
-      else drift = 'ahead/diverged';
+      drift = 'flux-klein-server differs';
     }
     console.log(
       [
         fmt(r.dc, 10),
         fmt(r.volumeId, 12),
+        fmt(r.fluxAppVersion?.slice(0, 8) ?? null, 12),
         fmt(r.gitSha?.slice(0, 8) ?? null, 12),
         fmt(r.syncedAtUtc, 22),
-        fmt(r.syncedBy, 26),
         fmt(drift, 24),
       ].join(' '),
     );
@@ -214,8 +222,12 @@ function renderTable(rows: DcVersion[], localHead: string): void {
 // ─── Main ─────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
-  const [rows, localHead] = await Promise.all([queryDcVersions(), Promise.resolve(localGitSha())]);
-  renderTable(rows, localHead);
+  const [rows, localFlux, localGit] = await Promise.all([
+    queryDcVersions(),
+    Promise.resolve(localFluxAppVersion()),
+    Promise.resolve(localGitSha()),
+  ]);
+  renderTable(rows, localFlux, localGit);
 }
 
 main().catch((e) => {

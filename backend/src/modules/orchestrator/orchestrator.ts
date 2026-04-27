@@ -196,14 +196,23 @@ const IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 const REAPER_INTERVAL_MS = 60 * 1000;
 const MAX_CONCURRENT_PROVISIONS = Number(process.env['MAX_CONCURRENT_PROVISIONS'] ?? 5);
 
-// Git SHA the backend was built from. Two sources tried in order:
-//   1. RAILWAY_GIT_COMMIT_SHA — auto-injected by Railway for git-triggered
-//      deploys, but EMPTY for `railway up` CLI deploys (which is how we ship).
-//   2. /app/.git-sha — written into the build context by `npm run deploy`
-//      (`git rev-parse HEAD > .git-sha && railway up`). The file gets baked
-//      into the Docker image because there's no .dockerignore and the
-//      Dockerfile does `COPY . .`.
-// Empty string = neither source set; drift checks no-op.
+// Drift check uses the git tree-hash of `flux-klein-server/` — the subtree
+// that sync-flux-app actually rsyncs to volumes. This changes only when files
+// in that path change, so doc/iOS/backend commits don't false-trigger drift
+// (which was the problem with the prior commit-SHA-based check). Written by
+// `npm run deploy` (`git rev-parse HEAD:flux-klein-server > .flux-app-version`)
+// and baked into the Docker image via the Dockerfile's `COPY . .`. Empty
+// string = file missing; drift check no-ops.
+const BACKEND_FLUX_APP_VERSION = (() => {
+  try {
+    return readFileSync('/app/.flux-app-version', 'utf-8').trim();
+  } catch {
+    return '';
+  }
+})();
+
+// Backend's commit SHA — kept for forensic context only (logged at startup,
+// not used for drift comparison). Same fallback chain as before.
 const BACKEND_GIT_SHA = (() => {
   const fromEnv = process.env['RAILWAY_GIT_COMMIT_SHA'];
   if (fromEnv) return fromEnv.trim();
@@ -730,7 +739,8 @@ export async function start(logger: FastifyBaseLogger): Promise<void> {
       maxConcurrent: MAX_CONCURRENT_PROVISIONS,
       reconcileIntervalMs: config.RECONCILE_INTERVAL_MS,
       reconcileMinAgeSec: config.RECONCILE_MIN_AGE_SEC,
-      backendGitSha: BACKEND_GIT_SHA ? BACKEND_GIT_SHA.slice(0, 8) : '(unset — drift checks disabled)',
+      backendFluxVersion: BACKEND_FLUX_APP_VERSION ? BACKEND_FLUX_APP_VERSION.slice(0, 8) : '(unset — drift checks disabled)',
+      backendGitSha: BACKEND_GIT_SHA ? BACKEND_GIT_SHA.slice(0, 8) : '(unset)',
     },
     'Orchestrator started',
   );
@@ -919,70 +929,72 @@ interface ProvisionResult {
  * failure path (unrecoverable error, or rerolls exhausted).
  */
 /**
- * Compare the FLUX pod's reported app version (from /health, originally
+ * Compare the FLUX pod's reported flux_app_version (from /health, originally
  * written into /workspace/app/.version.json by sync-flux-app.ts) against the
- * backend's own git SHA. Logs + Sentry-captures any of:
- *   - missing version: pod booted from a volume that was synced before the
- *     version-stamping era. Indicates that volume hasn't been re-synced
- *     since 2026-04-26 and is on stale code.
- *   - sha mismatch: volume stamped against a different commit than the
- *     backend was deployed from. Indicates "deployed backend but forgot to
- *     run sync-flux-app per DC" — a class of bug that's caused real silent
- *     drift in this repo.
- * Sentry's grouping handles dedup (one issue per dc + actual_sha pair) so
- * sustained drift won't flood event volume.
+ * backend's expected flux_app_version. Both are git tree-hashes of the
+ * `flux-klein-server/` subtree at the respective deploy times, so they only
+ * change when files that actually get rsynced to volumes change. Doc/iOS/
+ * backend commits don't false-trigger.
  *
- * No-ops when BACKEND_GIT_SHA is unset (local dev, non-Railway).
+ * Logs + Sentry-captures:
+ *   - missing version: pod booted from a volume synced before flux_app_version
+ *     stamping (i.e. before 2026-04-26 second pass). Re-sync needed.
+ *   - mismatch: volume stamped against a different flux-klein-server tree
+ *     than the backend expects. Indicates "deployed backend but forgot to
+ *     re-run sync-flux-app per DC after a flux-klein-server change."
+ * Sentry's grouping handles dedup (one issue per dc + actual_version pair).
+ *
+ * No-ops when BACKEND_FLUX_APP_VERSION is unset (local dev / no .flux-app-version).
  */
 function checkVersionDrift(
   appVersion: Record<string, string | number | boolean>,
   ctx: { sessionId: string; podId: string; dc: string | null },
 ): void {
-  if (!BACKEND_GIT_SHA) return;
-  const actualSha = typeof appVersion['app_git_sha'] === 'string'
-    ? (appVersion['app_git_sha'] as string)
+  if (!BACKEND_FLUX_APP_VERSION) return;
+  const actualVersion = typeof appVersion['app_flux_app_version'] === 'string'
+    ? (appVersion['app_flux_app_version'] as string)
     : '';
-  if (!actualSha) {
+  if (!actualVersion) {
     log.warn(
       {
         sessionId: ctx.sessionId,
         podId: ctx.podId,
         dc: ctx.dc,
-        backendSha: BACKEND_GIT_SHA.slice(0, 8),
+        backendFluxVersion: BACKEND_FLUX_APP_VERSION.slice(0, 8),
         event: 'volume.version.missing',
       },
-      'Pod has no app_version on /health — volume predates version stamping',
+      'Pod has no flux_app_version on /health — volume predates flux-app-version stamping',
     );
-    Sentry.captureMessage('Pod volume missing app_version stamp', {
+    Sentry.captureMessage('Pod volume missing flux_app_version stamp', {
       level: 'warning',
       tags: {
         dc: ctx.dc ?? 'unknown',
-        backend_sha: BACKEND_GIT_SHA.slice(0, 8),
+        backend_flux_version: BACKEND_FLUX_APP_VERSION.slice(0, 8),
         kind: 'missing_stamp',
       },
       contexts: { pod: { id: ctx.podId, sessionId: ctx.sessionId } },
     });
     return;
   }
-  if (actualSha !== BACKEND_GIT_SHA) {
+  if (actualVersion !== BACKEND_FLUX_APP_VERSION) {
     log.warn(
       {
         sessionId: ctx.sessionId,
         podId: ctx.podId,
         dc: ctx.dc,
-        backendSha: BACKEND_GIT_SHA.slice(0, 8),
-        volumeSha: actualSha.slice(0, 8),
+        backendFluxVersion: BACKEND_FLUX_APP_VERSION.slice(0, 8),
+        volumeFluxVersion: actualVersion.slice(0, 8),
         event: 'volume.version.drift',
       },
-      'Pod volume git_sha differs from backend git_sha',
+      'Pod volume flux_app_version differs from backend',
     );
-    Sentry.captureMessage('Pod volume version drift', {
+    Sentry.captureMessage('Pod volume flux_app_version drift', {
       level: 'warning',
       tags: {
         dc: ctx.dc ?? 'unknown',
-        backend_sha: BACKEND_GIT_SHA.slice(0, 8),
-        volume_sha: actualSha.slice(0, 8),
-        kind: 'sha_mismatch',
+        backend_flux_version: BACKEND_FLUX_APP_VERSION.slice(0, 8),
+        volume_flux_version: actualVersion.slice(0, 8),
+        kind: 'flux_app_drift',
       },
       contexts: { pod: { id: ctx.podId, sessionId: ctx.sessionId } },
     });

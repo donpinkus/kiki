@@ -277,19 +277,31 @@ function runRsync(ssh: SshInfo, localPath: string, remotePath: string, timeoutMs
  * each sync. Pipeline reads this at boot and surfaces it on /health, so
  * PostHog records per-DC version skew on every cold start. See
  * `documents/references/provider-config.md` "Volume version tracking".
+ *
+ * `flux_app_version` is the git tree-hash of `flux-klein-server/`. It only
+ * changes when files in that subtree change — committing CLAUDE.md, iOS
+ * code, or backend code does NOT bump it. This is the field the drift
+ * check compares against. `git_sha` is retained as forensic context only.
  */
 function buildVersionStamp(): Record<string, string | boolean> {
   const REPO_ROOT = resolve(__dirname, '..', '..');
   let gitSha = 'unknown';
   let gitDirty = false;
+  let fluxAppVersion = 'unknown';
   try {
     gitSha = execSync('git rev-parse HEAD', { cwd: REPO_ROOT }).toString().trim();
     const dirty = execSync('git status --porcelain', { cwd: REPO_ROOT }).toString().trim();
     gitDirty = dirty.length > 0;
+    // Tree-hash of the flux-klein-server/ subtree at HEAD. Reflects committed
+    // state only — uncommitted edits don't change this. Pair with git_dirty
+    // to spot deploys-with-uncommitted-changes (where two volumes could
+    // share a version but actually differ).
+    fluxAppVersion = execSync('git rev-parse HEAD:flux-klein-server', { cwd: REPO_ROOT }).toString().trim();
   } catch (e) {
     console.warn('[sync] git lookup failed; version stamp will be partial:', (e as Error).message);
   }
   return {
+    flux_app_version: fluxAppVersion,
     git_sha: gitSha,
     git_dirty: gitDirty,
     synced_at_utc: new Date().toISOString(),
@@ -388,7 +400,7 @@ echo "=== DONE ==="
     //    A pod that boots and sees no .version.json knows something interrupted.
     const stamp = buildVersionStamp();
     const stampJson = JSON.stringify(stamp, null, 2).replace(/'/g, "'\\''");
-    console.log(`[sync] stamping version (sha=${stamp['git_sha'].toString().slice(0, 8)}${stamp['git_dirty'] ? '+dirty' : ''})...`);
+    console.log(`[sync] stamping version (flux_app=${stamp['flux_app_version'].toString().slice(0, 8)} git=${stamp['git_sha'].toString().slice(0, 8)}${stamp['git_dirty'] ? '+dirty' : ''})...`);
     await runSsh(ssh, `cat > /workspace/app/.version.json <<'VEREOF'
 ${stampJson}
 VEREOF`);
