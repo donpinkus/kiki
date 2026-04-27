@@ -214,15 +214,18 @@ const MAX_CONCURRENT_PROVISIONS = Number(process.env['MAX_CONCURRENT_PROVISIONS'
 // Pod kinds: one operation (provision a pod) parameterized by a small static
 // config. POD_CONFIGS holds the six values that genuinely differ between
 // image and video pods. Everything else — DC selection, reroll on stall,
-// runtime+health waits, in-process inFlight dedup, idle reaping, reconcile —
-// is shared machinery in `_runProvisionLoop` / `_getOrProvisionPod` /
-// `_replacePodSession` (this file). Public per-kind exports (getOrProvisionPod,
-// getOrProvisionVideoPod, replaceSession, replaceVideoSession) are thin
-// wrappers expressing the per-kind contract differences (image: throws on
-// failure; video: returns null, best-effort).
+// runtime+health waits, idle reaping, reconcile — is shared machinery in
+// `_runProvisionLoop`. The four public entry points (getOrProvisionPod /
+// getOrProvisionVideoPod / replaceSession / replaceVideoSession) call the
+// helper with `kind` and read POD_CONFIGS[kind] for the diffs. Per-kind
+// outer concerns (image: semaphore + initial-row writeSession + Sentry span +
+// emitState; video: best-effort try/catch + image-DC co-location) live in
+// the public functions, not the helper.
 //
-// Adding a new pod kind = add a row to POD_CONFIGS + thin public wrappers.
-// No new architecture, no new Redis schema field, no new inFlight map.
+// One in-process inFlight map (`inFlightProvisions`, keyed `${kind}:${sessionId}`)
+// dedupes concurrent provisions for both kinds. Adding a new pod kind = add
+// a row to POD_CONFIGS + 1-2 thin public wrappers; no new Redis schema
+// field, no new map.
 // ────────────────────────────────────────────────────────────────────────────
 
 export type PodKind = 'image' | 'video';
@@ -291,11 +294,11 @@ interface RedisSession {
   createdAt: number;
   lastActivityAt: number;
   replacementCount: number;
-  // Best-effort video pod tracking. Set by setVideoPod() once
-  // provisionVideoPod resolves; cleared by clearVideoPod() on stream close
-  // or by the reaper. The image pod can serve without these — they only
-  // exist to (a) drive reconcile so we don't orphan video pods after
-  // crashes, and (b) let the reaper terminate both pods together.
+  // Best-effort video pod tracking. Stamped by POD_CONFIGS.video.stampRow
+  // on successful provision; cleared by clearVideoPod() on relay-wire
+  // failure or replacement. The image pod can serve without this — it
+  // exists only to (a) drive reconcile so we don't orphan video pods
+  // after crashes, and (b) let the reaper terminate both pods together.
   videoPodId: string | null;
 }
 
@@ -1636,7 +1639,7 @@ const POD_CONFIGS: Record<PodKind, PodKindConfig> = {
       if (pod && pod.desiredStatus === 'RUNNING' && pod.runtime !== null) {
         return {
           podId: row.videoPodId,
-          podUrl: `wss://${row.videoPodId}-8766.proxy.runpod.net/ws`,
+          podUrl: `wss://${row.videoPodId}-${POD_CONFIGS.video.port}.proxy.runpod.net/ws`,
         };
       }
       return null;
