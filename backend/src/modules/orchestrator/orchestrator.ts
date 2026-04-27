@@ -1251,11 +1251,12 @@ async function provision(sessionId: string): Promise<ProvisionResult> {
 
 export async function provisionVideoPod(
   sessionId: string,
+  preferredDc?: string,
 ): Promise<{ podId: string; podUrl: string } | null> {
   const t0 = Date.now();
   let target: PlacementTarget | null;
   try {
-    target = await selectPlacement(sessionId);
+    target = await selectPlacement(sessionId, undefined, preferredDc);
   } catch (err) {
     log.warn(
       { sessionId, err: (err as Error).message, event: '[provision/video] selectPlacement failed' },
@@ -1451,9 +1452,24 @@ export async function getOrProvisionVideoPod(
     return inFlight;
   }
 
+  // Co-locate with the image pod's DC if we know it. The image pod may
+  // already be in a working DC (possibly via reroll) — sticking the video
+  // pod there avoids cross-DC trigger latency AND avoids landing the
+  // video pod in a DC that's currently broken (e.g. US-NC-1 host issues
+  // we've seen). If the image pod hasn't been placed yet (parallel
+  // provision starting up), we have no preference and fall back to
+  // selectPlacement's default ranking.
+  let preferredDc: string | undefined;
+  if (existing?.podId) {
+    const imagePod = await getPod(existing.podId).catch(() => null);
+    if (imagePod?.machine?.dataCenterId) {
+      preferredDc = imagePod.machine.dataCenterId;
+    }
+  }
+
   const promise = (async () => {
     try {
-      return await provisionVideoPod(sessionId);
+      return await provisionVideoPod(sessionId, preferredDc);
     } finally {
       inFlightVideoProvisions.delete(sessionId);
     }
@@ -1487,6 +1503,7 @@ interface PlacementTarget {
 async function selectPlacement(
   sessionId: string,
   excludeDcs: ReadonlySet<string> = new Set(),
+  preferredDc?: string,
 ): Promise<PlacementTarget | null> {
   const volumes = config.NETWORK_VOLUMES_BY_DC;
   const volumeDcs = Object.keys(volumes).filter((dc) => !excludeDcs.has(dc));
@@ -1528,12 +1545,29 @@ async function selectPlacement(
     return br - ar;
   });
 
+  // Float the caller's preferred DC to the front IF it shows any non-zero
+  // stock. Used by video-pod placement to co-locate with the image pod's
+  // DC, avoiding cross-DC trigger latency and the "image pod placed in
+  // working DC X but video pod independently chose broken DC Y" trap.
+  if (preferredDc) {
+    const idx = probed.findIndex((p) => p.dc === preferredDc);
+    if (idx > 0) {
+      const candidate = probed[idx]!;
+      const stockRank = candidate.bid ? (rank[candidate.bid.stockStatus] ?? 0) : 0;
+      if (stockRank > 0) {
+        probed.splice(idx, 1);
+        probed.unshift(candidate);
+      }
+    }
+  }
+
   log.info(
     {
       sessionId,
       event: 'provision.placement.ranked',
       dcs: probed.map((p) => ({ dc: p.dc, stock: p.bid?.stockStatus ?? 'none' })),
       excluded: Array.from(excludeDcs),
+      preferredDc: preferredDc ?? null,
     },
     'DC placement ranked',
   );
