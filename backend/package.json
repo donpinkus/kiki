@@ -11,7 +11,8 @@
     "test": "vitest",
     "lint": "eslint src/",
     "format": "prettier --write \"src/**/*.ts\"",
-    "deploy": "git rev-parse HEAD:flux-klein-server > .flux-app-version && git rev-parse HEAD > .git-sha && railway up"
+    "deploy": "tsx scripts/deploy.ts",
+    "sync-all": "tsx scripts/sync-all-dcs.ts"
   },
   "engines": {
     "node": ">=20.0.0"

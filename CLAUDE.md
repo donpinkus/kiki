@@ -116,9 +116,21 @@ When diagnosing a failure, separate observations from inferences. Do not collaps
 
 ## Deploy Process
 
-**Backend (Fastify on Railway):** `cd backend && npm run deploy`. The deploy script writes the local git HEAD SHA to `backend/.git-sha` and then runs `railway up` — the file gets baked into the Docker image so the orchestrator can read its own deploy SHA at runtime (Railway's `RAILWAY_GIT_COMMIT_SHA` env var is empty for `railway up` deploys, only set for git-triggered ones). Without this, the volume-version-drift check silently no-ops. Plain `railway up` still works but ships a stale SHA — only use it if you know what you're doing.
+**`cd backend && npm run deploy`** — single command. The script (`scripts/deploy.ts`) handles both pod app code and backend together:
 
-**Pod app code (`flux-klein-server/*.py` + Python deps):** Pods boot from stock `runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404` (hardcoded as `BASE_IMAGE` in `orchestrator.ts`) and read `/workspace/app/server.py` plus `/workspace/venv/` off the attached network volume. To deploy code changes: run `backend/scripts/sync-flux-app.ts` once per pre-populated DC volume (5 of them — IDs in `provider-config.md`). Needs `RUNPOD_API_KEY` and `RUNPOD_SSH_PRIVATE_KEY="$(cat ~/.ssh/id_ed25519)"`. Existing running pods keep the old in-memory copy; new pods pick up changes on next provision. To force a user onto the new code, terminate their pod and let the orchestrator reprovision.
+1. Reads `backend/.flux-app-version` (= flux-klein-server tree hash from the last successful deploy).
+2. Compares to current `git rev-parse HEAD:flux-klein-server`.
+3. **If they differ** → fans out `sync-flux-app.ts` to all configured DCs in parallel (`npm run sync-all`). Aborts deploy if any DC fails — fix and re-run.
+4. **If same** → skips the sync step (backend-only iteration; ~1 min total).
+5. Writes `backend/.flux-app-version` and `backend/.git-sha` (baked into the image so the orchestrator's drift check has its expected version), then runs `railway up`.
+
+The two `.git-sha` / `.flux-app-version` files appear as untracked in `git status` after each deploy — that's expected (Railway CLI honors `.gitignore` during upload, so we deliberately keep them out of `.gitignore`; see `backend/.gitignore` comment).
+
+`npm run sync-all` is also exposed for ad-hoc syncs (e.g., recovering after a DC was skipped due to capacity exhaustion, without redeploying backend).
+
+Plain `railway up` still works but bypasses the auto-sync — drift can occur if `flux-klein-server/` changed. The orchestrator's drift check (Sentry warning + PostHog `volume_status`) catches this on the next pod boot, so it's not silent — but `npm run deploy` is the canonical path.
+
+**Pod boot model:** Pods launch from stock `runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404` (hardcoded as `BASE_IMAGE` in `orchestrator.ts`) and read `/workspace/app/server.py` plus `/workspace/venv/` off the attached network volume. Existing running pods keep the old in-memory copy after a sync; new pods pick up changes on next provision. To force a user onto the new code, terminate their pod and let the orchestrator reprovision.
 
 Bumping `BASE_IMAGE` (e.g. CUDA / PyTorch upgrade) is not just a constant flip — the new image's Python/CUDA ABI must match `/workspace/venv/`, so the venv has to be rebuilt by deleting it and re-running `sync-flux-app.ts`.
 
