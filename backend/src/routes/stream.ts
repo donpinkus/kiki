@@ -13,8 +13,8 @@ import {
   subscribe,
   emitState,
   getOrProvisionVideoPod,
+  replaceVideoSession,
   terminateVideoPod,
-  setVideoPod,
   clearVideoPod,
 } from '../modules/orchestrator/orchestrator.js';
 import { StreamRelay } from '../modules/relay/streamRelay.js';
@@ -343,20 +343,81 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             socket.send(data);
           }
         });
-        newRelay.onClose((code, reason) => {
-          request.log.warn(
-            { userId, code, reason, event: 'video_relay_closed', sessionDisabled: true },
-            'video_relay_closed',
-          );
-          videoSessionEnabled = false;
-          videoRelay = null;
-        });
+        newRelay.onClose((code, reason) => handleVideoUpstreamClose(code, reason));
         newRelay.onError((err) => {
           request.log.warn({ userId, err: err.message }, 'video relay error');
         });
         await newRelay.connect();
         videoRelay = newRelay;
       };
+
+      // Mirror of handleUpstreamClose for the video pod's relay. Same
+      // policy: same-pod reconnect first (transient transport drop), then
+      // replaceVideoSession if that fails (pod truly gone). On final
+      // failure, drop to image-only — video is best-effort, no iPad-visible
+      // error.
+      function handleVideoUpstreamClose(code: number, reason: string): void {
+        request.log.warn(
+          { userId, code, reason, event: 'video_relay_closed' },
+          'video_relay_closed',
+        );
+
+        if (clientDisconnected || socket.readyState !== socket.OPEN) {
+          // Client already left; don't try to recover.
+          videoSessionEnabled = false;
+          videoRelay = null;
+          return;
+        }
+
+        // Stop any residual events from the dead relay.
+        videoRelay?.close();
+        videoRelay = null;
+
+        void (async () => {
+          // Fast path: same-pod reconnect. RunPod proxy idle timeout or
+          // network blip; pod is still serving — succeeds in ~1–2 s.
+          if (videoPodId) {
+            const samePodUrl = `wss://${videoPodId}-8766.proxy.runpod.net/ws`;
+            try {
+              await wireVideoRelay(samePodUrl);
+              request.log.info(
+                { userId, videoPodId, event: 'video_relay_reconnected' },
+                'video same-pod reconnect succeeded',
+              );
+              return;
+            } catch (reconnectErr) {
+              request.log.info(
+                { userId, videoPodId, err: (reconnectErr as Error).message },
+                'video same-pod reconnect failed; trying replaceVideoSession',
+              );
+            }
+          }
+
+          // Slow path: replace the pod. Best-effort; null on failure.
+          if (clientDisconnected || socket.readyState !== socket.OPEN) return;
+          const result = await replaceVideoSession(userId);
+          if (!result || clientDisconnected || socket.readyState !== socket.OPEN) {
+            videoSessionEnabled = false;
+            videoPodId = null;
+            return;
+          }
+          videoPodId = result.podId;
+          try {
+            await wireVideoRelay(result.podUrl);
+            request.log.info(
+              { userId, videoPodId, event: 'video_relay_replaced' },
+              'video pod replaced; relay re-wired',
+            );
+          } catch (err) {
+            request.log.warn(
+              { userId, videoPodId, err: (err as Error).message },
+              'video replacement relay-wire failed; image-only',
+            );
+            videoSessionEnabled = false;
+            videoPodId = null;
+          }
+        })();
+      }
 
       // Recover from an upstream close. If the iPad WS is still open, always
       // attempt recovery: first a same-pod reconnect (transient transport
@@ -464,7 +525,8 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
               return;
             }
             videoPodId = result.podId;
-            await setVideoPod(userId, result.podId);
+            // Helper stamps the row's videoPodId field internally during
+            // provision; no need to do it again here.
             try {
               await wireVideoRelay(result.podUrl);
               request.log.info(

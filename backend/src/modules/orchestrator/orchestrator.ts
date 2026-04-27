@@ -161,11 +161,14 @@ export type PodType = 'spot' | 'onDemand';
 
 // Session registry lives in Redis (WS5). Local map only holds in-flight
 // provision promises for same-process join (Promises can't be serialized).
-const inFlightProvisions = new Map<string, Promise<{ podUrl: string }>>();
-// Same idea for video pods. Closes the in-process race where a quick
-// iPad reconnect during a video pod's boot would otherwise trigger a
-// second provision before the first one's videoPodId is on the row.
-const inFlightVideoProvisions = new Map<string, Promise<{ podId: string; podUrl: string } | null>>();
+// Keyed by `${kind}:${sessionId}` so image and video pods don't collide.
+// Value is the rich shape from _runProvisionLoop; per-kind public wrappers
+// project this onto their narrower contract (image: {podUrl}; video:
+// {podId, podUrl}).
+const inFlightProvisions = new Map<
+  string,
+  Promise<{ podId: string; podUrl: string; podType: PodType; dc: string | null }>
+>();
 
 const SESSION_PREFIX = 'session:';
 const POD_PREFIX = 'kiki-session-';
@@ -558,18 +561,20 @@ export async function getOrProvisionPod(sessionId: string): Promise<{ podUrl: st
   // 1. Check Redis for existing session
   const existing = await readSession(sessionId);
 
-  if (existing?.state === 'ready' && existing.podUrl) {
-    log.info({ sessionId, podId: existing.podId }, 'Reusing existing session pod');
-    return { podUrl: existing.podUrl };
+  const reusable = existing ? await POD_CONFIGS.image.getReusableFromRow(existing) : null;
+  if (reusable) {
+    log.info({ sessionId, podId: reusable.podId }, 'Reusing existing session pod');
+    return { podUrl: reusable.podUrl };
   }
 
   // 2. Check local in-flight map (same-process concurrent callers — fresh
   // provision OR replacement). Joiners subscribe via broker; here we just
   // await the same promise.
-  const inFlight = inFlightProvisions.get(sessionId);
+  const key = `image:${sessionId}`;
+  const inFlight = inFlightProvisions.get(key);
   if (inFlight) {
     log.info({ sessionId }, 'Joining in-flight provision');
-    return inFlight;
+    return inFlight.then((r) => ({ podUrl: r.podUrl }));
   }
 
   // 3. If Redis has a non-ready session but we don't own the promise
@@ -606,7 +611,7 @@ export async function getOrProvisionPod(sessionId: string): Promise<{ podUrl: st
         await emitState(sessionId, 'finding_gpu');
         const result = await provision(sessionId);
         provisionedPodId = result.podId;
-        return { podUrl: result.podUrl };
+        return { podId: result.podId, podUrl: result.podUrl, podType: result.podType, dc: null };
       } finally {
         releaseSemaphore();
       }
@@ -625,12 +630,12 @@ export async function getOrProvisionPod(sessionId: string): Promise<{ podUrl: st
       await deleteSession(sessionId).catch(() => {});
       throw err;
     } finally {
-      inFlightProvisions.delete(sessionId);
+      inFlightProvisions.delete(key);
     }
   })();
 
-  inFlightProvisions.set(sessionId, promise);
-  return promise;
+  inFlightProvisions.set(key, promise);
+  return promise.then((r) => ({ podUrl: r.podUrl }));
 }
 
 export function touch(sessionId: string): void {
@@ -709,6 +714,7 @@ export async function replaceSession(sessionId: string): Promise<{ podUrl: strin
 
   const t0 = Date.now();
   let newPodId: string | null = null;
+  const key = `image:${sessionId}`;
   const replacementPromise = (async () => {
     try {
       if (isSemaphoreFull()) await emitState(sessionId, 'queued');
@@ -719,7 +725,7 @@ export async function replaceSession(sessionId: string): Promise<{ podUrl: strin
         newPodId = result.podId;
         const replacementMs = Date.now() - t0;
         log.info({ sessionId, oldPodId, newPodId: result.podId, replacementMs, attempt }, 'Session replaced');
-        return { podUrl: result.podUrl };
+        return { podId: result.podId, podUrl: result.podUrl, podType: result.podType, dc: null };
       } finally {
         releaseSemaphore();
       }
@@ -747,14 +753,14 @@ export async function replaceSession(sessionId: string): Promise<{ podUrl: strin
       });
       throw err;
     } finally {
-      inFlightProvisions.delete(sessionId);
+      inFlightProvisions.delete(key);
     }
   })();
 
   // Register in inFlight so concurrent getOrProvisionPod calls join this
   // replacement instead of starting a duplicate.
-  inFlightProvisions.set(sessionId, replacementPromise);
-  return replacementPromise;
+  inFlightProvisions.set(key, replacementPromise);
+  return replacementPromise.then((r) => ({ podUrl: r.podUrl }));
 }
 
 export function sessionClosed(sessionId: string): void {
@@ -1146,120 +1152,181 @@ async function provision(sessionId: string): Promise<ProvisionResult> {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Video pod (best-effort, on-demand only, no replacement)
+// Video pod public entry points. Both call into the unified machinery
+// (`_runProvisionLoop` + `_replacePodSession` via POD_CONFIGS.video). The
+// only video-specific concerns here are: (a) best-effort contract — return
+// null on any failure, image session continues; (b) co-locate with image's
+// DC; (c) join concurrent in-flight provisions (covers a quick iPad
+// reconnect during the LTXV warmup window).
 // ────────────────────────────────────────────────────────────────────────────
-//
-// Lifecycle and tracking decisions:
-//   - One video pod per session, provisioned by stream.ts AFTER the image pod
-//     resolves 'ready' (so the user's image flow is unblocked while video
-//     warms up).
-//   - Best-effort: if creation/health fails, log + warn and return null.
-//     Image gen continues normally; the iPad sees no error.
-//   - Tracked via `videoPodId` on the existing session row (no separate
-//     Redis key) so the reaper terminates both pods together when image is
-//     idle-reaped, and reconcile can match orphans against active sessions.
-//   - On-demand only for v1. Spot would help cost but adds replacement
-//     complexity that's not justified for a feature whose worst-case
-//     degradation is "no video animation this session".
 
-export async function provisionVideoPod(
+/**
+ * Get-or-provision the video pod for a session.
+ *
+ * Returns null on failure (best-effort — image session keeps going). On
+ * success returns { podId, podUrl } for stream.ts to wire its relay.
+ *
+ * Reuse path: probes RunPod via POD_CONFIGS.video.getReusableFromRow.
+ * If pod is RUNNING+runtime, reuse. If RUNNING-but-still-booting AND we
+ * own the in-flight promise, join it. Otherwise (gone, mid-boot on a
+ * different replica, or no prior pod) fall through to a fresh provision.
+ */
+export async function getOrProvisionVideoPod(
   sessionId: string,
-  preferredDc?: string,
 ): Promise<{ podId: string; podUrl: string } | null> {
-  const t0 = Date.now();
-  let target: PlacementTarget | null;
-  try {
-    target = await selectPlacement(sessionId, undefined, preferredDc);
-  } catch (err) {
-    log.warn(
-      { sessionId, err: (err as Error).message, event: '[provision/video] selectPlacement failed' },
-      '[provision/video] selectPlacement threw',
-    );
-    return null;
+  const existing = await readSession(sessionId);
+
+  // ── Reuse path ─────────────────────────────────────────────────────
+  if (existing) {
+    const reusable = await POD_CONFIGS.video.getReusableFromRow(existing);
+    if (reusable) {
+      log.info(
+        { sessionId, videoPodId: reusable.podId, pod_kind: 'video', event: '[provision/video] reused' },
+        '[provision/video] reusing existing pod (no cold start)',
+      );
+      return reusable;
+    }
+    // Pod exists on row but isn't fully ready — could be mid-boot from a
+    // concurrent provision on this instance. If so, join its promise.
+    if (existing.videoPodId) {
+      const inFlight = inFlightProvisions.get(`video:${sessionId}`);
+      if (inFlight) {
+        log.info(
+          { sessionId, videoPodId: existing.videoPodId, pod_kind: 'video', event: '[provision/video] joined in-flight' },
+          '[provision/video] pod still booting; joining in-flight provision',
+        );
+        try {
+          const r = await inFlight;
+          return { podId: r.podId, podUrl: r.podUrl };
+        } catch {
+          return null;
+        }
+      }
+      // Stale id (pod gone or different replica owns it). Clear and reprovision.
+      log.info(
+        { sessionId, videoPodId: existing.videoPodId, pod_kind: 'video', event: '[provision/video] stale id' },
+        '[provision/video] stashed videoPodId is stale; reprovisioning',
+      );
+      await clearVideoPod(sessionId).catch(() => {});
+    }
   }
-  if (!target) {
-    log.warn({ sessionId, event: '[provision/video] no DC capacity' }, '[provision/video] no DC capacity for video pod');
-    return null;
-  }
 
-  const podName = `${VIDEO_POD_PREFIX}${sessionId.slice(0, 16)}`;
-  const dcField = target.dataCenterId ? { dataCenterId: target.dataCenterId } : {};
-  const volField = target.networkVolumeId ? { networkVolumeId: target.networkVolumeId } : {};
-
-  log.info(
-    { sessionId, dc: target.dataCenterId, pod_kind: 'video', event: '[provision/video] start' },
-    '[provision/video] creating on-demand pod',
-  );
-
-  let podId: string;
-  try {
-    const result = await createOnDemandPod({
-      name: podName,
-      imageName: BASE_IMAGE,
-      gpuTypeId: GPU_TYPE_ID,
-      cloudType: 'SECURE',
-      dockerArgs: BOOT_DOCKER_ARGS_VIDEO,
-      env: BOOT_ENV,
-      containerRegistryAuthId: config.RUNPOD_REGISTRY_AUTH_ID,
-      ...dcField,
-      ...volField,
-    });
-    podId = result.id;
+  // ── In-flight join (no row stamp yet — concurrent fresh provision) ──
+  const inFlight = inFlightProvisions.get(`video:${sessionId}`);
+  if (inFlight) {
     log.info(
-      { sessionId, podId, costPerHr: result.costPerHr, pod_kind: 'video', event: '[provision/video] created' },
-      '[provision/video] pod created',
+      { sessionId, pod_kind: 'video', event: '[provision/video] joined in-flight' },
+      '[provision/video] joining in-flight provision (no row stamp yet)',
     );
-  } catch (err) {
-    log.warn(
-      { sessionId, err: (err as Error).message, pod_kind: 'video', event: '[provision/video] create failed' },
-      '[provision/video] createOnDemandPod failed',
-    );
-    Sentry.addBreadcrumb({
-      category: 'provision/video',
-      level: 'warning',
-      message: 'Video pod create failed',
-      data: { sessionId, err: (err as Error).message },
-    });
-    return null;
+    try {
+      const r = await inFlight;
+      return { podId: r.podId, podUrl: r.podUrl };
+    } catch {
+      return null;
+    }
   }
 
-  // Stamp videoPodId on the session row immediately, before waiting for
-  // boot. Otherwise a quick iPad reconnect during the 60-180s boot window
-  // hits getOrProvisionVideoPod with a row whose videoPodId is still null,
-  // and starts a SECOND pod — both then race the stall watchdog and both
-  // get terminated. Stamping here closes that window.
-  await setVideoPod(sessionId, podId);
+  // ── Fresh provision ────────────────────────────────────────────────
+  // Co-locate with the image pod's DC: avoids cross-DC trigger latency
+  // and avoids landing the video pod in a DC that's currently broken
+  // (e.g. US-NC-1 host issues we've seen) when the image pod is already
+  // running fine elsewhere.
+  let preferredDc: string | undefined;
+  if (existing?.podId) {
+    const imagePod = await getPod(existing.podId).catch(() => null);
+    if (imagePod?.machine?.dataCenterId) {
+      preferredDc = imagePod.machine.dataCenterId;
+    }
+  }
 
+  const key = `video:${sessionId}`;
+  const promise = (async () => {
+    try {
+      return await _runProvisionLoop('video', sessionId, { preferredDc });
+    } finally {
+      inFlightProvisions.delete(key);
+    }
+  })();
+  inFlightProvisions.set(key, promise);
   try {
-    // Bump stallMs to 180s for video pods. Default 45s isn't enough for
-    // a cold image pull on a fresh host, and unlike the image-pod path
-    // we don't reroll DCs on stall — a single stall = no video for this
-    // session. 180s comfortably covers a slow Docker Hub pull.
-    await waitForRuntime(podId, { stallMs: 180_000 });
-    const healthUrl = `https://${podId}-8766.proxy.runpod.net/health`;
-    await waitForHealth(podId, healthUrl);
-    const podUrl = `wss://${podId}-8766.proxy.runpod.net/ws`;
-    log.info(
-      { sessionId, podId, podUrl, totalMs: Date.now() - t0, pod_kind: 'video', event: '[provision/video] ready' },
-      '[provision/video] pod ready',
-    );
-    return { podId, podUrl };
+    const r = await promise;
+    return { podId: r.podId, podUrl: r.podUrl };
   } catch (err) {
     log.warn(
-      { sessionId, podId, err: (err as Error).message, pod_kind: 'video', event: '[provision/video] runtime/health failed' },
-      '[provision/video] failed runtime/health; terminating pod',
+      { sessionId, err: (err as Error).message, pod_kind: 'video', event: '[provision/video] failed' },
+      '[provision/video] provision failed; image session continues image-only',
     );
-    terminatePod(podId).catch((e) =>
-      log.warn({ podId, err: (e as Error).message }, '[provision/video] terminate-after-fail failed'),
-    );
-    // Clear the row stamp we wrote above so the next reconnect does a
-    // fresh provision instead of probing this dead pod.
-    await clearVideoPod(sessionId).catch(() => {});
     return null;
   }
 }
 
-/** Terminate a video pod by ID. Never throws. */
+/**
+ * Replace a session's video pod after it dies mid-session. Mirror of
+ * `replaceSession` for the video kind: terminate the old video pod,
+ * reprovision via the shared loop, return the new pod info or null on
+ * failure. Called by stream.ts's `handleVideoUpstreamClose` after a
+ * same-pod reconnect attempt fails (i.e., the pod is truly gone, not
+ * just a transient WS drop).
+ *
+ * Best-effort contract: returns null on any failure. Caller falls back
+ * to image-only.
+ */
+export async function replaceVideoSession(
+  sessionId: string,
+): Promise<{ podId: string; podUrl: string } | null> {
+  const session = await readSession(sessionId);
+  if (!session) {
+    log.warn({ sessionId }, 'replaceVideoSession: no session to replace');
+    return null;
+  }
+  const oldPodId = session.videoPodId;
+  log.info({ sessionId, oldPodId, pod_kind: 'video' }, 'Starting video session replacement');
+
+  // Clear old pod ref + terminate (fire-and-forget). No replacement-count
+  // bump — we share session.replacementCount with image, and video failures
+  // are recoverable enough that we don't want to consume the budget.
+  await clearVideoPod(sessionId).catch(() => {});
+  if (oldPodId) {
+    terminatePod(oldPodId).catch((e) =>
+      log.warn(
+        { sessionId, oldPodId, err: (e as Error).message },
+        'replaceVideoSession: terminate old pod failed (reaper will clean)',
+      ),
+    );
+  }
+
+  // Co-locate the replacement with image pod's current DC.
+  let preferredDc: string | undefined;
+  if (session.podId) {
+    const imagePod = await getPod(session.podId).catch(() => null);
+    if (imagePod?.machine?.dataCenterId) {
+      preferredDc = imagePod.machine.dataCenterId;
+    }
+  }
+
+  const key = `video:${sessionId}`;
+  const promise = (async () => {
+    try {
+      return await _runProvisionLoop('video', sessionId, { preferredDc });
+    } finally {
+      inFlightProvisions.delete(key);
+    }
+  })();
+  inFlightProvisions.set(key, promise);
+  try {
+    const r = await promise;
+    return { podId: r.podId, podUrl: r.podUrl };
+  } catch (err) {
+    log.warn(
+      { sessionId, err: (err as Error).message, pod_kind: 'video' },
+      'replaceVideoSession failed; session is image-only',
+    );
+    return null;
+  }
+}
+
+/** Terminate a video pod by ID. Never throws. Used by stream.ts on relay
+ *  wire failure. */
 export async function terminateVideoPod(podId: string): Promise<void> {
   try {
     await terminatePod(podId);
@@ -1272,22 +1339,8 @@ export async function terminateVideoPod(podId: string): Promise<void> {
   }
 }
 
-/** Stash the just-provisioned video pod ID on the session row so reaper +
- *  reconcile can find it. Best-effort: if the session row doesn't exist
- *  (somehow already cleaned up), silently skip — the reconciler will
- *  terminate this pod as an orphan within a minute. */
-export async function setVideoPod(sessionId: string, videoPodId: string): Promise<void> {
-  try {
-    await patchSession(sessionId, { videoPodId });
-  } catch (err) {
-    log.warn(
-      { sessionId, videoPodId, err: (err as Error).message },
-      'setVideoPod patchSession failed (orphan will be reconciled)',
-    );
-  }
-}
-
-/** Clear videoPodId on session row (e.g. after stream close). Never throws. */
+/** Clear videoPodId on session row. Never throws. Used by stream.ts on
+ *  relay wire failure to ensure the next reconnect provisions fresh. */
 export async function clearVideoPod(sessionId: string): Promise<void> {
   try {
     await patchSession(sessionId, { videoPodId: null });
@@ -1297,98 +1350,6 @@ export async function clearVideoPod(sessionId: string): Promise<void> {
       'clearVideoPod patchSession failed',
     );
   }
-}
-
-/**
- * Get-or-provision the video pod for a session. Mirrors getOrProvisionPod
- * for image pods: on iPad WS reconnect, the video pod outlives the WS and
- * is reused, avoiding the ~3-min LTXV cold start on every drawing change.
- *
- * Returns null on any provision failure (best-effort, same contract as
- * provisionVideoPod).
- *
- * Stale-id handling: if the session row references a videoPodId that's
- * gone from RunPod (terminated externally, reconciled, etc.), we clear
- * the stale id and provision fresh.
- */
-export async function getOrProvisionVideoPod(
-  sessionId: string,
-): Promise<{ podId: string; podUrl: string } | null> {
-  const existing = await readSession(sessionId);
-  if (existing?.videoPodId) {
-    const pod = await getPod(existing.videoPodId).catch(() => null);
-    const ready = pod && pod.desiredStatus === 'RUNNING' && pod.runtime !== null;
-    if (ready) {
-      const podUrl = `wss://${existing.videoPodId}-8766.proxy.runpod.net/ws`;
-      log.info(
-        { sessionId, videoPodId: existing.videoPodId, pod_kind: 'video', event: '[provision/video] reused' },
-        '[provision/video] reusing existing pod (no cold start)',
-      );
-      return { podId: existing.videoPodId, podUrl };
-    }
-    if (pod && pod.desiredStatus === 'RUNNING' && pod.runtime === null) {
-      // Pod exists and is desired-running, but runtime hasn't appeared
-      // yet — it's mid-boot, likely from a concurrent in-flight provision
-      // on this same backend instance. Joining the in-flight promise (if
-      // present) gets us the correct result without starting a duplicate.
-      const inFlight = inFlightVideoProvisions.get(sessionId);
-      if (inFlight) {
-        log.info(
-          { sessionId, videoPodId: existing.videoPodId, pod_kind: 'video', event: '[provision/video] joined in-flight' },
-          '[provision/video] pod still booting; joining in-flight provision',
-        );
-        return inFlight;
-      }
-      // Booting but not in-flight on this instance — likely a different
-      // backend replica owns it, or the original promise lost track on
-      // restart. Fall through to fresh provision; the orphan will be
-      // cleaned up by reconcile.
-      log.warn(
-        { sessionId, videoPodId: existing.videoPodId, pod_kind: 'video' },
-        '[provision/video] pod booting but no in-flight promise here; reprovisioning',
-      );
-    } else {
-      log.info(
-        { sessionId, videoPodId: existing.videoPodId, status: pod?.desiredStatus ?? 'gone', pod_kind: 'video', event: '[provision/video] stale id' },
-        '[provision/video] stashed videoPodId is stale; reprovisioning',
-      );
-    }
-    await clearVideoPod(sessionId).catch(() => {});
-  }
-
-  const inFlight = inFlightVideoProvisions.get(sessionId);
-  if (inFlight) {
-    log.info(
-      { sessionId, pod_kind: 'video', event: '[provision/video] joined in-flight' },
-      '[provision/video] joining in-flight provision (no row stamp yet)',
-    );
-    return inFlight;
-  }
-
-  // Co-locate with the image pod's DC if we know it. The image pod may
-  // already be in a working DC (possibly via reroll) — sticking the video
-  // pod there avoids cross-DC trigger latency AND avoids landing the
-  // video pod in a DC that's currently broken (e.g. US-NC-1 host issues
-  // we've seen). If the image pod hasn't been placed yet (parallel
-  // provision starting up), we have no preference and fall back to
-  // selectPlacement's default ranking.
-  let preferredDc: string | undefined;
-  if (existing?.podId) {
-    const imagePod = await getPod(existing.podId).catch(() => null);
-    if (imagePod?.machine?.dataCenterId) {
-      preferredDc = imagePod.machine.dataCenterId;
-    }
-  }
-
-  const promise = (async () => {
-    try {
-      return await provisionVideoPod(sessionId, preferredDc);
-    } finally {
-      inFlightVideoProvisions.delete(sessionId);
-    }
-  })();
-  inFlightVideoProvisions.set(sessionId, promise);
-  return promise;
 }
 
 /**
