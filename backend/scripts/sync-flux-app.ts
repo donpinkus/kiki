@@ -62,12 +62,16 @@ if (!SSH_KEY) {
 // mount the network volume. RunPod requires gpuCount ≥ 1, so we try an
 // ordered list of cheap GPUs (cheapest first) and use whichever one has
 // capacity in the target DC. Set SYNC_GPU_TYPE_ID to pin a specific type.
+// 4090 deliberately omitted: hosts in EUR-NO-1 + US-IL-1 boot the
+// container but `startSsh:true` never opens port 22 (verified across 3
+// retries, 2026-04-27). The cheaper tiers above + 5090 fallback are
+// proven to work. 5090 last so we don't pay the premium when a cheap
+// host is available.
 const DEFAULT_GPU_CANDIDATES = [
   'NVIDIA RTX 2000 Ada Generation',
   'NVIDIA RTX A4000',
   'NVIDIA GeForce RTX 3090',
   'NVIDIA L4',
-  'NVIDIA GeForce RTX 4090',
   'NVIDIA GeForce RTX 5090',
 ];
 const GPU_CANDIDATES = process.env['SYNC_GPU_TYPE_ID']
