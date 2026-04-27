@@ -162,6 +162,10 @@ export type PodType = 'spot' | 'onDemand';
 // Session registry lives in Redis (WS5). Local map only holds in-flight
 // provision promises for same-process join (Promises can't be serialized).
 const inFlightProvisions = new Map<string, Promise<{ podUrl: string }>>();
+// Same idea for video pods. Closes the in-process race where a quick
+// iPad reconnect during a video pod's boot would otherwise trigger a
+// second provision before the first one's videoPodId is on the row.
+const inFlightVideoProvisions = new Map<string, Promise<{ podId: string; podUrl: string } | null>>();
 
 const SESSION_PREFIX = 'session:';
 const POD_PREFIX = 'kiki-session-';
@@ -1305,8 +1309,19 @@ export async function provisionVideoPod(
     return null;
   }
 
+  // Stamp videoPodId on the session row immediately, before waiting for
+  // boot. Otherwise a quick iPad reconnect during the 60-180s boot window
+  // hits getOrProvisionVideoPod with a row whose videoPodId is still null,
+  // and starts a SECOND pod — both then race the stall watchdog and both
+  // get terminated. Stamping here closes that window.
+  await setVideoPod(sessionId, podId);
+
   try {
-    await waitForRuntime(podId);
+    // Bump stallMs to 180s for video pods. Default 45s isn't enough for
+    // a cold image pull on a fresh host, and unlike the image-pod path
+    // we don't reroll DCs on stall — a single stall = no video for this
+    // session. 180s comfortably covers a slow Docker Hub pull.
+    await waitForRuntime(podId, { stallMs: 180_000 });
     const healthUrl = `https://${podId}-8766.proxy.runpod.net/health`;
     await waitForHealth(podId, healthUrl);
     const podUrl = `wss://${podId}-8766.proxy.runpod.net/ws`;
@@ -1323,6 +1338,9 @@ export async function provisionVideoPod(
     terminatePod(podId).catch((e) =>
       log.warn({ podId, err: (e as Error).message }, '[provision/video] terminate-after-fail failed'),
     );
+    // Clear the row stamp we wrote above so the next reconnect does a
+    // fresh provision instead of probing this dead pod.
+    await clearVideoPod(sessionId).catch(() => {});
     return null;
   }
 }
@@ -1394,13 +1412,54 @@ export async function getOrProvisionVideoPod(
       );
       return { podId: existing.videoPodId, podUrl };
     }
-    log.info(
-      { sessionId, videoPodId: existing.videoPodId, status: pod?.desiredStatus ?? 'gone', pod_kind: 'video', event: '[provision/video] stale id' },
-      '[provision/video] stashed videoPodId is stale; reprovisioning',
-    );
+    if (pod && pod.desiredStatus === 'RUNNING' && pod.runtime === null) {
+      // Pod exists and is desired-running, but runtime hasn't appeared
+      // yet — it's mid-boot, likely from a concurrent in-flight provision
+      // on this same backend instance. Joining the in-flight promise (if
+      // present) gets us the correct result without starting a duplicate.
+      const inFlight = inFlightVideoProvisions.get(sessionId);
+      if (inFlight) {
+        log.info(
+          { sessionId, videoPodId: existing.videoPodId, pod_kind: 'video', event: '[provision/video] joined in-flight' },
+          '[provision/video] pod still booting; joining in-flight provision',
+        );
+        return inFlight;
+      }
+      // Booting but not in-flight on this instance — likely a different
+      // backend replica owns it, or the original promise lost track on
+      // restart. Fall through to fresh provision; the orphan will be
+      // cleaned up by reconcile.
+      log.warn(
+        { sessionId, videoPodId: existing.videoPodId, pod_kind: 'video' },
+        '[provision/video] pod booting but no in-flight promise here; reprovisioning',
+      );
+    } else {
+      log.info(
+        { sessionId, videoPodId: existing.videoPodId, status: pod?.desiredStatus ?? 'gone', pod_kind: 'video', event: '[provision/video] stale id' },
+        '[provision/video] stashed videoPodId is stale; reprovisioning',
+      );
+    }
     await clearVideoPod(sessionId).catch(() => {});
   }
-  return provisionVideoPod(sessionId);
+
+  const inFlight = inFlightVideoProvisions.get(sessionId);
+  if (inFlight) {
+    log.info(
+      { sessionId, pod_kind: 'video', event: '[provision/video] joined in-flight' },
+      '[provision/video] joining in-flight provision (no row stamp yet)',
+    );
+    return inFlight;
+  }
+
+  const promise = (async () => {
+    try {
+      return await provisionVideoPod(sessionId);
+    } finally {
+      inFlightVideoProvisions.delete(sessionId);
+    }
+  })();
+  inFlightVideoProvisions.set(sessionId, promise);
+  return promise;
 }
 
 /**
