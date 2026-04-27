@@ -15,7 +15,16 @@ public final class MetalCanvasView: UIView {
 
     // MARK: - Public State
 
-    public var currentTool: ToolState = .brush(.defaultPen)
+    public var currentTool: ToolState = .brush(.defaultPen) {
+        didSet {
+            // Switching tools while a snap-edit is pending finalizes it
+            // (the user has clearly moved on). The pending line gets
+            // flattened with whatever endpoint positions it currently has.
+            if case .editingHandles = snapState {
+                finalizeEditedSnap()
+            }
+        }
+    }
 
     /// Layer metadata, read from the renderer (single source of truth).
     public var layers: [LayerInfo] {
@@ -128,18 +137,42 @@ public final class MetalCanvasView: UIView {
     /// Recognizer instance — created lazily on first brush stroke.
     private var recognizer: StrokeRecognizer?
 
-    /// State of the snap workflow during the current stroke.
+    /// State of the snap workflow.
+    ///
+    /// On hold-commit the recognizer transitions directly to `.draggingHandle`
+    /// (with the end "grabbed" by the pen) — both handles appear immediately.
+    /// On the subsequent touchesEnded the state moves to `.editingHandles`,
+    /// which persists across touches: the user can re-tap either handle to
+    /// drag, or tap elsewhere to flatten the line into the canvas.
     private enum SnapState {
         case drawing
         case preview(verdict: Verdict, enteredAt: TimeInterval)
-        case committed
+        case editingHandles(start: CGPoint, end: CGPoint)
+        case draggingHandle(which: HandleSide, anchored: CGPoint)
     }
+    private enum HandleSide { case start, end }
     private var snapState: SnapState = .drawing
+
+    /// Hit radius for handle taps. Larger than the visual handle so finger
+    /// taps work well; Apple Pencil precision is fine within this radius too.
+    private static let handleHitRadius: CGFloat = 22
+
+    /// Visual diameter of the handle indicator (Procreate-like).
+    private static let handleVisualDiameter: CGFloat = 12
 
     /// Overlay layer showing the snap preview ghost (line outline above active stroke).
     private let snapPreviewLayer = CAShapeLayer()
+    /// Direct-manipulation handles shown when a snapped line is editable
+    /// (post-touchesEnded, pre-dismiss). Two CAShapeLayer circles.
+    private let startHandleLayer = CAShapeLayer()
+    private let endHandleLayer = CAShapeLayer()
     private let previewHaptic = UIImpactFeedbackGenerator(style: .light)
     private let commitHaptic = UIImpactFeedbackGenerator(style: .medium)
+
+    /// Captured at snap-commit time, preserved through edit mode so each
+    /// handle drag can re-call `reparameterizeStrokePoints` against the
+    /// original pressure curve. Cleared on finalize/cancel/new-stroke.
+    private var preCommitRawPoints: [StrokePoint]?
 
     // MARK: - Init
 
@@ -208,6 +241,20 @@ public final class MetalCanvasView: UIView {
         snapPreviewLayer.lineJoin = .round
         snapPreviewLayer.isHidden = true
         layer.addSublayer(snapPreviewLayer)
+
+        // Handle indicators for snap edit mode. Procreate-like: white-fill,
+        // accent-stroke circles with subtle drop shadow.
+        for handle in [startHandleLayer, endHandleLayer] {
+            handle.fillColor = UIColor.white.cgColor
+            handle.strokeColor = UIColor.tintColor.cgColor
+            handle.lineWidth = 1.5
+            handle.shadowColor = UIColor.black.cgColor
+            handle.shadowOpacity = 0.25
+            handle.shadowRadius = 2
+            handle.shadowOffset = CGSize(width: 0, height: 1)
+            handle.isHidden = true
+            layer.addSublayer(handle)
+        }
     }
 
     public func setQuickShapeEnabled(_ enabled: Bool) {
@@ -271,6 +318,30 @@ public final class MetalCanvasView: UIView {
             print("\n===== [QS] STROKE BEGIN — touches=\(touches.count), tool=\(currentTool) =====")
         }
 
+        // Snap edit mode: route touch to handle drag, or dismiss if outside.
+        if case .editingHandles(let start, let end) = snapState,
+           let touch = touches.first {
+            let p = touch.location(in: self)
+            if let which = handleHitTest(at: p, start: start, end: end) {
+                let anchored = (which == .start) ? end : start
+                snapState = .draggingHandle(which: which, anchored: anchored)
+                drawingTouch = touch
+                onInteractionBegan?()
+                if isQuickShapeLoggingEnabled {
+                    print("[QS] handle drag begin — \(which)")
+                }
+                return
+            } else {
+                // Tap elsewhere — finalize and consume this touch (don't
+                // start a new stroke; user must lift and re-touch to draw).
+                if isQuickShapeLoggingEnabled {
+                    print("[QS] tap-elsewhere — finalize edit")
+                }
+                finalizeEditedSnap()
+                return
+            }
+        }
+
         guard drawingTouch == nil, let touch = touches.first else {
             if isQuickShapeLoggingEnabled {
                 print("[QS] touchesBegan rejected (drawingTouch=\(drawingTouch != nil ? "busy" : "nil"))")
@@ -328,6 +399,17 @@ public final class MetalCanvasView: UIView {
     public override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard let touch = drawingTouch, touches.contains(touch) else { return }
 
+        // Snap handle drag: update line endpoints and re-render in scratch.
+        if case .draggingHandle(let which, let anchored) = snapState {
+            let dragged = touch.location(in: self)
+            let (start, end): (CGPoint, CGPoint) = (which == .start)
+                ? (dragged, anchored)
+                : (anchored, dragged)
+            rebuildSnappedLineStamps(start: start, end: end)
+            updateDragHandles(start: start, end: end)
+            return
+        }
+
         switch currentTool {
         case .brush:
             // Append coalesced points and rebuild all stamps for live preview.
@@ -336,10 +418,10 @@ public final class MetalCanvasView: UIView {
                 activeStroke?.points.append(makeStrokePoint(from: ct))
             }
             appendStampsForLatestPoints(touch: touch, event: event)
-            // QuickShape: feed recognizer + drive snap state machine.
-            if isQuickShapeEnabled, case .committed = snapState {
-                // Already snapped — ignore further input until touchesEnded.
-            } else if isQuickShapeEnabled {
+            // QuickShape: feed recognizer + drive snap state machine. Only
+            // active in `.drawing` and `.preview`; once a snap commits, the
+            // touch handler at the top of touchesMoved owns the lifecycle.
+            if isQuickShapeEnabled {
                 feedRecognizer(touch: touch, event: event)
                 updateSnapState()
             }
@@ -375,13 +457,28 @@ public final class MetalCanvasView: UIView {
     public override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard let touch = drawingTouch, touches.contains(touch) else { return }
 
+        // End of a handle drag: return to editingHandles with new positions.
+        // The line + handles stay visible until the user dismisses or re-edits.
+        if case .draggingHandle(let which, let anchored) = snapState {
+            let final = touch.location(in: self)
+            let (start, end): (CGPoint, CGPoint) = (which == .start)
+                ? (final, anchored)
+                : (anchored, final)
+            snapState = .editingHandles(start: start, end: end)
+            updateDragHandles(start: start, end: end)
+            drawingTouch = nil
+            onInteractionEnded?()
+            isDirty = true
+            return
+        }
+
         // Telemetry / diagnostic at touchesEnded.
         if isQuickShapeEnabled, let recognizer {
+            // This block is only reached when the stroke ended WITHOUT having
+            // entered handle-drag mode (the .draggingHandle case returns
+            // earlier above). So we know no snap committed during this touch.
             let v = recognizer.finalize()
-            // Fire abstain event if the stroke ended without committing a snap.
-            if case .committed = snapState {
-                // Already fired .committed in commitSnap; nothing to do here.
-            } else if case .abstain(let reason) = v {
+            if case .abstain(let reason) = v {
                 onSnapEvent?(.abstained(SnapAbstainedInfo(
                     reason: reason.rawValue,
                     confidence: Double(recognizer.currentConfidence),
@@ -423,6 +520,23 @@ public final class MetalCanvasView: UIView {
 
     public override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard let touch = drawingTouch, touches.contains(touch) else { return }
+
+        // If a handle drag is cancelled mid-stream, snap back to whatever
+        // positions the line had at drag-start (the anchored point + the
+        // handle's pre-drag location, which we don't have explicitly —
+        // closest is the current stroke endpoints, which already track the
+        // latest interpolation). Just restore editingHandles state.
+        if case .draggingHandle(let which, let anchored) = snapState {
+            let pos = touch.location(in: self)
+            let (start, end): (CGPoint, CGPoint) = (which == .start)
+                ? (pos, anchored) : (anchored, pos)
+            snapState = .editingHandles(start: start, end: end)
+            updateDragHandles(start: start, end: end)
+            drawingTouch = nil
+            onInteractionEnded?()
+            isDirty = true
+            return
+        }
 
         if case .eraser = currentTool {
             // Eraser stamps were applied directly to canvas — revert by restoring
@@ -568,6 +682,119 @@ public final class MetalCanvasView: UIView {
         isDirty = true
     }
 
+    // MARK: - Snap Edit Mode (handle dragging post-commit)
+
+    /// Flatten the pending snapped line into the canvas and exit edit mode.
+    /// Called when the user taps elsewhere, switches tools, or otherwise
+    /// dismisses the handles.
+    private func finalizeEditedSnap() {
+        guard case .editingHandles = snapState else { return }
+        guard !activeStrokeStamps.isEmpty else {
+            // Defensive: nothing to flatten. Just clear state.
+            cancelPendingSnapEdit()
+            return
+        }
+        pushUndoSnapshot()
+        renderer.clearStamps()
+        for stamp in activeStrokeStamps {
+            renderer.appendStamp(stamp)
+        }
+        renderer.flattenScratchIntoCanvas()
+        strokeCount += 1
+        onDrawingChanged?()
+
+        clearSnapEditState()
+        isDirty = true
+    }
+
+    /// Discard the pending snapped line without flattening — used when the
+    /// user undoes during edit mode.
+    private func cancelPendingSnapEdit() {
+        guard case .editingHandles = snapState else { return }
+        clearSnapEditState()
+        isDirty = true
+    }
+
+    /// Common cleanup shared by finalize + cancel paths.
+    private func clearSnapEditState() {
+        hideDragHandles()
+        activeStroke = nil
+        activeStrokeStamps = []
+        preCommitRawPoints = nil
+        snapState = .drawing
+    }
+
+    // MARK: - Handle UI
+
+    private func showDragHandles(start: CGPoint, end: CGPoint) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        configureHandlePath(startHandleLayer, at: start)
+        configureHandlePath(endHandleLayer, at: end)
+        startHandleLayer.isHidden = false
+        endHandleLayer.isHidden = false
+        CATransaction.commit()
+    }
+
+    private func updateDragHandles(start: CGPoint, end: CGPoint) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        configureHandlePath(startHandleLayer, at: start)
+        configureHandlePath(endHandleLayer, at: end)
+        CATransaction.commit()
+    }
+
+    private func hideDragHandles() {
+        guard !startHandleLayer.isHidden || !endHandleLayer.isHidden else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        startHandleLayer.isHidden = true
+        endHandleLayer.isHidden = true
+        startHandleLayer.path = nil
+        endHandleLayer.path = nil
+        CATransaction.commit()
+    }
+
+    private func configureHandlePath(_ layer: CAShapeLayer, at center: CGPoint) {
+        let r = Self.handleVisualDiameter / 2
+        let rect = CGRect(x: center.x - r, y: center.y - r,
+                          width: Self.handleVisualDiameter,
+                          height: Self.handleVisualDiameter)
+        layer.path = CGPath(ellipseIn: rect, transform: nil)
+    }
+
+    /// Hit-test a touch location against the two visible handles. Returns
+    /// the closer handle if either is within `handleHitRadius` of the touch,
+    /// else nil. Choosing the closer one prevents ambiguity at degenerate
+    /// short lines where both handles overlap.
+    private func handleHitTest(at p: CGPoint, start: CGPoint, end: CGPoint) -> HandleSide? {
+        let dStart = hypot(p.x - start.x, p.y - start.y)
+        let dEnd = hypot(p.x - end.x, p.y - end.y)
+        let r = Self.handleHitRadius
+        if dStart <= r && dEnd <= r {
+            return dStart <= dEnd ? .start : .end
+        }
+        if dStart <= r { return .start }
+        if dEnd <= r { return .end }
+        return nil
+    }
+
+    /// Rebuild the snapped line's stamps for a new (start, end) pair. Used
+    /// during handle drag to live-update the brush stroke in scratch.
+    private func rebuildSnappedLineStamps(start: CGPoint, end: CGPoint) {
+        guard var stroke = activeStroke,
+              let raw = preCommitRawPoints else { return }
+        let resampled = reparameterizeStrokePoints(
+            rawPoints: raw,
+            correctedStart: start,
+            correctedEnd: end
+        )
+        stroke.points = resampled
+        activeStroke = stroke
+        activeStrokeStamps = generateStampsForStroke(stroke, scale: canvasScale)
+        isDirty = true
+    }
+
     // MARK: - QuickShape integration (v0)
 
     private func ensureRecognizer() -> StrokeRecognizer {
@@ -694,7 +921,9 @@ public final class MetalCanvasView: UIView {
                 commitSnap(verdict: cachedVerdict)
             }
 
-        case .committed:
+        case .editingHandles, .draggingHandle:
+            // No recognizer-driven transitions in these states; touch handlers
+            // own the lifecycle here.
             break
         }
     }
@@ -703,7 +932,8 @@ public final class MetalCanvasView: UIView {
         switch s {
         case .drawing: return "drawing"
         case .preview: return "preview"
-        case .committed: return "committed"
+        case .editingHandles: return "editingHandles"
+        case .draggingHandle: return "draggingHandle"
         }
     }
 
@@ -738,20 +968,43 @@ public final class MetalCanvasView: UIView {
     /// normalized arc-length so the user's full pressure profile is preserved
     /// (not just the endpoints). The brush engine then handles adaptive
     /// stamp spacing as it would for any other stroke.
+    ///
+    /// Immediately enters handle-drag mode for the END handle: both handles
+    /// appear, the start is anchored at the projected fit-line start, and
+    /// the end is set to the **current pen position** (not the algebraic
+    /// projection) so the line tracks the pen exactly. Subsequent
+    /// touchesMoved events continue dragging the end as if the user had
+    /// just grabbed it. On touchesEnded the state transitions to
+    /// editingHandles where both handles are re-tappable.
+    ///
+    /// Stashes the raw points so each drag tick can re-reparameterize
+    /// against the original pressure curve.
     private func commitSnap(verdict: Verdict) {
         guard case .line(let geom) = verdict, var stroke = activeStroke else { return }
+
+        // Save the raw points for post-commit handle dragging.
+        preCommitRawPoints = stroke.points
+
+        // Treat the user's hold position as the end-handle position so the
+        // line reaches exactly to the pen at the moment of commit. The line
+        // direction may differ slightly from the fitted-line direction,
+        // but that's correct — once the pen is grabbed, the line is start→pen.
+        let penPos = recognizer?.lastInputPositionTimestamp?.position ?? geom.end
 
         let resampled = reparameterizeStrokePoints(
             rawPoints: stroke.points,
             correctedStart: geom.start,
-            correctedEnd: geom.end
+            correctedEnd: penPos
         )
         stroke.points = resampled
         activeStroke = stroke
         activeStrokeStamps = generateStampsForStroke(stroke, scale: canvasScale)
 
         cancelSnapPreview()
-        snapState = .committed
+        // Enter handle-drag mode immediately. Both handles visible; end follows
+        // the pen until the user lifts.
+        snapState = .draggingHandle(which: .end, anchored: geom.start)
+        showDragHandles(start: geom.start, end: penPos)
         commitHaptic.impactOccurred()
         if isQuickShapeLoggingEnabled {
             print("[QS] commitSnap — \(stroke.points.count) corrected points")
@@ -976,6 +1229,15 @@ public final class MetalCanvasView: UIView {
     }
 
     public func performUndo() {
+        // If a snap-edit is pending (line in scratch, handles visible),
+        // undo discards the pending line rather than popping an undo
+        // snapshot. The user expects undo to dismiss the in-progress edit.
+        if case .editingHandles = snapState {
+            cancelPendingSnapEdit()
+            onStateChanged?()
+            return
+        }
+
         guard let entry = undoSnapshots.popLast() else { return }
         if let current = renderer.snapshotLayer(at: entry.layerIndex) {
             redoSnapshots.append(UndoEntry(layerIndex: entry.layerIndex, snapshotData: current))
