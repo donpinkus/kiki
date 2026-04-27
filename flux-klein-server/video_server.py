@@ -300,10 +300,15 @@ async def websocket_video(ws: WebSocket):
 
 
 def _encode_mp4(frames: list[Image.Image], fps: int) -> bytes:
-    """Encode a frame list to H.264 MP4 with faststart for smooth iOS looping.
+    """Encode a frame list to H.264 MP4 for iPad playback.
 
     Pipes raw RGB through the bundled ffmpeg binary — avoids tempfiles and
-    works inside the offline pod with no external ffmpeg dependency.
+    works inside the offline pod with no external ffmpeg dependency. NOTE:
+    no `-movflags +faststart` — that flag requires seekable output to
+    rewrite the moov atom at the front, and ffmpeg 7.x (in imageio-ffmpeg
+    0.6.0) refuses with "muxer does not support non seekable output" when
+    piping to stdout. Faststart only matters for HTTP streaming anyway;
+    we ship the whole MP4 to the iPad in one WS message and play from disk.
     """
     if not frames:
         return b""
@@ -322,7 +327,6 @@ def _encode_mp4(frames: list[Image.Image], fps: int) -> bytes:
         "-preset", "veryfast",
         "-crf", "23",
         "-pix_fmt", "yuv420p",
-        "-movflags", "+faststart",
         "-f", "mp4",
         "pipe:1",
     ]
