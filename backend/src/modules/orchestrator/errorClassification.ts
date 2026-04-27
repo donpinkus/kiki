@@ -59,11 +59,29 @@ export class PodVanishedError extends Error {
   }
 }
 
+/**
+ * Provision was cancelled mid-flight by `abortSession` (e.g. user signed out).
+ * `_runProvisionLoop` checks its `signal` between phases and throws this with
+ * the just-created pod (if any) already terminated. Non-recoverable: callers
+ * should not retry, since the cancellation reflects a deliberate caller
+ * decision, not a flaky DC.
+ */
+export class ProvisionAbortedError extends Error {
+  readonly podId: string | null;
+
+  constructor(podId: string | null, phase: string) {
+    super(`Provision aborted at ${phase}${podId ? ` (pod ${podId} terminated)` : ''}`);
+    this.name = 'ProvisionAbortedError';
+    this.podId = podId;
+  }
+}
+
 export type FailureCategory =
   | 'spot_capacity'
   | 'pod_create_failed'
   | 'pod_boot_stall'
   | 'pod_vanished'
+  | 'provision_aborted'
   | 'warm_model_timeout'
   | 'monthly_cap'
   | 'idle_timeout'
@@ -75,6 +93,7 @@ import { isCapacityError } from './runpodClient.js';
 export function classifyProvisionError(err: Error): FailureCategory {
   if (err instanceof PodBootStallError) return 'pod_boot_stall';
   if (err instanceof PodVanishedError) return 'pod_vanished';
+  if (err instanceof ProvisionAbortedError) return 'provision_aborted';
   // Delegate capacity detection to the single source of truth in runpodClient.
   // Also retain the legacy internal phrasings ("spot capacity", "capacity exhausted",
   // "no runpod dc") since those are thrown by our own code, not RunPod.

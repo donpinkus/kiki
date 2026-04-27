@@ -108,7 +108,7 @@ import {
 } from './runpodClient.js';
 import { getPolicy } from './policy.js';
 import { notifyPodCreated, notifyPodProgress, notifyPodTerminated } from './costMonitor.js';
-import { PodBootStallError, PodVanishedError, classifyProvisionError, type FailureCategory } from './errorClassification.js';
+import { PodBootStallError, PodVanishedError, ProvisionAbortedError, classifyProvisionError, type FailureCategory } from './errorClassification.js';
 import {
   trackPodProvisionStarted,
   trackPodProvisionCompleted,
@@ -162,13 +162,14 @@ export type PodType = 'spot' | 'onDemand';
 // Session registry lives in Redis (WS5). Local map only holds in-flight
 // provision promises for same-process join (Promises can't be serialized).
 // Keyed by `${kind}:${sessionId}` so image and video pods don't collide.
-// Value is the rich shape from _runProvisionLoop; per-kind public wrappers
-// project this onto their narrower contract (image: {podUrl}; video:
-// {podId, podUrl}).
-const inFlightProvisions = new Map<
-  string,
-  Promise<{ podId: string; podUrl: string; podType: PodType; dc: string | null }>
->();
+// Each entry pairs the rich-shape promise with an AbortController so
+// `abortSession` can cancel the provision mid-flight (otherwise a signout
+// during provisioning leaks the just-created pod — see Round 6 plan).
+type InFlightEntry = {
+  promise: Promise<{ podId: string; podUrl: string; podType: PodType; dc: string | null }>;
+  controller: AbortController;
+};
+const inFlightProvisions = new Map<string, InFlightEntry>();
 
 const SESSION_PREFIX = 'session:';
 const POD_PREFIX = 'kiki-session-';
@@ -527,6 +528,21 @@ export async function abortSession(
   reason: 'manual' | 'error' = 'error',
 ): Promise<void> {
   try {
+    // Cancel in-flight provisions FIRST (image and video may both be
+    // running concurrently). The signal causes _runProvisionLoop to
+    // terminate any just-created pod and reject; awaiting settlement
+    // ensures no provision can stamp+leak a pod after we return.
+    const settled: Promise<unknown>[] = [];
+    for (const kind of ['image', 'video'] as const) {
+      const entry = inFlightProvisions.get(`${kind}:${sessionId}`);
+      if (entry) {
+        log.info({ sessionId, kind, reason }, 'Aborting in-flight provision');
+        entry.controller.abort('session aborted');
+        settled.push(entry.promise.catch(() => {}));
+      }
+    }
+    if (settled.length > 0) await Promise.all(settled);
+
     const session = await readSession(sessionId);
     if (session?.podId) {
       const lifetimeMs = session.createdAt > 0 ? Date.now() - session.createdAt : 0;
@@ -577,7 +593,7 @@ export async function getOrProvisionPod(sessionId: string): Promise<{ podUrl: st
   const inFlight = inFlightProvisions.get(key);
   if (inFlight) {
     log.info({ sessionId }, 'Joining in-flight provision');
-    return inFlight.then((r) => ({ podUrl: r.podUrl }));
+    return inFlight.promise.then((r) => ({ podUrl: r.podUrl }));
   }
 
   // 3. If Redis has a non-ready session but we don't own the promise
@@ -606,13 +622,14 @@ export async function getOrProvisionPod(sessionId: string): Promise<{ podUrl: st
 
   let provisionedPodId: string | null = null;
 
+  const controller = new AbortController();
   const promise = (async () => {
     try {
       if (isSemaphoreFull()) await emitState(sessionId, 'queued');
       await acquireSemaphore();
       try {
         await emitState(sessionId, 'finding_gpu');
-        const result = await provision(sessionId);
+        const result = await provision(sessionId, controller.signal);
         provisionedPodId = result.podId;
         return { podId: result.podId, podUrl: result.podUrl, podType: result.podType, dc: null };
       } finally {
@@ -637,7 +654,7 @@ export async function getOrProvisionPod(sessionId: string): Promise<{ podUrl: st
     }
   })();
 
-  inFlightProvisions.set(key, promise);
+  inFlightProvisions.set(key, { promise, controller });
   return promise.then((r) => ({ podUrl: r.podUrl }));
 }
 
@@ -718,13 +735,14 @@ export async function replaceSession(sessionId: string): Promise<{ podUrl: strin
   const t0 = Date.now();
   let newPodId: string | null = null;
   const key = `image:${sessionId}`;
+  const controller = new AbortController();
   const replacementPromise = (async () => {
     try {
       if (isSemaphoreFull()) await emitState(sessionId, 'queued');
       await acquireSemaphore();
       try {
         await emitState(sessionId, 'finding_gpu');
-        const result = await provision(sessionId);
+        const result = await provision(sessionId, controller.signal);
         newPodId = result.podId;
         const replacementMs = Date.now() - t0;
         log.info({ sessionId, oldPodId, newPodId: result.podId, replacementMs, attempt }, 'Session replaced');
@@ -762,7 +780,7 @@ export async function replaceSession(sessionId: string): Promise<{ podUrl: strin
 
   // Register in inFlight so concurrent getOrProvisionPod calls join this
   // replacement instead of starting a duplicate.
-  inFlightProvisions.set(key, replacementPromise);
+  inFlightProvisions.set(key, { promise: replacementPromise, controller });
   return replacementPromise.then((r) => ({ podUrl: r.podUrl }));
 }
 
@@ -1126,12 +1144,13 @@ function handleRecoverableProvisionError(
  * for runtime + health, retry across DCs on stall/vanish) and the cross-
  * kind concerns (analytics, Sentry exception capture).
  */
-async function provision(sessionId: string): Promise<ProvisionResult> {
+async function provision(sessionId: string, signal?: AbortSignal): Promise<ProvisionResult> {
   return Sentry.startSpan(
     { name: 'pod.provision', op: 'pod.provision', attributes: { sessionId } },
     async () => {
       try {
         const result = await _runProvisionLoop('image', sessionId, {
+          signal,
           onProvisionPhase: async (phase, podId) => {
             await emitState(sessionId, phase);
             if (podId && phase === 'fetching_image') {
@@ -1182,14 +1201,15 @@ async function _runVideoProvision(
   preferredDc: string | undefined,
 ): Promise<{ podId: string; podUrl: string } | null> {
   const key = `video:${sessionId}`;
+  const controller = new AbortController();
   const promise = (async () => {
     try {
-      return await _runProvisionLoop('video', sessionId, { preferredDc });
+      return await _runProvisionLoop('video', sessionId, { preferredDc, signal: controller.signal });
     } finally {
       inFlightProvisions.delete(key);
     }
   })();
-  inFlightProvisions.set(key, promise);
+  inFlightProvisions.set(key, { promise, controller });
   try {
     const r = await promise;
     return { podId: r.podId, podUrl: r.podUrl };
@@ -1240,7 +1260,7 @@ export async function getOrProvisionVideoPod(
       '[provision/video] joining in-flight provision',
     );
     try {
-      const r = await inFlight;
+      const r = await inFlight.promise;
       return { podId: r.podId, podUrl: r.podUrl };
     } catch {
       return null;
@@ -1675,6 +1695,7 @@ async function _runProvisionLoop(
   sessionId: string,
   opts: {
     preferredDc?: string;
+    signal?: AbortSignal;
     onProvisionPhase?: (phase: State, podId: string | null) => Promise<void>;
   } = {},
 ): Promise<{ podId: string; podUrl: string; podType: PodType; dc: string | null }> {
@@ -1691,6 +1712,12 @@ async function _runProvisionLoop(
     const attemptStart = Date.now();
     let phaseStart = attemptStart;
     const phaseTimings: Record<string, number> = {};
+
+    // Checkpoint #1: bail before doing any work this iteration. Nothing to
+    // clean up — no pod created yet for this attempt.
+    if (opts.signal?.aborted) {
+      throw new ProvisionAbortedError(null, 'pre_create');
+    }
 
     // On reroll, return the UI to 'finding_gpu' before the next pod create.
     if (attempt > 0) {
@@ -1735,6 +1762,18 @@ async function _runProvisionLoop(
         data: { podId, dc, podType, kind, attempt, creatingPodMs: phaseTimings.creating_pod_ms },
       });
 
+      // Checkpoint #2: pod just created. If the caller aborted while we were
+      // in cfg.createPodForDc, terminate this pod before doing further work.
+      // The post-create catch handler below would also clean up since we
+      // throw, but inlining the terminate makes the intent unambiguous.
+      if (opts.signal?.aborted) {
+        log.info({ sessionId, kind, podId, dc }, 'Provision aborted post-create — terminating pod');
+        terminatePod(podId).catch((e) =>
+          log.warn({ podId, err: (e as Error).message }, 'Failed to terminate aborted pod'),
+        );
+        throw new ProvisionAbortedError(podId, 'post_create');
+      }
+
       try {
         // 3. Wait for container to boot. Dominated by image pull.
         await opts.onProvisionPhase?.('fetching_image', podId);
@@ -1758,6 +1797,20 @@ async function _runProvisionLoop(
 
         const totalMs = Date.now() - t0;
         const podUrl = `wss://${podId}-${cfg.port}.proxy.runpod.net/ws`;
+
+        // Checkpoint #3: pod is healthy but we haven't stamped it yet. If
+        // the caller aborted during waitForRuntime/waitForHealth, terminate
+        // here instead of stamping a row that abortSession just deleted.
+        if (opts.signal?.aborted) {
+          log.info(
+            { sessionId, kind, podId, dc, totalMs },
+            'Provision aborted post-health — terminating pod before stamp',
+          );
+          terminatePod(podId).catch((e) =>
+            log.warn({ podId, err: (e as Error).message }, 'Failed to terminate aborted pod'),
+          );
+          throw new ProvisionAbortedError(podId, 'post_health');
+        }
 
         // 5. Stamp the row with the kind-appropriate fields. Image:
         // {podId, podUrl, podType}; video: {videoPodId}.
