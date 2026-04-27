@@ -185,24 +185,43 @@ async def websocket_video(ws: WebSocket):
         # Encode MP4 via the bundled ffmpeg binary. Using a subprocess
         # rather than imageio.mimwrite() because we want explicit control
         # over codec / pixel format / faststart for smooth iOS playback.
-        encode_t0 = time.time()
-        mp4_bytes = await asyncio.to_thread(_encode_mp4, frames, config.LTXV_FPS)
-        encode_ms = int((time.time() - encode_t0) * 1000)
+        # Wrap encode + send in try/except so a failure here emits
+        # video_cancelled (visible to backend + iPad) instead of silently
+        # dying — the create_task future has nobody awaiting it.
+        try:
+            encode_t0 = time.time()
+            mp4_bytes = await asyncio.to_thread(_encode_mp4, frames, config.LTXV_FPS)
+            encode_ms = int((time.time() - encode_t0) * 1000)
 
-        videos_total += 1
-        logger.info(
-            "complete: req=%s frames=%d gen_ms=%d encode_ms=%d mp4_bytes=%d",
-            request_id, len(frames), gen_ms, encode_ms, len(mp4_bytes),
-        )
-        await ws.send_text(json.dumps({
-            "type": "video_complete",
-            "requestId": request_id,
-            "fps": config.LTXV_FPS,
-            "frames": len(frames),
-            "genMs": gen_ms,
-            "encodeMs": encode_ms,
-        }))
-        await ws.send_bytes(mp4_bytes)
+            videos_total += 1
+            logger.info(
+                "complete: req=%s frames=%d gen_ms=%d encode_ms=%d mp4_bytes=%d",
+                request_id, len(frames), gen_ms, encode_ms, len(mp4_bytes),
+            )
+            await ws.send_text(json.dumps({
+                "type": "video_complete",
+                "requestId": request_id,
+                "fps": config.LTXV_FPS,
+                "frames": len(frames),
+                "genMs": gen_ms,
+                "encodeMs": encode_ms,
+            }))
+            await ws.send_bytes(mp4_bytes)
+        except Exception as e:  # noqa: BLE001
+            videos_failed += 1
+            logger.error(
+                "encode/send failed: req=%s err=%s", request_id, e, exc_info=True,
+            )
+            try:
+                await ws.send_text(json.dumps({
+                    "type": "video_cancelled",
+                    "requestId": request_id,
+                    "atStep": current_step_count["step"],
+                    "error": f"encode_or_send_failed: {e}",
+                }))
+            except Exception:  # noqa: BLE001
+                # WS already broken; nothing else to do.
+                pass
 
     try:
         while True:
@@ -307,13 +326,13 @@ def _encode_mp4(frames: list[Image.Image], fps: int) -> bytes:
         "-f", "mp4",
         "pipe:1",
     ]
+    # NOTE: must use communicate(input=...) — sequential stdin-then-stdout
+    # deadlocks when ffmpeg's stdout fills the 64 KB pipe buffer (a 100-300 KB
+    # MP4 will). communicate() does the IO concurrently via threads.
+    raw_input = b"".join(f.tobytes() for f in frames)
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    assert proc.stdin is not None and proc.stdout is not None
     try:
-        for f in frames:
-            proc.stdin.write(f.tobytes())
-        proc.stdin.close()
-        out, err = proc.communicate(timeout=30)
+        out, err = proc.communicate(input=raw_input, timeout=30)
         if proc.returncode != 0:
             raise RuntimeError(f"ffmpeg failed: rc={proc.returncode} stderr={err.decode('utf-8', 'replace')[:500]}")
         return out
