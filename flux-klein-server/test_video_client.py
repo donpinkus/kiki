@@ -3,10 +3,10 @@
 Usage:
     python test_video_client.py --url ws://localhost:8766/ws --image still.jpg --prompt "a cat dancing"
 
-Asserts the wire protocol matches video_server.py: receives frame_meta-style
-status, then a sequence of (video_frame text + JPEG binary) pairs, then
-(video_complete text + MP4 binary). Saves the MP4 + last frame for
-visual inspection.
+Asserts the wire protocol matches video_server.py: an initial
+{type: "status", status: "ready"|"warmup"} JSON, then a sequence of
+(video_frame text + JPEG binary) pairs, then a (video_complete text +
+MP4 binary) pair. Saves the MP4 + last frame for visual inspection.
 """
 import argparse
 import asyncio

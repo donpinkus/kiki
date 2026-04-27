@@ -297,29 +297,38 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
               : 'video_unknown_data';
             socket.send(JSON.stringify({ type: wrapperType, data: base64, meta: wrap?.meta ?? {} }));
           } else if (typeof data === 'string') {
-            // Forward text frames and update counters. The pod sends the
-            // type before the binary, so we cache the type for the
-            // upcoming binary to consume.
+            // The pod sends the preamble type before the binary, so we cache
+            // the type and forward the *_data wrapped binary on arrival.
+            // Bare preambles (video_frame, video_complete) are NOT forwarded
+            // — the iPad has no handler for them, so forwarding is wasted
+            // bandwidth (~one extra WS message per decoded frame).
+            let parsed: Record<string, unknown> | null = null;
             try {
-              const parsed = JSON.parse(data) as Record<string, unknown>;
-              const t = parsed['type'];
-              if (t === 'video_frame' || t === 'video_complete') {
-                pendingVideoBinaryWrapper = { type: t as string, meta: parsed };
-              } else if (t === 'video_cancelled') {
-                if (parsed['error']) {
-                  videoFailed++;
-                } else {
-                  videoCancelled++;
-                }
-                inFlightVideoRequestId = null;
-                pendingVideoBinaryWrapper = null;
-              }
+              parsed = JSON.parse(data) as Record<string, unknown>;
+            } catch {
+              // Not JSON — pass through opaquely below.
+            }
+            if (parsed === null) {
+              socket.send(data);
+              return;
+            }
+            const t = parsed['type'];
+            if (t === 'video_frame' || t === 'video_complete') {
+              pendingVideoBinaryWrapper = { type: t as string, meta: parsed };
               if (t === 'video_complete') {
                 videoCompleted++;
                 inFlightVideoRequestId = null;
               }
-            } catch {
-              // Not JSON; ignore.
+              return; // bare preamble — wrapped *_data goes out on the binary path
+            }
+            if (t === 'video_cancelled') {
+              if (parsed['error']) {
+                videoFailed++;
+              } else {
+                videoCancelled++;
+              }
+              inFlightVideoRequestId = null;
+              pendingVideoBinaryWrapper = null;
             }
             socket.send(data);
           }

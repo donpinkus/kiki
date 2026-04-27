@@ -626,6 +626,13 @@ final class AppCoordinator {
             guard let self else { return }
             self.streamFrameCount += 1
             self.lastSuccessfulImage = image
+            // Resuming img2img clobbers any in-flight video state. Drop the
+            // looping MP4 from disk now — otherwise NSTemporaryDirectory
+            // accumulates one file per draw/idle cycle until stopStream.
+            if let prior = self.currentVideoMP4URL {
+                try? FileManager.default.removeItem(at: prior)
+                self.currentVideoMP4URL = nil
+            }
             self.resultState = .streaming(image: image, frameCount: self.streamFrameCount)
             if self.drawingLayout == .fullscreen {
                 self.showFloatingPanel = true

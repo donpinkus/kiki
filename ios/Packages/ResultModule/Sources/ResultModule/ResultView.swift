@@ -1,5 +1,6 @@
 import AVFoundation
 import AVKit
+import OSLog
 import SwiftUI
 
 /// Displays the generated image result with support for loading, error, and empty states.
@@ -588,11 +589,14 @@ private struct LoopingVideoView: UIViewRepresentable {
 }
 
 /// UIView host for AVPlayerLayer. Falls back to a static image if the
-/// player item fails.
-final class PlayerContainerView: UIView {
+/// player item fails — covers KVO `.failed` (decode/asset load fails before
+/// playback) plus `failedToPlayToEndTime` and `playbackStalled` (failures
+/// after the item enters `.readyToPlay`, which the status KVO alone misses).
+private final class PlayerContainerView: UIView {
     private var playerLayer: AVPlayerLayer?
     private let fallbackImageView = UIImageView()
     private var failureObserver: NSKeyValueObservation?
+    private var notificationObservers: [NSObjectProtocol] = []
 
     var fallbackImage: UIImage? {
         didSet { fallbackImageView.image = fallbackImage }
@@ -610,31 +614,71 @@ final class PlayerContainerView: UIView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) not used") }
 
+    deinit {
+        removeNotificationObservers()
+    }
+
     func attach(player: AVPlayer) {
         playerLayer?.removeFromSuperlayer()
+        removeNotificationObservers()
+
         let layer = AVPlayerLayer(player: player)
         layer.videoGravity = .resizeAspect
         layer.frame = bounds
         self.layer.addSublayer(layer)
         playerLayer = layer
 
-        // Watch for failure → show fallback.
-        failureObserver = player.currentItem?.observe(\.status, options: [.new]) { [weak self] item, _ in
+        guard let item = player.currentItem else { return }
+
+        // KVO: catches the `.failed` transition (asset load / initial decode).
+        failureObserver = item.observe(\.status, options: [.new]) { [weak self, weak layer] item, _ in
             guard let self else { return }
             DispatchQueue.main.async {
                 if item.status == .failed {
-                    self.fallbackImageView.isHidden = false
-                    layer.isHidden = true
+                    self.showFallback(layer: layer, reason: "status=failed err=\(item.error?.localizedDescription ?? "nil")")
                 } else {
                     self.fallbackImageView.isHidden = true
-                    layer.isHidden = false
+                    layer?.isHidden = false
                 }
             }
         }
+
+        // Notifications: catch failures that happen *after* `.readyToPlay`,
+        // which KVO on `.status` doesn't observe.
+        let center = NotificationCenter.default
+        notificationObservers.append(center.addObserver(
+            forName: .AVPlayerItemFailedToPlayToEndTime,
+            object: item,
+            queue: .main
+        ) { [weak self, weak layer] note in
+            let err = note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error
+            self?.showFallback(layer: layer, reason: "failedToPlayToEndTime err=\(err?.localizedDescription ?? "nil")")
+        })
+        notificationObservers.append(center.addObserver(
+            forName: AVPlayerItem.playbackStalledNotification,
+            object: item,
+            queue: .main
+        ) { [weak self, weak layer] _ in
+            self?.showFallback(layer: layer, reason: "playbackStalled")
+        })
     }
 
     override func layoutSubviews() {
         super.layoutSubviews()
         playerLayer?.frame = bounds
     }
+
+    private func showFallback(layer: AVPlayerLayer?, reason: String) {
+        videoLog.warning("LoopingVideoView falling back: \(reason)")
+        fallbackImageView.isHidden = false
+        layer?.isHidden = true
+    }
+
+    private func removeNotificationObservers() {
+        let center = NotificationCenter.default
+        for token in notificationObservers { center.removeObserver(token) }
+        notificationObservers.removeAll()
+    }
 }
+
+private let videoLog = Logger(subsystem: "com.kiki.result", category: "video")

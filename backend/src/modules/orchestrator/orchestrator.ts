@@ -793,7 +793,7 @@ async function runReaper(): Promise<void> {
       const videoPodId = data['videoPodId'] || null;
       const createdAt = Number(data['createdAt'] ?? 0);
       const lifetimeMs = createdAt > 0 ? now - createdAt : 0;
-      log.info({ sessionId, podId, videoPodId, idleMs, lifetimeMs, kind: 'image' }, '[reaper] terminating session=' + sessionId + ' kind=image');
+      log.info({ sessionId, podId, videoPodId, idleMs, lifetimeMs, kind: 'image' }, '[reaper] terminating idle session');
       trackPodTerminated({ userId: sessionId, reason: 'idle', lifetimeMs });
       notifyPodTerminated(podId, `idle ${Math.round(idleMs / 1000)}s`);
       // Emit through the broker so the iPad sees state='terminated' with
@@ -807,7 +807,7 @@ async function runReaper(): Promise<void> {
         .then(() => redis.del(key))
         .catch((err) => log.error({ sessionId, podId, err }, 'Reap failed'));
       if (videoPodId) {
-        log.info({ sessionId, videoPodId, kind: 'video' }, '[reaper] terminating session=' + sessionId + ' kind=video');
+        log.info({ sessionId, videoPodId, kind: 'video' }, '[reaper] terminating video pod alongside image');
         terminatePod(videoPodId).catch((err) =>
           log.error({ sessionId, videoPodId, err }, 'Reap video pod failed'),
         );

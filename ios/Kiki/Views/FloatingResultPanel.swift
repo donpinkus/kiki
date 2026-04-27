@@ -123,6 +123,16 @@ struct FloatingResultPanel: View {
                 Color(.systemGray6)
             }
 
+        case .videoStreaming(let latestFrame, _):
+            // Floating panel stays a still — no AVPlayerLayer here. The
+            // streamed frame already shows motion progress; falling back
+            // to the fallback if anything fails is handled by the right-pane
+            // ResultView.
+            pickableImage(latestFrame).padding(4)
+
+        case .videoLooping(_, let fallback):
+            pickableImage(fallback).padding(4)
+
         case .empty:
             Color(.systemGray6)
         }
