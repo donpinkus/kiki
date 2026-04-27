@@ -1887,13 +1887,21 @@ async function waitForRuntime(
 async function waitForHealth(
   podId: string,
   healthUrl: string,
-  timeoutMs = 10 * 60 * 1000,
+  timeoutMs = 4 * 60 * 1000,
 ): Promise<void> {
   const start = Date.now();
   const deadline = start + timeoutMs;
   let lastLogAt = 0;
   let lastPodProbeAt = 0;
   let lastDc: string | null = null;
+  // Track the last-seen runtime uptime so we can detect crashlooping pods.
+  // If the container has been continuously alive since `lastSeenAt`, current
+  // uptime should be ≥ `lastSeenUptime + (now - lastSeenAt)`. A materially
+  // smaller value means the container restarted between probes — which the
+  // simpler `uptime < prevUptime` check misses for fast crashloops where the
+  // restart happens to land between probe samples.
+  let lastSeenUptime: number | null = null;
+  let lastSeenAt: number | null = null;
   while (Date.now() < deadline) {
     try {
       const res = await fetch(healthUrl, { signal: AbortSignal.timeout(10_000) });
@@ -1905,9 +1913,8 @@ async function waitForHealth(
       // Ignore — health check hasn't come up yet
     }
     const now = Date.now();
-    // Probe RunPod every 30s to detect a vanished pod (preempted, host
-    // failure). Fail fast instead of waiting out the full timeoutMs polling
-    // a dead URL.
+    // Probe RunPod every 30s to detect a vanished or crashlooping pod. Fail
+    // fast instead of waiting out the full timeoutMs polling a dead URL.
     if (now - lastPodProbeAt > 30_000) {
       const pod = await getPod(podId);
       if (!pod) {
@@ -1916,6 +1923,29 @@ async function waitForHealth(
         throw new PodVanishedError(podId, lastDc, 'warming_model', elapsed);
       }
       if (pod.machine?.dataCenterId) lastDc = pod.machine.dataCenterId;
+      const uptime = pod.runtime?.uptimeInSeconds ?? null;
+      if (uptime !== null && lastSeenUptime !== null && lastSeenAt !== null) {
+        const expectedUptime = lastSeenUptime + (now - lastSeenAt) / 1000;
+        if (uptime < expectedUptime - 5) {
+          const elapsed = Math.round((now - start) / 1000);
+          log.warn(
+            {
+              podId,
+              lastSeenUptime,
+              currentUptime: uptime,
+              expectedUptime: Math.round(expectedUptime),
+              elapsedSec: elapsed,
+              dc: lastDc,
+            },
+            'Pod runtime uptime did not advance as expected — likely crashlooping',
+          );
+          throw new PodBootStallError(podId, lastDc, elapsed);
+        }
+      }
+      if (uptime !== null) {
+        lastSeenUptime = uptime;
+        lastSeenAt = now;
+      }
       lastPodProbeAt = now;
     }
     if (now - lastLogAt > 30_000) {
@@ -1925,7 +1955,15 @@ async function waitForHealth(
     }
     await sleep(10_000);
   }
-  throw new Error(`Server at ${healthUrl} never became healthy within ${timeoutMs}ms`);
+  // Treat health-check timeout as a stall — same remediation as a runtime
+  // stall (reroll DC). Throwing a generic Error here would fall through
+  // `handleRecoverableProvisionError` to `decision: 'abort'` with no reroll.
+  const elapsed = Math.round((Date.now() - start) / 1000);
+  log.warn(
+    { podId, healthUrl, elapsedSec: elapsed, dc: lastDc },
+    'Health check never reached 200 within timeout — declaring pod stalled',
+  );
+  throw new PodBootStallError(podId, lastDc, elapsed);
 }
 
 function sleep(ms: number): Promise<void> {
