@@ -1367,6 +1367,42 @@ export async function clearVideoPod(sessionId: string): Promise<void> {
 }
 
 /**
+ * Get-or-provision the video pod for a session. Mirrors getOrProvisionPod
+ * for image pods: on iPad WS reconnect, the video pod outlives the WS and
+ * is reused, avoiding the ~3-min LTXV cold start on every drawing change.
+ *
+ * Returns null on any provision failure (best-effort, same contract as
+ * provisionVideoPod).
+ *
+ * Stale-id handling: if the session row references a videoPodId that's
+ * gone from RunPod (terminated externally, reconciled, etc.), we clear
+ * the stale id and provision fresh.
+ */
+export async function getOrProvisionVideoPod(
+  sessionId: string,
+): Promise<{ podId: string; podUrl: string } | null> {
+  const existing = await readSession(sessionId);
+  if (existing?.videoPodId) {
+    const pod = await getPod(existing.videoPodId).catch(() => null);
+    const ready = pod && pod.desiredStatus === 'RUNNING' && pod.runtime !== null;
+    if (ready) {
+      const podUrl = `wss://${existing.videoPodId}-8766.proxy.runpod.net/ws`;
+      log.info(
+        { sessionId, videoPodId: existing.videoPodId, pod_kind: 'video', event: '[provision/video] reused' },
+        '[provision/video] reusing existing pod (no cold start)',
+      );
+      return { podId: existing.videoPodId, podUrl };
+    }
+    log.info(
+      { sessionId, videoPodId: existing.videoPodId, status: pod?.desiredStatus ?? 'gone', pod_kind: 'video', event: '[provision/video] stale id' },
+      '[provision/video] stashed videoPodId is stale; reprovisioning',
+    );
+    await clearVideoPod(sessionId).catch(() => {});
+  }
+  return provisionVideoPod(sessionId);
+}
+
+/**
  * A candidate placement: which DC to pin the pod to, and optionally which
  * pre-populated network volume to attach. `null` for both means "let RunPod
  * pick any DC, no volume" — only hit when NETWORK_VOLUMES_BY_DC is empty

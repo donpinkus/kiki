@@ -12,7 +12,7 @@ import {
   sessionClosed,
   subscribe,
   emitState,
-  provisionVideoPod,
+  getOrProvisionVideoPod,
   terminateVideoPod,
   setVideoPod,
   clearVideoPod,
@@ -142,7 +142,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       let clientDisconnected = false;
       const sessionStartMs = Date.now();
 
-      // ─── Video pod state (best-effort, see provisionVideoPod) ─────────
+      // ─── Video pod state (best-effort, see getOrProvisionVideoPod) ────
       let videoRelay: StreamRelay | null = null;
       let videoPodId: string | null = null;
       // Once the upstream video relay closes uninitiated we don't try
@@ -222,6 +222,16 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
                   { userId, reason: 'prompt_not_cached', event: 'video_skipped' },
                   'video_skipped',
                 );
+              } else if (inFlightVideoRequestId) {
+                // A video is mid-generation. Don't fire another trigger —
+                // the pod would cancel the in-flight one to start a new
+                // request, starving us of any completion. Wait for the
+                // current video to finish (or be cancelled by the user
+                // resuming drawing) before triggering again.
+                request.log.info(
+                  { userId, reason: 'already_in_flight', inFlightReq: inFlightVideoRequestId, event: 'video_skipped' },
+                  'video_skipped',
+                );
               } else {
                 const reqId = nextImageBinaryRequestId ?? `vid-${Date.now()}`;
                 videoRelay.sendConfig({
@@ -275,7 +285,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       };
 
       // ─── Video relay wiring ────────────────────────────────────────────
-      // Best-effort: provisionVideoPod returns null on any failure, in which
+      // Best-effort: getOrProvisionVideoPod returns null on any failure, in which
       // case videoRelay stays null and queueEmpty triggers log a single
       // 'video_skipped: relay_disconnected' line. No iPad-visible error.
       const wireVideoRelay = async (podUrl: string): Promise<void> => {
@@ -471,11 +481,13 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         if (config.VIDEO_POD_ENABLED) {
           void (async () => {
           try {
-            const result = await provisionVideoPod(userId);
+            const result = await getOrProvisionVideoPod(userId);
             if (!result || clientDisconnected || socket.readyState !== socket.OPEN) {
               if (result) {
-                // Client left during provision — clean up immediately.
-                terminateVideoPod(result.podId).catch(() => {});
+                // Client left during provision/reuse. We don't terminate
+                // here — the pod (whether fresh or reused) is on the
+                // session row and will be picked up by the next reconnect
+                // or terminated by the reaper alongside the image pod.
               }
               return;
             }
@@ -488,6 +500,11 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
                 'video relay wired',
               );
             } catch (err) {
+              // Relay connect failed for an otherwise-live pod. Terminate
+              // + clear so the next reconnect provisions fresh (avoids
+              // looping on a broken pod). The reaper would catch this
+              // anyway, but eagerly clearing keeps the next session
+              // healthy without a 30-min wait.
               request.log.warn(
                 { userId, videoPodId, err: (err as Error).message, event: '[provision/video] relay connect failed' },
                 'video relay connect failed; terminating pod',
@@ -500,7 +517,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
           } catch (err) {
             request.log.warn(
               { userId, err: (err as Error).message, event: '[provision/video] unexpected throw' },
-              'provisionVideoPod unexpectedly threw (returns null on failure normally)',
+              'getOrProvisionVideoPod unexpectedly threw (returns null on failure normally)',
             );
             videoSessionEnabled = false;
           }
@@ -609,16 +626,13 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         sessionClosed(userId);
         unsubscribeState();
         relay?.close();
+        // Close the video relay WS so the pod sees the disconnect and stops
+        // any in-flight generation, but DO NOT terminate the pod itself.
+        // The pod is Redis-tracked on the session row; the next iPad
+        // reconnect will reuse it via getOrProvisionVideoPod (no 3-min
+        // cold start). The reaper terminates the pod when the image
+        // session itself is reaped (orchestrator.ts: runReaper).
         videoRelay?.close();
-        // Terminate the video pod immediately on stream close — it has no
-        // useful work to do once the iPad is gone, and the reaper would
-        // only catch it on the next minute boundary.
-        if (videoPodId) {
-          const podIdAtClose = videoPodId;
-          videoPodId = null;
-          terminateVideoPod(podIdAtClose).catch(() => {});
-          clearVideoPod(userId).catch(() => {});
-        }
       });
 
       socket.on('error', (err: Error) => {
@@ -626,12 +640,6 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         unsubscribeState();
         relay?.close();
         videoRelay?.close();
-        if (videoPodId) {
-          const podIdAtClose = videoPodId;
-          videoPodId = null;
-          terminateVideoPod(podIdAtClose).catch(() => {});
-          clearVideoPod(userId).catch(() => {});
-        }
       });
     })();
   });
