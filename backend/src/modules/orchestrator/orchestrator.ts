@@ -1282,7 +1282,7 @@ export async function provisionVideoPod(
       cloudType: 'SECURE',
       dockerArgs: BOOT_DOCKER_ARGS_VIDEO,
       env: BOOT_ENV,
-      containerRegistryAuthId: config.RUNPOD_REGISTRY_AUTH_ID || undefined,
+      containerRegistryAuthId: config.RUNPOD_REGISTRY_AUTH_ID,
       ...dcField,
       ...volField,
     });
@@ -1571,7 +1571,7 @@ async function createPodWithFallback(
         bidPerGpu: bid,
         dockerArgs: BOOT_DOCKER_ARGS,
         env: BOOT_ENV,
-        containerRegistryAuthId: config.RUNPOD_REGISTRY_AUTH_ID || undefined,
+        containerRegistryAuthId: config.RUNPOD_REGISTRY_AUTH_ID,
         ...dcField,
         ...volField,
       });
@@ -1623,7 +1623,7 @@ async function createPodWithFallback(
       cloudType: 'SECURE',
       dockerArgs: BOOT_DOCKER_ARGS,
       env: BOOT_ENV,
-      containerRegistryAuthId: config.RUNPOD_REGISTRY_AUTH_ID || undefined,
+      containerRegistryAuthId: config.RUNPOD_REGISTRY_AUTH_ID,
       ...dcField,
       ...volField,
     });
