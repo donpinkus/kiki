@@ -442,53 +442,25 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
           await recordProvision(userId);
         }
 
-        const getOrProvisionStart = Date.now();
-        const { podUrl } = await getOrProvisionPod(userId);
-        getOrProvisionMs = Date.now() - getOrProvisionStart;
-
-        if (socket.readyState !== socket.OPEN) {
-          request.log.info({ userId }, 'Client disconnected during provisioning');
-          return;
-        }
-
-        // Pod is serving; transition to 'connecting' while we wire up the relay.
-        await emitState(userId, 'connecting');
-        // Retry initial relay connect once. Occasionally RunPod's proxy
-        // fails to upgrade the first WS to a freshly-ready pod: /health
-        // returns ok but the /ws upgrade on the same pod 10 s later hangs
-        // (observed 2026-04-25 02:30 UTC — pod was healthy, connect
-        // timed out). A brief second attempt usually succeeds; if it
-        // doesn't, the outer catch aborts the session cleanly.
-        try {
-          await wireRelay(podUrl);
-        } catch (firstErr) {
-          if (clientDisconnected || socket.readyState !== socket.OPEN) throw firstErr;
-          request.log.warn(
-            { userId, podUrl, err: (firstErr as Error).message },
-            'Initial relay connect failed, retrying in 2s',
-          );
-          await new Promise((r) => setTimeout(r, 2000));
-          await wireRelay(podUrl);
-        }
-        request.log.info({ userId }, 'Upstream connected, relaying');
-
-        // Kick off video pod provisioning in the background, gated by
-        // VIDEO_POD_ENABLED so we can deploy backend-side changes ahead
-        // of the pod-side code reaching the network volume. When disabled,
-        // queueEmpty triggers log 'video_skipped: relay_disconnected' and
-        // the session continues image-only — same code path as a runtime
-        // video provision failure.
+        // Kick off video pod provisioning IN PARALLEL with image. The image
+        // pod gating user input takes ~96s cold; running video alongside
+        // (~157s LTXV warmup) saves ~96s of time-to-first-video vs starting
+        // it after image is wired. Video is best-effort: any failure here
+        // logs and falls back to image-only without affecting the image
+        // path. Race note: getOrProvisionVideoPod reads the session row
+        // for an existing videoPodId; for fresh sessions the row gets
+        // written by getOrProvisionPod kicked off below, but for new
+        // sessions there's no prior pod to reuse anyway, so the race is
+        // benign.
         if (config.VIDEO_POD_ENABLED) {
           void (async () => {
           try {
             const result = await getOrProvisionVideoPod(userId);
             if (!result || clientDisconnected || socket.readyState !== socket.OPEN) {
-              if (result) {
-                // Client left during provision/reuse. We don't terminate
-                // here — the pod (whether fresh or reused) is on the
-                // session row and will be picked up by the next reconnect
-                // or terminated by the reaper alongside the image pod.
-              }
+              // Client left during provision/reuse. We don't terminate
+              // here — the pod (whether fresh or reused) is on the
+              // session row and will be picked up by the next reconnect
+              // or terminated by the reaper alongside the image pod.
               return;
             }
             videoPodId = result.podId;
@@ -529,6 +501,36 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
           );
           videoSessionEnabled = false;
         }
+
+        const getOrProvisionStart = Date.now();
+        const { podUrl } = await getOrProvisionPod(userId);
+        getOrProvisionMs = Date.now() - getOrProvisionStart;
+
+        if (socket.readyState !== socket.OPEN) {
+          request.log.info({ userId }, 'Client disconnected during provisioning');
+          return;
+        }
+
+        // Pod is serving; transition to 'connecting' while we wire up the relay.
+        await emitState(userId, 'connecting');
+        // Retry initial relay connect once. Occasionally RunPod's proxy
+        // fails to upgrade the first WS to a freshly-ready pod: /health
+        // returns ok but the /ws upgrade on the same pod 10 s later hangs
+        // (observed 2026-04-25 02:30 UTC — pod was healthy, connect
+        // timed out). A brief second attempt usually succeeds; if it
+        // doesn't, the outer catch aborts the session cleanly.
+        try {
+          await wireRelay(podUrl);
+        } catch (firstErr) {
+          if (clientDisconnected || socket.readyState !== socket.OPEN) throw firstErr;
+          request.log.warn(
+            { userId, podUrl, err: (firstErr as Error).message },
+            'Initial relay connect failed, retrying in 2s',
+          );
+          await new Promise((r) => setTimeout(r, 2000));
+          await wireRelay(podUrl);
+        }
+        request.log.info({ userId }, 'Upstream connected, relaying');
 
         socket.on('message', (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
           if (!relay) return;
