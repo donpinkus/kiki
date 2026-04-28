@@ -53,10 +53,18 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 video_pipeline = Ltx23VideoPipeline()
+# Captures any load() failure so /health can surface it to whoever's polling
+# (orchestrator, manual curl). Without this, a load() exception kills the
+# FastAPI app before /health responds, the pod crashloops, and the only
+# observable signal is "container restarted" — actual Python error never
+# escapes the pod's stdout. We trade off "fail loud at boot" for "fail
+# observably via /health" because RunPod doesn't expose pod stdout to us.
+_load_error_traceback: str | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _load_error_traceback
     logger.info(
         "Starting %s video server: model=%s/%s pipeline=DistilledPipeline "
         "quantization=%s resolution=%dx%d num_frames=%d fps=%d",
@@ -69,7 +77,14 @@ async def lifespan(app: FastAPI):
         config.LTX_NUM_FRAMES,
         config.LTX_FPS,
     )
-    video_pipeline.load()
+    try:
+        video_pipeline.load()
+    except Exception:
+        import traceback
+        _load_error_traceback = traceback.format_exc()
+        logger.exception("LTX-2.3 pipeline load failed — exposing traceback via /health")
+        # Don't re-raise — keep the FastAPI app alive so /health can return
+        # the traceback. The pipeline is unusable but observable.
     yield
     logger.info("Shutting down.")
 
@@ -79,6 +94,15 @@ app = FastAPI(lifespan=lifespan)
 
 @app.get("/health")
 async def health():
+    if _load_error_traceback is not None:
+        # Status "error" surfaces the failure to anyone polling /health.
+        # The orchestrator's waitForHealth watches for status=="ok" and
+        # otherwise keeps polling — but we can curl this URL directly to
+        # read the traceback without depending on the orchestrator's loop.
+        return {
+            "status": "error",
+            "load_error": _load_error_traceback,
+        }
     info = video_pipeline.get_info()
     return {"status": "ok" if video_pipeline.ready else "loading", **info}
 
