@@ -214,11 +214,27 @@ const BASE_IMAGE = 'runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404';
 // sync-all-dcs deploy. Remove PUBLIC_KEY from Railway env (not the code) to
 // re-disable SSH on all subsequently-spawned pods. Existing pods retain
 // whichever path was active when they booted; terminate them to refresh.
+//
+// `ssh-keygen -A` generates any missing /etc/ssh/ssh_host_*_key files
+// (rsa/ecdsa/ed25519). Without those, sshd silently exits. We also try
+// `service ssh start` first (mirrors RunPod's own start.sh), with a fallback
+// to `/usr/sbin/sshd` for images that don't ship sysv init scripts. All
+// output captured to /tmp/ssh-bootstrap.log so we can post-mortem inspect
+// without needing SSH itself to debug why SSH didn't start.
 const SSH_BOOTSTRAP =
   'if [ -n "$PUBLIC_KEY" ]; then ' +
-  'mkdir -p /root/.ssh && echo "$PUBLIC_KEY" > /root/.ssh/authorized_keys && ' +
+  '{ ' +
+  'echo "ssh bootstrap start at $(date -u +%FT%TZ)"; ' +
+  'mkdir -p /root/.ssh && ' +
+  'echo "$PUBLIC_KEY" > /root/.ssh/authorized_keys && ' +
   'chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys && ' +
-  '/usr/sbin/sshd; ' +
+  'echo "wrote authorized_keys"; ' +
+  'ssh-keygen -A && echo "host keys generated"; ' +
+  'if service ssh start; then echo "service ssh start ok"; ' +
+  'else echo "service ssh start failed; trying /usr/sbin/sshd"; /usr/sbin/sshd && echo "/usr/sbin/sshd ok"; ' +
+  'fi; ' +
+  'echo "ssh bootstrap done at $(date -u +%FT%TZ)"; ' +
+  '} > /tmp/ssh-bootstrap.log 2>&1 || true; ' +
   'fi';
 
 // `bash -lc` sources /etc/profile.d/* for CUDA paths; activate the volume
