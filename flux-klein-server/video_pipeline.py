@@ -17,12 +17,14 @@ revenue. Verify license terms before any commercial deployment.
 """
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import tempfile
 import threading
 import time
-from typing import Callable
+from collections import defaultdict
+from typing import Any, Callable
 
 import torch
 from PIL import Image
@@ -84,11 +86,39 @@ class Ltx23VideoPipeline:
         # drift detection and substage observability work identically for
         # both pod kinds.
         self._phase_timings: dict[str, int] = {}
+        # Per-inference phase timings (CUDA-synced ms). Reset at the start of
+        # _run_inference; each phase wrapper appends. Logged at end of run so
+        # we can attribute the 15s steady-state latency to specific stages
+        # before optimizing blind. Lists because some phases (image_conditioner,
+        # transformer stage) are called twice per inference.
+        self._inference_timings: dict[str, list[int]] = defaultdict(list)
         self._app_version = _load_app_version()
 
     @property
     def ready(self) -> bool:
         return self._ready
+
+    def _wrap_phase(self, name: str, fn: Callable[..., Any]) -> Callable[..., Any]:
+        """Wrap a pipeline-phase callable with CUDA-synced timing.
+
+        ``torch.cuda.synchronize()`` before AND after the call is required
+        because PyTorch dispatches kernels asynchronously — without sync, the
+        timer captures kernel-launch time rather than completion time, and
+        prior phases' GPU work bleeds into the next phase's measured time.
+        """
+
+        @functools.wraps(fn)
+        def wrapper(*args: object, **kwargs: object) -> object:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            result = fn(*args, **kwargs)
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            self._inference_timings[name].append(int((time.perf_counter() - t0) * 1000))
+            return result
+
+        return wrapper
 
     def load(self) -> None:
         logger.info(
@@ -168,6 +198,20 @@ class Ltx23VideoPipeline:
         # `(decoded_video, decoded_audio)`; a None second element is fine —
         # our wrapper discards `_audio`.
         self.pipe.audio_decoder = lambda *_args, **_kwargs: None  # type: ignore[assignment]
+
+        # Wrap each pipeline phase with a CUDA-synced timer so we can attribute
+        # the 15s steady-state latency to specific stages. Each phase logs into
+        # self._inference_timings; the final entry per inference is logged at
+        # the end of _run_inference. List per phase because image_conditioner
+        # and the diffusion stage are called twice per inference (stage 1 + 2).
+        self.pipe.prompt_encoder = self._wrap_phase("prompt_encoder", self.pipe.prompt_encoder)
+        self.pipe.image_conditioner = self._wrap_phase(
+            "image_conditioner", self.pipe.image_conditioner
+        )
+        self.pipe.stage = self._wrap_phase("stage", self.pipe.stage)
+        self.pipe.upsampler = self._wrap_phase("upsampler", self.pipe.upsampler)
+        self.pipe.video_decoder = self._wrap_phase("video_decoder_call", self.pipe.video_decoder)
+
         self._tiling_config = TilingConfig.default()
         self._phase_timings["pipeline_init_ms"] = int((time.time() - t_phase) * 1000)
         logger.info("LTX-2.3 pipeline loaded in %.1fs", time.time() - t_phase)
@@ -288,8 +332,12 @@ class Ltx23VideoPipeline:
         ]
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
+        self._inference_timings.clear()
 
         frames: list[Image.Image] = []
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        t_pipe = time.perf_counter()
         with torch.inference_mode():
             decoded_video, _audio = self.pipe(
                 prompt=prompt,
@@ -308,6 +356,14 @@ class Ltx23VideoPipeline:
             # the inference_mode context. Each chunk is (F, H, W, 3) uint8
             # RGB (per ltx_pipelines.utils.media_io.encode_video which feeds
             # the same tensor straight into PyAV with format="rgb24").
+            #
+            # Time the iteration separately from the pipe call: video_decoder
+            # __call__ returns the iterator quickly; the actual VAE decode
+            # work happens here on each `for chunk in decoded_video`.
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            t_decode = time.perf_counter()
+            t_pil = 0.0
             for chunk in decoded_video:
                 chunk_cpu = chunk.to("cpu")
                 if chunk_cpu.dtype != torch.uint8:
@@ -317,8 +373,19 @@ class Ltx23VideoPipeline:
                     # the output dtype.
                     chunk_cpu = (chunk_cpu.clamp(0, 1) * 255).to(torch.uint8)
                 arr = chunk_cpu.numpy()
+                t_pil_start = time.perf_counter()
                 for frame_arr in arr:
                     frames.append(Image.fromarray(frame_arr, mode="RGB"))
+                t_pil += time.perf_counter() - t_pil_start
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            self._inference_timings["video_decoder_iter"].append(
+                int((time.perf_counter() - t_decode) * 1000)
+            )
+            self._inference_timings["pil_conversion"].append(int(t_pil * 1000))
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        self._inference_timings["pipe_total"].append(int((time.perf_counter() - t_pipe) * 1000))
 
         if torch.cuda.is_available():
             logger.info(
@@ -326,6 +393,16 @@ class Ltx23VideoPipeline:
                 torch.cuda.max_memory_allocated() / (1024**3),
                 torch.cuda.max_memory_reserved() / (1024**3),
             )
+
+        # Phase breakdown — single line, easy to scan in pod logs. Lists for
+        # phases called twice per inference (image_conditioner stage 1+2,
+        # transformer stage 1+2). Sum of phase ms should approximate
+        # pipe_total minus per-phase overhead.
+        timings_summary = " ".join(
+            f"{name}={vs[0] if len(vs) == 1 else vs}"
+            for name, vs in sorted(self._inference_timings.items())
+        )
+        logger.info("LTX phase timings ms: %s", timings_summary)
 
         # Diagnostic: dump the first decoded frame to disk so that if the iPad
         # video looks wrong, we can SSH in and check whether the bug is in
