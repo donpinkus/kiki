@@ -401,6 +401,10 @@ export interface StateEvent {
   stateEnteredAt: number;
   replacementCount: number;
   failureCategory: FailureCategory | null;
+  /** Real error message from the failure source. Populated only on
+   * `state === 'failed'`. Client renders it directly — no client-side
+   * category-to-string mapping that fabricates a cause. */
+  message?: string;
 }
 
 type StateHandler = (event: StateEvent) => void;
@@ -451,6 +455,7 @@ export async function emitState(
   sessionId: string,
   state: State,
   failureCategory: FailureCategory | null = null,
+  message?: string,
 ): Promise<void> {
   const now = Date.now();
 
@@ -473,6 +478,7 @@ export async function emitState(
     stateEnteredAt: now,
     replacementCount,
     failureCategory,
+    ...(message !== undefined ? { message } : {}),
   };
 
   // Fan out to in-process subscribers (iOS WebSocket handlers in stream.ts).
@@ -1165,8 +1171,10 @@ async function provision(sessionId: string, signal?: AbortSignal): Promise<Provi
       } catch (err) {
         // Helper has already done analytics + Sentry capture. Layer on the
         // image-only terminal-state emit so iPad subscribers see 'failed'.
+        // Bubble the real error message up to the client — they get to see
+        // exactly what went wrong instead of a category-mapped string.
         const category = classifyProvisionError(err as Error);
-        await emitState(sessionId, 'failed', category);
+        await emitState(sessionId, 'failed', category, (err as Error).message);
         throw err;
       }
     },

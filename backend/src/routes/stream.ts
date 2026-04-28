@@ -667,9 +667,13 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         // accounting is released transitively.
         await abortSession(userId, 'error');
         if (socket.readyState === socket.OPEN) {
-          const errorMsg = `Provisioning failed: ${errMsg}`;
+          // Send the raw error verbatim — no fabricated "Provisioning failed:"
+          // prefix. provision()'s catch already emitted state=failed with the
+          // same message; this type=error envelope is the fallback for cases
+          // where no state was emitted (e.g., a relay-wire failure after
+          // getOrProvisionPod succeeded).
           request.log.info({ userId }, 'Sending provisioning error to client and closing socket');
-          socket.send(JSON.stringify({ type: 'error', message: errorMsg }));
+          socket.send(JSON.stringify({ type: 'error', message: errMsg }));
           socket.close(1011, 'Provisioning failed');
         } else {
           request.log.warn({ userId, readyState: socket.readyState }, 'Cannot send provisioning error — socket not open');

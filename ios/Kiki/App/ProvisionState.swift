@@ -47,29 +47,10 @@ public func displayText(for state: ProvisionState, replacementCount: Int) -> Str
     }
 }
 
-/// Returns a more specific user-facing message for a failure, refined by
-/// category. Falls back to the generic "Something went wrong" if the category
-/// is unknown or nil.
-public func displayText(for failureCategory: FailureCategory?) -> String {
-    guard let category = failureCategory else { return "Something went wrong" }
-    switch category {
-    case .spotCapacity:
-        return "GPU capacity is temporarily exhausted — try again shortly"
-    case .podCreateFailed:
-        return "Couldn't create your pod — try again shortly"
-    case .transientRunpod:
-        return "Our GPU provider is having a hiccup — try again shortly"
-    case .podBootStall:
-        return "Pod took too long to start — try again"
-    case .warmModelTimeout:
-        return "AI model took too long to start — try again"
-    case .podVanished:
-        return "Pod was reclaimed during setup — try again"
-    case .monthlyCap:
-        return "Monthly usage cap reached"
-    case .idleTimeout:
-        return "Session paused after idle. Tap or draw to resume."
-    case .unknown:
-        return "Something went wrong"
-    }
-}
+// Note: there used to be a `displayText(for: FailureCategory?)` here that
+// mapped failure categories to client-side strings. It was deleted because
+// it routinely lied about the cause (e.g., showed "GPU capacity exhausted"
+// for `transient_runpod` errors that had nothing to do with capacity).
+// `failureCategory` is now used only for analytics + retry decisions; the
+// user-facing message is the real error string sent by the backend on the
+// state=failed event.

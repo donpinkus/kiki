@@ -457,7 +457,8 @@ final class StreamSession {
                         self.handleState(
                             state,
                             replacementCount: status.replacementCount ?? 0,
-                            failureCategory: status.failureCategory.flatMap { FailureCategory(rawValue: $0) }
+                            failureCategory: status.failureCategory.flatMap { FailureCategory(rawValue: $0) },
+                            message: status.message
                         )
                     } else if status.type == "error" {
                         // Out-of-band error (auth, entitlement, rate-limit,
@@ -475,13 +476,16 @@ final class StreamSession {
         }
     }
 
-    /// Map a server state event to UI readiness. Any non-terminal state
-    /// produces `.warming` with display text derived locally; `ready` and
-    /// `failed` are terminal transitions.
+    /// Map a server state event to UI readiness. Non-terminal states use
+    /// state-code mappings (the codes ARE the meaning — "Connecting...",
+    /// "Finding GPU..." are not invented). For `.failed`, use the real
+    /// error message bubbled up from the source — no client-side
+    /// category-to-string translation that fabricates a cause.
     private func handleState(
         _ state: ProvisionState,
         replacementCount: Int,
-        failureCategory: FailureCategory?
+        failureCategory: FailureCategory?,
+        message: String?
     ) {
         switch state {
         case .queued, .findingGpu, .creatingPod, .fetchingImage, .warmingModel, .connecting:
@@ -492,7 +496,7 @@ final class StreamSession {
             self.lastSentConfig = nil
         case .failed:
             self.reconnectAttempts = 0
-            self.setReadiness(.failed(message: displayText(for: failureCategory)))
+            self.setReadiness(.failed(message: message ?? "Something went wrong"))
         case .terminated:
             // Idle reaper sends terminated + idle_timeout. Stop the session
             // cleanly so attemptReconnect doesn't fight the deliberate close;

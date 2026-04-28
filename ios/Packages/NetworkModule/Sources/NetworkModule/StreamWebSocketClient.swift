@@ -24,7 +24,10 @@ public actor StreamWebSocketClient {
         public let stateEnteredAt: Int64?    // ms epoch, type=="state"
         public let replacementCount: Int?    // type=="state"
         public let failureCategory: String?  // type=="state" && state=="failed"
-        public let message: String?          // present for type=="error"
+        // Real error message from the source. Populated for type=="error"
+        // and for type=="state" when state=="failed". Client renders verbatim
+        // — no category-to-string mapping that fabricates a cause.
+        public let message: String?
     }
 
     /// A generated image frame from the pod. `requestId` is set when the
