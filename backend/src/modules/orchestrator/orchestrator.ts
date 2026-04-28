@@ -237,15 +237,34 @@ const SSH_BOOTSTRAP =
   '} > /tmp/ssh-bootstrap.log 2>&1 || true; ' +
   'fi';
 
-// `bash -lc` sources /etc/profile.d/* for CUDA paths; activate the volume
-// venv (inherits base-image torch via --system-site-packages); exec Python
-// so SIGTERM reaches uvicorn directly.
+// `bash -lc` sources /etc/profile.d/* for CUDA paths; activate the volume venv
+// (inherits base-image torch via --system-site-packages).
+//
+// Server-launch path is conditional on PUBLIC_KEY:
+//   - prod (PUBLIC_KEY unset): `exec python3` — python becomes PID 1, SIGTERM
+//     reaches uvicorn directly for clean orchestrator-initiated termination.
+//   - dev  (PUBLIC_KEY set):   respawn loop — bash stays as PID 1 and respawns
+//     the python child if it exits. Lets us `pkill -f python3` over SSH to
+//     pick up scp'd code changes without restarting the container (which
+//     trips the orchestrator's crashloop reaper). Container termination still
+//     works because docker stop → SIGTERM bash → 10s grace → SIGKILL.
+//
+// Built as separate constants to keep the prod path bit-identical to the
+// previous BOOT_DOCKER_ARGS — a leaked PUBLIC_KEY env still flips to dev mode
+// but anything else is unchanged.
+const SERVER_LAUNCH = (script: string): string =>
+  'if [ -n "$PUBLIC_KEY" ]; then ' +
+  `while true; do python3 -u ${script}; sleep 2; done; ` +
+  'else ' +
+  `exec python3 -u ${script}; ` +
+  'fi';
+
 const BOOT_DOCKER_ARGS =
-  `bash -lc '${SSH_BOOTSTRAP}; source /workspace/venv/bin/activate && cd /workspace/app && exec python3 -u server.py'`;
+  `bash -lc '${SSH_BOOTSTRAP}; source /workspace/venv/bin/activate && cd /workspace/app && ${SERVER_LAUNCH('server.py')}'`;
 // Video pod runs LTXV i2v on a separate pod (see flux-klein-server/video_server.py).
 // Same volume / venv / port as the image pod — only the entry script differs.
 const BOOT_DOCKER_ARGS_VIDEO =
-  `bash -lc '${SSH_BOOTSTRAP}; source /workspace/venv/bin/activate && cd /workspace/app && exec python3 -u video_server.py'`;
+  `bash -lc '${SSH_BOOTSTRAP}; source /workspace/venv/bin/activate && cd /workspace/app && ${SERVER_LAUNCH('video_server.py')}'`;
 // Pod name prefix for video pods. Distinct from POD_PREFIX so reconcile
 // can list them separately and so RunPod console / Discord alerts are
 // unambiguous about which kind died.
