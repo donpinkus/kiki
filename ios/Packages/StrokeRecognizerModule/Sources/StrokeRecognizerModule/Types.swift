@@ -81,8 +81,14 @@ public struct RecognizerSeeds: Equatable, Sendable {
     /// Per-sample velocity is too noisy at 240 Hz: a 1pt jitter / (1/240s) =
     /// 240 pt/s, which would blow past any reasonable velocity threshold.
     /// Position-spread is the right framing.
-    public var holdJitterTolerance: CGFloat = 20     // pt — bbox diagonal in the window (bumped from 6 for diagnostic)
-    public var previewMoveCancelDist: CGFloat = 12   // pt — once preview is up, motion past this cancels (raised proportionally)
+    ///
+    /// 8pt: real micro-tremor on a still pen is < 3pt bbox over 120ms;
+    /// 8pt comfortably catches that while still rejecting careful drawing
+    /// (a pen moving > ~67pt/s covers > 8pt in 120ms). Briefly inflated to
+    /// 20 during an early diagnostic, which turned out to mask a separate
+    /// scoring bug rather than a hold-detection problem.
+    public var holdJitterTolerance: CGFloat = 8      // pt — bbox diagonal in the window
+    public var previewMoveCancelDist: CGFloat = 6    // pt — once preview is up, motion past this cancels
 
     // Pipeline
     public var speculativeFitHz: Double = 30
