@@ -227,9 +227,13 @@ class Ltx23VideoPipeline:
 
         # Image conditioning is path-based in ltx-pipelines. Write the
         # incoming PIL image to a tempfile, pass the path, clean up after.
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
+        # PNG (lossless) instead of JPEG: upstream's preprocessing pass
+        # re-encodes the image at crf=33 unless the caller explicitly passes
+        # crf=0 (see _run_inference). For sparse line drawings from the iPad,
+        # JPEG-then-crf=33 cumulative loss visibly damages thin strokes.
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
             image_path = f.name
-            image.save(image_path, format="JPEG", quality=95)
+            image.save(image_path, format="PNG")
         try:
             with self._lock:
                 frames = self._run_inference(
@@ -271,7 +275,17 @@ class Ltx23VideoPipeline:
         """
         from ltx_pipelines.utils.args import ImageConditioningInput
 
-        images = [ImageConditioningInput(path=image_path, frame_idx=0, strength=1.0)]
+        # crf=0 disables upstream's preprocessing re-encode of the conditioning
+        # image (default crf=33 introduces visible compression artifacts on
+        # sparse drawn linework, weakening conditioning).
+        images = [
+            ImageConditioningInput(
+                path=image_path,
+                frame_idx=0,
+                strength=1.0,
+                crf=0,
+            )
+        ]
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
 
@@ -312,6 +326,16 @@ class Ltx23VideoPipeline:
                 torch.cuda.max_memory_allocated() / (1024**3),
                 torch.cuda.max_memory_reserved() / (1024**3),
             )
+
+        # Diagnostic: dump the first decoded frame to disk so that if the iPad
+        # video looks wrong, we can SSH in and check whether the bug is in
+        # inference (frame 0 itself is bad) or in MP4/streaming (frame 0 is
+        # clean but the encoded MP4 is corrupted). Overwrite each call.
+        if frames:
+            try:
+                frames[0].save("/tmp/ltx-first-frame.jpg", format="JPEG", quality=90)
+            except OSError as e:
+                logger.warning("Failed to save /tmp/ltx-first-frame.jpg: %s", e)
         return frames
 
     def get_info(self) -> dict:

@@ -44,8 +44,15 @@ NVFP4_FILENAME = os.getenv("FLUX_NVFP4_FILENAME", "flux-2-klein-4b-nvfp4.safeten
 # >=$10M annual revenue. Verify license terms before any commercial
 # deployment (App Store / TestFlight rollout).
 LTX_MODEL_FAMILY = "LTX-2.3"
-LTX_MODEL_REPO = os.getenv("LTX_MODEL_REPO", "Lightricks/LTX-2.3-fp8")
-LTX_MODEL_FILE = os.getenv("LTX_MODEL_FILE", "ltx-2.3-22b-distilled-fp8.safetensors")
+# BF16 distilled checkpoint v1.1. Pairs correctly with QuantizationPolicy.fp8_cast()
+# per Lightricks' README: fp8_cast downcasts BF16 → FP8 at load time and upcasts
+# back per matmul. The pre-quantized FP8 checkpoint (Lightricks/LTX-2.3-fp8)
+# stores per-tensor weight_scale/input_scale tensors that fp8_cast does not
+# read — using that variant with fp8_cast produced numerical garbage (random
+# noise output). Switch to fp8_scaled_mm + the FP8 checkpoint via
+# LTX_FP8_MODE=scaled_mm if/when tensorrt-llm gets installed.
+LTX_MODEL_REPO = os.getenv("LTX_MODEL_REPO", "Lightricks/LTX-2.3")
+LTX_MODEL_FILE = os.getenv("LTX_MODEL_FILE", "ltx-2.3-22b-distilled-1.1.safetensors")
 
 # Spatial upscaler is REQUIRED by DistilledPipeline (stage 2 upscales by 2x
 # from the half-res stage 1 latent). Lives in the base LTX-2.3 repo.

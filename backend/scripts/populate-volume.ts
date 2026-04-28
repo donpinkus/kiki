@@ -87,8 +87,18 @@ const NVFP4_FILENAME = 'flux-2-klein-4b-nvfp4.safetensors';
 
 // Video-pod weights (LTX-2.3, Gemma encoder, spatial upscaler).
 // Must match config.LTX_* in flux-klein-server/config.py.
-const LTX_MODEL_REPO = 'Lightricks/LTX-2.3-fp8';
-const LTX_MODEL_FILE = 'ltx-2.3-22b-distilled-fp8.safetensors';
+//
+// BF16 distilled (v1.1) — pairs with QuantizationPolicy.fp8_cast() per
+// Lightricks' README. The pre-quantized FP8 checkpoint (Lightricks/LTX-2.3-fp8
+// /ltx-2.3-22b-distilled-fp8.safetensors) stores per-tensor weight_scale and
+// input_scale tensors that fp8_cast cannot read — using it with fp8_cast
+// produced numerical garbage. The FP8 checkpoint pairs with fp8_scaled_mm
+// (requires tensorrt-llm); not in our deps yet.
+const LTX_MODEL_REPO = 'Lightricks/LTX-2.3';
+const LTX_MODEL_FILE = 'ltx-2.3-22b-distilled-1.1.safetensors';
+// Legacy FP8 cache directory cleaned up at populate time so the BF16 file
+// (46 GB) fits in the 100 GB volume alongside Gemma (~24 GB).
+const LEGACY_LTX_FP8_CACHE_DIR = 'models--Lightricks--LTX-2.3-fp8';
 const LTX_SPATIAL_UPSCALER_REPO = 'Lightricks/LTX-2.3';
 const LTX_SPATIAL_UPSCALER_FILE = 'ltx-2.3-spatial-upscaler-x2-1.1.safetensors';
 const LTX_TEXT_ENCODER_REPO = 'google/gemma-3-12b-it-qat-q4_0-unquantized';
@@ -308,7 +318,7 @@ du -sh /workspace/huggingface
 }
 
 function buildVideoPopulateCmd(): string {
-  // Downloads LTX-2.3 22B distilled FP8 + Gemma-3-12B + spatial upscaler.
+  // Downloads LTX-2.3 22B distilled BF16 + Gemma-3-12B + spatial upscaler.
   // HF_TOKEN must be set with Gemma access accepted on huggingface.co.
   // We pass it via env on the SSH'd shell so the pod can authenticate to HF.
   return `set -e
@@ -321,11 +331,18 @@ mkdir -p "$HF_HOME"
 echo "=== Disk before ==="
 df -h /workspace
 
+echo "=== Cleaning up legacy FP8 checkpoint cache (if present) ==="
+# 100 GB volumes can't hold BF16 (46 GB) + FP8 (27.5 GB) + Gemma (24 GB) at once.
+# Remove the legacy FP8 cache before downloading BF16. Idempotent — succeeds
+# whether or not the directory exists. The new code path (fp8_cast on BF16)
+# does not need this file, so removing it is safe.
+rm -rf "$HF_HOME/hub/${LEGACY_LTX_FP8_CACHE_DIR}" 2>/dev/null || true
+
 echo "=== Ensuring huggingface_hub is installed ==="
 python3 -c "import huggingface_hub; print('already installed:', huggingface_hub.__version__)" 2>/dev/null || \
   pip install --no-cache-dir --break-system-packages huggingface-hub
 
-echo "=== Downloading ${LTX_MODEL_REPO}/${LTX_MODEL_FILE} (~27.5 GB) ==="
+echo "=== Downloading ${LTX_MODEL_REPO}/${LTX_MODEL_FILE} (~46 GB) ==="
 python3 -c "
 from huggingface_hub import hf_hub_download
 p = hf_hub_download('${LTX_MODEL_REPO}', '${LTX_MODEL_FILE}')
