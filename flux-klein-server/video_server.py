@@ -31,7 +31,9 @@ import base64
 import io
 import json
 import logging
+import os
 import subprocess
+import tempfile
 import time
 from contextlib import asynccontextmanager
 from threading import Event
@@ -302,47 +304,52 @@ async def websocket_video(ws: WebSocket):
 def _encode_mp4(frames: list[Image.Image], fps: int) -> bytes:
     """Encode a frame list to H.264 MP4 for iPad playback.
 
-    Pipes raw RGB through the bundled ffmpeg binary — avoids tempfiles and
-    works inside the offline pod with no external ffmpeg dependency. NOTE:
-    no `-movflags +faststart` — that flag requires seekable output to
-    rewrite the moov atom at the front, and ffmpeg 7.x (in imageio-ffmpeg
-    0.6.0) refuses with "muxer does not support non seekable output" when
-    piping to stdout. Faststart only matters for HTTP streaming anyway;
-    we ship the whole MP4 to the iPad in one WS message and play from disk.
+    Writes ffmpeg output to a tempfile rather than piping to stdout. The
+    mp4 muxer in ffmpeg 7.x (bundled in imageio-ffmpeg 0.6.0) needs
+    seekable output by default to lay out the moov atom — non-seekable
+    output (a pipe) fails with "muxer does not support non seekable
+    output" even without `-movflags +faststart`. A tempfile is seekable
+    and gives AVPlayer the expected non-fragmented MP4 shape.
     """
     if not frames:
         return b""
     width, height = frames[0].size
     ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
-    cmd = [
-        ffmpeg_path,
-        "-y",
-        "-loglevel", "error",
-        "-f", "rawvideo",
-        "-pix_fmt", "rgb24",
-        "-s", f"{width}x{height}",
-        "-r", str(fps),
-        "-i", "-",
-        "-c:v", "libx264",
-        "-preset", "veryfast",
-        "-crf", "23",
-        "-pix_fmt", "yuv420p",
-        "-f", "mp4",
-        "pipe:1",
-    ]
-    # NOTE: must use communicate(input=...) — sequential stdin-then-stdout
-    # deadlocks when ffmpeg's stdout fills the 64 KB pipe buffer (a 100-300 KB
-    # MP4 will). communicate() does the IO concurrently via threads.
-    raw_input = b"".join(f.tobytes() for f in frames)
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+        out_path = tmp.name
     try:
-        out, err = proc.communicate(input=raw_input, timeout=30)
-        if proc.returncode != 0:
-            raise RuntimeError(f"ffmpeg failed: rc={proc.returncode} stderr={err.decode('utf-8', 'replace')[:500]}")
-        return out
+        cmd = [
+            ffmpeg_path,
+            "-y",
+            "-loglevel", "error",
+            "-f", "rawvideo",
+            "-pix_fmt", "rgb24",
+            "-s", f"{width}x{height}",
+            "-r", str(fps),
+            "-i", "-",
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "23",
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            out_path,
+        ]
+        raw_input = b"".join(f.tobytes() for f in frames)
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            _, err = proc.communicate(input=raw_input, timeout=30)
+            if proc.returncode != 0:
+                raise RuntimeError(f"ffmpeg failed: rc={proc.returncode} stderr={err.decode('utf-8', 'replace')[:500]}")
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+        with open(out_path, "rb") as f:
+            return f.read()
     finally:
-        if proc.poll() is None:
-            proc.kill()
+        try:
+            os.unlink(out_path)
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":
