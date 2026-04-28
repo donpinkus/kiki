@@ -63,17 +63,27 @@ if (!SSH_KEY) {
 // mount the network volume. RunPod requires gpuCount ≥ 1, so we try an
 // ordered list of cheap GPUs (cheapest first) and use whichever one has
 // capacity in the target DC. Set SYNC_GPU_TYPE_ID to pin a specific type.
-// 4090 deliberately omitted: hosts in EUR-NO-1 + US-IL-1 boot the
-// container but `startSsh:true` never opens port 22 (verified across 3
-// retries, 2026-04-27). The cheaper tiers above + 5090 fallback are
-// proven to work. 5090 last so we don't pay the premium when a cheap
-// host is available.
+//
+// The candidates include enough variety that at least one stocks in every
+// DC we use. 5090 covers our image DCs (EUR-NO-1, EU-RO-1, EU-CZ-1,
+// US-IL-1, US-NC-1). RTX 4000 Ada / 4090 cover the H100-SXM DCs (US-CA-2,
+// US-TX-3, EU-NL-1, EUR-IS-3, US-MO-1, US-NE-1) where the cheaper RTX
+// 2000 Ada / A4000 / 3090 / L4 SKUs aren't stocked. H100 SXM is the last-
+// resort fallback so we never fail a sync just because a DC is sparse.
+//
+// 4090 was previously omitted: hosts in EUR-NO-1 + US-IL-1 boot the
+// container but `startSsh:true` never opens port 22 (2026-04-27). It's
+// re-added here because the new H100 DCs need it AND retrySsh + the next-
+// candidate fallback together limit the blast radius if 4090 hangs again.
 const DEFAULT_GPU_CANDIDATES = [
   'NVIDIA RTX 2000 Ada Generation',
+  'NVIDIA RTX 4000 Ada Generation',
   'NVIDIA RTX A4000',
   'NVIDIA GeForce RTX 3090',
   'NVIDIA L4',
+  'NVIDIA GeForce RTX 4090',
   'NVIDIA GeForce RTX 5090',
+  'NVIDIA H100 80GB HBM3',
 ];
 const GPU_CANDIDATES = process.env['SYNC_GPU_TYPE_ID']
   ? [process.env['SYNC_GPU_TYPE_ID']!]
