@@ -37,7 +37,19 @@ function loadEnvLocal(): void {
   const content = readFileSync(path, 'utf-8');
   for (const line of content.split('\n')) {
     const m = line.match(/^([A-Z_]+)=(.*)$/);
-    if (m && m[1] && !process.env[m[1]]) process.env[m[1]] = m[2];
+    if (!m || !m[1]) continue;
+    if (process.env[m[1]]) continue;
+    let value = m[2] ?? '';
+    // Strip surrounding single or double quotes — dotenv-style. Without
+    // this, `KEY='{"a":1}'` lands in process.env as `'{"a":1}'` (literal
+    // quotes), which JSON.parse rejects.
+    if (
+      (value.startsWith("'") && value.endsWith("'")) ||
+      (value.startsWith('"') && value.endsWith('"'))
+    ) {
+      value = value.slice(1, -1);
+    }
+    process.env[m[1]] = value;
   }
 }
 loadEnvLocal();
