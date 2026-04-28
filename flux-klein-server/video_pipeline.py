@@ -17,14 +17,14 @@ revenue. Verify license terms before any commercial deployment.
 """
 from __future__ import annotations
 
-import functools
 import logging
 import os
 import tempfile
 import threading
 import time
 from collections import defaultdict
-from typing import Any, Callable
+from contextlib import contextmanager
+from typing import Callable, Iterator
 
 import torch
 from PIL import Image
@@ -98,27 +98,26 @@ class Ltx23VideoPipeline:
     def ready(self) -> bool:
         return self._ready
 
-    def _wrap_phase(self, name: str, fn: Callable[..., Any]) -> Callable[..., Any]:
-        """Wrap a pipeline-phase callable with CUDA-synced timing.
+    @contextmanager
+    def _timed(self, name: str) -> Iterator[None]:
+        """Context manager that records CUDA-synced wall-clock for a phase.
 
-        ``torch.cuda.synchronize()`` before AND after the call is required
-        because PyTorch dispatches kernels asynchronously — without sync, the
-        timer captures kernel-launch time rather than completion time, and
-        prior phases' GPU work bleeds into the next phase's measured time.
+        ``torch.cuda.synchronize()`` before AND after is required because
+        PyTorch dispatches kernels asynchronously — without sync, the timer
+        captures kernel-launch time rather than completion time, and prior
+        phases' GPU work bleeds into the next phase's measured time. Appends
+        to a list so callers can run the same phase twice (e.g. stage 1 vs
+        stage 2 image conditioning) and see both samples.
         """
-
-        @functools.wraps(fn)
-        def wrapper(*args: object, **kwargs: object) -> object:
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-            t0 = time.perf_counter()
-            result = fn(*args, **kwargs)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        try:
+            yield
+        finally:
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             self._inference_timings[name].append(int((time.perf_counter() - t0) * 1000))
-            return result
-
-        return wrapper
 
     def load(self) -> None:
         logger.info(
@@ -192,25 +191,12 @@ class Ltx23VideoPipeline:
             offload_mode=offload_mode,
         )
 
-        # Kiki has no audio output. Replace audio_decoder with a stub so the
-        # vocoder is never built/run — saves the audio decode build/free cycle
-        # and a few seconds of latency. DistilledPipeline's __call__ unpacks
-        # `(decoded_video, decoded_audio)`; a None second element is fine —
-        # our wrapper discards `_audio`.
+        # Kiki has no audio output. Replace audio_decoder with a stub. The new
+        # _run_inference path replicates DistilledPipeline.__call__'s flow
+        # without invoking audio_decoder, so this stub is mostly belt-and-
+        # suspenders — but if anything ever falls back to upstream __call__,
+        # the stub avoids spinning up the vocoder.
         self.pipe.audio_decoder = lambda *_args, **_kwargs: None  # type: ignore[assignment]
-
-        # Wrap each pipeline phase with a CUDA-synced timer so we can attribute
-        # the 15s steady-state latency to specific stages. Each phase logs into
-        # self._inference_timings; the final entry per inference is logged at
-        # the end of _run_inference. List per phase because image_conditioner
-        # and the diffusion stage are called twice per inference (stage 1 + 2).
-        self.pipe.prompt_encoder = self._wrap_phase("prompt_encoder", self.pipe.prompt_encoder)
-        self.pipe.image_conditioner = self._wrap_phase(
-            "image_conditioner", self.pipe.image_conditioner
-        )
-        self.pipe.stage = self._wrap_phase("stage", self.pipe.stage)
-        self.pipe.upsampler = self._wrap_phase("upsampler", self.pipe.upsampler)
-        self.pipe.video_decoder = self._wrap_phase("video_decoder_call", self.pipe.video_decoder)
 
         self._tiling_config = TilingConfig.default()
         self._phase_timings["pipeline_init_ms"] = int((time.time() - t_phase) * 1000)
@@ -306,18 +292,27 @@ class Ltx23VideoPipeline:
         prompt: str,
         seed: int,
     ) -> list[Image.Image]:
-        """Run one DistilledPipeline call, materialize the frame iterator
-        into PIL Images. Caller holds `self._lock`.
+        """Run one inference, materialize frames as PIL. Caller holds `self._lock`.
 
-        Wraps the pipeline call in ``torch.inference_mode()`` — without it
-        PyTorch retains autograd buffers for every fp8_cast Linear's BF16
-        upcast tensor, blowing past 80 GiB on the 22B transformer. Lightricks'
-        own ``ltx_pipelines.distilled.main()`` is decorated with
-        ``@torch.inference_mode()``; replicating that here is the load-bearing
-        fix for the H100 OOM. ``model.eval()`` alone is NOT enough — it only
-        toggles dropout/batchnorm, not autograd.
+        Replicates ``DistilledPipeline.__call__``'s flow but builds the
+        transformer ONCE per request via ``stage.model_context()`` and runs
+        both stages with ``stage.run(transformer, ...)`` — upstream's
+        ``stage(...)`` builds and tears down the transformer on each call,
+        which empirically dominates latency (~7-8s of the 25s steady-state
+        spent on per-stage build/teardown, vs ~1.5s on actual denoising math).
+        Reusing the transformer across stage 1 + stage 2 cuts that overhead
+        in half within a single request.
+
+        Also wraps everything in ``torch.inference_mode()`` — required to
+        prevent autograd from retaining fp8_cast's per-matmul BF16 upcast
+        tensors and OOMing on H100 80GB.
         """
+        from ltx_core.components.noisers import GaussianNoiser
         from ltx_pipelines.utils.args import ImageConditioningInput
+        from ltx_pipelines.utils.constants import DISTILLED_SIGMAS, STAGE_2_DISTILLED_SIGMAS
+        from ltx_pipelines.utils.denoisers import SimpleDenoiser
+        from ltx_pipelines.utils.helpers import assert_resolution, combined_image_conditionings
+        from ltx_pipelines.utils.types import ModalitySpec
 
         # crf=0 disables upstream's preprocessing re-encode of the conditioning
         # image (default crf=33 introduces visible compression artifacts on
@@ -334,32 +329,117 @@ class Ltx23VideoPipeline:
             torch.cuda.reset_peak_memory_stats()
         self._inference_timings.clear()
 
-        frames: list[Image.Image] = []
+        pipe = self.pipe
+        width = config.LTX_WIDTH
+        height = config.LTX_HEIGHT
+        num_frames = config.LTX_NUM_FRAMES
+        frame_rate = float(config.LTX_FPS)
+        assert_resolution(height=height, width=width, is_two_stage=True)
+
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         t_pipe = time.perf_counter()
+        frames: list[Image.Image] = []
+
         with torch.inference_mode():
-            decoded_video, _audio = self.pipe(
-                prompt=prompt,
-                seed=seed,
-                height=config.LTX_HEIGHT,
-                width=config.LTX_WIDTH,
-                num_frames=config.LTX_NUM_FRAMES,
-                frame_rate=float(config.LTX_FPS),
-                images=images,
-                tiling_config=self._tiling_config,
-                enhance_prompt=False,
-            )
+            with self._timed("prompt_encoder"):
+                (ctx_p,) = pipe.prompt_encoder([prompt])
+            video_context, audio_context = ctx_p.video_encoding, ctx_p.audio_encoding
+
+            generator = torch.Generator(device=pipe.device).manual_seed(seed)
+            noiser = GaussianNoiser(generator=generator)
+            stage_1_sigmas = DISTILLED_SIGMAS.to(dtype=torch.float32, device=pipe.device)
+            stage_2_sigmas = STAGE_2_DISTILLED_SIGMAS.to(dtype=torch.float32, device=pipe.device)
+            stage_1_w, stage_1_h = width // 2, height // 2
+
+            with self._timed("image_conditioner"):
+                stage_1_conditionings = pipe.image_conditioner(
+                    lambda enc: combined_image_conditionings(
+                        images=images,
+                        height=stage_1_h,
+                        width=stage_1_w,
+                        video_encoder=enc,
+                        dtype=torch.bfloat16,
+                        device=pipe.device,
+                    )
+                )
+
+            # Build transformer ONCE; reuse across stage 1 and stage 2.
+            # Manually open/close the context manager so we can time build
+            # and teardown separately. `stage_build` is the dominant load-time
+            # cost we're trying to cut in half by not rebuilding for stage 2.
+            transformer_ctx = pipe.stage.model_context()
+            with self._timed("stage_build"):
+                transformer = transformer_ctx.__enter__()
+            try:
+                with self._timed("stage_1_denoise"):
+                    video_state, audio_state = pipe.stage.run(
+                        transformer,
+                        denoiser=SimpleDenoiser(video_context, audio_context),
+                        sigmas=stage_1_sigmas,
+                        noiser=noiser,
+                        width=stage_1_w,
+                        height=stage_1_h,
+                        frames=num_frames,
+                        fps=frame_rate,
+                        video=ModalitySpec(
+                            context=video_context,
+                            conditionings=stage_1_conditionings,
+                        ),
+                        audio=ModalitySpec(context=audio_context),
+                    )
+
+                with self._timed("upsampler"):
+                    upscaled_video_latent = pipe.upsampler(video_state.latent[:1])
+
+                with self._timed("image_conditioner"):
+                    stage_2_conditionings = pipe.image_conditioner(
+                        lambda enc: combined_image_conditionings(
+                            images=images,
+                            height=height,
+                            width=width,
+                            video_encoder=enc,
+                            dtype=torch.bfloat16,
+                            device=pipe.device,
+                        )
+                    )
+
+                with self._timed("stage_2_denoise"):
+                    video_state, audio_state = pipe.stage.run(
+                        transformer,
+                        denoiser=SimpleDenoiser(video_context, audio_context),
+                        sigmas=stage_2_sigmas,
+                        noiser=noiser,
+                        width=width,
+                        height=height,
+                        frames=num_frames,
+                        fps=frame_rate,
+                        video=ModalitySpec(
+                            context=video_context,
+                            conditionings=stage_2_conditionings,
+                            noise_scale=stage_2_sigmas[0].item(),
+                            initial_latent=upscaled_video_latent,
+                        ),
+                        audio=ModalitySpec(
+                            context=audio_context,
+                            noise_scale=stage_2_sigmas[0].item(),
+                            initial_latent=audio_state.latent,
+                        ),
+                    )
+            finally:
+                with self._timed("stage_teardown"):
+                    transformer_ctx.__exit__(None, None, None)
+
+            with self._timed("video_decoder_call"):
+                decoded_video = pipe.video_decoder(
+                    video_state.latent, self._tiling_config, generator
+                )
 
             # Tensor iterator → PIL list. The iterator drives the video VAE
             # decoder, which is also part of inference and must run inside
             # the inference_mode context. Each chunk is (F, H, W, 3) uint8
             # RGB (per ltx_pipelines.utils.media_io.encode_video which feeds
             # the same tensor straight into PyAV with format="rgb24").
-            #
-            # Time the iteration separately from the pipe call: video_decoder
-            # __call__ returns the iterator quickly; the actual VAE decode
-            # work happens here on each `for chunk in decoded_video`.
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             t_decode = time.perf_counter()
@@ -383,6 +463,7 @@ class Ltx23VideoPipeline:
                 int((time.perf_counter() - t_decode) * 1000)
             )
             self._inference_timings["pil_conversion"].append(int(t_pil * 1000))
+
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         self._inference_timings["pipe_total"].append(int((time.perf_counter() - t_pipe) * 1000))
