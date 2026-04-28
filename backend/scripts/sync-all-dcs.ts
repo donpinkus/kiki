@@ -60,19 +60,37 @@ if (!process.env['RUNPOD_API_KEY']) {
   process.exit(1);
 }
 
-const VOLUMES_JSON = process.env['NETWORK_VOLUMES_BY_DC'];
-if (!VOLUMES_JSON) {
-  console.error('NETWORK_VOLUMES_BY_DC required (set in .env.local at repo root)');
-  process.exit(1);
+function parseMap(name: string, required: boolean): Record<string, string> {
+  const raw = process.env[name];
+  if (!raw) {
+    if (required) {
+      console.error(`${name} required (set in .env.local at repo root)`);
+      process.exit(1);
+    }
+    return {};
+  }
+  try {
+    return JSON.parse(raw) as Record<string, string>;
+  } catch (e) {
+    console.error(`${name} is not valid JSON: ${(e as Error).message}`);
+    process.exit(1);
+  }
 }
 
-let VOLUMES: Record<string, string>;
-try {
-  VOLUMES = JSON.parse(VOLUMES_JSON) as Record<string, string>;
-} catch (e) {
-  console.error(`NETWORK_VOLUMES_BY_DC is not valid JSON: ${(e as Error).message}`);
+// Sync runs against both volume sets — image and video both need the
+// flux-klein-server tree (server.py + video_server.py share a venv) up to
+// date. Image volumes are required; video are optional (empty if the
+// LTX-2.3 migration's video volumes haven't been provisioned yet).
+const IMAGE_VOLUMES = parseMap('NETWORK_VOLUMES_BY_DC', true);
+const VIDEO_VOLUMES = parseMap('NETWORK_VOLUMES_BY_DC_VIDEO', false);
+const overlapDcs = Object.keys(IMAGE_VOLUMES).filter((dc) => dc in VIDEO_VOLUMES);
+if (overlapDcs.length > 0) {
+  console.error(
+    `DCs cannot appear in both NETWORK_VOLUMES_BY_DC and _VIDEO (overlap: ${overlapDcs.join(', ')})`,
+  );
   process.exit(1);
 }
+const VOLUMES: Record<string, string> = { ...IMAGE_VOLUMES, ...VIDEO_VOLUMES };
 
 // ─── Per-DC sync ──────────────────────────────────────────────────────────
 

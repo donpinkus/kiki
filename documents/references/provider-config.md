@@ -61,9 +61,18 @@ Model weights are stored on pre-populated RunPod network volumes, one per (kind,
 
 **Video volumes** (~52 GB: LTX-2.3 22B distilled FP8 + Gemma-3-12B + spatial upscaler) live in DCs that stock H100 SXM 80 GB. Set via `NETWORK_VOLUMES_BY_DC_VIDEO` JSON env var on Railway. Created at 75 GB to leave headroom for venv + app code + future asset growth.
 
-> _Volume IDs TBD — created during the LTX-2.3 migration. Candidate DCs (Low stock at probe time): CA-MTL-1, US-CA-2, US-TX-3, EU-NL-1, EU-FR-1, EUR-NO-2._
+| DC | Volume ID | Size |
+|---|---|---|
+| US-CA-2 | 4iq4uchi49 | 75 GB |
+| US-TX-3 | bhqphgrfen | 75 GB |
+| EU-NL-1 | l83rmkz50d | 75 GB |
+| EUR-IS-3 | m4ac7szq80 | 75 GB |
+| US-MO-1 | qvm9zwa2b8 | 75 GB |
+| US-NE-1 | 92a53hbwc1 | 75 GB |
 
-Fixed storage cost: image (250 GB) + video (~6 × 75 = 450 GB) ≈ 700 GB × $0.07/GB/mo = ~$49/mo.
+Note: not every DC that stocks H100 SXM supports network volumes — RunPod refuses `createNetworkVolume` for CA-MTL-1, EU-FR-1, and EUR-NO-2 even though those DCs show H100-SXM stock. The 6 DCs above are the intersection of "has H100 SXM" + "supports network volumes" at probe time.
+
+Fixed storage cost: image (250 GB) + video (450 GB) ≈ 700 GB × $0.07/GB/mo = ~$49/mo.
 
 ### HF_TOKEN for video volumes
 
