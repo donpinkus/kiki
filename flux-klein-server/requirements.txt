@@ -1,27 +1,43 @@
-# FLUX.2-klein server requirements.
+# FLUX.2-klein server requirements (image pod + video pod share the venv).
 # Torch + torchvision are inherited from the runpod/pytorch base image (2.9.1 + cu128).
 # DO NOT list them — pinning torch here would override the base image's Blackwell-
 # compatible build.
 
+# ─── Image pod: FLUX.2-klein via diffusers ──────────────────────────────────
 # diffusers is installed from git because Flux2KleinPipeline was added after the
 # last tagged release. Pin to a specific commit so NVFP4 load_state_dict doesn't
 # silently break when diffusers main changes transformer module names.
 # TODO: once we confirm a specific commit works end-to-end, pin it here.
 diffusers @ git+https://github.com/huggingface/diffusers.git
 
-transformers>=4.40.0,<5
+# transformers>=4.52 required by ltx-core (video pod). Image pipeline (FLUX)
+# also uses transformers via diffusers and is compatible with this range.
+transformers>=4.52,<5
 accelerate>=0.28.0,<2
 sentencepiece>=0.2.0
 safetensors>=0.4.0
 huggingface-hub>=0.25.0
 
-# Server
+# ─── Video pod: LTX-2.3 via official ltx-pipelines ──────────────────────────
+# Lightricks doesn't publish to PyPI. Install from the LTX-2 monorepo, pinned
+# to a specific SHA so model loading doesn't break on upstream main churn.
+# Both packages must be present — ltx-pipelines depends on ltx-core.
+# License: LTX-2 Community License Agreement (NOT Apache-2.0). Verify before
+# any commercial deployment.
+ltx-core @ git+https://github.com/Lightricks/LTX-2.git@41d924371612b692c0fd1e4d9d94c3dfb3c02cb3#subdirectory=packages/ltx-core
+ltx-pipelines @ git+https://github.com/Lightricks/LTX-2.git@41d924371612b692c0fd1e4d9d94c3dfb3c02cb3#subdirectory=packages/ltx-pipelines
+
+# ─── Server (shared) ────────────────────────────────────────────────────────
 fastapi>=0.108.0
 uvicorn[standard]>=0.25.0
 websockets>=12.0
 Pillow>=10.0.0
 
-# Video pod (LTXV) — bundled ffmpeg binary keeps the pod self-contained,
-# no apt install needed. imageio-ffmpeg pulls a static ffmpeg into the
-# venv at install time. ~30 MB.
+# Video pod's MP4 encoder uses imageio-ffmpeg (bundled static ffmpeg, ~30 MB).
+# Kept after the LTX-2.3 migration: ltx-pipelines exposes a PyAV-based
+# encode_video() but its API expects a tensor iterator, file path, and
+# pre-computed video_chunks_number — different shape than our streamed-then-
+# muxed output. Our _encode_mp4 has been hardened (tempfile output, ffmpeg 7.x
+# compatible) and is simpler to keep than to convert. Revisit if ltx-pipelines'
+# encoder grows a buffer-output API.
 imageio-ffmpeg>=0.4.9

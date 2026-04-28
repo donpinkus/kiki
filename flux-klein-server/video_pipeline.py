@@ -1,17 +1,25 @@
-"""LTX-Video 2B (0.9.8 distilled) image-to-video pipeline.
+"""LTX-2.3 image-to-video pipeline (DistilledPipeline, FP8, H100 SXM).
 
-Loads the 0.9.5 base for VAE/text-encoder/scheduler and overwrites the
-transformer with the 0.9.8 distilled single-file checkpoint — same pattern
-FluxKleinPipeline uses for NVFP4. The base 0.9.5 transformer weights are
-deliberately NOT on the volume (see backend/scripts/populate-volume.ts);
-we sidestep that by loading the distilled transformer first via
-``from_single_file`` and injecting it into ``from_pretrained`` so the
-pipeline's own transformer load is skipped.
+Replaces the prior LTXV 0.9.8 (2B distilled FP8) Diffusers pipeline. Uses
+Lightricks' official `ltx-pipelines.DistilledPipeline`:
+
+- Stage 1: half-resolution video generation (8 sigmas)
+- Stage 2: 2x spatial upsample + refinement (4 sigmas)
+
+Output (Iterator[Tensor], Audio). Audio is discarded — Kiki's video pane is
+silent. Frames-as-tensors get converted to PIL Images so video_server.py
+can stream them as JPEGs over the existing WebSocket protocol unchanged.
+
+License note: LTX-2 weights are released under the LTX-2 Community License
+(https://github.com/Lightricks/LTX-2/blob/main/LICENSE), NOT Apache-2.0.
+The license restricts commercial use for entities with >=$10M annual
+revenue. Verify license terms before any commercial deployment.
 """
-
 from __future__ import annotations
 
 import logging
+import os
+import tempfile
 import threading
 import time
 from typing import Callable
@@ -22,38 +30,59 @@ from PIL import Image
 import config
 # Reuse the image pipeline's helper so both pods stamp the same
 # /workspace/app/.version.json onto /health for drift detection by the
-# orchestrator. Cross-module private import is fine here — both files
-# live in the same package.
+# orchestrator.
 from pipeline import _load_app_version
 
 logger = logging.getLogger(__name__)
 
 
-class CancelledError(Exception):
-    """Raised inside the diffusion loop when the backend signals cancel.
+def _resolve_hf_cache_path(repo_id: str, filename: str) -> str:
+    """Resolve the local path of a single-file HF asset that was pre-cached
+    via `hf_hub_download` at populate time. Pod runs offline (HF_HUB_OFFLINE=1)
+    so we cannot use `hf_hub_download` again — we read directly from the
+    cache layout written by the populate script.
+    """
+    from huggingface_hub import hf_hub_download
+    return hf_hub_download(repo_id=repo_id, filename=filename, local_files_only=True)
 
-    Bubbles up out of ``self.pipe(...)``; ``generate()`` catches it and
-    returns ``None`` so the caller can emit a ``video_cancelled`` frame
-    cleanly.
+
+def _resolve_hf_snapshot_path(repo_id: str) -> str:
+    """Resolve the local path of a multi-file HF snapshot (e.g., Gemma) that
+    was pre-cached via `snapshot_download` at populate time. Returns the
+    snapshot directory path that DistilledPipeline expects as `gemma_root`.
+    """
+    from huggingface_hub import snapshot_download
+    return snapshot_download(repo_id=repo_id, local_files_only=True)
+
+
+class CancelledError(Exception):
+    """Raised when the backend cancels mid-pipeline. NOTE: DistilledPipeline
+    does NOT expose mid-inference cancellation hooks (no step callback like
+    Diffusers had). Cancellation is checked at start-of-generate only; if
+    cancellation arrives during inference, the GPU keeps running to
+    completion and the result is discarded by the caller. Acceptable cost
+    (~10-30s wasted GPU time per cancelled generation) versus rewriting
+    DistilledPipeline internals.
     """
 
 
-class LtxvVideoPipeline:
-    """Wraps ``LTXImageToVideoPipeline`` for the idle-state animation flow.
+class Ltx23VideoPipeline:
+    """Wraps `ltx_pipelines.DistilledPipeline` for the idle-state animation flow.
 
-    Single-instance, single-GPU. Calls are serialized through ``_lock`` so
-    the WebSocket layer can fire-and-forget without worrying about overlap.
+    Single-instance, single-GPU. Calls are serialized through `_lock` so the
+    WebSocket layer can fire-and-forget without worrying about overlap.
     """
 
     def __init__(self) -> None:
         self.pipe = None
+        self._tiling_config = None
         self._ready = False
         self._lock = threading.Lock()
         self._load_ms: int = 0
         # Per-substage warmup timings + flux-klein-server tree-hash version
         # exposed via /health. Mirrors the image pipeline so the orchestrator's
         # drift detection and substage observability work identically for
-        # both pod kinds (per-DC volume sync coverage, slow-warmup root-cause).
+        # both pod kinds.
         self._phase_timings: dict[str, int] = {}
         self._app_version = _load_app_version()
 
@@ -63,68 +92,82 @@ class LtxvVideoPipeline:
 
     def load(self) -> None:
         logger.info(
-            "Loading LTXV: base=%s transformer=%s/%s",
-            config.LTXV_BASE_REPO,
-            config.LTXV_TRANSFORMER_REPO,
-            config.LTXV_TRANSFORMER_FILE,
+            "Loading %s: model=%s/%s gemma=%s upscaler=%s/%s quantization=%s",
+            config.LTX_MODEL_FAMILY,
+            config.LTX_MODEL_REPO,
+            config.LTX_MODEL_FILE,
+            config.LTX_TEXT_ENCODER_REPO,
+            config.LTX_SPATIAL_UPSCALER_REPO,
+            config.LTX_SPATIAL_UPSCALER_FILE,
+            config.LTX_QUANTIZATION,
         )
         t0 = time.time()
 
-        from diffusers import LTXImageToVideoPipeline, LTXVideoTransformer3DModel
-        from huggingface_hub import hf_hub_download
+        # Imports gated to load() so that startup failures (missing weights,
+        # ImportError on ltx_core/ltx_pipelines) surface in the loader log
+        # rather than at module import time.
+        from ltx_core.model.video_vae import TilingConfig
+        from ltx_core.quantization import QuantizationPolicy
+        from ltx_pipelines.distilled import DistilledPipeline
+        from ltx_pipelines.utils.types import OffloadMode
 
-        # Distilled transformer — single-file checkpoint. Loading via
-        # ``from_single_file`` lets diffusers infer the architecture from
-        # the safetensors metadata without needing the 0.9.5 transformer
-        # weights as a fallback (which the volume doesn't have).
+        # Resolve pre-populated paths from the offline HF cache. Pod is
+        # HF_HUB_OFFLINE=1; populate script ran these as online downloads.
         t_phase = time.time()
-        transformer_path = hf_hub_download(
-            repo_id=config.LTXV_TRANSFORMER_REPO,
-            filename=config.LTXV_TRANSFORMER_FILE,
+        checkpoint_path = _resolve_hf_cache_path(config.LTX_MODEL_REPO, config.LTX_MODEL_FILE)
+        upscaler_path = _resolve_hf_cache_path(
+            config.LTX_SPATIAL_UPSCALER_REPO, config.LTX_SPATIAL_UPSCALER_FILE
         )
-        logger.info("Loading transformer single-file: %s", transformer_path)
-        transformer = LTXVideoTransformer3DModel.from_single_file(
-            transformer_path,
-            torch_dtype=torch.bfloat16,
+        gemma_root = _resolve_hf_snapshot_path(config.LTX_TEXT_ENCODER_REPO)
+        self._phase_timings["resolve_paths_ms"] = int((time.time() - t_phase) * 1000)
+        logger.info(
+            "Resolved offline paths: checkpoint=%s upscaler=%s gemma=%s",
+            checkpoint_path,
+            upscaler_path,
+            gemma_root,
         )
-        self._phase_timings["transformer_load_ms"] = int((time.time() - t_phase) * 1000)
 
-        # Base pipeline — passing transformer= bypasses transformer load
-        # from the base repo (which is intentional: those weights aren't
-        # on the volume).
-        t_phase = time.time()
-        self.pipe = LTXImageToVideoPipeline.from_pretrained(
-            config.LTXV_BASE_REPO,
-            transformer=transformer,
-            torch_dtype=torch.bfloat16,
-        )
-        self._phase_timings["from_pretrained_ms"] = int((time.time() - t_phase) * 1000)
+        # FP8-cast quantization: works with the FP8 checkpoint without
+        # requiring tensorrt-llm (which fp8-scaled-mm would need). On H100
+        # this is sufficient — fp8-scaled-mm would be ~10-20% faster but
+        # adds a heavyweight dep we'd rather avoid until perf data justifies it.
+        quantization = QuantizationPolicy.fp8_cast()
 
         t_phase = time.time()
-        self.pipe.to("cuda")
-        self._phase_timings["to_cuda_ms"] = int((time.time() - t_phase) * 1000)
-
-        logger.info("LTXV loaded in %.1fs", time.time() - t0)
+        self.pipe = DistilledPipeline(
+            distilled_checkpoint_path=checkpoint_path,
+            gemma_root=gemma_root,
+            spatial_upsampler_path=upscaler_path,
+            loras=[],
+            quantization=quantization,
+            offload_mode=OffloadMode.NONE,  # 80 GB H100 fits everything in VRAM
+        )
+        self._tiling_config = TilingConfig.default()
+        self._phase_timings["pipeline_init_ms"] = int((time.time() - t_phase) * 1000)
+        logger.info("LTX-2.3 pipeline loaded in %.1fs", time.time() - t_phase)
 
         # Warmup — first call has lazy CUDA kernel compilation. Doing it
         # here keeps the user-visible first video latency clean.
-        logger.info("LTXV warmup...")
+        logger.info("LTX-2.3 warmup...")
         t1 = time.time()
-        warmup_image = Image.new("RGB", (config.LTXV_WIDTH, config.LTXV_HEIGHT), (128, 128, 128))
-        with self._lock:
-            _ = self.pipe(
-                image=warmup_image,
-                prompt="warmup",
-                negative_prompt=config.LTXV_NEGATIVE_PROMPT,
-                width=config.LTXV_WIDTH,
-                height=config.LTXV_HEIGHT,
-                num_frames=config.LTXV_NUM_FRAMES,
-                num_inference_steps=config.LTXV_STEPS,
-                guidance_scale=1.0,
-                generator=torch.Generator(device="cuda").manual_seed(0),
-            )
+        warmup_image = Image.new("RGB", (config.LTX_WIDTH, config.LTX_HEIGHT), (128, 128, 128))
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            warmup_path = f.name
+            warmup_image.save(warmup_path, format="PNG")
+        try:
+            with self._lock:
+                _ = self._run_inference(
+                    image_path=warmup_path,
+                    prompt="warmup",
+                    seed=0,
+                )
+        finally:
+            try:
+                os.unlink(warmup_path)
+            except OSError:
+                pass
         self._phase_timings["warmup_inference_ms"] = int((time.time() - t1) * 1000)
-        logger.info("LTXV warmup done (%.1fs)", time.time() - t1)
+        logger.info("LTX-2.3 warmup done (%.1fs)", time.time() - t1)
 
         self._load_ms = int((time.time() - t0) * 1000)
         self._ready = True
@@ -136,52 +179,91 @@ class LtxvVideoPipeline:
         seed: int | None,
         is_cancelled: Callable[[], bool],
     ) -> list[Image.Image] | None:
-        """Generate a video from ``image``+``prompt``. Returns the decoded
-        frame list, or ``None`` if cancelled mid-generation.
+        """Generate a video from `image`+`prompt`. Returns the decoded frame
+        list, or `None` if cancellation was requested before inference started.
 
-        ``is_cancelled`` is polled in a step callback; raising inside the
-        callback is what actually aborts the diffusion loop.
+        NOTE on cancellation: DistilledPipeline doesn't expose mid-inference
+        callbacks, so once we enter `pipe(...)` we run to completion. The
+        cancel check at the top is the only opportunity to bail cheaply.
+        Mid-inference cancels result in a wasted full inference; the caller
+        discards the frames if cancel.is_set() upon return. See class
+        docstring for details.
         """
-        generator = self._make_generator(seed)
+        if is_cancelled():
+            logger.info("LTX-2.3 generate skipped — cancelled before start")
+            return None
 
-        def _step_cb(pipe, step, timestep, callback_kwargs):  # noqa: ANN001
-            if is_cancelled():
-                # Raising propagates out of pipe.__call__ — we catch it
-                # below. Diffusers swallows callback return values but
-                # propagates exceptions, so this is the supported way to
-                # exit early.
-                raise CancelledError(f"cancel at step {step}")
-            if config.LTXV_DEBUG:
-                logger.debug("ltxv step %d ts=%s", step, timestep)
-            return callback_kwargs
+        # Resolve seed: if caller didn't specify, generate a fresh random one.
+        # DistilledPipeline.__call__ requires `seed: int`, not Optional.
+        if seed is None:
+            seed = int.from_bytes(os.urandom(4), byteorder="little") & 0x7FFFFFFF
 
-        with self._lock:
-            try:
-                result = self.pipe(
-                    image=image,
+        # Image conditioning is path-based in ltx-pipelines. Write the
+        # incoming PIL image to a tempfile, pass the path, clean up after.
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
+            image_path = f.name
+            image.save(image_path, format="JPEG", quality=95)
+        try:
+            with self._lock:
+                frames = self._run_inference(
+                    image_path=image_path,
                     prompt=prompt or "",
-                    negative_prompt=config.LTXV_NEGATIVE_PROMPT,
-                    width=config.LTXV_WIDTH,
-                    height=config.LTXV_HEIGHT,
-                    num_frames=config.LTXV_NUM_FRAMES,
-                    num_inference_steps=config.LTXV_STEPS,
-                    guidance_scale=1.0,
-                    generator=generator,
-                    callback_on_step_end=_step_cb,
+                    seed=seed,
                 )
-            except CancelledError as e:
-                logger.info("LTXV cancelled (%s)", e)
-                return None
+        finally:
+            try:
+                os.unlink(image_path)
+            except OSError:
+                pass
 
-        # result.frames is List[List[PIL.Image.Image]] — one per batch
-        # element; we ran a single prompt so the outer list has length 1.
-        frames = result.frames[0]
+        # Late cancel check: caller may have set the flag while inference was
+        # running. Returning None lets video_server emit `video_cancelled`
+        # cleanly and the caller's counters tick the cancelled tally.
+        if is_cancelled():
+            logger.info("LTX-2.3 generate completed but cancellation arrived; discarding")
+            return None
+
         return frames
 
-    def _make_generator(self, seed: int | None) -> torch.Generator | None:
-        if seed is not None:
-            return torch.Generator(device="cuda").manual_seed(seed)
-        return None
+    def _run_inference(
+        self,
+        image_path: str,
+        prompt: str,
+        seed: int,
+    ) -> list[Image.Image]:
+        """Run one DistilledPipeline call, materialize the frame iterator
+        into PIL Images. Caller holds `self._lock`.
+        """
+        from ltx_pipelines.utils.args import ImageConditioningInput
+
+        images = [ImageConditioningInput(path=image_path, frame_idx=0, strength=1.0)]
+        decoded_video, _audio = self.pipe(  # audio discarded — Kiki has no audio path
+            prompt=prompt,
+            seed=seed,
+            height=config.LTX_HEIGHT,
+            width=config.LTX_WIDTH,
+            num_frames=config.LTX_NUM_FRAMES,
+            frame_rate=float(config.LTX_FPS),
+            images=images,
+            tiling_config=self._tiling_config,
+            enhance_prompt=False,
+        )
+
+        # Tensor iterator → PIL list. Each chunk is (F, H, W, 3) uint8 RGB
+        # (per ltx_pipelines.utils.media_io.encode_video which feeds the
+        # same tensor straight into PyAV with format="rgb24").
+        frames: list[Image.Image] = []
+        for chunk in decoded_video:
+            chunk_cpu = chunk.to("cpu")
+            if chunk_cpu.dtype != torch.uint8:
+                # Defensive: float tensors get clamped + scaled. Shouldn't
+                # happen for the ltx-pipelines decoder, but guards against a
+                # silent regression if upstream changes the output dtype.
+                chunk_cpu = (chunk_cpu.clamp(0, 1) * 255).to(torch.uint8)
+            arr = chunk_cpu.numpy()
+            for frame_arr in arr:
+                frames.append(Image.fromarray(frame_arr, mode="RGB"))
+        return frames
 
     def get_info(self) -> dict:
         gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "none"
@@ -190,12 +272,16 @@ class LtxvVideoPipeline:
             vram_free = torch.cuda.mem_get_info()[0] / (1024**3)
         return {
             "video_ready": self._ready,
-            "model": f"{config.LTXV_TRANSFORMER_REPO}/{config.LTXV_TRANSFORMER_FILE}",
-            "base": config.LTXV_BASE_REPO,
-            "resolution": f"{config.LTXV_WIDTH}x{config.LTXV_HEIGHT}",
-            "num_frames": config.LTXV_NUM_FRAMES,
-            "steps": config.LTXV_STEPS,
-            "fps": config.LTXV_FPS,
+            "model_family": config.LTX_MODEL_FAMILY,
+            "model_repo": config.LTX_MODEL_REPO,
+            "model_file": config.LTX_MODEL_FILE,
+            "text_encoder": config.LTX_TEXT_ENCODER_REPO,
+            "spatial_upscaler": config.LTX_SPATIAL_UPSCALER_FILE,
+            "quantization": config.LTX_QUANTIZATION,
+            "pipeline": "DistilledPipeline",
+            "resolution": f"{config.LTX_WIDTH}x{config.LTX_HEIGHT}",
+            "num_frames": config.LTX_NUM_FRAMES,
+            "fps": config.LTX_FPS,
             "gpu": gpu_name,
             "vram_free_gb": round(vram_free, 2),
             "load_ms": self._load_ms,

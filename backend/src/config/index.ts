@@ -43,12 +43,18 @@ export interface AppConfig {
   readonly VIDEO_POD_ENABLED: boolean;
 
   // ─── Network volumes (pre-populated with weights, venv, app code) ────
-  /** Map of RunPod datacenter ID → network volume ID. Each volume is
-   * pre-populated by scripts/populate-volume.ts (FLUX weights at
-   * /workspace/huggingface) and scripts/sync-flux-app.ts (Python deps at
-   * /workspace/venv, server code at /workspace/app). Parse from JSON env
-   * var, e.g. `{"EUR-NO-1":"49n6i3twuw","US-NC-1":"5vz7ubospw"}`. */
+  /** Map of RunPod datacenter ID → network volume ID for IMAGE pods (FLUX
+   * BF16 + NVFP4, ~20 GB). Volumes live in 5090-stocked DCs. Pre-populated
+   * by `populate-volume.ts --kind image`. JSON env var, e.g.
+   * `{"EUR-NO-1":"49n6i3twuw","US-NC-1":"5vz7ubospw"}`. */
   readonly NETWORK_VOLUMES_BY_DC: Readonly<Record<string, string>>;
+  /** Map of RunPod datacenter ID → network volume ID for VIDEO pods
+   * (LTX-2.3 22B FP8 + Gemma-3-12B + spatial upscaler, ~52 GB). Volumes
+   * live in H100-SXM-stocked DCs (different set than image volumes —
+   * 5090 DCs typically don't have H100 SXM, and vice versa). Pre-populated
+   * by `populate-volume.ts --kind video` (requires HF_TOKEN with Gemma
+   * access accepted). JSON env var. Empty → video pods skip provisioning. */
+  readonly NETWORK_VOLUMES_BY_DC_VIDEO: Readonly<Record<string, string>>;
 
   // ─── Redis (Workstream 5) ──────────────────────────────────────────────
   /** Redis connection URL. Required for session registry persistence. */
@@ -121,23 +127,23 @@ export interface AppConfig {
   readonly LOG_LEVEL: 'fatal' | 'error' | 'warn' | 'info' | 'debug' | 'trace';
 }
 
-function parseVolumesMap(raw: string | undefined): Readonly<Record<string, string>> {
+function parseVolumesMap(raw: string | undefined, varName: string): Readonly<Record<string, string>> {
   if (!raw) return Object.freeze({});
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
     throw new Error(
-      `NETWORK_VOLUMES_BY_DC must be valid JSON (got: ${raw.slice(0, 60)}...)`,
+      `${varName} must be valid JSON (got: ${raw.slice(0, 60)}...)`,
     );
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error('NETWORK_VOLUMES_BY_DC must be a JSON object { "DC-ID": "volumeId" }');
+    throw new Error(`${varName} must be a JSON object { "DC-ID": "volumeId" }`);
   }
   const out: Record<string, string> = {};
   for (const [dc, vol] of Object.entries(parsed)) {
     if (typeof vol !== 'string' || !vol) {
-      throw new Error(`NETWORK_VOLUMES_BY_DC[${dc}] must be a non-empty string`);
+      throw new Error(`${varName}[${dc}] must be a non-empty string`);
     }
     out[dc] = vol;
   }
@@ -204,7 +210,11 @@ function validateConfig(): AppConfig {
     ONDEMAND_FALLBACK_ENABLED: process.env['ONDEMAND_FALLBACK_ENABLED'] === 'true',
     VIDEO_POD_ENABLED: process.env['VIDEO_POD_ENABLED'] === 'true',
     ONDEMAND_ONLY_MODE: process.env['ONDEMAND_ONLY_MODE'] === 'true',
-    NETWORK_VOLUMES_BY_DC: parseVolumesMap(process.env['NETWORK_VOLUMES_BY_DC']),
+    NETWORK_VOLUMES_BY_DC: parseVolumesMap(process.env['NETWORK_VOLUMES_BY_DC'], 'NETWORK_VOLUMES_BY_DC'),
+    NETWORK_VOLUMES_BY_DC_VIDEO: parseVolumesMap(
+      process.env['NETWORK_VOLUMES_BY_DC_VIDEO'],
+      'NETWORK_VOLUMES_BY_DC_VIDEO',
+    ),
     REDIS_URL: process.env['REDIS_URL'] ?? '',
     PREEMPTION_REPLACEMENT_ENABLED: process.env['PREEMPTION_REPLACEMENT_ENABLED'] === 'true',
     MAX_SESSION_REPLACEMENTS: Number(process.env['MAX_SESSION_REPLACEMENTS'] ?? 2),

@@ -47,7 +47,9 @@ Every transition also fires a `pod.state.entered` PostHog event with `previous_s
 
 ## Network volumes
 
-Model weights (~25 GB: FLUX.2-klein-4B BF16 + NVFP4) are stored on pre-populated RunPod network volumes, one per datacenter. Pods mount them read-shared at `/workspace` so the server reads weights from `/workspace/huggingface` without downloading.
+Model weights are stored on pre-populated RunPod network volumes, one per (kind, datacenter) tuple. Pods mount them read-shared at `/workspace`. Two volume sets diverge by GPU SKU:
+
+**Image volumes** (~20 GB: FLUX.2-klein-4B BF16 + NVFP4) live in DCs that stock RTX 5090. Set via `NETWORK_VOLUMES_BY_DC` JSON env var on Railway.
 
 | DC | Volume ID | Size |
 |---|---|---|
@@ -57,20 +59,47 @@ Model weights (~25 GB: FLUX.2-klein-4B BF16 + NVFP4) are stored on pre-populated
 | US-IL-1 | 59plfch67d | 50 GB |
 | US-NC-1 | 5vz7ubospw | 50 GB |
 
-Fixed storage cost: 250 GB × $0.07/GB/mo = ~$17.50/mo.
+**Video volumes** (~52 GB: LTX-2.3 22B distilled FP8 + Gemma-3-12B + spatial upscaler) live in DCs that stock H100 SXM 80 GB. Set via `NETWORK_VOLUMES_BY_DC_VIDEO` JSON env var on Railway. Created at 75 GB to leave headroom for venv + app code + future asset growth.
+
+> _Volume IDs TBD — created during the LTX-2.3 migration. Candidate DCs (Low stock at probe time): CA-MTL-1, US-CA-2, US-TX-3, EU-NL-1, EU-FR-1, EUR-NO-2._
+
+Fixed storage cost: image (250 GB) + video (~6 × 75 = 450 GB) ≈ 700 GB × $0.07/GB/mo = ~$49/mo.
+
+### HF_TOKEN for video volumes
+
+Gemma-3-12B is gated by Google's Gemma terms. Before populating any video volume:
+
+1. Log in to huggingface.co with the account that will run populate-volume.ts
+2. Visit https://huggingface.co/google/gemma-3-12b-it-qat-q4_0-unquantized and accept the license
+3. Generate an HF token at https://huggingface.co/settings/tokens (any read scope is fine)
+4. Add to `.env.local` at the repo root: `HF_TOKEN=hf_...` (gitignored)
+
+The pod itself stays `HF_HUB_OFFLINE=1` at runtime — the token is only used at populate time to download Gemma into the volume cache.
 
 ### Populating a new volume
 
-Use the one-shot script (from `backend/`):
+Use the one-shot script (from `backend/`). Pass `--kind image` or `--kind video` — they download different weights and use different GPU SKUs (5090 for image, H100 SXM for video, since the GPU must be in the volume's DC).
+
+**Image volume** (FLUX.2-klein BF16 + NVFP4, ~20 GB):
 
 ```bash
 RUNPOD_API_KEY=... \
 RUNPOD_SSH_PRIVATE_KEY="$(cat ~/.ssh/id_ed25519)" \
 RUNPOD_REGISTRY_AUTH_ID=cmnzebqxw007pl407z8oij1x8 \
-  npx tsx scripts/populate-volume.ts --dc <DC> --volume-id <id>
+  npx tsx scripts/populate-volume.ts --kind image --dc <5090-DC> --volume-id <id>
 ```
 
-This spawns an on-demand pod in the target DC, mounts the volume, downloads weights via `huggingface_hub`, and terminates the pod (~10–15 min, ~$0.20).
+**Video volume** (LTX-2.3 22B FP8 + Gemma-3-12B + spatial upscaler, ~52 GB) — requires `HF_TOKEN` (see above):
+
+```bash
+RUNPOD_API_KEY=... \
+HF_TOKEN=hf_... \
+RUNPOD_SSH_PRIVATE_KEY="$(cat ~/.ssh/id_ed25519)" \
+RUNPOD_REGISTRY_AUTH_ID=cmnzebqxw007pl407z8oij1x8 \
+  npx tsx scripts/populate-volume.ts --kind video --dc <H100-DC> --volume-id <id>
+```
+
+Both spawn an on-demand pod in the target DC, mount the volume, download weights via `huggingface_hub`, and terminate the pod. Image: ~10–15 min, ~$0.20. Video: ~20–30 min, ~$1 (H100 is pricier and Gemma's 24 GB takes longer to download).
 
 ## Required env vars (Railway)
 
@@ -79,7 +108,8 @@ Set via `railway variables --set` or the dashboard:
 | Env | Source | Purpose |
 |---|---|---|
 | `RUNPOD_API_KEY` | RunPod Console → Settings → API Keys | GraphQL auth for pod lifecycle |
-| `NETWORK_VOLUMES_BY_DC` | JSON: `{"EUR-NO-1":"49n6i3twuw",...}` | DC → volume ID map for weights + app code |
+| `NETWORK_VOLUMES_BY_DC` | JSON: `{"EUR-NO-1":"49n6i3twuw",...}` | Image-pod DC → volume ID map (5090 DCs) |
+| `NETWORK_VOLUMES_BY_DC_VIDEO` | JSON: `{"EU-FR-1":"...",...}` | Video-pod DC → volume ID map (H100 SXM DCs) |
 | `ONDEMAND_FALLBACK_ENABLED` | `true` | Allow on-demand when spot exhausted |
 | `JWT_ACCESS_SECRET` | ≥32 byte hex | HS256 secret for access tokens |
 | `JWT_REFRESH_SECRET` | ≥32 byte hex | HS256 secret for refresh tokens |

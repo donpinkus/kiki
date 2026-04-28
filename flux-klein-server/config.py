@@ -31,29 +31,61 @@ USE_NVFP4 = os.getenv("FLUX_USE_NVFP4", "1") == "1"
 NVFP4_REPO = os.getenv("FLUX_NVFP4_REPO", "black-forest-labs/FLUX.2-klein-4b-nvfp4")
 NVFP4_FILENAME = os.getenv("FLUX_NVFP4_FILENAME", "flux-2-klein-4b-nvfp4.safetensors")
 
-# ─── LTXV (video pod) ───────────────────────────────────────────────────────
-# The video pod runs LTXImageToVideoPipeline with the 0.9.8 distilled
-# transformer overwritten on top of the 0.9.5 base (VAE / text encoder /
-# scheduler come from base). Must match the populate-volume.ts download
-# constants so the pod can run fully offline.
-LTXV_BASE_REPO = os.getenv("LTXV_BASE_REPO", "Lightricks/LTX-Video-0.9.5")
-LTXV_TRANSFORMER_REPO = os.getenv("LTXV_TRANSFORMER_REPO", "Lightricks/LTX-Video")
-LTXV_TRANSFORMER_FILE = os.getenv(
-    "LTXV_TRANSFORMER_FILE", "ltxv-2b-0.9.8-distilled-fp8.safetensors"
+# ─── LTX-2.3 (video pod) ────────────────────────────────────────────────────
+# The video pod runs LTX-2.3 22B distilled FP8 via Lightricks' official
+# `ltx-pipelines.DistilledPipeline`. Two-stage: stage 1 generates at half
+# resolution, stage 2 upscales (via spatial upscaler) and refines at full.
+# All assets are pre-populated on per-DC video volumes at /workspace/huggingface
+# so the pod can run fully offline (HF_HUB_OFFLINE=1).
+#
+# License note: LTX-2 weights are released under the LTX-2 Community License
+# Agreement (https://github.com/Lightricks/LTX-2/blob/main/LICENSE), NOT
+# Apache-2.0. The license restricts commercial use for entities with
+# >=$10M annual revenue. Verify license terms before any commercial
+# deployment (App Store / TestFlight rollout).
+LTX_MODEL_FAMILY = "LTX-2.3"
+LTX_MODEL_REPO = os.getenv("LTX_MODEL_REPO", "Lightricks/LTX-2.3-fp8")
+LTX_MODEL_FILE = os.getenv("LTX_MODEL_FILE", "ltx-2.3-22b-distilled-fp8.safetensors")
+
+# Spatial upscaler is REQUIRED by DistilledPipeline (stage 2 upscales by 2x
+# from the half-res stage 1 latent). Lives in the base LTX-2.3 repo.
+LTX_SPATIAL_UPSCALER_REPO = os.getenv("LTX_SPATIAL_UPSCALER_REPO", "Lightricks/LTX-2.3")
+LTX_SPATIAL_UPSCALER_FILE = os.getenv(
+    "LTX_SPATIAL_UPSCALER_FILE", "ltx-2.3-spatial-upscaler-x2-1.1.safetensors"
 )
-# Generation parameters. Defaults sized for ~2 s video at 24 fps with
-# headroom for sub-3 s end-to-end on a 5090: keeps the right pane
-# responsive when the user resumes drawing.
-LTXV_WIDTH = int(os.getenv("LTXV_WIDTH", "704"))
-LTXV_HEIGHT = int(os.getenv("LTXV_HEIGHT", "480"))
-LTXV_NUM_FRAMES = int(os.getenv("LTXV_NUM_FRAMES", "49"))
-LTXV_STEPS = int(os.getenv("LTXV_STEPS", "8"))
-LTXV_FPS = int(os.getenv("LTXV_FPS", "24"))
-LTXV_OUTPUT_JPEG_QUALITY = int(os.getenv("LTXV_OUTPUT_QUALITY", "80"))
-# Negative prompt — slight quality bump per LTX docs.
-LTXV_NEGATIVE_PROMPT = os.getenv(
-    "LTXV_NEGATIVE_PROMPT",
-    "worst quality, inconsistent motion, blurry, jittery, distorted",
+
+# Gemma-3-12B is LTX-2.3's text encoder (replaces T5 from LTXV 0.9.x). Gated
+# by Google's Gemma terms — populate must run with HF_TOKEN that has
+# accepted the license. Pod runtime stays offline.
+LTX_TEXT_ENCODER_REPO = os.getenv(
+    "LTX_TEXT_ENCODER_REPO", "google/gemma-3-12b-it-qat-q4_0-unquantized"
 )
+
+# Inference parameters. DistilledPipeline runs 8 sigmas in stage 1 + 4 in
+# stage 2 = 12 effective denoising steps; LTX_INFERENCE_STEPS is informational
+# (the pipeline owns the actual step count via its predefined sigmas).
+LTX_INFERENCE_STEPS = 8
+LTX_CFG_SCALE = 1.0
+LTX_QUANTIZATION = "fp8"
+
+# Resolution + frame-count constraints (enforced by ltx-pipelines.utils.helpers
+# .assert_resolution at __call__ time). We validate at config load too so
+# misconfig surfaces at pod boot, not first inference.
+LTX_WIDTH = int(os.getenv("LTX_WIDTH", "704"))
+LTX_HEIGHT = int(os.getenv("LTX_HEIGHT", "480"))
+LTX_NUM_FRAMES = int(os.getenv("LTX_NUM_FRAMES", "49"))
+LTX_FPS = int(os.getenv("LTX_FPS", "24"))
+LTX_OUTPUT_JPEG_QUALITY = int(os.getenv("LTX_OUTPUT_QUALITY", "80"))
+
+if LTX_WIDTH % 32 != 0:
+    raise ValueError(f"LTX_WIDTH must be divisible by 32 (got {LTX_WIDTH})")
+if LTX_HEIGHT % 32 != 0:
+    raise ValueError(f"LTX_HEIGHT must be divisible by 32 (got {LTX_HEIGHT})")
+if (LTX_NUM_FRAMES - 1) % 8 != 0:
+    raise ValueError(
+        f"LTX_NUM_FRAMES must satisfy (n - 1) % 8 == 0 — valid: 9, 17, 25, 33, 41, 49, … "
+        f"(got {LTX_NUM_FRAMES})"
+    )
+
 # Toggle for verbose per-step logging in the video pipeline. Off by default.
-LTXV_DEBUG = os.getenv("LTXV_DEBUG", "0") == "1"
+LTX_DEBUG = os.getenv("LTX_DEBUG", "0") == "1"

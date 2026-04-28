@@ -282,9 +282,18 @@ interface PodKindConfig {
   bootDockerArgs: string;
   /** RunPod proxy port for this pod's HTTP/WS service. */
   port: number;
+  /** RunPod GPU SKU. Image: RTX 5090 (Blackwell, NVFP4 path for FLUX).
+   *  Video: H100 80GB HBM3 (SXM, needed for LTX-2.3 22B FP8 + Gemma + activations
+   *  — the ~46 GB total VRAM footprint doesn't fit on 5090). */
+  gpuTypeId: string;
+  /** Per-kind map of DC → networkVolumeId, sourced from config.NETWORK_VOLUMES_BY_DC*
+   *  at construction time. Image and video volume sets diverge: image lives in
+   *  5090 DCs, video lives in H100-SXM DCs (different DCs because RunPod's
+   *  capacity allocation differs by GPU). selectPlacement consumes this. */
+  volumesByDc: Readonly<Record<string, string>>;
   /** Watchdog budget for `waitForRuntime`. Image: 45 s (handles by reroll).
-   *  Video: 180 s (cold image pulls on a fresh host need more headroom; we
-   *  do still reroll, just give each DC more time before giving up). */
+   *  Video: 240 s (LTX-2.3 22B FP8 + Gemma encoder load is heavier than
+   *  LTXV 2B distilled was; needs more headroom before giving up). */
   stallMs: number;
   /** Create a pod for the chosen DC. Image: spot then on-demand fallback.
    *  Video: on-demand only (preemption recovery via replaceVideoSession is
@@ -1329,29 +1338,25 @@ async function provision(sessionId: string, signal?: AbortSignal): Promise<Provi
 // the LTXV warmup window).
 // ────────────────────────────────────────────────────────────────────────────
 
-/** Read the image pod's current DC for co-location. Returns undefined if
- *  no image pod yet or RunPod query fails. Both video entry points call
- *  this so a video provision targets the same DC as image (avoids
- *  cross-DC trigger latency + bad-DC landing). */
-async function _imagePodDc(session: RedisSession | null): Promise<string | undefined> {
-  if (!session?.podId) return undefined;
-  const pod = await getPod(session.podId).catch(() => null);
-  return pod?.machine?.dataCenterId ?? undefined;
-}
-
 /** Kick off (or reuse) a video provision in the inFlight map. Stores the
  *  rich-shape promise from _runProvisionLoop, returns the narrower
  *  best-effort {podId, podUrl}|null. Used by both fresh provision
- *  (getOrProvisionVideoPod) and replacement (replaceVideoSession). */
+ *  (getOrProvisionVideoPod) and replacement (replaceVideoSession).
+ *
+ *  Note: pre-LTX-2.3 we passed `preferredDc=imagePodDc` here to co-locate
+ *  the video pod with the image pod's DC. Post-migration, image and video
+ *  use disjoint GPU SKUs (5090 vs H100 SXM) which RunPod allocates to
+ *  disjoint DCs — co-location can never succeed. The forwarded video_request
+ *  payload is one JPEG (~200 KB) over RunPod's backbone (~50 ms cross-DC),
+ *  acceptable. */
 async function _runVideoProvision(
   sessionId: string,
-  preferredDc: string | undefined,
 ): Promise<{ podId: string; podUrl: string } | null> {
   const key = `video:${sessionId}`;
   const controller = new AbortController();
   const promise = (async () => {
     try {
-      return await _runProvisionLoop('video', sessionId, { preferredDc, signal: controller.signal });
+      return await _runProvisionLoop('video', sessionId, { signal: controller.signal });
     } finally {
       inFlightProvisions.delete(key);
     }
@@ -1424,7 +1429,7 @@ export async function getOrProvisionVideoPod(
   }
 
   // ── Fresh provision. ──────────────────────────────────────────────
-  return _runVideoProvision(sessionId, await _imagePodDc(existing));
+  return _runVideoProvision(sessionId);
 }
 
 /**
@@ -1463,7 +1468,7 @@ export async function replaceVideoSession(
     );
   }
 
-  return _runVideoProvision(sessionId, await _imagePodDc(session));
+  return _runVideoProvision(sessionId);
 }
 
 /** Terminate a video pod by ID. Never throws. Used by stream.ts on relay
@@ -1516,17 +1521,19 @@ interface PlacementTarget {
  * target (DC = null) and lets RunPod pick.
  */
 async function selectPlacement(
+  kind: PodKind,
   sessionId: string,
   excludeDcs: ReadonlySet<string> = new Set(),
   preferredDc?: string,
 ): Promise<PlacementTarget | null> {
-  const volumes = config.NETWORK_VOLUMES_BY_DC;
+  const cfg = POD_CONFIGS[kind];
+  const volumes = cfg.volumesByDc;
   const volumeDcs = Object.keys(volumes).filter((dc) => !excludeDcs.has(dc));
   const useVolumes = volumeDcs.length > 0;
 
   if (!useVolumes) {
     try {
-      const bidInfo = await getSpotBid(GPU_TYPE_ID);
+      const bidInfo = await getSpotBid(cfg.gpuTypeId);
       return { dataCenterId: null, networkVolumeId: null, bidInfo };
     } catch (err) {
       if (isCapacityError(err)) return { dataCenterId: null, networkVolumeId: null, bidInfo: null };
@@ -1541,7 +1548,7 @@ async function selectPlacement(
     volumeDcs.map(async (dc) => {
       const volumeId = volumes[dc]!;
       try {
-        const bid = await getSpotBid(GPU_TYPE_ID, { dataCenterId: dc });
+        const bid = await getSpotBid(cfg.gpuTypeId, { dataCenterId: dc });
         probed.push({ dc, volumeId, bid });
       } catch (err) {
         if (isCapacityError(err)) {
@@ -1752,6 +1759,8 @@ const POD_CONFIGS: Record<PodKind, PodKindConfig> = {
     // BOOT_ENV.FLUX_PORT — same Python server framework, different scripts.
     // Kept parametric in case a future pod kind diverges.
     port: 8766,
+    gpuTypeId: 'NVIDIA GeForce RTX 5090',
+    volumesByDc: config.NETWORK_VOLUMES_BY_DC,
     stallMs: config.POD_BOOT_WATCHDOG_ENABLED ? config.POD_BOOT_STALL_MS : Infinity,
     createPodForDc: (target, sessionId) => {
       const podName = `${POD_PREFIX}${sessionId.slice(0, 16)}`;
@@ -1779,10 +1788,15 @@ const POD_CONFIGS: Record<PodKind, PodKindConfig> = {
     namePrefix: VIDEO_POD_PREFIX,
     bootDockerArgs: BOOT_DOCKER_ARGS_VIDEO,
     port: 8766,
-    // Cold image pulls on a fresh host take 60-180s. Image pod can reroll
-    // on stall fast (45s); video pod also rerolls now via _runProvisionLoop,
-    // but giving each attempt more headroom reduces total reroll cost.
-    stallMs: 180_000,
+    // H100 SXM (80 GB) — LTX-2.3 22B FP8 transformer (~27.5 GB) + Gemma-3-12B
+    // encoder (~6 GB) + spatial upscaler + activations doesn't fit on a 5090's
+    // 32 GB. Image and video DC sets diverge: video volumes live in DCs that
+    // stock H100 SXM, image volumes live in 5090 DCs.
+    gpuTypeId: 'NVIDIA H100 80GB HBM3',
+    volumesByDc: config.NETWORK_VOLUMES_BY_DC_VIDEO,
+    // LTX-2.3 22B + Gemma encoder load is heavier than LTXV 0.9.8's 2B —
+    // the previous 180s budget routinely tripped the watchdog on cold pulls.
+    stallMs: 240_000,
     createPodForDc: async (target, sessionId) => {
       const podName = `${VIDEO_POD_PREFIX}${sessionId.slice(0, 16)}`;
       const dcField = target.dataCenterId ? { dataCenterId: target.dataCenterId } : {};
@@ -1790,7 +1804,10 @@ const POD_CONFIGS: Record<PodKind, PodKindConfig> = {
       const result = await createOnDemandPod({
         name: podName,
         imageName: BASE_IMAGE,
-        gpuTypeId: GPU_TYPE_ID,
+        // H100 SXM. Defined here rather than at module scope because the
+        // image kind uses a different GPU SKU; GPU_TYPE_ID at the top of
+        // this file is the legacy image-only constant.
+        gpuTypeId: 'NVIDIA H100 80GB HBM3',
         cloudType: 'SECURE',
         dockerArgs: BOOT_DOCKER_ARGS_VIDEO,
         env: BOOT_ENV,
@@ -1884,14 +1901,18 @@ async function _runProvisionLoop(
 
     try {
       // 1 + 2. DC selection + pod create. Both are kind-specific via
-      // POD_CONFIGS[kind].createPodForDc — image goes spot-then-on-demand,
-      // video goes straight on-demand.
-      const target = await selectPlacement(sessionId, blacklistedDcs, opts.preferredDc);
+      // POD_CONFIGS[kind] — image goes spot-then-on-demand on 5090s in
+      // image volumes' DCs; video goes straight on-demand on H100 SXM in
+      // video volumes' DCs. selectPlacement reads the right volume map +
+      // GPU SKU from cfg.
+      const target = await selectPlacement(kind, sessionId, blacklistedDcs, opts.preferredDc);
       if (!target) {
         const suffix = blacklistedDcs.size > 0
           ? ` (excluding ${Array.from(blacklistedDcs).join(',')} after earlier stall)`
           : '';
-        throw new Error(`No RunPod DC has 5090 capacity right now (all volume-DCs exhausted)${suffix}`);
+        throw new Error(
+          `No RunPod DC has ${cfg.gpuTypeId} capacity right now (all volume-DCs exhausted)${suffix}`,
+        );
       }
       await opts.onProvisionPhase?.('creating_pod', null);
       currentState = 'creating_pod';

@@ -1,13 +1,23 @@
 /**
- * One-shot script: populate a RunPod network volume with FLUX.2-klein weights.
+ * One-shot script: populate a RunPod network volume with model weights.
  *
- * Spawns an on-demand 5090 pod in the volume's DC, mounts the volume at
- * /workspace, downloads FLUX.2-klein BF16 + NVFP4 weights into
- * /workspace/huggingface, terminates the pod.
+ * Two kinds of volumes:
+ *   --kind image  : FLUX.2-klein BF16 + NVFP4 (~20 GB), for image pods on 5090s
+ *   --kind video  : LTX-2.3 22B distilled FP8 + Gemma-3-12B + spatial upscaler
+ *                   (~52 GB), for video pods on H100 SXM
+ *
+ * Spawns an on-demand pod in the volume's DC, mounts the volume at
+ * /workspace, downloads weights into /workspace/huggingface, terminates pod.
  *
  * Usage (run from backend/):
+ *   # Image volume (5090 DCs)
  *   RUNPOD_API_KEY=... RUNPOD_SSH_PRIVATE_KEY="$(cat ~/.ssh/id_ed25519)" \
- *     tsx scripts/populate-volume.ts --dc EUR-NO-1 --volume-id 49n6i3twuw
+ *     tsx scripts/populate-volume.ts --kind image --dc EUR-NO-1 --volume-id 49n6i3twuw
+ *
+ *   # Video volume (H100 SXM DCs) — Gemma is gated by Google ToS, requires HF_TOKEN
+ *   # with Gemma access pre-accepted at huggingface.co/google/gemma-3-12b-it-qat-q4_0-unquantized
+ *   RUNPOD_API_KEY=... HF_TOKEN=... RUNPOD_SSH_PRIVATE_KEY="$(cat ~/.ssh/id_ed25519)" \
+ *     tsx scripts/populate-volume.ts --kind video --dc EU-FR-1 --volume-id <id>
  *
  * Idempotent — re-running against an already-populated volume just re-checks
  * sizes and exits quickly (huggingface_hub snapshot_download no-ops on cache hit).
@@ -28,6 +38,11 @@ function getArg(flag: string): string {
 
 const DC = getArg('--dc');
 const VOLUME_ID = getArg('--volume-id');
+const KIND = getArg('--kind');
+if (KIND !== 'image' && KIND !== 'video') {
+  console.error(`--kind must be 'image' or 'video' (got '${KIND}')`);
+  process.exit(1);
+}
 
 const API_KEY = process.env['RUNPOD_API_KEY'];
 const SSH_KEY = process.env['RUNPOD_SSH_PRIVATE_KEY'];
@@ -35,6 +50,9 @@ const SSH_KEY = process.env['RUNPOD_SSH_PRIVATE_KEY'];
 // pull is anonymous and can take 10+ min on a fresh host (rate limits shared
 // across RunPod customers on the same egress IP).
 const REGISTRY_AUTH_ID = process.env['RUNPOD_REGISTRY_AUTH_ID'];
+// Required for video kind only: Gemma is gated by Google's Gemma ToS. Token
+// must have accepted the license terms on huggingface.co.
+const HF_TOKEN = process.env['HF_TOKEN'] ?? process.env['HUGGING_FACE_HUB_TOKEN'];
 if (!API_KEY) {
   console.error('RUNPOD_API_KEY env var is required');
   process.exit(1);
@@ -43,24 +61,37 @@ if (!SSH_KEY) {
   console.error('RUNPOD_SSH_PRIVATE_KEY env var is required');
   process.exit(1);
 }
+if (KIND === 'video' && !HF_TOKEN) {
+  console.error(
+    'HF_TOKEN env var is required for --kind video (Gemma-3-12B is gated by Google ToS).\n' +
+    'Accept terms at https://huggingface.co/google/gemma-3-12b-it-qat-q4_0-unquantized\n' +
+    'then export HF_TOKEN=hf_...',
+  );
+  process.exit(1);
+}
 
 // ─── Constants ────────────────────────────────────────────────────────────
 
-const GPU_TYPE_ID = 'NVIDIA GeForce RTX 5090';
+// Image volumes live in 5090 DCs; video volumes live in H100 SXM DCs.
+// Volume is DC-locked, so the populate pod must be in the same DC as the
+// volume. We pick the GPU type that's actually available there.
+const GPU_TYPE_ID = KIND === 'image' ? 'NVIDIA GeForce RTX 5090' : 'NVIDIA H100 80GB HBM3';
 const IMAGE_NAME = 'runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404';
-const POD_NAME = `kiki-populate-${DC.toLowerCase()}-${Date.now()}`;
+const POD_NAME = `kiki-populate-${KIND}-${DC.toLowerCase()}-${Date.now()}`;
 const SSH_KEY_PATH = '/tmp/kiki-populate-key';
 
+// Image-pod weights.
 const FLUX_REPO = 'black-forest-labs/FLUX.2-klein-4B';
 const NVFP4_REPO = 'black-forest-labs/FLUX.2-klein-4b-nvfp4';
 const NVFP4_FILENAME = 'flux-2-klein-4b-nvfp4.safetensors';
-// LTXV 2B 0.9.8 distilled: used for idle-state video animation.
-// VAE/text_encoder/scheduler come from the 0.9.5 base repo (same 2B arch).
-// The 0.9.8 distilled transformer is a single-file checkpoint in the main repo.
-// Must match config.LTXV_BASE_REPO / LTXV_TRANSFORMER_* in flux-klein-server/config.py.
-const LTXV_BASE_REPO = 'Lightricks/LTX-Video-0.9.5';
-const LTXV_TRANSFORMER_REPO = 'Lightricks/LTX-Video';
-const LTXV_TRANSFORMER_FILE = 'ltxv-2b-0.9.8-distilled-fp8.safetensors';
+
+// Video-pod weights (LTX-2.3, Gemma encoder, spatial upscaler).
+// Must match config.LTX_* in flux-klein-server/config.py.
+const LTX_MODEL_REPO = 'Lightricks/LTX-2.3-fp8';
+const LTX_MODEL_FILE = 'ltx-2.3-22b-distilled-fp8.safetensors';
+const LTX_SPATIAL_UPSCALER_REPO = 'Lightricks/LTX-2.3';
+const LTX_SPATIAL_UPSCALER_FILE = 'ltx-2.3-spatial-upscaler-x2-1.1.safetensors';
+const LTX_TEXT_ENCODER_REPO = 'google/gemma-3-12b-it-qat-q4_0-unquantized';
 
 // ─── GraphQL helper ───────────────────────────────────────────────────────
 
@@ -201,10 +232,10 @@ async function retrySsh(ssh: SshInfo, tries = 20): Promise<void> {
 // ─── Main ─────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
-  console.log(`[populate] DC=${DC} volume=${VOLUME_ID}`);
+  console.log(`[populate] kind=${KIND} DC=${DC} volume=${VOLUME_ID} gpu=${GPU_TYPE_ID}`);
   ensureSshKey();
 
-  console.log(`[populate] creating on-demand 5090 pod in ${DC}...`);
+  console.log(`[populate] creating on-demand pod in ${DC}...`);
   const { id: podId, costPerHr } = await createPod();
   console.log(`[populate] pod ${podId} created ($${costPerHr}/hr)`);
 
@@ -216,14 +247,30 @@ async function main(): Promise<void> {
     console.log('[populate] waiting for sshd to accept connections...');
     await retrySsh(ssh);
 
-    // Populate script — downloads FLUX.2-klein BF16 weights + NVFP4 weights
-    // into /workspace/huggingface (i.e. the mounted network volume).
-    //
-    // allow_patterns trims the BF16 repo to just what Flux2KleinPipeline uses
-    // — without it we'd pull ~40 GB of alt transformer variants (fp8, bnb).
-    // Ubuntu 24.04 (PEP 668) blocks system-wide pip unless --break-system-packages.
-    // We're on a throwaway pod so that's fine.
-    const populateCmd = `set -e
+    const populateCmd = KIND === 'image' ? buildImagePopulateCmd() : buildVideoPopulateCmd();
+
+    console.log('[populate] running download commands (this takes 5-15 min)...');
+    await runSsh(ssh, populateCmd, 60 * 60 * 1000);
+    console.log('[populate] populate complete');
+  } finally {
+    console.log(`[populate] terminating pod ${podId}...`);
+    await terminatePod(podId).catch((e) => console.error('[populate] terminate failed:', e));
+  }
+
+  console.log(`[populate] done. Volume ${VOLUME_ID} ready to use in ${DC} (kind=${KIND}).`);
+}
+
+// ─── Per-kind populate scripts ────────────────────────────────────────────
+
+function buildImagePopulateCmd(): string {
+  // Downloads FLUX.2-klein BF16 weights + NVFP4 weights into
+  // /workspace/huggingface (the mounted network volume).
+  //
+  // allow_patterns trims the BF16 repo to just what Flux2KleinPipeline uses
+  // — without it we'd pull ~40 GB of alt transformer variants (fp8, bnb).
+  // Ubuntu 24.04 (PEP 668) blocks system-wide pip unless --break-system-packages.
+  // We're on a throwaway pod so that's fine.
+  return `set -e
 export HF_HOME=/workspace/huggingface
 export HF_HUB_DISABLE_TELEMETRY=1
 mkdir -p "$HF_HOME"
@@ -252,43 +299,59 @@ p = hf_hub_download('${NVFP4_REPO}', '${NVFP4_FILENAME}')
 print('nvfp4 weights at', p)
 "
 
-echo "=== Downloading ${LTXV_BASE_REPO} (VAE/text_encoder/scheduler — skip transformer, ~16 GB) ==="
-python3 -c "
-from huggingface_hub import snapshot_download
-# Download everything except the 0.9.5 transformer weights — we replace
-# those with the 0.9.8 distilled single-file checkpoint below.
-p = snapshot_download(
-    '${LTXV_BASE_REPO}',
-    allow_patterns=['*.json','*.txt','model_index.json','tokenizer*/*','text_encoder*/*','vae/*','scheduler/*','transformer/config.json'],
-    ignore_patterns=['transformer/*.safetensors'],
-)
-print('ltxv base at', p)
-"
-
-echo "=== Downloading ${LTXV_TRANSFORMER_REPO}/${LTXV_TRANSFORMER_FILE} (0.9.8 distilled transformer, ~6 GB) ==="
-python3 -c "
-from huggingface_hub import hf_hub_download
-p = hf_hub_download('${LTXV_TRANSFORMER_REPO}', '${LTXV_TRANSFORMER_FILE}')
-print('ltxv transformer at', p)
-"
-
 echo "=== Disk after ==="
 df -h /workspace
-
 echo "=== Layout ==="
 ls -la /workspace/huggingface/hub | head -20
 du -sh /workspace/huggingface
 `;
+}
 
-    console.log('[populate] running download commands (this takes 5-15 min)...');
-    await runSsh(ssh, populateCmd, 45 * 60 * 1000);
-    console.log('[populate] populate complete');
-  } finally {
-    console.log(`[populate] terminating pod ${podId}...`);
-    await terminatePod(podId).catch((e) => console.error('[populate] terminate failed:', e));
-  }
+function buildVideoPopulateCmd(): string {
+  // Downloads LTX-2.3 22B distilled FP8 + Gemma-3-12B + spatial upscaler.
+  // HF_TOKEN must be set with Gemma access accepted on huggingface.co.
+  // We pass it via env on the SSH'd shell so the pod can authenticate to HF.
+  return `set -e
+export HF_HOME=/workspace/huggingface
+export HF_HUB_DISABLE_TELEMETRY=1
+export HF_TOKEN=${HF_TOKEN}
+export HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}
+mkdir -p "$HF_HOME"
 
-  console.log(`[populate] done. Volume ${VOLUME_ID} ready to use in ${DC}.`);
+echo "=== Disk before ==="
+df -h /workspace
+
+echo "=== Ensuring huggingface_hub is installed ==="
+python3 -c "import huggingface_hub; print('already installed:', huggingface_hub.__version__)" 2>/dev/null || \
+  pip install --no-cache-dir --break-system-packages huggingface-hub
+
+echo "=== Downloading ${LTX_MODEL_REPO}/${LTX_MODEL_FILE} (~27.5 GB) ==="
+python3 -c "
+from huggingface_hub import hf_hub_download
+p = hf_hub_download('${LTX_MODEL_REPO}', '${LTX_MODEL_FILE}')
+print('ltx-2.3 transformer at', p)
+"
+
+echo "=== Downloading ${LTX_SPATIAL_UPSCALER_REPO}/${LTX_SPATIAL_UPSCALER_FILE} (~1 GB) ==="
+python3 -c "
+from huggingface_hub import hf_hub_download
+p = hf_hub_download('${LTX_SPATIAL_UPSCALER_REPO}', '${LTX_SPATIAL_UPSCALER_FILE}')
+print('spatial upscaler at', p)
+"
+
+echo "=== Downloading ${LTX_TEXT_ENCODER_REPO} (Gemma encoder, ~24 GB, gated) ==="
+python3 -c "
+from huggingface_hub import snapshot_download
+p = snapshot_download('${LTX_TEXT_ENCODER_REPO}')
+print('gemma encoder at', p)
+"
+
+echo "=== Disk after ==="
+df -h /workspace
+echo "=== Layout ==="
+ls -la /workspace/huggingface/hub | head -20
+du -sh /workspace/huggingface
+`;
 }
 
 main().catch((e) => {

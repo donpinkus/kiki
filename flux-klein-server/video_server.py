@@ -1,4 +1,4 @@
-"""LTXV video pod WebSocket server.
+"""LTX-2.3 video pod WebSocket server.
 
 Protocol (backend -> pod):
     - Text frame (JSON):
@@ -44,7 +44,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from PIL import Image
 
 import config
-from video_pipeline import LtxvVideoPipeline
+from video_pipeline import Ltx23VideoPipeline
 
 logging.basicConfig(
     level=logging.INFO,
@@ -52,12 +52,23 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-video_pipeline = LtxvVideoPipeline()
+video_pipeline = Ltx23VideoPipeline()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Starting LTXV video server...")
+    logger.info(
+        "Starting %s video server: model=%s/%s pipeline=DistilledPipeline "
+        "quantization=%s resolution=%dx%d num_frames=%d fps=%d",
+        config.LTX_MODEL_FAMILY,
+        config.LTX_MODEL_REPO,
+        config.LTX_MODEL_FILE,
+        config.LTX_QUANTIZATION,
+        config.LTX_WIDTH,
+        config.LTX_HEIGHT,
+        config.LTX_NUM_FRAMES,
+        config.LTX_FPS,
+    )
     video_pipeline.load()
     yield
     logger.info("Shutting down.")
@@ -132,7 +143,7 @@ async def websocket_video(ws: WebSocket):
             )
         except Exception as e:  # noqa: BLE001
             videos_failed += 1
-            logger.error("ltxv generate error: req=%s err=%s", request_id, e, exc_info=True)
+            logger.error("LTX-2.3 generate error: req=%s err=%s", request_id, e, exc_info=True)
             await ws.send_text(json.dumps({
                 "type": "video_cancelled",
                 "requestId": request_id,
@@ -169,7 +180,7 @@ async def websocket_video(ws: WebSocket):
                 }))
                 return
             buf = io.BytesIO()
-            frame.save(buf, format="JPEG", quality=config.LTXV_OUTPUT_JPEG_QUALITY)
+            frame.save(buf, format="JPEG", quality=config.LTX_OUTPUT_JPEG_QUALITY)
             await ws.send_text(json.dumps({
                 "type": "video_frame",
                 "requestId": request_id,
@@ -178,7 +189,7 @@ async def websocket_video(ws: WebSocket):
             }))
             await ws.send_bytes(buf.getvalue())
 
-            if config.LTXV_DEBUG and i % 4 == 0:
+            if config.LTX_DEBUG and i % 4 == 0:
                 logger.info(
                     "frame %d/%d streamed elapsed_ms=%d",
                     i + 1, len(frames), int((time.time() - t0) * 1000),
@@ -192,7 +203,7 @@ async def websocket_video(ws: WebSocket):
         # dying — the create_task future has nobody awaiting it.
         try:
             encode_t0 = time.time()
-            mp4_bytes = await asyncio.to_thread(_encode_mp4, frames, config.LTXV_FPS)
+            mp4_bytes = await asyncio.to_thread(_encode_mp4, frames, config.LTX_FPS)
             encode_ms = int((time.time() - encode_t0) * 1000)
 
             videos_total += 1
@@ -203,7 +214,7 @@ async def websocket_video(ws: WebSocket):
             await ws.send_text(json.dumps({
                 "type": "video_complete",
                 "requestId": request_id,
-                "fps": config.LTXV_FPS,
+                "fps": config.LTX_FPS,
                 "frames": len(frames),
                 "genMs": gen_ms,
                 "encodeMs": encode_ms,
