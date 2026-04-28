@@ -7,6 +7,10 @@ struct DrawingView: View {
     @Environment(AppCoordinator.self) private var coordinator
     @State private var panelReturnTask: Task<Void, Never>?
     @State private var errorDismissTask: Task<Void, Never>?
+    @State private var quickShapeTooltipDismissTask: Task<Void, Never>?
+    /// Persistent flag — once the user has seen the QuickShape tooltip on
+    /// any device session, never show it again on this device.
+    @AppStorage("quickShape.tooltip.shown") private var hasSeenQuickShapeTooltip: Bool = false
 
     var body: some View {
         @Bindable var coordinator = coordinator
@@ -91,6 +95,29 @@ struct DrawingView: View {
                         .zIndex(10)
                     }
 
+                    // QuickShape NUX tooltip — appears once per device, on the
+                    // user's first successful snap. Auto-dismisses after 5s
+                    // or on tap. AppStorage flag suppresses subsequent showings.
+                    if coordinator.shouldShowQuickShapeTooltip && !hasSeenQuickShapeTooltip {
+                        quickShapeTooltip
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                            .padding(.bottom, 24)
+                            .zIndex(11)
+                            .transition(.opacity.combined(with: .move(edge: .bottom)))
+                            .onAppear {
+                                quickShapeTooltipDismissTask?.cancel()
+                                quickShapeTooltipDismissTask = Task {
+                                    try? await Task.sleep(for: .seconds(5))
+                                    guard !Task.isCancelled else { return }
+                                    dismissQuickShapeTooltip()
+                                }
+                            }
+                            .onTapGesture {
+                                quickShapeTooltipDismissTask?.cancel()
+                                dismissQuickShapeTooltip()
+                            }
+                    }
+
                     if coordinator.drawingLayout == .splitScreen {
                         splitScreenResultPane(geometry: geometry)
                             .zIndex(2)
@@ -109,8 +136,10 @@ struct DrawingView: View {
                             }
                         )
                         .overlay(alignment: .bottomLeading) {
-                            connectionStatusIndicator
-                                .padding(8)
+                            if case .ready = coordinator.streamReadiness {
+                                connectionStatusIndicator
+                                    .padding(8)
+                            }
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
                         .padding(16)
@@ -138,11 +167,35 @@ struct DrawingView: View {
             }
         }
         .animation(.easeInOut(duration: 0.3), value: coordinator.generationError != nil)
+        .animation(.easeOut(duration: 0.25), value: coordinator.shouldShowQuickShapeTooltip)
         .ignoresSafeArea(.keyboard)
         .onAppear { KeyboardDismissal.installIfNeeded() }
         .fullScreenCover(isPresented: $coordinator.showStylePicker) {
             StylePickerView()
                 .environment(coordinator)
+        }
+    }
+
+    // MARK: - QuickShape Tooltip
+
+    private var quickShapeTooltip: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "hand.tap.fill")
+                .font(.subheadline)
+            Text("Hold at the end of a stroke to snap it to a shape")
+                .font(.subheadline.weight(.medium))
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(Color.black.opacity(0.85), in: Capsule())
+        .shadow(color: .black.opacity(0.25), radius: 8, y: 2)
+    }
+
+    private func dismissQuickShapeTooltip() {
+        hasSeenQuickShapeTooltip = true
+        withAnimation(.easeOut(duration: 0.25)) {
+            coordinator.shouldShowQuickShapeTooltip = false
         }
     }
 
@@ -154,14 +207,17 @@ struct DrawingView: View {
                 state: coordinator.resultState,
                 currentBrushColor: coordinator.currentColor,
                 onColorPicked: { coordinator.currentColor = $0 },
-                onResumeTapped: { coordinator.resumeStream() }
+                onResumeTapped: { coordinator.resumeStream() },
+                isUserDrawing: coordinator.canvasViewModel.isInteracting
             )
             .overlay(alignment: .top) {
                 PromptTitleBar()
             }
             .overlay(alignment: .bottomLeading) {
-                connectionStatusIndicator
-                    .padding(12)
+                if case .ready = coordinator.streamReadiness {
+                    connectionStatusIndicator
+                        .padding(12)
+                }
             }
             .overlay(alignment: .bottomTrailing) {
                 if coordinator.canSwapStreamImageToCanvas {
@@ -183,38 +239,20 @@ struct DrawingView: View {
 
     // MARK: - Private
 
+    /// Bottom-left badge shown only while connected (`.ready`). Every other
+    /// readiness state surfaces through the result-pane overlay instead.
     private var connectionStatusIndicator: some View {
         HStack(spacing: 6) {
             Circle()
-                .fill(streamStatusColor)
+                .fill(.green)
                 .frame(width: 7, height: 7)
-            Text(streamStatusLabel)
+            Text("Streaming · frame \(coordinator.streamFrameCount)")
                 .font(.caption.weight(.medium))
         }
         .foregroundStyle(.secondary)
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
         .background(.ultraThinMaterial, in: Capsule())
-    }
-
-    private var streamStatusColor: Color {
-        switch coordinator.streamReadiness {
-        case .ready: return .green
-        case .warming: return .orange
-        case .disconnected: return .gray
-        case .failed: return .red
-        case .idleTimeout: return .blue
-        }
-    }
-
-    private var streamStatusLabel: String {
-        switch coordinator.streamReadiness {
-        case .ready: return "Streaming · frame \(coordinator.streamFrameCount)"
-        case .warming(let message, _): return message
-        case .disconnected: return "Disconnected"
-        case .failed: return "Error"
-        case .idleTimeout: return "Paused"
-        }
     }
 
     private var streamSwapBar: some View {

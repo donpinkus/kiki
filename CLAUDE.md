@@ -34,7 +34,7 @@ cd backend && npm run lint         # Lint
 
 **Backend:** TypeScript + Fastify — no Express. Railway for hosting. Backend is both a WebSocket relay AND a pod orchestrator: it provisions a dedicated RTX 5090 pod per session (JWT-authenticated), relays frames to that pod, and terminates pods idle > 30 min. Redis-backed session registry (survives deploys), semaphore caps concurrent cold starts. See `documents/references/provider-config.md` for the full ops picture.
 
-**Generation:** FLUX.2-klein-4B on RunPod RTX 5090 spot, with BFL's NVFP4 transformer checkpoint loaded on top of the BF16 pipeline. Real-time img2img streaming over WebSocket. Canvas captured at ~2 FPS, sent as JPEG, generated images returned ~1 FPS. Reference-mode only: the sketch is VAE-encoded and concatenated with generation latents as conditioning tokens. Server uses frame dropping (single-slot buffer) to prevent queue buildup. ~110–150s cold start (slim GHCR image + pre-populated network volumes).
+**Generation:** FLUX.2-klein-4B on RunPod RTX 5090 spot, with BFL's NVFP4 transformer checkpoint loaded on top of the BF16 pipeline. Real-time img2img streaming over WebSocket. Canvas captured at ~2 FPS, sent as JPEG, generated images returned ~1 FPS. Reference-mode only: the sketch is VAE-encoded and concatenated with generation latents as conditioning tokens. Server uses frame dropping (single-slot buffer) to prevent queue buildup. ~96s avg cold start (p95 ~157s) — pods boot from stock `runpod/pytorch` and read app code + venv off pre-populated network volumes that also hold the FLUX weights.
 
 ## Navigation & Persistence
 
@@ -108,6 +108,7 @@ When diagnosing a failure, separate observations from inferences. Do not collaps
 | Cost monitoring, Discord alerts, pod lifecycle threads | `backend/src/modules/orchestrator/costMonitor.ts` |
 | Scale-to-100-users roadmap + workstream status | `documents/plans/scale-to-100-users.md` |
 | Metal canvas architecture plan (layers, smudge, etc.) | `documents/plans/metal-canvas-rewrite.md` |
+| FLUX.2-klein capability notebook (potential features, not committed) | `documents/ideas/flux-klein-capabilities.md` |
 | Implementation decisions log | `documents/decisions.md` |
 | Removed features (ComfyUI, StreamDiffusion) | `documents/removed-features.md` |
 | Product requirements | `PRD.md` |
@@ -115,11 +116,25 @@ When diagnosing a failure, separate observations from inferences. Do not collaps
 
 ## Deploy Process
 
-**Backend (Fastify on Railway):** `cd backend && railway up`. No git push.
+**`cd backend && npm run deploy`** — single command. The script (`scripts/deploy.ts`) handles both pod app code and backend together:
 
-**Pod Docker image (flux-klein-server on RunPod):** Push to `main` touching `flux-klein-server/**` → GitHub Actions builds and pushes to `ghcr.io/donpinkus/kiki-flux-klein:latest`. `FLUX_IMAGE` on Railway is set to `:latest`, so new pods automatically pull the latest image — no Railway update needed. SHA-pinned tags (`:sha-<commit>`) are also pushed for rollback: `railway variables set FLUX_IMAGE=ghcr.io/donpinkus/kiki-flux-klein:sha-<commit>`. **Warning:** the SHA in the tag is GitHub's merge commit SHA (`github.sha`), NOT the local git commit SHA — check the Actions run log for the exact tag.
+1. Reads `backend/.flux-app-version` (= flux-klein-server tree hash from the last successful deploy).
+2. Compares to current `git rev-parse HEAD:flux-klein-server`.
+3. **If they differ** → fans out `sync-flux-app.ts` to all configured DCs in parallel (`npm run sync-all`). Aborts deploy if any DC fails — fix and re-run.
+4. **If same** → skips the sync step (backend-only iteration; ~1 min total).
+5. Writes `backend/.flux-app-version` and `backend/.git-sha` (baked into the image so the orchestrator's drift check has its expected version), then runs `railway up`.
 
-Existing running pods are unaffected — only newly provisioned pods pick up the new image. To force a user onto the new image, terminate their pod and let the orchestrator reprovision.
+The two `.git-sha` / `.flux-app-version` files appear as untracked in `git status` after each deploy — that's expected (Railway CLI honors `.gitignore` during upload, so we deliberately keep them out of `.gitignore`; see `backend/.gitignore` comment).
+
+`npm run sync-all` is also exposed for ad-hoc syncs (e.g., recovering after a DC was skipped due to capacity exhaustion, without redeploying backend).
+
+Plain `railway up` still works but bypasses the auto-sync — drift can occur if `flux-klein-server/` changed. The orchestrator's drift check (Sentry warning + PostHog `volume_status`) catches this on the next pod boot, so it's not silent — but `npm run deploy` is the canonical path.
+
+**Pod boot model:** Pods launch from stock `runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404` (hardcoded as `BASE_IMAGE` in `orchestrator.ts`) and read `/workspace/app/server.py` plus `/workspace/venv/` off the attached network volume. Existing running pods keep the old in-memory copy after a sync; new pods pick up changes on next provision. To force a user onto the new code, terminate their pod and let the orchestrator reprovision.
+
+Bumping `BASE_IMAGE` (e.g. CUDA / PyTorch upgrade) is not just a constant flip — the new image's Python/CUDA ABI must match `/workspace/venv/`, so the venv has to be rebuilt by deleting it and re-running `sync-flux-app.ts`.
+
+**Rollback to GHCR custom-image flow:** The pre-2026-04-23 architecture (custom image at `ghcr.io/donpinkus/kiki-flux-klein`, built by `.github/workflows/build-flux-image.yml`) is retained as inactive code for emergency rollback only. Procedure documented in `documents/decisions.md` 2026-04-23 entry.
 
 ## Git Conventions
 

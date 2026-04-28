@@ -13,26 +13,57 @@ interface GraphQLResponse<T> {
   errors?: Array<{ message: string }>;
 }
 
-// RunPod's catch-all transient error. They literally say "Please try again
-// later" so we honor that — short retry with backoff before surfacing.
+// Retry policy covers three flavors of RunPod transient:
+//   - Network-level failures (DNS, TCP, TLS).
+//   - HTTP 5xx (Cloudflare→origin glitch, GraphQL gateway hiccup).
+//   - GraphQL body errors containing RunPod's literal "please try again
+//     later" phrase — they tell us to retry, so we honor that.
+// 3 attempts with exponential backoff covers most observed outages
+// without dragging out failures when RunPod is genuinely down.
+const TRANSIENT_RETRY_DELAYS_MS = [500, 1500, 4500];
 const TRANSIENT_RUNPOD_PHRASE = /something went wrong\. please try again later/i;
 
-async function gql<T>(query: string, opts: { retryTransient?: boolean } = {}): Promise<T> {
-  const maxAttempts = opts.retryTransient ? 3 : 1;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const res = await fetch(API_URL(), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query }),
-    });
+async function fetchOnce(query: string): Promise<Response> {
+  return fetch(API_URL(), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query }),
+  });
+}
+
+async function gql<T>(query: string): Promise<T> {
+  let lastErr: Error | null = null;
+  for (let attempt = 0; attempt <= TRANSIENT_RETRY_DELAYS_MS.length; attempt++) {
+    if (attempt > 0) {
+      const delay = TRANSIENT_RETRY_DELAYS_MS[attempt - 1]!;
+      console.warn(`[runpod] gql retry attempt ${attempt} after ${delay}ms (${lastErr?.message?.slice(0, 120) ?? 'unknown'})`);
+      await new Promise((r) => setTimeout(r, delay));
+    }
+    let res: Response;
+    try {
+      res = await fetchOnce(query);
+    } catch (e) {
+      // Network-level failure (DNS, TCP, TLS). Retryable.
+      lastErr = e as Error;
+      continue;
+    }
+    if (res.status >= 500 && res.status < 600) {
+      // Server-side / Cloudflare gateway error. Retryable.
+      const bodyText = await res.text().catch(() => '');
+      lastErr = new Error(`RunPod API HTTP ${res.status}: ${bodyText}`);
+      continue;
+    }
     if (!res.ok) {
+      // 4xx — auth, malformed query, etc. Not retryable; surface immediately.
       throw new Error(`RunPod API HTTP ${res.status}: ${await res.text()}`);
     }
     const body = (await res.json()) as GraphQLResponse<T>;
     if (body.errors && body.errors.length > 0) {
       const msg = body.errors.map((e) => e.message).join('; ');
-      if (attempt < maxAttempts && TRANSIENT_RUNPOD_PHRASE.test(msg)) {
-        await new Promise((r) => setTimeout(r, 1000 * attempt));
+      // GraphQL body error matching RunPod's "try again later" phrase: retry.
+      // Other GraphQL errors (auth, malformed query) surface immediately.
+      if (TRANSIENT_RUNPOD_PHRASE.test(msg)) {
+        lastErr = new Error(`RunPod API error: ${msg}`);
         continue;
       }
       throw new Error(`RunPod API error: ${msg}`);
@@ -42,7 +73,8 @@ async function gql<T>(query: string, opts: { retryTransient?: boolean } = {}): P
     }
     return body.data;
   }
-  throw new Error('gql retry loop exhausted without resolution');
+  // Exhausted retries — surface the last error so callers see why.
+  throw lastErr ?? new Error('RunPod API: retries exhausted (unknown cause)');
 }
 
 export interface SpotBidInfo {
@@ -202,7 +234,7 @@ export async function createOnDemandPod(input: CreateOnDemandPodInput): Promise<
       startSsh: true${authField}${dcField}${volField}${dockerArgsField}${envField}
     }) { id desiredStatus costPerHr }
   }`;
-  const data = await gql<{ podFindAndDeployOnDemand: { id: string; costPerHr: number } | null }>(query, { retryTransient: true });
+  const data = await gql<{ podFindAndDeployOnDemand: { id: string; costPerHr: number } | null }>(query);
   if (!data.podFindAndDeployOnDemand) {
     throw new Error(`RunPod returned no pod (on-demand ${cloudType.toLowerCase()} capacity also unavailable)`);
   }
@@ -270,7 +302,7 @@ export async function createSpotPod(input: CreateSpotPodInput): Promise<PodCreat
       startSsh: true${authField}${dcField}${volField}${dockerArgsField}${envField}
     }) { id desiredStatus costPerHr }
   }`;
-  const data = await gql<{ podRentInterruptable: { id: string; costPerHr: number } | null }>(query, { retryTransient: true });
+  const data = await gql<{ podRentInterruptable: { id: string; costPerHr: number } | null }>(query);
   if (!data.podRentInterruptable) {
     throw new Error('RunPod returned no pod (spot capacity likely unavailable)');
   }

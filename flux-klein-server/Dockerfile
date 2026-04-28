@@ -1,3 +1,14 @@
+# INACTIVE — retained for rollback only.
+#
+# As of the 2026-04-23 cutover (see documents/decisions.md), live pods boot
+# from stock runpod/pytorch and read /workspace/app/server.py + /workspace/venv/
+# off a network volume populated by backend/scripts/sync-flux-app.ts. This
+# Dockerfile and its publishing workflow (.github/workflows/build-flux-image.yml)
+# are no longer in the provision path. They are kept around so the rollback
+# procedure in the 2026-04-23 decision entry remains a single env-var flip
+# instead of a re-rebuild. Slated for deletion at stage-3 cleanup.
+#
+# ─── (Original header retained below for rollback context) ───
 # FLUX.2-klein server image (slim, weights-on-volume).
 #
 # Contains: torch 2.9.1 + cu128 (from base), diffusers from git, and the

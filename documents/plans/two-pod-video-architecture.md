@@ -36,9 +36,8 @@ These are specific gotchas we hit that will be relevant when implementing the tw
 ### Docker / Deployment
 
 - The base image `runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404` uses **Python 3.12**. The `X | None` union type syntax in type hints fails at class-definition time. All Python files need `from __future__ import annotations`.
-- `FLUX_IMAGE` on Railway should use the `:latest` tag, NOT SHA-pinned. GitHub Actions' `github.sha` is the **merge commit SHA** (created by GitHub), which differs from the local git commit SHA. This caused `manifest unknown` errors when we pinned to the wrong SHA.
-- The GH Actions workflow pushes both `:latest` and `:sha-<merge_commit>`. SHA tags exist for rollback.
-- Docker image builds take ~3-5 minutes on GH Actions. The `pip install diffusers` from git is the slow step.
+- **As of 2026-04-23, FLUX pods no longer use a custom GHCR image.** They boot from stock `runpod/pytorch` and read app code + venv off the network volume (see `documents/decisions.md` 2026-04-23). When the video-pod work lands, decide whether the LTXV pod follows the same volume-entrypoint pattern (recommended — same rationale, same ops surface) or revives the GHCR flow for video-only.
+- Historical note (pre-cutover, retained for context if rollback is ever needed): `FLUX_IMAGE` on Railway used `:latest` rather than SHA-pinned. GitHub Actions' `github.sha` is the **merge commit SHA**, which differs from the local git commit SHA — pinning the wrong SHA produced `manifest unknown` errors. Workflow pushes both `:latest` and `:sha-<merge_commit>` for rollback. Build time ~3–5 min, dominated by `pip install diffusers` from git.
 
 ### Network Volumes
 
@@ -86,8 +85,9 @@ The orchestrator header (`backend/src/modules/orchestrator/orchestrator.ts`) has
 | FLUX pod server | `flux-klein-server/server.py` |
 | FLUX pod pipeline | `flux-klein-server/pipeline.py` |
 | Video pipeline (to be moved) | `flux-klein-server/video_pipeline.py` |
-| FLUX pod Dockerfile | `flux-klein-server/Dockerfile` |
-| FLUX image workflow | `.github/workflows/build-flux-image.yml` |
+| FLUX pod Dockerfile | `flux-klein-server/Dockerfile` *(inactive post-2026-04-23 — rollback only)* |
+| FLUX image workflow | `.github/workflows/build-flux-image.yml` *(inactive post-2026-04-23 — rollback only)* |
+| FLUX app-code sync | `backend/scripts/sync-flux-app.ts` |
 | Backend stream route | `backend/src/routes/stream.ts` |
 | Backend orchestrator | `backend/src/modules/orchestrator/orchestrator.ts` |
 | Backend StreamRelay | `backend/src/modules/relay/streamRelay.ts` |

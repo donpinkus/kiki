@@ -7,7 +7,15 @@ let package = Package(
     products: [
         .library(name: "CanvasModule", targets: ["CanvasModule"]),
     ],
+    dependencies: [
+        .package(path: "../StrokeRecognizerModule"),
+    ],
     targets: [
-        .target(name: "CanvasModule"),
+        .target(
+            name: "CanvasModule",
+            dependencies: [
+                .product(name: "StrokeRecognizerModule", package: "StrokeRecognizerModule"),
+            ]
+        ),
     ]
 )

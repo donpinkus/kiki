@@ -15,6 +15,7 @@ public struct ResultView: View {
     private let currentBrushColor: Color
     private let onColorPicked: ((Color) -> Void)?
     private let onResumeTapped: (() -> Void)?
+    private let isUserDrawing: Bool
 
     @State private var showToast = false
     @State private var toastMessage = ""
@@ -32,12 +33,14 @@ public struct ResultView: View {
         state: ResultState = .empty,
         currentBrushColor: Color = .black,
         onColorPicked: ((Color) -> Void)? = nil,
-        onResumeTapped: (() -> Void)? = nil
+        onResumeTapped: (() -> Void)? = nil,
+        isUserDrawing: Bool = false
     ) {
         self.state = state
         self.currentBrushColor = currentBrushColor
         self.onColorPicked = onColorPicked
         self.onResumeTapped = onResumeTapped
+        self.isUserDrawing = isUserDrawing
     }
 
     // MARK: - Body
@@ -51,8 +54,9 @@ public struct ResultView: View {
             case .empty:
                 emptyView
 
-            case .provisioning(let message, let startedAt):
-                provisioningView(message: message, startedAt: startedAt)
+            case .provisioning(let message, let startedAt, let previousImage):
+                provisioningView(message: message, startedAt: startedAt, previousImage: previousImage)
+                    .accessibilityElement(children: .combine)
 
             case .generating(let progress, let previousImage):
                 generatingView(progress: progress, previousImage: previousImage)
@@ -103,62 +107,115 @@ public struct ResultView: View {
 
     // MARK: - Provisioning
 
-    private func provisioningView(message: String, startedAt: Date) -> some View {
+    private func provisioningView(message: String, startedAt: Date?, previousImage: UIImage?) -> some View {
         TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: false)) { context in
             // Asymptotic curve approaching 95% — starts fast, slows down.
             // t=15s ≈ 39%, t=30s ≈ 63%, t=60s ≈ 87%, t=90s ≈ 95%.
-            let elapsed = max(0, context.date.timeIntervalSince(startedAt))
-            let progress = min(0.95, 1.0 - exp(-elapsed / 30.0))
+            // Both `progress` and `elapsedSec` are nil until the server tells
+            // us when the warm-up cycle began. Until then, the UI shows the
+            // overlay text but no progress bar — we never want to flash 0%
+            // and look like the cycle is restarting.
+            let elapsed: TimeInterval? = startedAt.map { max(0, context.date.timeIntervalSince($0)) }
+            let progress: Double? = elapsed.map { min(0.95, 1.0 - exp(-$0 / 30.0)) }
+            let elapsedSec: Int? = elapsed.map { Int($0) }
 
-            VStack(spacing: 28) {
-                Spacer(minLength: 0)
-
-                Image(systemName: "wand.and.stars")
-                    .font(.system(size: 56, weight: .light))
-                    .foregroundStyle(provisioningGradient)
-                    .symbolEffect(.pulse, options: .repeating)
-
-                VStack(spacing: 8) {
-                    Text("Warming up the AI")
-                        .font(.title2.weight(.semibold))
-                        .foregroundStyle(.primary)
-
-                    Text("First-time setup takes about 90 seconds")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+            ZStack {
+                if let previousImage {
+                    // Dimmed last result stays visible so the user keeps a
+                    // sense of continuity with their drawing while we reconnect.
+                    imageView(previousImage)
+                    Color.black.opacity(0.4)
+                        .ignoresSafeArea()
+                        .animation(.easeInOut(duration: 0.25), value: previousImage)
+                } else {
+                    // Rainbow particles that respond to canvas drawing — gives
+                    // the user something to play with during the cold start
+                    // instead of staring at the progress bar.
+                    ParticleField(isEmitting: isUserDrawing)
                 }
 
-                VStack(spacing: 12) {
+                provisioningContent(
+                    message: message,
+                    progress: progress,
+                    elapsedSec: elapsedSec,
+                    hasBackground: previousImage != nil
+                )
+            }
+        }
+    }
+
+    private func provisioningContent(message: String, progress: Double?, elapsedSec: Int?, hasBackground: Bool) -> some View {
+        VStack(spacing: 28) {
+            Spacer(minLength: 0)
+
+            Image(systemName: "wand.and.stars")
+                .font(.system(size: 56, weight: .light))
+                .foregroundStyle(provisioningGradient)
+                .symbolEffect(.pulse, options: .repeating)
+
+            VStack(spacing: 8) {
+                Text("Warming up the AI")
+                    .font(.title2.weight(.semibold))
+                    .foregroundStyle(hasBackground ? AnyShapeStyle(provisioningGradient) : AnyShapeStyle(HierarchicalShapeStyle.primary))
+                    .modifier(LayeredShadow(enabled: hasBackground))
+
+                Text("Ready in about 90 seconds")
+                    .font(.subheadline)
+                    .foregroundStyle(hasBackground ? AnyShapeStyle(Color.white.opacity(0.85)) : AnyShapeStyle(HierarchicalShapeStyle.secondary))
+
+                // Live elapsed counter — same monospaced digit width to avoid
+                // bouncing as seconds tick. Hidden until we have the server
+                // timestamp; visible thereafter so the user can see time
+                // continue across navigations.
+                if let elapsedSec {
+                    Text(elapsedTimerText(seconds: elapsedSec))
+                        .font(.caption2)
+                        .monospacedDigit()
+                        .foregroundStyle(hasBackground ? AnyShapeStyle(Color.white.opacity(0.7)) : AnyShapeStyle(HierarchicalShapeStyle.tertiary))
+                }
+            }
+
+            VStack(spacing: 12) {
+                if let progress {
                     provisioningProgressBar(progress: progress)
                         .frame(height: 8)
                         .frame(maxWidth: 320)
-
-                    Text(message)
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(2)
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: 320, minHeight: 28, alignment: .top)
-                        .animation(.easeInOut(duration: 0.2), value: message)
                 }
 
-                Label {
-                    Text("Keep sketching — your drawing will appear here as soon as the AI is ready.")
-                        .font(.callout)
-                        .foregroundStyle(.primary)
-                        .multilineTextAlignment(.leading)
-                } icon: {
-                    Image(systemName: "pencil.and.scribble")
-                        .foregroundStyle(.tint)
-                }
-                .padding(16)
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
-                .padding(.horizontal, 32)
-
-                Spacer(minLength: 0)
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(hasBackground ? AnyShapeStyle(Color.white.opacity(0.7)) : AnyShapeStyle(HierarchicalShapeStyle.tertiary))
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 320, minHeight: 28, alignment: .top)
+                    .animation(.easeInOut(duration: 0.2), value: message)
             }
-            .padding(.horizontal, 24)
-            .padding(.vertical, 32)
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 32)
+    }
+
+    private func elapsedTimerText(seconds: Int) -> String {
+        if seconds >= 90 {
+            return "\(seconds)s elapsed · almost ready"
+        }
+        return "\(seconds)s elapsed"
+    }
+
+    /// Title legibility on a dimmed image background — same recipe as
+    /// `idleTimeoutView` (tight crisp shadow + softer diffuse halo).
+    private struct LayeredShadow: ViewModifier {
+        let enabled: Bool
+        func body(content: Content) -> some View {
+            if enabled {
+                content
+                    .shadow(color: .black.opacity(0.4), radius: 2, y: 1)
+                    .shadow(color: .black.opacity(0.3), radius: 12, y: 6)
+            } else {
+                content
+            }
         }
     }
 
@@ -475,24 +532,43 @@ public struct ResultView: View {
     ResultView(state: .empty)
 }
 
+#Preview("Provisioning – No server timestamp yet") {
+    ResultView(state: .provisioning(
+        message: "Connecting…",
+        startedAt: nil,
+        previousImage: nil
+    ))
+}
+
 #Preview("Provisioning – Just started") {
     ResultView(state: .provisioning(
         message: "Reserving GPU…",
-        startedAt: Date()
+        startedAt: Date(),
+        previousImage: nil
     ))
 }
 
 #Preview("Provisioning – Mid warm-up") {
     ResultView(state: .provisioning(
         message: "Loading model weights — this is the longest step",
-        startedAt: Date().addingTimeInterval(-30)
+        startedAt: Date().addingTimeInterval(-30),
+        previousImage: nil
     ))
 }
 
 #Preview("Provisioning – Almost ready") {
     ResultView(state: .provisioning(
         message: "Final initialization…",
-        startedAt: Date().addingTimeInterval(-75)
+        startedAt: Date().addingTimeInterval(-75),
+        previousImage: nil
+    ))
+}
+
+#Preview("Provisioning – With previous image") {
+    ResultView(state: .provisioning(
+        message: "Loading model weights — this is the longest step",
+        startedAt: Date().addingTimeInterval(-30),
+        previousImage: UIImage(systemName: "photo.fill")?.withTintColor(.systemTeal, renderingMode: .alwaysOriginal)
     ))
 }
 

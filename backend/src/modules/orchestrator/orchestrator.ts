@@ -91,6 +91,7 @@
  * └─────────────────────────────────────┴──────────────────────────────────────────────────┴──────────────────────────────┘
  */
 
+import { readFileSync } from 'node:fs';
 import type { FastifyBaseLogger } from 'fastify';
 import * as Sentry from '@sentry/node';
 
@@ -210,6 +211,33 @@ const BOOT_ENV: Array<{ key: string; value: string }> = [
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 const REAPER_INTERVAL_MS = 60 * 1000;
 const MAX_CONCURRENT_PROVISIONS = Number(process.env['MAX_CONCURRENT_PROVISIONS'] ?? 5);
+
+// Drift check uses the git tree-hash of `flux-klein-server/` — the subtree
+// that sync-flux-app actually rsyncs to volumes. This changes only when files
+// in that path change, so doc/iOS/backend commits don't false-trigger drift
+// (which was the problem with the prior commit-SHA-based check). Written by
+// `npm run deploy` (`git rev-parse HEAD:flux-klein-server > .flux-app-version`)
+// and baked into the Docker image via the Dockerfile's `COPY . .`. Empty
+// string = file missing; drift check no-ops.
+const BACKEND_FLUX_APP_VERSION = (() => {
+  try {
+    return readFileSync('/app/.flux-app-version', 'utf-8').trim();
+  } catch {
+    return '';
+  }
+})();
+
+// Backend's commit SHA — kept for forensic context only (logged at startup,
+// not used for drift comparison). Same fallback chain as before.
+const BACKEND_GIT_SHA = (() => {
+  const fromEnv = process.env['RAILWAY_GIT_COMMIT_SHA'];
+  if (fromEnv) return fromEnv.trim();
+  try {
+    return readFileSync('/app/.git-sha', 'utf-8').trim();
+  } catch {
+    return '';
+  }
+})();
 
 // ────────────────────────────────────────────────────────────────────────────
 // Pod kinds: one operation (provision a pod) parameterized by a small static
@@ -399,6 +427,10 @@ async function deleteSession(sessionId: string): Promise<void> {
 export interface StateEvent {
   state: State;
   stateEnteredAt: number;
+  /// Ms epoch when this warm-up cycle began (= session.createdAt). Stable
+  /// across all state transitions so a reconnecting client can resume the
+  /// progress bar instead of restarting from zero.
+  warmingStartedAt: number;
   replacementCount: number;
   failureCategory: FailureCategory | null;
   /** Real error message from the failure source. Populated only on
@@ -432,6 +464,7 @@ export async function subscribe(
     handler({
       state: session.state,
       stateEnteredAt: session.stateEnteredAt,
+      warmingStartedAt: session.createdAt,
       replacementCount: session.replacementCount,
       failureCategory: session.failureCategory,
     });
@@ -470,12 +503,14 @@ export async function emitState(
     ? now - prevSession.stateEnteredAt
     : null;
   const replacementCount = prevSession?.replacementCount ?? 0;
+  const warmingStartedAt = prevSession?.createdAt ?? now;
 
   await patchSession(sessionId, { state, stateEnteredAt: now, failureCategory });
 
   const event: StateEvent = {
     state,
     stateEnteredAt: now,
+    warmingStartedAt,
     replacementCount,
     failureCategory,
     ...(message !== undefined ? { message } : {}),
@@ -822,6 +857,8 @@ export async function start(logger: FastifyBaseLogger): Promise<void> {
       maxConcurrent: MAX_CONCURRENT_PROVISIONS,
       reconcileIntervalMs: config.RECONCILE_INTERVAL_MS,
       reconcileMinAgeSec: config.RECONCILE_MIN_AGE_SEC,
+      backendFluxVersion: BACKEND_FLUX_APP_VERSION ? BACKEND_FLUX_APP_VERSION.slice(0, 8) : '(unset — drift checks disabled)',
+      backendGitSha: BACKEND_GIT_SHA ? BACKEND_GIT_SHA.slice(0, 8) : '(unset)',
     },
     'Orchestrator started',
   );
@@ -1074,6 +1111,93 @@ interface ProvisionResult {
  * reroll loop, `'abort'` when the caller should fall through to the generic
  * failure path (unrecoverable error, or rerolls exhausted).
  */
+/**
+ * Drift status the volume's flux_app_version reflects relative to the backend's
+ * expected version:
+ *   - 'current'        — volume is on the same flux-klein-server tree as backend
+ *   - 'drift'          — volume has a different flux_app_version than backend
+ *   - 'missing_stamp'  — volume predates flux_app_version stamping (pre-2026-04-26)
+ *   - 'unknown'        — backend has no expected version (local dev / no .flux-app-version)
+ * Returned from checkVersionDrift and surfaced on every pod.provision.completed
+ * PostHog event as `volume_status` so we can query drift trends without going
+ * to Sentry.
+ */
+type VolumeStatus = 'current' | 'drift' | 'missing_stamp' | 'unknown';
+
+/**
+ * Compare the FLUX pod's reported flux_app_version (from /health, originally
+ * written into /workspace/app/.version.json by sync-flux-app.ts) against the
+ * backend's expected flux_app_version. Both are git tree-hashes of the
+ * `flux-klein-server/` subtree at the respective deploy times, so they only
+ * change when files that actually get rsynced to volumes change. Doc/iOS/
+ * backend commits don't false-trigger.
+ *
+ * Side effects on non-current status:
+ *   - log.warn with structured fields (Railway logs)
+ *   - Sentry.captureMessage at warning level (Sentry dedups by dc + version pair)
+ * Caller forwards the returned status onto pod.provision.completed as
+ * `volume_status` for PostHog visibility.
+ *
+ * Returns 'unknown' when BACKEND_FLUX_APP_VERSION is unset (local dev / no
+ * .flux-app-version baked into the image) — drift cannot be evaluated.
+ */
+function checkVersionDrift(
+  appVersion: Record<string, string | number | boolean>,
+  ctx: { sessionId: string; podId: string; dc: string | null },
+): VolumeStatus {
+  if (!BACKEND_FLUX_APP_VERSION) return 'unknown';
+  const actualVersion = typeof appVersion['app_flux_app_version'] === 'string'
+    ? (appVersion['app_flux_app_version'] as string)
+    : '';
+  if (!actualVersion) {
+    log.warn(
+      {
+        sessionId: ctx.sessionId,
+        podId: ctx.podId,
+        dc: ctx.dc,
+        backendFluxVersion: BACKEND_FLUX_APP_VERSION.slice(0, 8),
+        event: 'volume.version.missing',
+      },
+      'Pod has no flux_app_version on /health — volume predates flux-app-version stamping',
+    );
+    Sentry.captureMessage('Pod volume missing flux_app_version stamp', {
+      level: 'warning',
+      tags: {
+        dc: ctx.dc ?? 'unknown',
+        backend_flux_version: BACKEND_FLUX_APP_VERSION.slice(0, 8),
+        kind: 'missing_stamp',
+      },
+      contexts: { pod: { id: ctx.podId, sessionId: ctx.sessionId } },
+    });
+    return 'missing_stamp';
+  }
+  if (actualVersion !== BACKEND_FLUX_APP_VERSION) {
+    log.warn(
+      {
+        sessionId: ctx.sessionId,
+        podId: ctx.podId,
+        dc: ctx.dc,
+        backendFluxVersion: BACKEND_FLUX_APP_VERSION.slice(0, 8),
+        volumeFluxVersion: actualVersion.slice(0, 8),
+        event: 'volume.version.drift',
+      },
+      'Pod volume flux_app_version differs from backend',
+    );
+    Sentry.captureMessage('Pod volume flux_app_version drift', {
+      level: 'warning',
+      tags: {
+        dc: ctx.dc ?? 'unknown',
+        backend_flux_version: BACKEND_FLUX_APP_VERSION.slice(0, 8),
+        volume_flux_version: actualVersion.slice(0, 8),
+        kind: 'flux_app_drift',
+      },
+      contexts: { pod: { id: ctx.podId, sessionId: ctx.sessionId } },
+    });
+    return 'drift';
+  }
+  return 'current';
+}
+
 function handleRecoverableProvisionError(
   err: Error,
   ctx: {
@@ -1797,11 +1921,18 @@ async function _runProvisionLoop(
         await opts.onProvisionPhase?.('warming_model', podId);
         currentState = 'warming_model';
         const healthUrl = `https://${podId}-${cfg.port}.proxy.runpod.net/health`;
-        await Sentry.startSpan(
+        const healthResult = await Sentry.startSpan(
           { name: 'pod.warming_model', op: 'pod.warming_model', attributes: { podId, kind, dc: dc ?? 'unknown' } },
           () => waitForHealth(podId as string, healthUrl),
         );
         phaseTimings.warming_model_ms = Date.now() - phaseStart;
+        // Merge per-substage warmup timings reported by the FLUX server's
+        // /health response. Keys: from_pretrained_ms, nvfp4_load_ms,
+        // to_cuda_ms, warmup_inference_ms. Lets us see which substage
+        // dominates the warming_model phase in PostHog.
+        for (const [k, v] of Object.entries(healthResult.phaseTimingsMs)) {
+          if (typeof v === 'number') phaseTimings[k] = v;
+        }
 
         const totalMs = Date.now() - t0;
         const podUrl = `wss://${podId}-${cfg.port}.proxy.runpod.net/ws`;
@@ -1828,6 +1959,15 @@ async function _runProvisionLoop(
           { sessionId, kind, podId, podUrl, podType, totalMs, attempt, dc },
           'Pod serving — awaiting relay',
         );
+        // Evaluate volume drift BEFORE emitting the event so volume_status
+        // lands on pod.provision.completed in PostHog. Side effects (log +
+        // Sentry) fire inside checkVersionDrift; we just forward the
+        // returned status. Provision still succeeds regardless — this is
+        // observability, not a gate.
+        const volumeStatus = checkVersionDrift(
+          healthResult.appVersion,
+          { sessionId, podId, dc },
+        );
         trackPodProvisionCompleted({
           userId: sessionId,
           durationMs: Date.now() - attemptStart,
@@ -1835,6 +1975,7 @@ async function _runProvisionLoop(
           podType,
           attempt,
           phaseTimings,
+          metadata: { ...healthResult.appVersion, volume_status: volumeStatus, kind },
         });
         return { podId, podUrl, podType, dc };
       } catch (err) {
@@ -1949,7 +2090,10 @@ async function waitForHealth(
   podId: string,
   healthUrl: string,
   timeoutMs = 4 * 60 * 1000,
-): Promise<void> {
+): Promise<{
+  phaseTimingsMs: Record<string, number>;
+  appVersion: Record<string, string | number | boolean>;
+}> {
   const start = Date.now();
   const deadline = start + timeoutMs;
   let lastLogAt = 0;
@@ -1967,8 +2111,17 @@ async function waitForHealth(
     try {
       const res = await fetch(healthUrl, { signal: AbortSignal.timeout(10_000) });
       if (res.ok) {
-        const body = (await res.json()) as { status?: string };
-        if (body.status === 'ok') return;
+        const body = (await res.json()) as {
+          status?: string;
+          phase_timings_ms?: Record<string, number>;
+          app_version?: Record<string, string | number | boolean>;
+        };
+        if (body.status === 'ok') {
+          return {
+            phaseTimingsMs: body.phase_timings_ms ?? {},
+            appVersion: body.app_version ?? {},
+          };
+        }
       }
     } catch {
       // Ignore — health check hasn't come up yet

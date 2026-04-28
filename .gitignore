@@ -15,6 +15,11 @@ ios/**/xcshareddata/WorkspaceSettings.xcsettings
 # Swift Package Manager
 ios/Packages/**/.build/
 ios/.swiftpm/
+# Stray SwiftPM build artifacts that occasionally land at package root
+ios/Packages/**/*.d
+ios/Packages/**/*.o
+ios/Packages/**/*.swiftdeps
+ios/Packages/**/*.swiftdeps~
 
 # Backend
 backend/node_modules/

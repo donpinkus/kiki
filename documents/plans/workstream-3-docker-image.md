@@ -1,5 +1,19 @@
 # Workstream 3: Pre-baked Docker image with model weights
 
+> **STATUS: SUPERSEDED (2026-04-23).** This document captures the original GHCR
+> custom-image plan. It was shipped, then revised: ~38% of provisions stalled on
+> hosts that couldn't reliably pull from ghcr.io. The cutover migrated to a
+> volume-entrypoint architecture — pods boot from stock `runpod/pytorch` and
+> read app code + Python deps off the network volume that already holds the
+> weights. The GHCR image is no longer pulled by any provision path; the
+> Dockerfile and build workflow remain in-tree as inactive code for emergency
+> rollback only.
+>
+> Current state: see `documents/decisions.md` 2026-04-23 entry and
+> `documents/references/provider-config.md` "Pod boot model" section.
+>
+> This file is retained as historical context for the original design.
+
 Part of the [scale-to-100-users roadmap](./scale-to-100-users.md).
 
 ## 1. Context

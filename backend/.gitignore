@@ -3,3 +3,13 @@ dist/
 .env
 *.log
 .DS_Store
+
+# .git-sha and .flux-app-version are intentionally NOT ignored.
+# `npm run deploy` writes both (git rev-parse HEAD > .git-sha and
+# git rev-parse HEAD:flux-klein-server > .flux-app-version), and the
+# orchestrator reads .flux-app-version at startup for the volume drift
+# check (.git-sha is forensic context only, since RAILWAY_GIT_COMMIT_SHA
+# is empty under `railway up` CLI deploys). Railway CLI honors .gitignore
+# during upload, so adding either file here causes it to be skipped and
+# the drift check silently no-ops in production. Both files will appear
+# as untracked after each deploy — that's expected.

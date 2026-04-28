@@ -101,6 +101,8 @@ export function trackPodProvisionCompleted(props: {
   attempt: number;
   /** Per-state durations for funnel analysis. Keys: creating_pod_ms, fetching_image_ms, warming_model_ms. */
   phaseTimings?: Record<string, number>;
+  /** Non-numeric pod metadata (e.g. app_version_sha, app_synced_at). Spread alongside phase timings. */
+  metadata?: Record<string, string | number | boolean | null>;
 }): void {
   capture(props.userId, 'pod.provision.completed', {
     duration_ms: props.durationMs,
@@ -108,6 +110,7 @@ export function trackPodProvisionCompleted(props: {
     pod_type: props.podType,
     attempt: props.attempt,
     ...(props.phaseTimings ?? {}),
+    ...(props.metadata ?? {}),
   });
 }
 
