@@ -71,16 +71,31 @@ LTX_QUANTIZATION = "fp8"
 # Resolution + frame-count constraints (enforced by ltx-pipelines.utils.helpers
 # .assert_resolution at __call__ time). We validate at config load too so
 # misconfig surfaces at pod boot, not first inference.
-LTX_WIDTH = int(os.getenv("LTX_WIDTH", "704"))
-LTX_HEIGHT = int(os.getenv("LTX_HEIGHT", "480"))
+#
+# DistilledPipeline is two-stage: stage 1 generates at half resolution, stage 2
+# upsamples by 2x. ltx-pipelines requires full resolution divisible by 64
+# (so half-res is divisible by 32). LTXV 0.9.x only required %32; the
+# tighter %64 rule was a 2.3 regression that bit us in 2026-04-28's first
+# end-to-end test.
+#
+# Square (512x512) matches FLUX.2-klein's output aspect — no pillarboxing
+# in the iPad's square right pane. 512 = 8x64 satisfies the divisor; lower
+# pixel count than 704x480 means faster inference. Bump to 768x768 if visual
+# quality demands it (latency cost ~50%).
+LTX_WIDTH = int(os.getenv("LTX_WIDTH", "512"))
+LTX_HEIGHT = int(os.getenv("LTX_HEIGHT", "512"))
 LTX_NUM_FRAMES = int(os.getenv("LTX_NUM_FRAMES", "49"))
 LTX_FPS = int(os.getenv("LTX_FPS", "24"))
 LTX_OUTPUT_JPEG_QUALITY = int(os.getenv("LTX_OUTPUT_QUALITY", "80"))
 
-if LTX_WIDTH % 32 != 0:
-    raise ValueError(f"LTX_WIDTH must be divisible by 32 (got {LTX_WIDTH})")
-if LTX_HEIGHT % 32 != 0:
-    raise ValueError(f"LTX_HEIGHT must be divisible by 32 (got {LTX_HEIGHT})")
+if LTX_WIDTH % 64 != 0:
+    raise ValueError(
+        f"LTX_WIDTH must be divisible by 64 (got {LTX_WIDTH}) — DistilledPipeline two-stage rule"
+    )
+if LTX_HEIGHT % 64 != 0:
+    raise ValueError(
+        f"LTX_HEIGHT must be divisible by 64 (got {LTX_HEIGHT}) — DistilledPipeline two-stage rule"
+    )
 if (LTX_NUM_FRAMES - 1) % 8 != 0:
     raise ValueError(
         f"LTX_NUM_FRAMES must satisfy (n - 1) % 8 == 0 — valid: 9, 17, 25, 33, 41, 49, … "
