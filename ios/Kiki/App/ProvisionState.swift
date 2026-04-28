@@ -53,8 +53,12 @@ public func displayText(for state: ProvisionState, replacementCount: Int) -> Str
 public func displayText(for failureCategory: FailureCategory?) -> String {
     guard let category = failureCategory else { return "Something went wrong" }
     switch category {
-    case .spotCapacity, .podCreateFailed, .transientRunpod:
+    case .spotCapacity:
         return "GPU capacity is temporarily exhausted — try again shortly"
+    case .podCreateFailed:
+        return "Couldn't create your pod — try again shortly"
+    case .transientRunpod:
+        return "Our GPU provider is having a hiccup — try again shortly"
     case .podBootStall:
         return "Pod took too long to start — try again"
     case .warmModelTimeout:
