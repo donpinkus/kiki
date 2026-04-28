@@ -202,15 +202,34 @@ const BID_HEADROOM = 0.05;
 // for how the volume gets populated, and documents/decisions.md entry
 // 2026-04-23 for the full context + rollback procedure.
 const BASE_IMAGE = 'runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404';
+
+// SSH bootstrap: RunPod's stock `runpod/pytorch` image normally writes
+// $PUBLIC_KEY → /root/.ssh/authorized_keys and starts sshd via its entrypoint
+// script. We override the entrypoint with BOOT_DOCKER_ARGS, so that script
+// never runs. Replicate it inline before exec'ing the server, gated by
+// PUBLIC_KEY so the bootstrap is a no-op when the env var is unset (prod).
+//
+// One-time use: pre-launch dev iteration. Lets us scp updated files into
+// /workspace/app + restart uvicorn instead of waiting 8–10 min per
+// sync-all-dcs deploy. Remove PUBLIC_KEY from Railway env (not the code) to
+// re-disable SSH on all subsequently-spawned pods. Existing pods retain
+// whichever path was active when they booted; terminate them to refresh.
+const SSH_BOOTSTRAP =
+  'if [ -n "$PUBLIC_KEY" ]; then ' +
+  'mkdir -p /root/.ssh && echo "$PUBLIC_KEY" > /root/.ssh/authorized_keys && ' +
+  'chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys && ' +
+  '/usr/sbin/sshd; ' +
+  'fi';
+
 // `bash -lc` sources /etc/profile.d/* for CUDA paths; activate the volume
 // venv (inherits base-image torch via --system-site-packages); exec Python
 // so SIGTERM reaches uvicorn directly.
 const BOOT_DOCKER_ARGS =
-  "bash -lc 'source /workspace/venv/bin/activate && cd /workspace/app && exec python3 -u server.py'";
+  `bash -lc '${SSH_BOOTSTRAP}; source /workspace/venv/bin/activate && cd /workspace/app && exec python3 -u server.py'`;
 // Video pod runs LTXV i2v on a separate pod (see flux-klein-server/video_server.py).
 // Same volume / venv / port as the image pod — only the entry script differs.
 const BOOT_DOCKER_ARGS_VIDEO =
-  "bash -lc 'source /workspace/venv/bin/activate && cd /workspace/app && exec python3 -u video_server.py'";
+  `bash -lc '${SSH_BOOTSTRAP}; source /workspace/venv/bin/activate && cd /workspace/app && exec python3 -u video_server.py'`;
 // Pod name prefix for video pods. Distinct from POD_PREFIX so reconcile
 // can list them separately and so RunPod console / Discord alerts are
 // unambiguous about which kind died.
@@ -229,6 +248,13 @@ const BOOT_ENV: Array<{ key: string; value: string }> = [
   // Recommended by the OOM error message itself.
   { key: 'PYTORCH_CUDA_ALLOC_CONF', value: 'expandable_segments:True' },
 ];
+
+// Forward orchestrator's PUBLIC_KEY env (set in Railway) to the pod so the
+// SSH_BOOTSTRAP block above can write authorized_keys. Conditional so prod
+// (no PUBLIC_KEY set) gets no SSH access by default.
+if (process.env['PUBLIC_KEY']) {
+  BOOT_ENV.push({ key: 'PUBLIC_KEY', value: process.env['PUBLIC_KEY'] });
+}
 
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 const REAPER_INTERVAL_MS = 60 * 1000;
