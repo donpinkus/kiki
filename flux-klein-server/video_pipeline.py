@@ -24,7 +24,8 @@ import threading
 import time
 from collections import defaultdict
 from contextlib import contextmanager
-from typing import Callable, Iterator
+from dataclasses import dataclass
+from typing import Callable, Iterator, Literal
 
 import torch
 from PIL import Image
@@ -55,6 +56,25 @@ def _resolve_hf_snapshot_path(repo_id: str) -> str:
     """
     from huggingface_hub import snapshot_download
     return snapshot_download(repo_id=repo_id, local_files_only=True)
+
+
+CancelState = Literal["ok", "before_start", "during_inference", "after_complete"]
+
+
+@dataclass
+class GenerateResult:
+    """Outcome of a single ``generate()`` call.
+
+    Carries enough to differentiate ``before_start`` (cheap), ``after_complete``
+    (today's dominant wasted-GPU pattern, ~pipe_total_ms wasted per cancel),
+    and ``during_inference`` (added in Step 5 with the forked denoising loop).
+    """
+
+    frames: list[Image.Image] | None
+    cancel_state: CancelState
+    lock_wait_ms: int
+    pipe_total_ms: int
+    cancelled_but_ran_ms: int
 
 
 class CancelledError(Exception):
@@ -235,20 +255,33 @@ class Ltx23VideoPipeline:
         prompt: str,
         seed: int | None,
         is_cancelled: Callable[[], bool],
-    ) -> list[Image.Image] | None:
-        """Generate a video from `image`+`prompt`. Returns the decoded frame
-        list, or `None` if cancellation was requested before inference started.
+    ) -> "GenerateResult":
+        """Generate a video from `image`+`prompt`. Returns a ``GenerateResult``
+        with `frames` (or None if cancelled), `cancel_state`, `lock_wait_ms`,
+        `pipe_total_ms`, and `cancelled_but_ran_ms`.
 
-        NOTE on cancellation: DistilledPipeline doesn't expose mid-inference
-        callbacks, so once we enter `pipe(...)` we run to completion. The
-        cancel check at the top is the only opportunity to bail cheaply.
-        Mid-inference cancels result in a wasted full inference; the caller
-        discards the frames if cancel.is_set() upon return. See class
-        docstring for details.
+        Cancellation states (Step 1 of the perf plan):
+        - ``ok``: full inference, frames returned.
+        - ``before_start``: cancel arrived before lock acquired or before
+          inference body started; ~0ms wasted.
+        - ``after_complete``: full inference ran, frames produced, cancel
+          arrived during the post-inference re-check; ~pipe_total_ms wasted.
+        - ``during_inference`` (future, after Step 5 lands): cancel landed
+          while denoising; ≤1 sigma wasted.
+
+        NOTE on cancellation: today's DistilledPipeline still doesn't expose
+        mid-inference callbacks, so `during_inference` won't appear yet.
+        Step 5 forks `euler_denoising_loop` to add it.
         """
         if is_cancelled():
             logger.info("LTX-2.3 generate skipped — cancelled before start")
-            return None
+            return GenerateResult(
+                frames=None,
+                cancel_state="before_start",
+                lock_wait_ms=0,
+                pipe_total_ms=0,
+                cancelled_but_ran_ms=0,
+            )
 
         # Resolve seed: if caller didn't specify, generate a fresh random one.
         # DistilledPipeline.__call__ requires `seed: int`, not Optional.
@@ -264,13 +297,20 @@ class Ltx23VideoPipeline:
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
             image_path = f.name
             image.save(image_path, format="PNG")
+        # `lock_wait_ms` separates queue/lock-contention time from
+        # `pipe_total`. Important once Step 5 lands and short-cancelled jobs
+        # release the lock fast — without it, queue effects look like
+        # spurious perf wins or losses on the next request.
+        t_lock_request = time.perf_counter()
         try:
             with self._lock:
+                lock_wait_ms = int((time.perf_counter() - t_lock_request) * 1000)
                 frames = self._run_inference(
                     image_path=image_path,
                     prompt=prompt or "",
                     seed=seed,
                 )
+                pipe_total_ms = self._inference_timings["pipe_total"][-1]
         finally:
             try:
                 os.unlink(image_path)
@@ -278,13 +318,29 @@ class Ltx23VideoPipeline:
                 pass
 
         # Late cancel check: caller may have set the flag while inference was
-        # running. Returning None lets video_server emit `video_cancelled`
-        # cleanly and the caller's counters tick the cancelled tally.
+        # running. Today this is the dominant wasted-GPU pattern (~21s per
+        # cancel) and Step 1's classification makes it visible in metrics.
         if is_cancelled():
-            logger.info("LTX-2.3 generate completed but cancellation arrived; discarding")
-            return None
+            logger.info(
+                "LTX-2.3 generate completed but cancellation arrived; discarding "
+                "(wasted_ms=%d)",
+                pipe_total_ms,
+            )
+            return GenerateResult(
+                frames=None,
+                cancel_state="after_complete",
+                lock_wait_ms=lock_wait_ms,
+                pipe_total_ms=pipe_total_ms,
+                cancelled_but_ran_ms=pipe_total_ms,
+            )
 
-        return frames
+        return GenerateResult(
+            frames=frames,
+            cancel_state="ok",
+            lock_wait_ms=lock_wait_ms,
+            pipe_total_ms=pipe_total_ms,
+            cancelled_but_ran_ms=0,
+        )
 
     def _run_inference(
         self,
@@ -311,6 +367,7 @@ class Ltx23VideoPipeline:
         from ltx_pipelines.utils.args import ImageConditioningInput
         from ltx_pipelines.utils.constants import DISTILLED_SIGMAS, STAGE_2_DISTILLED_SIGMAS
         from ltx_pipelines.utils.denoisers import SimpleDenoiser
+        from ltx_pipelines.utils.gpu_model import gpu_model
         from ltx_pipelines.utils.helpers import assert_resolution, combined_image_conditionings
         from ltx_pipelines.utils.types import ModalitySpec
 
@@ -342,8 +399,34 @@ class Ltx23VideoPipeline:
         frames: list[Image.Image] = []
 
         with torch.inference_mode():
-            with self._timed("prompt_encoder"):
-                (ctx_p,) = pipe.prompt_encoder([prompt])
+            # Inline the upstream PromptEncoder.__call__ flow so we can time
+            # build vs encode separately. Upstream conflates them in
+            # `pipe.prompt_encoder([prompt])` — and Round 1 saw the combined
+            # ~9s phase on a short prompt, which is suspiciously dominated
+            # by Gemma load (build), not actual encode. Splitting confirms
+            # whether persistent-Gemma (Step 4) is the right next move or
+            # whether the prompt cache (Step 3) covers most of it.
+            prompt_enc = pipe.prompt_encoder
+            with self._timed("prompt_encoder_build"):
+                text_encoder_ctx = prompt_enc._text_encoder_ctx()
+                text_encoder = text_encoder_ctx.__enter__()
+            try:
+                with self._timed("prompt_encoder_encode"):
+                    raw_outputs = [text_encoder.encode(prompt)]
+            finally:
+                text_encoder_ctx.__exit__(None, None, None)
+
+            with self._timed("embeddings_processor"):
+                ep_builder = prompt_enc._embeddings_processor_builder
+                ep_model = ep_builder.build(
+                    device=prompt_enc._device, dtype=prompt_enc._dtype
+                ).to(prompt_enc._device).eval()
+                with gpu_model(ep_model) as embeddings_processor:
+                    proc_outputs = [
+                        embeddings_processor.process_hidden_states(hs, mask)
+                        for hs, mask in raw_outputs
+                    ]
+            (ctx_p,) = proc_outputs
             video_context, audio_context = ctx_p.video_encoding, ctx_p.audio_encoding
 
             generator = torch.Generator(device=pipe.device).manual_seed(seed)
@@ -367,9 +450,18 @@ class Ltx23VideoPipeline:
             # Build transformer ONCE; reuse across stage 1 and stage 2.
             # Manually open/close the context manager so we can time build
             # and teardown separately. `stage_build` is the dominant load-time
-            # cost we're trying to cut in half by not rebuilding for stage 2.
-            transformer_ctx = pipe.stage.model_context()
+            # cost.
+            #
+            # Both `model_context()` AND `__enter__()` go inside the timer:
+            # upstream's `_transformer_ctx` (in ltx_pipelines.utils.blocks)
+            # does `gpu_model(self._build_transformer(**kwargs))`, so the
+            # heavy `_build_transformer` call runs synchronously when
+            # `model_context()` is invoked — `__enter__()` is then a no-op
+            # that just yields the already-built model. Round-1 timed only
+            # `__enter__()` and got `stage_build=0` while ~8s was hidden in
+            # `pipe_total`. Wrapping both gets the real number.
             with self._timed("stage_build"):
+                transformer_ctx = pipe.stage.model_context()
                 transformer = transformer_ctx.__enter__()
             try:
                 with self._timed("stage_1_denoise"):
@@ -466,19 +558,41 @@ class Ltx23VideoPipeline:
 
         if torch.cuda.is_available():
             torch.cuda.synchronize()
-        self._inference_timings["pipe_total"].append(int((time.perf_counter() - t_pipe) * 1000))
+        pipe_total_ms = int((time.perf_counter() - t_pipe) * 1000)
+        self._inference_timings["pipe_total"].append(pipe_total_ms)
+
+        # Compute unattributed time: pipe_total minus the sum of every named
+        # phase. Catches measurement gaps like Round 1's `model_context()`
+        # call site that lived between two timer blocks. Acceptance target:
+        # under ~300ms or explicitly explained.
+        named_total = sum(
+            sum(vs) for name, vs in self._inference_timings.items() if name != "pipe_total"
+        )
+        unattributed_ms = pipe_total_ms - named_total
+        self._inference_timings["unattributed"].append(unattributed_ms)
 
         if torch.cuda.is_available():
+            # Peak allocated alone hides allocator fragmentation. Reserved
+            # (cached but not in use) and free (whatever the driver still
+            # has unallocated) are independent signals — needed once we
+            # start holding the transformer + Gemma resident across calls
+            # (Steps 2 & 4). Logging them per-request lets us watch for
+            # progressive bloat across many inferences.
+            free_b, _ = torch.cuda.mem_get_info()
             logger.info(
-                "LTX inference CUDA peak allocated %.2f GiB, peak reserved %.2f GiB",
+                "LTX VRAM GiB: peak_alloc=%.2f peak_reserved=%.2f "
+                "now_alloc=%.2f now_reserved=%.2f free=%.2f",
                 torch.cuda.max_memory_allocated() / (1024**3),
                 torch.cuda.max_memory_reserved() / (1024**3),
+                torch.cuda.memory_allocated() / (1024**3),
+                torch.cuda.memory_reserved() / (1024**3),
+                free_b / (1024**3),
             )
 
         # Phase breakdown — single line, easy to scan in pod logs. Lists for
         # phases called twice per inference (image_conditioner stage 1+2,
-        # transformer stage 1+2). Sum of phase ms should approximate
-        # pipe_total minus per-phase overhead.
+        # transformer stage 1+2). `unattributed` should be small if the
+        # named phases are accounted for; large value ⇒ measurement gap.
         timings_summary = " ".join(
             f"{name}={vs[0] if len(vs) == 1 else vs}"
             for name, vs in sorted(self._inference_timings.items())

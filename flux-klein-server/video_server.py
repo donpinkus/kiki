@@ -162,7 +162,7 @@ async def websocket_video(ws: WebSocket):
             return cancel.is_set()
 
         try:
-            frames = await asyncio.to_thread(
+            result = await asyncio.to_thread(
                 video_pipeline.generate, image, prompt, seed, _is_cancelled,
             )
         except Exception as e:  # noqa: BLE001
@@ -177,12 +177,25 @@ async def websocket_video(ws: WebSocket):
             return
 
         gen_ms = int((time.time() - t0) * 1000)
+        frames = result.frames
 
         if frames is None:
+            # Cancellation — three classes per the perf plan's Step 1:
+            #   before_start: ~0ms wasted
+            #   during_inference: ≤1 sigma wasted (after Step 5 lands)
+            #   after_complete: pipe_total wasted (today's dominant pattern)
+            # cancelled_but_ran_ms is the explicit "wasted GPU" metric.
             videos_cancelled += 1
             logger.info(
-                "cancelled: req=%s at_step=%d elapsed_ms=%d",
-                request_id, current_step_count["step"], gen_ms,
+                "cancelled: req=%s state=%s at_step=%d elapsed_ms=%d "
+                "lock_wait_ms=%d pipe_total_ms=%d cancelled_but_ran_ms=%d",
+                request_id,
+                result.cancel_state,
+                current_step_count["step"],
+                gen_ms,
+                result.lock_wait_ms,
+                result.pipe_total_ms,
+                result.cancelled_but_ran_ms,
             )
             await ws.send_text(json.dumps({
                 "type": "video_cancelled",
@@ -232,8 +245,10 @@ async def websocket_video(ws: WebSocket):
 
             videos_total += 1
             logger.info(
-                "complete: req=%s frames=%d gen_ms=%d encode_ms=%d mp4_bytes=%d",
+                "complete: req=%s frames=%d gen_ms=%d encode_ms=%d mp4_bytes=%d "
+                "lock_wait_ms=%d pipe_total_ms=%d",
                 request_id, len(frames), gen_ms, encode_ms, len(mp4_bytes),
+                result.lock_wait_ms, result.pipe_total_ms,
             )
             await ws.send_text(json.dumps({
                 "type": "video_complete",
