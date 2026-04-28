@@ -138,6 +138,39 @@ Bumping `BASE_IMAGE` (e.g. CUDA / PyTorch upgrade) is not just a constant flip �
 
 **Rollback to GHCR custom-image flow:** The pre-2026-04-23 architecture (custom image at `ghcr.io/donpinkus/kiki-flux-klein`, built by `.github/workflows/build-flux-image.yml`) is retained as inactive code for emergency rollback only. Procedure documented in `documents/decisions.md` 2026-04-23 entry.
 
+## SSHing into a running pod (dev iteration only)
+
+Pre-launch only: SSH on serving pods is gated behind the `PUBLIC_KEY` env var on Railway. When set, orchestrator forwards it into the pod's `BOOT_ENV` and an inline bootstrap in `BOOT_DOCKER_ARGS` writes `authorized_keys`, runs `ssh-keygen -A`, and starts sshd before exec'ing the python server. When `PUBLIC_KEY` is unset (prod default), the bootstrap is a no-op.
+
+**Why we bootstrap manually:** RunPod's stock `runpod/pytorch` image has a `start.sh` entrypoint that does SSH setup itself, but `BOOT_DOCKER_ARGS` overrides the entrypoint to launch the python server directly, so the image's setup never runs. Confirmed: setting `startSsh: true` in the GraphQL `podFindAndDeployOnDemand` call is *not* sufficient on its own — without the inline bootstrap, port 22 is exposed but sshd isn't running and direct TCP gets `Connection refused`.
+
+**Enable SSH for a session:**
+```bash
+# One-time
+PUB="$(cat ~/.ssh/id_ed25519.pub)"
+railway variables --service kiki-backend --set "PUBLIC_KEY=$PUB"
+cd backend && npm run deploy   # backend-only change → fast path (~30s)
+# Existing pods keep the no-SSH path; terminate them to refresh
+```
+
+**Connect:** RunPod web console → pod → Connect tab → "**SSH over exposed TCP**" gives `ssh root@<ip> -p <port> -i ~/.ssh/id_ed25519`. **Use this form, not `ssh.runpod.io`.** The proxy form connects but rejects non-interactive commands ("Your SSH client doesn't support PTY") and doesn't support SCP/SFTP.
+
+**Iteration loop** (~3 min per cycle, dominated by model warmup, beats 8–10 min full deploy):
+```bash
+PORT=<pod_ssh_port>; IP=<pod_ip>
+scp -P $PORT -i ~/.ssh/id_ed25519 \
+    flux-klein-server/video_pipeline.py root@$IP:/workspace/app/
+ssh -p $PORT -i ~/.ssh/id_ed25519 root@$IP \
+    'pkill -f video_server; sleep 1; \
+     cd /workspace/app && source /workspace/venv/bin/activate && \
+     nohup python3 -u video_server.py > /tmp/video_server.log 2>&1 & disown'
+ssh -p $PORT -i ~/.ssh/id_ed25519 root@$IP 'tail -f /tmp/video_server.log'
+```
+
+**If SSH refuses connection:** check `/tmp/ssh-bootstrap.log` on the pod (via RunPod web terminal — enable it from the Connect tab). The log captures all bootstrap output and tells you whether `ssh-keygen -A` failed, whether `service ssh start` worked, etc.
+
+**Disable SSH for prod:** unset `PUBLIC_KEY` in Railway env (no code change needed). Newly-spawned pods skip the bootstrap. Existing pods retain whichever path was active when they booted.
+
 ## Git Conventions
 
 - **Branches:** `feature/module-short-desc`, `fix/module-short-desc`, `chore/desc`
