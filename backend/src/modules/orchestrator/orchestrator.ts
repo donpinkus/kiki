@@ -1742,13 +1742,17 @@ const POD_CONFIGS: Record<PodKind, PodKindConfig> = {
       const podName = `${POD_PREFIX}${sessionId.slice(0, 16)}`;
       return createPodWithFallback(sessionId, target, podName, BOOT_DOCKER_ARGS);
     },
-    // Image: trust the row's persisted state. `state === 'ready'` is set by
-    // stream.ts after the relay is wired (full session readiness), so this
-    // single Redis hash read replaces a ~500 ms RunPod query. The rare
-    // "row says ready but pod is gone" case is handled downstream by
-    // `wireRelay`'s onClose → replaceSession path.
+    // Image: row says ready, but the pod may have died externally (RunPod-
+    // side preemption, host failure, manual termination during ops). The
+    // close-handler in stream.ts only catches mid-session deaths — initial
+    // wire failure on a stale podId 404s and bounces the iPad. Probe RunPod
+    // before trusting the row, matching what the video kind already does
+    // below. ~500 ms per reconnect, but keeps reuse honest as a cache of
+    // RunPod state rather than an authoritative claim.
     getReusableFromRow: async (row) => {
-      if (row.state === 'ready' && row.podUrl && row.podId) {
+      if (row.state !== 'ready' || !row.podUrl || !row.podId) return null;
+      const pod = await getPod(row.podId).catch(() => null);
+      if (pod && pod.desiredStatus === 'RUNNING' && pod.runtime !== null) {
         return { podId: row.podId, podUrl: row.podUrl };
       }
       return null;
