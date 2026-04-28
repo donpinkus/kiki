@@ -221,6 +221,13 @@ const BOOT_ENV: Array<{ key: string; value: string }> = [
   { key: 'FLUX_HOST', value: '0.0.0.0' },
   { key: 'FLUX_PORT', value: '8766' },
   { key: 'FLUX_USE_NVFP4', value: '1' },
+  // Lets PyTorch grow a single CUDA memory segment instead of failing on
+  // fragmentation. Required for the LTX-2.3 video pod: fp8_cast's per-
+  // matmul bf16 upcast buffers churn the caching allocator, leading to
+  // OOM on H100 80GB even at small resolutions when allocator fragments.
+  // Strict improvement (or no-op) for image pod's FLUX path too.
+  // Recommended by the OOM error message itself.
+  { key: 'PYTORCH_CUDA_ALLOC_CONF', value: 'expandable_segments:True' },
 ];
 
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000;
