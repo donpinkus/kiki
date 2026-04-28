@@ -65,23 +65,25 @@ if (!SSH_KEY) {
 // capacity in the target DC. Set SYNC_GPU_TYPE_ID to pin a specific type.
 //
 // The candidates include enough variety that at least one stocks in every
-// DC we use. 5090 covers our image DCs (EUR-NO-1, EU-RO-1, EU-CZ-1,
-// US-IL-1, US-NC-1). RTX 4000 Ada / 4090 cover the H100-SXM DCs (US-CA-2,
-// US-TX-3, EU-NL-1, EUR-IS-3, US-MO-1, US-NE-1) where the cheaper RTX
-// 2000 Ada / A4000 / 3090 / L4 SKUs aren't stocked. H100 SXM is the last-
-// resort fallback so we never fail a sync just because a DC is sparse.
+// DC we use. 5090 covers our image DCs. RTX 4000 Ada covers the H100-SXM
+// DCs (US-CA-2, US-TX-3, EU-NL-1, EUR-IS-3, US-MO-1, US-NE-1) where the
+// cheaper RTX 2000 Ada / A4000 / 3090 / L4 SKUs aren't stocked. H100 SXM
+// is the last-resort fallback so we never fail a sync just because a DC
+// is sparse on cheap stock.
 //
-// 4090 was previously omitted: hosts in EUR-NO-1 + US-IL-1 boot the
-// container but `startSsh:true` never opens port 22 (2026-04-27). It's
-// re-added here because the new H100 DCs need it AND retrySsh + the next-
-// candidate fallback together limit the blast radius if 4090 hangs again.
+// 4090 deliberately omitted: hosts in EUR-NO-1, US-IL-1, US-NC-1, EUR-NO-1,
+// US-TX-3, EUR-NO-1 boot the container but `startSsh:true` never opens
+// port 22. The bug is post-create (the createPod returns success, then
+// the pod sits in RUNNING state with no SSH info), so the next-candidate
+// fallback never triggers — sync hangs until waitForSsh's 15-min timeout.
+// Verified across multiple sessions; do NOT re-add 4090 without confirming
+// RunPod has fixed the startSsh handshake on this SKU.
 const DEFAULT_GPU_CANDIDATES = [
   'NVIDIA RTX 2000 Ada Generation',
   'NVIDIA RTX 4000 Ada Generation',
   'NVIDIA RTX A4000',
   'NVIDIA GeForce RTX 3090',
   'NVIDIA L4',
-  'NVIDIA GeForce RTX 4090',
   'NVIDIA GeForce RTX 5090',
   'NVIDIA H100 80GB HBM3',
 ];
@@ -413,8 +415,12 @@ PYEOF
 echo "=== DONE ==="
 `;
 
-    console.log('[sync] creating venv + pip installing (takes 2-5 min first time, <30s idempotent reruns)...');
-    await runSsh(ssh, installCmd, 20 * 60 * 1000);
+    console.log('[sync] creating venv + pip installing (takes 5-15 min first time, <30s idempotent reruns)...');
+    // 30-min budget covers a fresh ltx-core + ltx-pipelines install on a
+    // slow DC (heavy deps: torch, diffusers, transformers, av, openimageio).
+    // Idempotent reruns finish under a minute. Previous 20-min budget hit
+    // mid-install on a fresh DC (US-MO-1, 2026-04-27).
+    await runSsh(ssh, installCmd, 30 * 60 * 1000);
 
     // 3. Write version stamp AFTER all other steps succeed — its presence
     //    is the signal that this volume is fully provisioned at this version.
