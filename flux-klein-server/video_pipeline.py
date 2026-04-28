@@ -20,6 +20,11 @@ import torch
 from PIL import Image
 
 import config
+# Reuse the image pipeline's helper so both pods stamp the same
+# /workspace/app/.version.json onto /health for drift detection by the
+# orchestrator. Cross-module private import is fine here — both files
+# live in the same package.
+from pipeline import _load_app_version
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +50,12 @@ class LtxvVideoPipeline:
         self._ready = False
         self._lock = threading.Lock()
         self._load_ms: int = 0
+        # Per-substage warmup timings + flux-klein-server tree-hash version
+        # exposed via /health. Mirrors the image pipeline so the orchestrator's
+        # drift detection and substage observability work identically for
+        # both pod kinds (per-DC volume sync coverage, slow-warmup root-cause).
+        self._phase_timings: dict[str, int] = {}
+        self._app_version = _load_app_version()
 
     @property
     def ready(self) -> bool:
@@ -66,6 +77,7 @@ class LtxvVideoPipeline:
         # ``from_single_file`` lets diffusers infer the architecture from
         # the safetensors metadata without needing the 0.9.5 transformer
         # weights as a fallback (which the volume doesn't have).
+        t_phase = time.time()
         transformer_path = hf_hub_download(
             repo_id=config.LTXV_TRANSFORMER_REPO,
             filename=config.LTXV_TRANSFORMER_FILE,
@@ -75,16 +87,22 @@ class LtxvVideoPipeline:
             transformer_path,
             torch_dtype=torch.bfloat16,
         )
+        self._phase_timings["transformer_load_ms"] = int((time.time() - t_phase) * 1000)
 
         # Base pipeline — passing transformer= bypasses transformer load
         # from the base repo (which is intentional: those weights aren't
         # on the volume).
+        t_phase = time.time()
         self.pipe = LTXImageToVideoPipeline.from_pretrained(
             config.LTXV_BASE_REPO,
             transformer=transformer,
             torch_dtype=torch.bfloat16,
         )
+        self._phase_timings["from_pretrained_ms"] = int((time.time() - t_phase) * 1000)
+
+        t_phase = time.time()
         self.pipe.to("cuda")
+        self._phase_timings["to_cuda_ms"] = int((time.time() - t_phase) * 1000)
 
         logger.info("LTXV loaded in %.1fs", time.time() - t0)
 
@@ -105,6 +123,7 @@ class LtxvVideoPipeline:
                 guidance_scale=1.0,
                 generator=torch.Generator(device="cuda").manual_seed(0),
             )
+        self._phase_timings["warmup_inference_ms"] = int((time.time() - t1) * 1000)
         logger.info("LTXV warmup done (%.1fs)", time.time() - t1)
 
         self._load_ms = int((time.time() - t0) * 1000)
@@ -180,4 +199,6 @@ class LtxvVideoPipeline:
             "gpu": gpu_name,
             "vram_free_gb": round(vram_free, 2),
             "load_ms": self._load_ms,
+            "phase_timings_ms": dict(self._phase_timings),
+            "app_version": dict(self._app_version),
         }

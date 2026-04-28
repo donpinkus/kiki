@@ -1965,14 +1965,14 @@ async function _runProvisionLoop(
         // returned status. Provision still succeeds regardless — this is
         // observability, not a gate.
         //
-        // Image-only: video pod's /health returns a different shape with no
-        // app_flux_app_version field, so calling checkVersionDrift on video
-        // would fire spurious "missing_stamp" warnings on every provision.
-        // Volume drift is genuinely image-specific (sync-flux-app stamps the
-        // flux-klein-server tree hash against the image pipeline's version).
-        const volumeStatus = kind === 'image'
-          ? checkVersionDrift(healthResult.appVersion, { sessionId, podId, dc })
-          : 'unknown';
+        // Both kinds: sync-flux-app stamps one .version.json into the volume
+        // for the whole flux-klein-server/ tree (server.py + video_server.py),
+        // so a stale volume affects both pod kinds equally and we want
+        // drift detection on both.
+        const volumeStatus = checkVersionDrift(
+          healthResult.appVersion,
+          { sessionId, podId, dc },
+        );
         trackPodProvisionCompleted({
           userId: sessionId,
           durationMs: Date.now() - attemptStart,
