@@ -127,17 +127,31 @@ class Ltx23VideoPipeline:
             gemma_root,
         )
 
-        # FP8-cast quantization: works with the FP8 checkpoint without
-        # requiring tensorrt-llm (which fp8-scaled-mm would need). On H100
-        # this is sufficient — fp8-scaled-mm would be ~10-20% faster but
-        # adds a heavyweight dep we'd rather avoid until perf data justifies it.
-        quantization = QuantizationPolicy.fp8_cast()
+        # Quantization + offload mode are env-controlled so we can flip without
+        # redeploying. ltx-pipelines rejects quantization combined with layer
+        # streaming, so when LTX_OFFLOAD_MODE != "none" we drop quantization.
+        #
+        # FP8 modes:
+        #   cast       — Lightricks' universal-no-deps default. Stores Linear
+        #                weights in FP8; upcasts to BF16 per matmul. Works on
+        #                any CUDA GPU. Default.
+        #   scaled_mm  — native FP8 matmul via TensorRT-LLM. Hopper-only,
+        #                ~10-30% faster on H100. Currently blocked on upstream
+        #                issue #181 (shape mismatch); flip when fixed.
+        offload_mode_name = os.getenv("LTX_OFFLOAD_MODE", "none").lower()
+        offload_mode = OffloadMode(offload_mode_name)
+        if offload_mode == OffloadMode.NONE:
+            fp8_mode = os.getenv("LTX_FP8_MODE", "cast").lower()
+            quantization = (
+                QuantizationPolicy.fp8_scaled_mm()
+                if fp8_mode == "scaled_mm"
+                else QuantizationPolicy.fp8_cast()
+            )
+            logger.info("LTX quantization=fp8_%s offload_mode=none", fp8_mode)
+        else:
+            quantization = None
+            logger.info("LTX quantization=disabled offload_mode=%s", offload_mode_name)
 
-        # OffloadMode is mutually exclusive with quantization in
-        # ltx-pipelines: combining them throws "quantization is not
-        # supported with layer streaming" at DiffusionStage init.
-        # Sticking with NONE and fitting in VRAM by limiting activation
-        # memory (smaller resolution); see config.LTX_WIDTH/HEIGHT.
         t_phase = time.time()
         self.pipe = DistilledPipeline(
             distilled_checkpoint_path=checkpoint_path,
@@ -145,8 +159,15 @@ class Ltx23VideoPipeline:
             spatial_upsampler_path=upscaler_path,
             loras=[],
             quantization=quantization,
-            offload_mode=OffloadMode.NONE,
+            offload_mode=offload_mode,
         )
+
+        # Kiki has no audio output. Replace audio_decoder with a stub so the
+        # vocoder is never built/run — saves the audio decode build/free cycle
+        # and a few seconds of latency. DistilledPipeline's __call__ unpacks
+        # `(decoded_video, decoded_audio)`; a None second element is fine —
+        # our wrapper discards `_audio`.
+        self.pipe.audio_decoder = lambda *_args, **_kwargs: None  # type: ignore[assignment]
         self._tiling_config = TilingConfig.default()
         self._phase_timings["pipeline_init_ms"] = int((time.time() - t_phase) * 1000)
         logger.info("LTX-2.3 pipeline loaded in %.1fs", time.time() - t_phase)
@@ -161,6 +182,7 @@ class Ltx23VideoPipeline:
             warmup_image.save(warmup_path, format="PNG")
         try:
             with self._lock:
+                # _run_inference already wraps in torch.inference_mode().
                 _ = self._run_inference(
                     image_path=warmup_path,
                     prompt="warmup",
@@ -238,36 +260,58 @@ class Ltx23VideoPipeline:
     ) -> list[Image.Image]:
         """Run one DistilledPipeline call, materialize the frame iterator
         into PIL Images. Caller holds `self._lock`.
+
+        Wraps the pipeline call in ``torch.inference_mode()`` — without it
+        PyTorch retains autograd buffers for every fp8_cast Linear's BF16
+        upcast tensor, blowing past 80 GiB on the 22B transformer. Lightricks'
+        own ``ltx_pipelines.distilled.main()`` is decorated with
+        ``@torch.inference_mode()``; replicating that here is the load-bearing
+        fix for the H100 OOM. ``model.eval()`` alone is NOT enough — it only
+        toggles dropout/batchnorm, not autograd.
         """
         from ltx_pipelines.utils.args import ImageConditioningInput
 
         images = [ImageConditioningInput(path=image_path, frame_idx=0, strength=1.0)]
-        decoded_video, _audio = self.pipe(  # audio discarded — Kiki has no audio path
-            prompt=prompt,
-            seed=seed,
-            height=config.LTX_HEIGHT,
-            width=config.LTX_WIDTH,
-            num_frames=config.LTX_NUM_FRAMES,
-            frame_rate=float(config.LTX_FPS),
-            images=images,
-            tiling_config=self._tiling_config,
-            enhance_prompt=False,
-        )
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
 
-        # Tensor iterator → PIL list. Each chunk is (F, H, W, 3) uint8 RGB
-        # (per ltx_pipelines.utils.media_io.encode_video which feeds the
-        # same tensor straight into PyAV with format="rgb24").
         frames: list[Image.Image] = []
-        for chunk in decoded_video:
-            chunk_cpu = chunk.to("cpu")
-            if chunk_cpu.dtype != torch.uint8:
-                # Defensive: float tensors get clamped + scaled. Shouldn't
-                # happen for the ltx-pipelines decoder, but guards against a
-                # silent regression if upstream changes the output dtype.
-                chunk_cpu = (chunk_cpu.clamp(0, 1) * 255).to(torch.uint8)
-            arr = chunk_cpu.numpy()
-            for frame_arr in arr:
-                frames.append(Image.fromarray(frame_arr, mode="RGB"))
+        with torch.inference_mode():
+            decoded_video, _audio = self.pipe(
+                prompt=prompt,
+                seed=seed,
+                height=config.LTX_HEIGHT,
+                width=config.LTX_WIDTH,
+                num_frames=config.LTX_NUM_FRAMES,
+                frame_rate=float(config.LTX_FPS),
+                images=images,
+                tiling_config=self._tiling_config,
+                enhance_prompt=False,
+            )
+
+            # Tensor iterator → PIL list. The iterator drives the video VAE
+            # decoder, which is also part of inference and must run inside
+            # the inference_mode context. Each chunk is (F, H, W, 3) uint8
+            # RGB (per ltx_pipelines.utils.media_io.encode_video which feeds
+            # the same tensor straight into PyAV with format="rgb24").
+            for chunk in decoded_video:
+                chunk_cpu = chunk.to("cpu")
+                if chunk_cpu.dtype != torch.uint8:
+                    # Defensive: float tensors get clamped + scaled.
+                    # Shouldn't happen for the ltx-pipelines decoder, but
+                    # guards against a silent regression if upstream changes
+                    # the output dtype.
+                    chunk_cpu = (chunk_cpu.clamp(0, 1) * 255).to(torch.uint8)
+                arr = chunk_cpu.numpy()
+                for frame_arr in arr:
+                    frames.append(Image.fromarray(frame_arr, mode="RGB"))
+
+        if torch.cuda.is_available():
+            logger.info(
+                "LTX inference CUDA peak allocated %.2f GiB, peak reserved %.2f GiB",
+                torch.cuda.max_memory_allocated() / (1024**3),
+                torch.cuda.max_memory_reserved() / (1024**3),
+            )
         return frames
 
     def get_info(self) -> dict:
