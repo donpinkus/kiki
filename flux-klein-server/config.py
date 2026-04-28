@@ -78,12 +78,15 @@ LTX_QUANTIZATION = "fp8"
 # tighter %64 rule was a 2.3 regression that bit us in 2026-04-28's first
 # end-to-end test.
 #
-# Square (512x512) matches FLUX.2-klein's output aspect — no pillarboxing
-# in the iPad's square right pane. 512 = 8x64 satisfies the divisor; lower
-# pixel count than 704x480 means faster inference. Bump to 768x768 if visual
-# quality demands it (latency cost ~50%).
-LTX_WIDTH = int(os.getenv("LTX_WIDTH", "512"))
-LTX_HEIGHT = int(os.getenv("LTX_HEIGHT", "512"))
+# 320x320 squares the aspect (matches FLUX 1:1 output, no pillarboxing in
+# the iPad's square pane) and keeps activation memory low: 22B FP8 + Gemma
+# + fp8_cast's transient bf16 upcast buffers OOMed H100 80GB at 512x512
+# (78 GiB allocated). ltx-pipelines forbids combining OffloadMode.CPU
+# with quantization, so the only knob to reduce VRAM pressure is making
+# activations smaller. 320 = 5x64 satisfies the two-stage divisor.
+# Upscale to 768 happens iPad-side via AVPlayerLayer's resizeAspect.
+LTX_WIDTH = int(os.getenv("LTX_WIDTH", "320"))
+LTX_HEIGHT = int(os.getenv("LTX_HEIGHT", "320"))
 LTX_NUM_FRAMES = int(os.getenv("LTX_NUM_FRAMES", "49"))
 LTX_FPS = int(os.getenv("LTX_FPS", "24"))
 LTX_OUTPUT_JPEG_QUALITY = int(os.getenv("LTX_OUTPUT_QUALITY", "80"))
