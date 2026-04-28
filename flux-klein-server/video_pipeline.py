@@ -133,6 +133,14 @@ class Ltx23VideoPipeline:
         # adds a heavyweight dep we'd rather avoid until perf data justifies it.
         quantization = QuantizationPolicy.fp8_cast()
 
+        # OffloadMode.CPU streams transformer weights from CPU per layer.
+        # NONE OOMed at 79 GiB on H100 80GB during the very first warmup
+        # inference (2026-04-28): 22B FP8 transformer (~22 GB) + Gemma
+        # encoder (~6 GB) + activations + fp8_cast's transient bf16
+        # upcast buffers saturate VRAM. CPU offload trades latency
+        # (CPU↔GPU bandwidth bound) for fit; per the LTX-2 README,
+        # ~36 GB RAM + ~5 GB VRAM. H100 SXM nodes have 200 GB+ RAM so
+        # this is comfortable.
         t_phase = time.time()
         self.pipe = DistilledPipeline(
             distilled_checkpoint_path=checkpoint_path,
@@ -140,7 +148,7 @@ class Ltx23VideoPipeline:
             spatial_upsampler_path=upscaler_path,
             loras=[],
             quantization=quantization,
-            offload_mode=OffloadMode.NONE,  # 80 GB H100 fits everything in VRAM
+            offload_mode=OffloadMode.CPU,
         )
         self._tiling_config = TilingConfig.default()
         self._phase_timings["pipeline_init_ms"] = int((time.time() - t_phase) * 1000)
