@@ -1964,10 +1964,15 @@ async function _runProvisionLoop(
         // Sentry) fire inside checkVersionDrift; we just forward the
         // returned status. Provision still succeeds regardless — this is
         // observability, not a gate.
-        const volumeStatus = checkVersionDrift(
-          healthResult.appVersion,
-          { sessionId, podId, dc },
-        );
+        //
+        // Image-only: video pod's /health returns a different shape with no
+        // app_flux_app_version field, so calling checkVersionDrift on video
+        // would fire spurious "missing_stamp" warnings on every provision.
+        // Volume drift is genuinely image-specific (sync-flux-app stamps the
+        // flux-klein-server tree hash against the image pipeline's version).
+        const volumeStatus = kind === 'image'
+          ? checkVersionDrift(healthResult.appVersion, { sessionId, podId, dc })
+          : 'unknown';
         trackPodProvisionCompleted({
           userId: sessionId,
           durationMs: Date.now() - attemptStart,
