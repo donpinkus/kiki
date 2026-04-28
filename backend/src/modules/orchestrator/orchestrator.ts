@@ -6,7 +6,7 @@
  * imports):
  *   - Registry: Map<sessionId, Session>
  *   - Provisioner: create pod → wait for runtime → poll health
- *   - Reaper: terminate pods idle > 10 min
+ *   - Reaper: terminate pods idle > 30 min
  *   - Reconcile: on boot, kill orphaned `kiki-session-*` pods from prior runs
  *   - Semaphore: cap concurrent provisions to prevent rate-limit + burst OOM
  *
@@ -33,19 +33,20 @@
  * │                                     │                                                  │ Only after rerolls exhausted  │
  * │                                     │                                                  │ does abortSession fire.       │
  * ├─────────────────────────────────────┼──────────────────────────────────────────────────┼──────────────────────────────┤
- * │ 3. Pod errors during provisioning   │ Container pulls but server.py crashes on startup │ waitForHealth polls /health;  │
- * │    (e.g. Python import error)       │ (e.g. missing dep, bad config). Pod is running   │ if pod runtime is up but      │
- * │                                     │ but /health never returns 200.                   │ health never passes, times    │
- * │                                     │                                                  │ out after 10min → abortSession│
- * │                                     │                                                  │ terminates pod + clears Redis.│
+ * │ 3. Pod errors during provisioning   │ Container pulls but the app crashes on startup   │ waitForHealth polls /health  │
+ * │    (e.g. Python import error,       │ — /health never reaches 200, or supervisord       │ AND tracks runtime uptime    │
+ * │    crashlooping container)          │ restarts the container repeatedly (uptime resets  │ across probes; uptime         │
+ * │                                     │ every probe).                                    │ regression OR 4-min timeout  │
+ * │                                     │                                                  │ both throw                    │
+ * │                                     │                                                  │ PodBootStallError → reroll.  │
  * ├─────────────────────────────────────┼──────────────────────────────────────────────────┼──────────────────────────────┤
- * │ 4. User idle >10min on gallery      │ No WS connection → no touch() calls.             │ Reaper scans every 60s,      │
- * │                                     │ lastActivityAt goes stale.                       │ terminates pod if idle >10min.│
+ * │ 4. User idle >30min on gallery      │ No WS connection → no touch() calls.             │ Reaper scans every 60s,      │
+ * │                                     │ lastActivityAt goes stale.                       │ terminates pod if idle >30min.│
  * │                                     │                                                  │ Redis session deleted. Next   │
  * │                                     │                                                  │ startStream() provisions     │
  * │                                     │                                                  │ fresh.                       │
  * ├─────────────────────────────────────┼──────────────────────────────────────────────────┼──────────────────────────────┤
- * │ 5. User idle >10min on canvas       │ WS stays open but no frames sent (canvas         │ Same as #4 — touch() only    │
+ * │ 5. User idle >30min on canvas       │ WS stays open but no frames sent (canvas         │ Same as #4 — touch() only    │
  * │    (not drawing)                    │ unchanged). No touch() calls from relay.          │ fires on relayed messages.   │
  * │                                     │                                                  │ Pod reaped. Next stroke →    │
  * │                                     │                                                  │ frame send fails → iOS       │
@@ -69,13 +70,13 @@
  * │                                     │ unexpectedly.                                    │ with exponential backoff).   │
  * │                                     │                                                  │ Backend pod stays alive      │
  * │                                     │                                                  │ (sessionClosed keeps it for  │
- * │                                     │                                                  │ reconnect within 10min).     │
+ * │                                     │                                                  │ reconnect within 30min).     │
  * │                                     │                                                  │ Reconnect reuses ready pod.  │
  * ├─────────────────────────────────────┼──────────────────────────────────────────────────┼──────────────────────────────┤
- * │ 9. App backgrounded then resumed    │ iOS stopStream() on background, restarts on      │ Pod stays alive up to 10min  │
+ * │ 9. App backgrounded then resumed    │ iOS stopStream() on background, restarts on      │ Pod stays alive up to 30min  │
  * │                                     │ foreground if streamWasActiveBeforeBackground.   │ (idle reaper). If resumed    │
  * │                                     │                                                  │ within window, reuses pod.   │
- * │                                     │                                                  │ If >10min, fresh provision.  │
+ * │                                     │                                                  │ If >30min, fresh provision.  │
  * ├─────────────────────────────────────┼──────────────────────────────────────────────────┼──────────────────────────────┤
  * │ 10. Pod boot stalls on a bad host   │ Pod created but runtime stays null. NFS mount    │ waitForRuntime throws        │
  * │     (stock image pull on fresh      │ delay or stock-image pull on a cold host —       │ PodBootStallError after      │
@@ -85,9 +86,23 @@
  * │                                     │                                                  │ rerolls up to                │
  * │                                     │                                                  │ POD_BOOT_MAX_REROLLS.        │
  * │                                     │                                                  │ Sentry captures each stall.  │
- * │                                     │                                                  │ 10-min hard timeout remains  │
- * │                                     │                                                  │ as a safety net when the     │
- * │                                     │                                                  │ watchdog is disabled.        │
+ * ├─────────────────────────────────────┼──────────────────────────────────────────────────┼──────────────────────────────┤
+ * │ 11. User signs out mid-provision    │ /v1/auth/signout fires while _runProvisionLoop is │ abortSession aborts the     │
+ * │     (Round 6 leak fix)              │ creating a pod. Without cancellation, the loop   │ AbortController on each      │
+ * │                                     │ would continue, stamp the row, and leak the pod  │ inFlightProvisions entry and │
+ * │                                     │ until reconcile.                                 │ awaits settlement; the loop  │
+ * │                                     │                                                  │ checks signal at 3 points    │
+ * │                                     │                                                  │ (pre-create / post-create / │
+ * │                                     │                                                  │ pre-stamp) and terminates    │
+ * │                                     │                                                  │ any pod-in-flight inline.    │
+ * ├─────────────────────────────────────┼──────────────────────────────────────────────────┼──────────────────────────────┤
+ * │ 12. Pod terminated externally       │ Spot preemption, host failure, manual            │ Image kind's                 │
+ * │     (Redis row points to dead pod)  │ termination — orchestrator never observes the    │ getReusableFromRow probes    │
+ * │                                     │ kill, so the session row keeps claiming          │ RunPod (getPod) before       │
+ * │                                     │ state=ready with the dead podId. Reconnect would │ trusting the row. Pod gone → │
+ * │                                     │ reuse blindly and 404 on the WS upgrade.         │ returns null → existing      │
+ * │                                     │                                                  │ deleteSession + fresh        │
+ * │                                     │                                                  │ provision path runs.         │
  * └─────────────────────────────────────┴──────────────────────────────────────────────────┴──────────────────────────────┘
  */
 
