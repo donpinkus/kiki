@@ -104,6 +104,7 @@ When diagnosing a failure, separate observations from inferences. Do not collaps
 |------|------|
 | Content safety / App Store compliance | `documents/references/content-safety.md` |
 | RunPod deploy, provider ops, network volumes | `documents/references/provider-config.md` |
+| Getting a model performant on RunPod (persistent-model architecture, OOM/perf diagnosis, dev iteration loop, lessons from LTX-2.3) | `documents/references/runpod-model-serving-playbook.md` |
 | Pod lifecycle edge cases (MUST-handle matrix)          | `backend/src/modules/orchestrator/orchestrator.ts` (file header) |
 | Two-pod video architecture (LTXV split) plan + context | `documents/plans/two-pod-video-architecture.md` + GitHub #25 |
 | UX test cases (must-pass manual checklist)              | `documents/test-cases.md` |
