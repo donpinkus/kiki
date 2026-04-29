@@ -622,10 +622,17 @@ class Ltx23VideoPipeline:
         # bottom of this method, after pipe_total_ms is finalized.
         if profile:
             from torch.profiler import ProfilerActivity, profile as _torch_profile
+            # `profile_memory=True` was tried in v1 and produced 1+ GB
+            # traces (every alloc/free is a record over a multi-second
+            # inference). Per-request VRAM is already in the `LTX VRAM
+            # GiB:` log line, so dropping it cuts trace size ~5–10x with
+            # no information loss for the questions we're asking
+            # (kernel-launch overhead, op-level timing, FP8-path check).
+            # `record_shapes=True` is cheap and useful — keep.
             profiler_ctx = _torch_profile(
                 activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
                 record_shapes=True,
-                profile_memory=True,
+                profile_memory=False,
                 with_stack=False,
             )
         else:
@@ -906,12 +913,17 @@ class Ltx23VideoPipeline:
         timestamp = time.strftime("%H%M%S")
         setting = f"{width}x{height}x{num_frames}"
         base = f"/tmp/ltx-profile-{timestamp}-{setting}"
+        # Each artifact write is independently guarded — v1 had the .txt
+        # `key_averages().table()` call throw on a 1+ GB trace and that
+        # exception aborted the .meta.json write too, leaving a useless
+        # 0-byte .txt and no metadata. Now any one artifact failure is
+        # logged and the others still land.
         try:
             prof.export_chrome_trace(f"{base}.json")
-            with open(f"{base}.txt", "w") as f:
-                f.write(prof.key_averages().table(
-                    sort_by="cuda_time_total", row_limit=30,
-                ))
+            logger.info("LTX profile chrome trace written: %s.json", base)
+        except Exception as e:  # noqa: BLE001
+            logger.error("Failed to export Chrome trace %s.json: %s", base, e)
+        try:
             with open(f"{base}.meta.json", "w") as f:
                 json.dump(
                     {
@@ -928,11 +940,18 @@ class Ltx23VideoPipeline:
                     f,
                     indent=2,
                 )
-            logger.info(
-                "LTX profile trace written: %s.{json,txt,meta.json}", base
-            )
         except Exception as e:  # noqa: BLE001
-            logger.error("Failed to write profile trace to %s: %s", base, e)
+            logger.error("Failed to write %s.meta.json: %s", base, e)
+        try:
+            with open(f"{base}.txt", "w") as f:
+                f.write(prof.key_averages().table(
+                    sort_by="cuda_time_total", row_limit=30,
+                ))
+        except Exception as e:  # noqa: BLE001
+            logger.error(
+                "Failed to write %s.txt summary (Chrome trace JSON still "
+                "has the data): %s", base, e
+            )
 
     def get_info(self) -> dict:
         gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "none"
