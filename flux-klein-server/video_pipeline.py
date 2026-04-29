@@ -124,6 +124,23 @@ class Ltx23VideoPipeline:
         self._persistent_transformer_ready: bool = False
         self._persistent_transformer_build_ms: int = 0
         self._vram_after_transformer_gb: float = 0.0
+        # Persistent Gemma + embeddings_processor (Step 3 of the perf plan).
+        # Built together at warmup as one unit. Same fail-fast +
+        # idempotent-shutdown pattern as Step 2. Gated by
+        # LTX_PERSIST_GEMMA env var (default "1") so we have a fast
+        # rollback path if a host shows unexpected allocator behavior at
+        # ~46 GiB resident. The two are persisted together because
+        # upstream's PromptEncoder.__call__ runs them as one unit, and the
+        # 1.5s embeddings_processor build cost is also per-request load.
+        self._text_encoder_ctx: object | None = None
+        self._text_encoder: object | None = None
+        self._embeddings_processor_ctx: object | None = None
+        self._embeddings_processor: object | None = None
+        self._persistent_gemma_ready: bool = False
+        self._persistent_gemma_build_ms: int = 0
+        self._persistent_embeddings_processor_build_ms: int = 0
+        self._vram_after_gemma_gb: float = 0.0
+        self._vram_after_embeddings_processor_gb: float = 0.0
         # Per-request resident-vs-peak VRAM accounting. Without this, after
         # persistence lands, peak_alloc includes the resident transformer
         # baseline so per-request leaks become invisible. Captured at the
@@ -264,10 +281,74 @@ class Ltx23VideoPipeline:
             self._vram_after_transformer_gb,
         )
 
+        # Step 3 — Build persistent Gemma + embeddings_processor as one unit,
+        # also BEFORE warmup. Same fail-fast + idempotent-shutdown pattern
+        # as Step 2. Gated by LTX_PERSIST_GEMMA so we have an env-flag
+        # rollback path if a host shows unexpected allocator behavior at
+        # ~46 GiB resident.
+        #
+        # Reuses upstream's _underscore-prefixed builders (`_text_encoder_ctx`
+        # and `_embeddings_processor_builder`). Not strictly public API; if
+        # Lightricks changes the signatures the failure surface is exactly
+        # this block plus the prompt-encoding section in `_run_inference`.
+        if os.getenv("LTX_PERSIST_GEMMA", "1") == "1":
+            from ltx_pipelines.utils.gpu_model import gpu_model
+
+            logger.info("LTX-2.3 building persistent Gemma + embeddings_processor (Step 3)...")
+            prompt_enc = self.pipe.prompt_encoder
+
+            # Persistent Gemma text encoder.
+            t_gemma = time.time()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            self._text_encoder_ctx = prompt_enc._text_encoder_ctx()
+            self._text_encoder = self._text_encoder_ctx.__enter__()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            self._persistent_gemma_build_ms = int((time.time() - t_gemma) * 1000)
+            if torch.cuda.is_available():
+                self._vram_after_gemma_gb = torch.cuda.memory_allocated() / (1024**3)
+            logger.info(
+                "LTX-2.3 persistent Gemma ready (%dms, vram_after=%.2f GiB)",
+                self._persistent_gemma_build_ms,
+                self._vram_after_gemma_gb,
+            )
+
+            # Persistent embeddings processor. Build same way upstream's
+            # PromptEncoder.__call__ does it, then keep it on GPU via
+            # gpu_model() — but never exit the context until shutdown.
+            t_ep = time.time()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            ep_model = (
+                prompt_enc._embeddings_processor_builder.build(
+                    device=prompt_enc._device, dtype=prompt_enc._dtype
+                )
+                .to(prompt_enc._device)
+                .eval()
+            )
+            self._embeddings_processor_ctx = gpu_model(ep_model)
+            self._embeddings_processor = self._embeddings_processor_ctx.__enter__()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            self._persistent_embeddings_processor_build_ms = int((time.time() - t_ep) * 1000)
+            if torch.cuda.is_available():
+                self._vram_after_embeddings_processor_gb = (
+                    torch.cuda.memory_allocated() / (1024**3)
+                )
+            self._persistent_gemma_ready = True
+            logger.info(
+                "LTX-2.3 persistent embeddings_processor ready (%dms, vram_after=%.2f GiB)",
+                self._persistent_embeddings_processor_build_ms,
+                self._vram_after_embeddings_processor_gb,
+            )
+        else:
+            logger.info("LTX_PERSIST_GEMMA=0 — skipping Step 3 (Gemma rebuilds per request)")
+
         # Warmup — first call has lazy CUDA kernel compilation. Doing it
         # here keeps the user-visible first video latency clean. With the
-        # persistent transformer above, warmup now exercises the
-        # stage.run() path (no rebuild) so metrics match steady-state.
+        # persistent transformer + Gemma above, warmup now exercises the
+        # full persistent serving path so metrics match steady-state.
         logger.info("LTX-2.3 warmup...")
         t1 = time.time()
         warmup_image = Image.new("RGB", (config.LTX_WIDTH, config.LTX_HEIGHT), (128, 128, 128))
@@ -479,33 +560,52 @@ class Ltx23VideoPipeline:
         frames: list[Image.Image] = []
 
         with torch.inference_mode():
-            # Inline the upstream PromptEncoder.__call__ flow so we can time
-            # build vs encode separately. Upstream conflates them in
-            # `pipe.prompt_encoder([prompt])` — and Round 1 saw the combined
-            # ~9s phase on a short prompt, which is suspiciously dominated
-            # by Gemma load (build), not actual encode. Splitting confirms
-            # whether persistent-Gemma (Step 4) is the right next move or
-            # whether the prompt cache (Step 3) covers most of it.
+            # Step 3 — Use persistent Gemma + embeddings_processor when
+            # available. Falls back to per-request build if
+            # LTX_PERSIST_GEMMA=0 (env kill switch for fast rollback).
+            #
+            # Field naming (parallel to Step 2's stage_build_runtime):
+            #   prompt_encoder_build_runtime      ≈ 0ms post-Step-3
+            #   embeddings_processor_build_runtime ≈ 0ms post-Step-3
+            # The one-time build costs are exposed via
+            # persistent_gemma_build_ms / persistent_embeddings_processor_build_ms
+            # on /health.
             prompt_enc = pipe.prompt_encoder
-            with self._timed("prompt_encoder_build"):
-                text_encoder_ctx = prompt_enc._text_encoder_ctx()
-                text_encoder = text_encoder_ctx.__enter__()
-            try:
+            if self._persistent_gemma_ready and self._text_encoder is not None:
+                # Persistent path — no rebuild, no teardown.
+                with self._timed("prompt_encoder_build_runtime"):
+                    text_encoder = self._text_encoder
                 with self._timed("prompt_encoder_encode"):
                     raw_outputs = [text_encoder.encode(prompt)]
-            finally:
-                text_encoder_ctx.__exit__(None, None, None)
-
-            with self._timed("embeddings_processor"):
-                ep_builder = prompt_enc._embeddings_processor_builder
-                ep_model = ep_builder.build(
-                    device=prompt_enc._device, dtype=prompt_enc._dtype
-                ).to(prompt_enc._device).eval()
-                with gpu_model(ep_model) as embeddings_processor:
+                with self._timed("embeddings_processor_build_runtime"):
+                    embeddings_processor = self._embeddings_processor
+                with self._timed("embeddings_processor_run"):
                     proc_outputs = [
                         embeddings_processor.process_hidden_states(hs, mask)
                         for hs, mask in raw_outputs
                     ]
+            else:
+                # Legacy per-request path (kill-switch off, or build failed).
+                # Same pattern as pre-Step-3 — kept so disabling persistence
+                # via env doesn't break the pod.
+                with self._timed("prompt_encoder_build"):
+                    text_encoder_ctx = prompt_enc._text_encoder_ctx()
+                    text_encoder = text_encoder_ctx.__enter__()
+                try:
+                    with self._timed("prompt_encoder_encode"):
+                        raw_outputs = [text_encoder.encode(prompt)]
+                finally:
+                    text_encoder_ctx.__exit__(None, None, None)
+                with self._timed("embeddings_processor"):
+                    ep_builder = prompt_enc._embeddings_processor_builder
+                    ep_model = ep_builder.build(
+                        device=prompt_enc._device, dtype=prompt_enc._dtype
+                    ).to(prompt_enc._device).eval()
+                    with gpu_model(ep_model) as embeddings_processor:
+                        proc_outputs = [
+                            embeddings_processor.process_hidden_states(hs, mask)
+                            for hs, mask in raw_outputs
+                        ]
             (ctx_p,) = proc_outputs
             video_context, audio_context = ctx_p.video_encoding, ctx_p.audio_encoding
 
@@ -728,6 +828,12 @@ class Ltx23VideoPipeline:
             "persistent_transformer_ready": self._persistent_transformer_ready,
             "persistent_transformer_build_ms": self._persistent_transformer_build_ms,
             "vram_after_transformer_gb": round(self._vram_after_transformer_gb, 2),
+            # Step 3 — persistent Gemma + embeddings_processor health.
+            "persistent_gemma_ready": self._persistent_gemma_ready,
+            "persistent_gemma_build_ms": self._persistent_gemma_build_ms,
+            "persistent_embeddings_processor_build_ms": self._persistent_embeddings_processor_build_ms,
+            "vram_after_gemma_gb": round(self._vram_after_gemma_gb, 2),
+            "vram_after_embeddings_processor_gb": round(self._vram_after_embeddings_processor_gb, 2),
         }
 
     def shutdown_persistent_models(self) -> None:
@@ -739,7 +845,37 @@ class Ltx23VideoPipeline:
         within the docker grace window. Ungraceful kills (SIGKILL after
         grace timeout) skip this entirely; that's fine because the GPU is
         torn down with the container.
+
+        Releases in reverse build order: embeddings_processor → Gemma →
+        transformer. Each block tolerates being already-None so partial
+        builds (e.g., transformer succeeded but Gemma failed) shut down
+        cleanly. After each successful exit the corresponding refs are
+        cleared so a subsequent call is a no-op.
         """
+        # Step 3 — release embeddings_processor first.
+        if self._embeddings_processor_ctx is not None:
+            try:
+                logger.info("LTX-2.3 releasing persistent embeddings_processor...")
+                self._embeddings_processor_ctx.__exit__(None, None, None)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Error during persistent embeddings_processor shutdown: %s", e)
+            finally:
+                self._embeddings_processor_ctx = None
+                self._embeddings_processor = None
+
+        # Step 3 — release Gemma text encoder.
+        if self._text_encoder_ctx is not None:
+            try:
+                logger.info("LTX-2.3 releasing persistent Gemma text encoder...")
+                self._text_encoder_ctx.__exit__(None, None, None)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Error during persistent Gemma shutdown: %s", e)
+            finally:
+                self._text_encoder_ctx = None
+                self._text_encoder = None
+                self._persistent_gemma_ready = False
+
+        # Step 2 — release transformer.
         if self._transformer_ctx is not None:
             try:
                 logger.info("LTX-2.3 releasing persistent transformer...")
