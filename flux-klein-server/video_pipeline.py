@@ -362,6 +362,9 @@ class Ltx23VideoPipeline:
                     image_path=warmup_path,
                     prompt="warmup",
                     seed=0,
+                    width=config.LTX_WIDTH,
+                    height=config.LTX_HEIGHT,
+                    num_frames=config.LTX_NUM_FRAMES,
                 )
         finally:
             try:
