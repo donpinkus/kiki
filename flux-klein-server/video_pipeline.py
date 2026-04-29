@@ -112,6 +112,23 @@ class Ltx23VideoPipeline:
         # before optimizing blind. Lists because some phases (image_conditioner,
         # transformer stage) are called twice per inference.
         self._inference_timings: dict[str, list[int]] = defaultdict(list)
+        # Persistent transformer (Step 2 of the perf plan). Built once at end
+        # of load(), reused across all requests, freed only on graceful
+        # shutdown via shutdown_persistent_models(). Eliminates the ~63s
+        # per-request stage_build cost. None until built; if build fails,
+        # _ready stays False and orchestrator's reaper rerolls the pod —
+        # we explicitly do NOT fall back to per-request rebuild because that
+        # would silently mask the failure and reintroduce 60s+ latency.
+        self._transformer_ctx: object | None = None
+        self._transformer: object | None = None
+        self._persistent_transformer_ready: bool = False
+        self._persistent_transformer_build_ms: int = 0
+        self._vram_after_transformer_gb: float = 0.0
+        # Per-request resident-vs-peak VRAM accounting. Without this, after
+        # persistence lands, peak_alloc includes the resident transformer
+        # baseline so per-request leaks become invisible. Captured at the
+        # top of each _run_inference call.
+        self._resident_alloc_gb_at_request_start: float = 0.0
         self._app_version = _load_app_version()
 
     @property
@@ -222,8 +239,35 @@ class Ltx23VideoPipeline:
         self._phase_timings["pipeline_init_ms"] = int((time.time() - t_phase) * 1000)
         logger.info("LTX-2.3 pipeline loaded in %.1fs", time.time() - t_phase)
 
+        # Step 2 — Build persistent transformer BEFORE warmup so that warmup
+        # validates the persistent path, not the legacy per-request build path.
+        # Otherwise warmup metrics would still reflect the old behavior and
+        # be misleading. Fail-fast: if the build raises, _ready stays False
+        # and the orchestrator's /health-based reaper rerolls the pod. Do
+        # NOT silently fall back to per-request rebuild — that would hide
+        # the failure and reintroduce 60s+ latency per request.
+        logger.info("LTX-2.3 building persistent transformer (Step 2)...")
+        t_persist = time.time()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        self._transformer_ctx = self.pipe.stage.model_context()
+        self._transformer = self._transformer_ctx.__enter__()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        self._persistent_transformer_build_ms = int((time.time() - t_persist) * 1000)
+        if torch.cuda.is_available():
+            self._vram_after_transformer_gb = torch.cuda.memory_allocated() / (1024**3)
+        self._persistent_transformer_ready = True
+        logger.info(
+            "LTX-2.3 persistent transformer ready (%dms, vram_after=%.2f GiB)",
+            self._persistent_transformer_build_ms,
+            self._vram_after_transformer_gb,
+        )
+
         # Warmup — first call has lazy CUDA kernel compilation. Doing it
-        # here keeps the user-visible first video latency clean.
+        # here keeps the user-visible first video latency clean. With the
+        # persistent transformer above, warmup now exercises the
+        # stage.run() path (no rebuild) so metrics match steady-state.
         logger.info("LTX-2.3 warmup...")
         t1 = time.time()
         warmup_image = Image.new("RGB", (config.LTX_WIDTH, config.LTX_HEIGHT), (128, 128, 128))
@@ -305,6 +349,24 @@ class Ltx23VideoPipeline:
         try:
             with self._lock:
                 lock_wait_ms = int((time.perf_counter() - t_lock_request) * 1000)
+                # Re-check cancellation immediately after acquiring the lock.
+                # The earlier check at the top of generate() can be stale by
+                # ~lock_wait_ms; if the request was cancelled while queued,
+                # we'd otherwise still run a full ~127s inference. This
+                # closes that window before Step 5's mid-denoise hook lands.
+                if is_cancelled():
+                    logger.info(
+                        "LTX-2.3 generate cancelled after acquiring lock "
+                        "(lock_wait_ms=%d)",
+                        lock_wait_ms,
+                    )
+                    return GenerateResult(
+                        frames=None,
+                        cancel_state="before_start",
+                        lock_wait_ms=lock_wait_ms,
+                        pipe_total_ms=0,
+                        cancelled_but_ran_ms=0,
+                    )
                 frames = self._run_inference(
                     image_path=image_path,
                     prompt=prompt or "",
@@ -382,8 +444,26 @@ class Ltx23VideoPipeline:
                 crf=0,
             )
         ]
+        # Step 2 fail-fast: if the persistent transformer wasn't built (load
+        # failed, or shutdown was called), don't silently fall back to a
+        # per-request rebuild. Either we serve from a healthy persistent
+        # transformer or we surface the failure to the orchestrator.
+        if self._transformer is None or not self._persistent_transformer_ready:
+            raise RuntimeError(
+                "persistent transformer not initialized — pod should not have reached _ready=True"
+            )
+
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
+            # Capture resident baseline at request start so request_peak_delta_gb
+            # measures only this request's incremental allocation. After Step 2
+            # the resident baseline is ~22 GiB (transformer); after Step 3 it
+            # will be ~46 GiB (transformer + Gemma + processor). Without the
+            # delta, peak_alloc would always look "huge" and we couldn't tell
+            # whether a request leaked extra memory on top of the baseline.
+            self._resident_alloc_gb_at_request_start = (
+                torch.cuda.memory_allocated() / (1024**3)
+            )
         self._inference_timings.clear()
 
         pipe = self.pipe
@@ -447,22 +527,21 @@ class Ltx23VideoPipeline:
                     )
                 )
 
-            # Build transformer ONCE; reuse across stage 1 and stage 2.
-            # Manually open/close the context manager so we can time build
-            # and teardown separately. `stage_build` is the dominant load-time
-            # cost.
+            # Step 2 — Reuse the persistent transformer built once at load().
+            # `stage_build_runtime` should be ~0ms after Step 2 lands; the
+            # one-time build cost is exposed separately as
+            # `persistent_transformer_build_ms` on /health.
             #
-            # Both `model_context()` AND `__enter__()` go inside the timer:
-            # upstream's `_transformer_ctx` (in ltx_pipelines.utils.blocks)
-            # does `gpu_model(self._build_transformer(**kwargs))`, so the
-            # heavy `_build_transformer` call runs synchronously when
-            # `model_context()` is invoked — `__enter__()` is then a no-op
-            # that just yields the already-built model. Round-1 timed only
-            # `__enter__()` and got `stage_build=0` while ~8s was hidden in
-            # `pipe_total`. Wrapping both gets the real number.
-            with self._timed("stage_build"):
-                transformer_ctx = pipe.stage.model_context()
-                transformer = transformer_ctx.__enter__()
+            # Pre-Step-2 (Round 1): `stage_build` here was the per-request
+            # build cost (~63s on cold-cache hosts). Now it just measures
+            # the cost of reusing — should be near-zero.
+            #
+            # Renamed from `stage_build` to `stage_build_runtime` so a value
+            # of 0ms unambiguously means "no rebuild this request" rather
+            # than "no transformer exists" (which is what Round-1's
+            # untimed-model-context bug looked like).
+            with self._timed("stage_build_runtime"):
+                transformer = self._transformer
             try:
                 with self._timed("stage_1_denoise"):
                     video_state, audio_state = pipe.stage.run(
@@ -519,8 +598,11 @@ class Ltx23VideoPipeline:
                         ),
                     )
             finally:
+                # No teardown — transformer is persistent. `stage_teardown`
+                # remains in the schema (timed at ~0) so log structure is
+                # unchanged for downstream parsers.
                 with self._timed("stage_teardown"):
-                    transformer_ctx.__exit__(None, None, None)
+                    pass
 
             with self._timed("video_decoder_call"):
                 decoded_video = pipe.video_decoder(
@@ -575,18 +657,28 @@ class Ltx23VideoPipeline:
             # Peak allocated alone hides allocator fragmentation. Reserved
             # (cached but not in use) and free (whatever the driver still
             # has unallocated) are independent signals — needed once we
-            # start holding the transformer + Gemma resident across calls
-            # (Steps 2 & 4). Logging them per-request lets us watch for
-            # progressive bloat across many inferences.
+            # hold the transformer (and later Gemma) resident across calls.
+            #
+            # `resident_alloc` = baseline at start of request (typically the
+            # persistent transformer's ~22 GiB after Step 2, and ~46 GiB
+            # after Step 3). `request_peak_delta` = peak - resident, the
+            # actual incremental memory this request needed on top of the
+            # persistent baseline. Without the delta, a per-request leak
+            # would be invisible against the resident baseline.
             free_b, _ = torch.cuda.mem_get_info()
+            peak_alloc_gb = torch.cuda.max_memory_allocated() / (1024**3)
+            request_peak_delta_gb = peak_alloc_gb - self._resident_alloc_gb_at_request_start
             logger.info(
                 "LTX VRAM GiB: peak_alloc=%.2f peak_reserved=%.2f "
-                "now_alloc=%.2f now_reserved=%.2f free=%.2f",
-                torch.cuda.max_memory_allocated() / (1024**3),
+                "now_alloc=%.2f now_reserved=%.2f free=%.2f "
+                "resident_alloc=%.2f request_peak_delta=%.2f",
+                peak_alloc_gb,
                 torch.cuda.max_memory_reserved() / (1024**3),
                 torch.cuda.memory_allocated() / (1024**3),
                 torch.cuda.memory_reserved() / (1024**3),
                 free_b / (1024**3),
+                self._resident_alloc_gb_at_request_start,
+                request_peak_delta_gb,
             )
 
         # Phase breakdown — single line, easy to scan in pod logs. Lists for
@@ -632,4 +724,29 @@ class Ltx23VideoPipeline:
             "load_ms": self._load_ms,
             "phase_timings_ms": dict(self._phase_timings),
             "app_version": dict(self._app_version),
+            # Step 2 — persistent transformer health.
+            "persistent_transformer_ready": self._persistent_transformer_ready,
+            "persistent_transformer_build_ms": self._persistent_transformer_build_ms,
+            "vram_after_transformer_gb": round(self._vram_after_transformer_gb, 2),
         }
+
+    def shutdown_persistent_models(self) -> None:
+        """Release persistent models on graceful shutdown. Idempotent — safe to
+        call zero, one, or multiple times.
+
+        Hooked into FastAPI's lifespan exit in ``video_server.py``. Covers
+        ``railway up`` redeploys and orchestrator-initiated ``podTerminate``
+        within the docker grace window. Ungraceful kills (SIGKILL after
+        grace timeout) skip this entirely; that's fine because the GPU is
+        torn down with the container.
+        """
+        if self._transformer_ctx is not None:
+            try:
+                logger.info("LTX-2.3 releasing persistent transformer...")
+                self._transformer_ctx.__exit__(None, None, None)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Error during persistent transformer shutdown: %s", e)
+            finally:
+                self._transformer_ctx = None
+                self._transformer = None
+                self._persistent_transformer_ready = False

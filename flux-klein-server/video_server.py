@@ -86,6 +86,14 @@ async def lifespan(app: FastAPI):
         # Don't re-raise — keep the FastAPI app alive so /health can return
         # the traceback. The pipeline is unusable but observable.
     yield
+    # Step 2 — release persistent transformer (and later Gemma/processor) on
+    # graceful shutdown. Idempotent inside the pipeline; runs in a thread to
+    # avoid blocking the event loop on CUDA cleanup.
+    logger.info("Shutting down — releasing persistent models...")
+    try:
+        await asyncio.to_thread(video_pipeline.shutdown_persistent_models)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Error during shutdown_persistent_models: %s", e)
     logger.info("Shutting down.")
 
 
