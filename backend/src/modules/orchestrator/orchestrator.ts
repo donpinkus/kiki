@@ -282,6 +282,14 @@ const BOOT_ENV: Array<{ key: string; value: string }> = [
   // Strict improvement (or no-op) for image pod's FLUX path too.
   // Recommended by the OOM error message itself.
   { key: 'PYTORCH_CUDA_ALLOC_CONF', value: 'expandable_segments:True' },
+  // Step P2 (perf plan, post-first-trace) — turn on torch.compile of the
+  // persistent transformer. Pod-side default is "0" (off), so this
+  // explicitly enables the experiment for all newly-booted video pods.
+  // To disable quickly: change to '0' and redeploy + re-roll pods. The
+  // wrap call is in flux-klein-server/video_pipeline.py:load(); failure
+  // falls back to eager and is surfaced on /health as
+  // compiled_transformer=false.
+  { key: 'LTX_TORCH_COMPILE', value: '1' },
 ];
 
 // Forward orchestrator's PUBLIC_KEY env (set in Railway) to the pod so the

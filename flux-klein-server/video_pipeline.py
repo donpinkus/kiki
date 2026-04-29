@@ -127,6 +127,17 @@ class Ltx23VideoPipeline:
         self._persistent_transformer_ready: bool = False
         self._persistent_transformer_build_ms: int = 0
         self._vram_after_transformer_gb: float = 0.0
+        # Step P2 (perf plan, post-first-trace) — torch.compile experiment.
+        # When LTX_TORCH_COMPILE=1, wrap self._transformer in
+        # torch.compile(mode="reduce-overhead") AFTER the persistent
+        # transformer is built. The actual lowering + CUDA-graph capture
+        # happens lazily on first call (the warmup inference triggers it).
+        # Pre-trace estimate: 30-50% pipe_total reduction from cutting
+        # ~224k kernel launches (mean 7.7us each) into batched graph
+        # replays. Reviewer flagged this as unproven; this is the
+        # measurement experiment.
+        self._compiled_transformer: bool = False
+        self._compile_ms: int = 0
         # Persistent Gemma + embeddings_processor (Step 3 of the perf plan).
         # Built together at warmup as one unit. Same fail-fast +
         # idempotent-shutdown pattern as Step 2. Gated by
@@ -289,6 +300,53 @@ class Ltx23VideoPipeline:
             self._persistent_transformer_build_ms,
             self._vram_after_transformer_gb,
         )
+
+        # Step P2 — experimental torch.compile pass over the persistent
+        # transformer. Off by default (LTX_TORCH_COMPILE unset). When on,
+        # wrap with mode="reduce-overhead" which uses CUDA graphs to batch
+        # kernel launches — the launch-overhead win the first-trace data
+        # predicted. Lowering is lazy: the real compile happens on the
+        # first transformer(...) call inside warmup, so warmup's
+        # `warmup_inference_ms` will absorb it.
+        #
+        # Reviewer guidance built in:
+        #  - Compile only the transformer denoise path (this), not the
+        #    whole pipeline.
+        #  - dynamic=False — fixed shapes only. iPad sending a different
+        #    (W,H,F) than warmup will trigger a recompile on first use,
+        #    which we accept as part of the experiment. Pre-shipping we
+        #    would whitelist a small preset set; for now the env-flag is
+        #    the gate.
+        #  - Failure falls back to eager: leave the un-compiled transformer
+        #    in self._transformer if compile raises. Surfaces in
+        #    /health.compiled_transformer=False so we know.
+        if os.getenv("LTX_TORCH_COMPILE", "0") == "1":
+            logger.info(
+                "LTX-2.3 torch.compile transformer (mode=reduce-overhead, "
+                "lowering deferred to first call)..."
+            )
+            t_compile_call = time.time()
+            try:
+                self._transformer = torch.compile(
+                    self._transformer,
+                    mode="reduce-overhead",
+                    fullgraph=False,
+                    dynamic=False,
+                )
+                self._compiled_transformer = True
+                self._compile_ms = int((time.time() - t_compile_call) * 1000)
+                logger.info(
+                    "LTX-2.3 torch.compile wrap call returned in %dms "
+                    "(actual lowering happens at warmup)",
+                    self._compile_ms,
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.error(
+                    "torch.compile wrap failed, falling back to eager "
+                    "transformer: %s", e, exc_info=True,
+                )
+                # self._transformer remains the eager nn.Module.
+                self._compiled_transformer = False
 
         # Step 3 — Build persistent Gemma + embeddings_processor as one unit,
         # also BEFORE warmup. Same fail-fast + idempotent-shutdown pattern
@@ -979,6 +1037,9 @@ class Ltx23VideoPipeline:
             "persistent_transformer_ready": self._persistent_transformer_ready,
             "persistent_transformer_build_ms": self._persistent_transformer_build_ms,
             "vram_after_transformer_gb": round(self._vram_after_transformer_gb, 2),
+            # Step P2 — torch.compile experiment status.
+            "compiled_transformer": self._compiled_transformer,
+            "compile_ms": self._compile_ms,
             # Step 3 — persistent Gemma + embeddings_processor health.
             "persistent_gemma_ready": self._persistent_gemma_ready,
             "persistent_gemma_build_ms": self._persistent_gemma_build_ms,
