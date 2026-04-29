@@ -155,7 +155,11 @@ async def websocket_video(ws: WebSocket):
         current_cancel = None
 
     async def run_video(request_id: str, image: Image.Image, prompt: str, seed: int | None,
-                        cancel: Event) -> None:
+                        cancel: Event,
+                        *,
+                        req_width: int | None = None,
+                        req_height: int | None = None,
+                        req_frames: int | None = None) -> None:
         """Generate video, stream frames, encode MP4. Updates outer counters."""
         nonlocal videos_total, videos_cancelled, videos_failed
         t0 = time.time()
@@ -172,6 +176,7 @@ async def websocket_video(ws: WebSocket):
         try:
             result = await asyncio.to_thread(
                 video_pipeline.generate, image, prompt, seed, _is_cancelled,
+                width=req_width, height=req_height, num_frames=req_frames,
             )
         except Exception as e:  # noqa: BLE001
             videos_failed += 1
@@ -314,6 +319,29 @@ async def websocket_video(ws: WebSocket):
                     except (TypeError, ValueError):
                         seed = None
 
+                # Step 3.5 — Optional per-request shape overrides. None
+                # means "use config defaults" (today: 320x320, 49 frames).
+                # video_pipeline.generate() applies the defaults; we only
+                # type-coerce here.
+                req_width = data.get("videoWidth")
+                if req_width is not None:
+                    try:
+                        req_width = int(req_width)
+                    except (TypeError, ValueError):
+                        req_width = None
+                req_height = data.get("videoHeight")
+                if req_height is not None:
+                    try:
+                        req_height = int(req_height)
+                    except (TypeError, ValueError):
+                        req_height = None
+                req_frames = data.get("videoFrames")
+                if req_frames is not None:
+                    try:
+                        req_frames = int(req_frames)
+                    except (TypeError, ValueError):
+                        req_frames = None
+
                 image_b64 = data.get("image_b64") or ""
                 try:
                     image_bytes = base64.b64decode(image_b64)
@@ -328,14 +356,19 @@ async def websocket_video(ws: WebSocket):
                     continue
 
                 logger.info(
-                    "video_request: req=%s prompt='%s' image=%dx%d seed=%s",
+                    "video_request: req=%s prompt='%s' image=%dx%d seed=%s "
+                    "videoWidth=%s videoHeight=%s videoFrames=%s",
                     request_id, prompt[:60], image.width, image.height, seed,
+                    req_width, req_height, req_frames,
                 )
                 cancel = Event()
                 current_request_id = request_id
                 current_cancel = cancel
                 current_task = asyncio.create_task(
-                    run_video(request_id, image, prompt, seed, cancel)
+                    run_video(
+                        request_id, image, prompt, seed, cancel,
+                        req_width=req_width, req_height=req_height, req_frames=req_frames,
+                    )
                 )
 
             elif mtype == "video_cancel":

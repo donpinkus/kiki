@@ -380,10 +380,21 @@ class Ltx23VideoPipeline:
         prompt: str,
         seed: int | None,
         is_cancelled: Callable[[], bool],
+        *,
+        width: int | None = None,
+        height: int | None = None,
+        num_frames: int | None = None,
     ) -> "GenerateResult":
         """Generate a video from `image`+`prompt`. Returns a ``GenerateResult``
         with `frames` (or None if cancelled), `cancel_state`, `lock_wait_ms`,
         `pipe_total_ms`, and `cancelled_but_ran_ms`.
+
+        Per-call overrides for `width`, `height`, `num_frames` (Step 3.5
+        benchmark): when None (the default — what the WebSocket path does),
+        falls back to ``config.LTX_WIDTH`` / ``LTX_HEIGHT`` / ``LTX_NUM_FRAMES``.
+        The persistent transformer + Gemma are shape-flexible (transformer
+        weights aren't shape-specific; resolution is a call-time arg), so
+        these can vary per request without a model rebuild.
 
         Cancellation states (Step 1 of the perf plan):
         - ``ok``: full inference, frames returned.
@@ -398,6 +409,26 @@ class Ltx23VideoPipeline:
         mid-inference callbacks, so `during_inference` won't appear yet.
         Step 5 forks `euler_denoising_loop` to add it.
         """
+        # Resolve per-call shape parameters. Defaults to config so existing
+        # WebSocket callers (which don't pass shape args) keep working.
+        if width is None:
+            width = config.LTX_WIDTH
+        if height is None:
+            height = config.LTX_HEIGHT
+        if num_frames is None:
+            num_frames = config.LTX_NUM_FRAMES
+        # Validate same constraints as config.py does at module load. Fail
+        # fast with a clear error rather than letting upstream's
+        # assert_resolution catch it deeper in the call stack.
+        if width % 64 != 0:
+            raise ValueError(f"width must be divisible by 64 (got {width})")
+        if height % 64 != 0:
+            raise ValueError(f"height must be divisible by 64 (got {height})")
+        if (num_frames - 1) % 8 != 0:
+            raise ValueError(
+                f"num_frames must satisfy (n-1) %% 8 == 0 (got {num_frames})"
+            )
+
         if is_cancelled():
             logger.info("LTX-2.3 generate skipped — cancelled before start")
             return GenerateResult(
@@ -452,6 +483,9 @@ class Ltx23VideoPipeline:
                     image_path=image_path,
                     prompt=prompt or "",
                     seed=seed,
+                    width=width,
+                    height=height,
+                    num_frames=num_frames,
                 )
                 pipe_total_ms = self._inference_timings["pipe_total"][-1]
         finally:
@@ -490,6 +524,10 @@ class Ltx23VideoPipeline:
         image_path: str,
         prompt: str,
         seed: int,
+        *,
+        width: int,
+        height: int,
+        num_frames: int,
     ) -> list[Image.Image]:
         """Run one inference, materialize frames as PIL. Caller holds `self._lock`.
 
@@ -547,10 +585,11 @@ class Ltx23VideoPipeline:
             )
         self._inference_timings.clear()
 
+        # `width`, `height`, `num_frames` are kwargs from generate(), with
+        # config defaults applied at the entry point. Step 3.5 added
+        # per-request override; do NOT re-read from config here or the
+        # kwargs become silently dead.
         pipe = self.pipe
-        width = config.LTX_WIDTH
-        height = config.LTX_HEIGHT
-        num_frames = config.LTX_NUM_FRAMES
         frame_rate = float(config.LTX_FPS)
         assert_resolution(height=height, width=width, is_two_stage=True)
 

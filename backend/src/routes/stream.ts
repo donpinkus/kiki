@@ -234,12 +234,22 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
                 );
               } else {
                 const reqId = nextImageBinaryRequestId ?? `vid-${Date.now()}`;
-                videoRelay.sendConfig({
+                const videoRequestPayload: Record<string, unknown> = {
                   type: 'video_request',
                   requestId: reqId,
                   image_b64: base64,
                   prompt: lastConfig['prompt'],
-                });
+                };
+                // Step 3.5 — per-request resolution/frames overrides. Forward
+                // only when the iPad sent them (and they parse to integers);
+                // otherwise pod falls back to its config defaults.
+                for (const k of ['videoWidth', 'videoHeight', 'videoFrames'] as const) {
+                  const v = lastConfig[k];
+                  if (typeof v === 'number' && Number.isFinite(v)) {
+                    videoRequestPayload[k] = Math.trunc(v);
+                  }
+                }
+                videoRelay.sendConfig(videoRequestPayload);
                 inFlightVideoRequestId = reqId;
                 videoTriggered++;
                 request.log.info(
@@ -248,6 +258,9 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
                     req: reqId,
                     promptCached: true,
                     videoRelayConnected: true,
+                    videoWidth: videoRequestPayload['videoWidth'],
+                    videoHeight: videoRequestPayload['videoHeight'],
+                    videoFrames: videoRequestPayload['videoFrames'],
                     event: 'video_trigger',
                   },
                   'video_trigger',

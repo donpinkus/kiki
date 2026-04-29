@@ -202,6 +202,14 @@ final class AppCoordinator {
     /// Fixed seed (nil = server picks a stable per-session seed).
     var streamSeed: Int? { didSet { syncStreamConfig() } }
 
+    /// LTX-2.3 video override — square resolution (px). Session-only by design:
+    /// not @AppStorage, so each app launch resets to the perf baseline (320).
+    /// Step 3.5 benchmark needs deterministic baselines per launch.
+    var videoResolution: Int = 320 { didSet { syncStreamConfig() } }
+
+    /// LTX-2.3 video override — frame count. Session-only (see `videoResolution`).
+    var videoFrames: Int = 49 { didSet { syncStreamConfig() } }
+
     /// Capture FPS for stream mode.
     var streamCaptureFPS: Double = 5 {
         didSet { streamSession?.captureInterval = 1.0 / streamCaptureFPS }
@@ -956,7 +964,10 @@ final class AppCoordinator {
         StreamConfig(
             prompt: composedPrompt,
             steps: streamSteps,
-            seed: streamSeed
+            seed: streamSeed,
+            videoWidth: videoResolution,
+            videoHeight: videoResolution,
+            videoFrames: videoFrames
         )
     }
 
