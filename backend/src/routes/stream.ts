@@ -249,6 +249,12 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
                     videoRequestPayload[k] = Math.trunc(v);
                   }
                 }
+                // Per-request torch.profiler toggle (iPad SettingsPanel >
+                // Diagnostics). Forward only when truthy; absence ⇒ no
+                // profiling (zero overhead on the pod).
+                if (lastConfig['enableProfiling'] === true) {
+                  videoRequestPayload['enableProfiling'] = true;
+                }
                 videoRelay.sendConfig(videoRequestPayload);
                 inFlightVideoRequestId = reqId;
                 videoTriggered++;
@@ -261,6 +267,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
                     videoWidth: videoRequestPayload['videoWidth'],
                     videoHeight: videoRequestPayload['videoHeight'],
                     videoFrames: videoRequestPayload['videoFrames'],
+                    enableProfiling: videoRequestPayload['enableProfiling'] === true,
                     event: 'video_trigger',
                   },
                   'video_trigger',

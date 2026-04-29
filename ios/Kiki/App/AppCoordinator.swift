@@ -210,6 +210,14 @@ final class AppCoordinator {
     /// LTX-2.3 video override — frame count. Session-only (see `videoResolution`).
     var videoFrames: Int = 49 { didSet { syncStreamConfig() } }
 
+    /// LTX-2.3 diagnostic — when true, every video request triggers a
+    /// `torch.profiler` capture on the pod (Chrome trace JSON + summary
+    /// txt + meta JSON written to `/tmp/ltx-profile-*` for SCP-out).
+    /// Adds ~15–25% latency to each request while on. Session-only:
+    /// resets to false on each app launch so we never accidentally
+    /// ship profiled performance to a real test.
+    var enableProfiling: Bool = false { didSet { syncStreamConfig() } }
+
     /// Capture FPS for stream mode.
     var streamCaptureFPS: Double = 5 {
         didSet { streamSession?.captureInterval = 1.0 / streamCaptureFPS }
@@ -967,7 +975,8 @@ final class AppCoordinator {
             seed: streamSeed,
             videoWidth: videoResolution,
             videoHeight: videoResolution,
-            videoFrames: videoFrames
+            videoFrames: videoFrames,
+            enableProfiling: enableProfiling
         )
     }
 

@@ -17,6 +17,8 @@ revenue. Verify license terms before any commercial deployment.
 """
 from __future__ import annotations
 
+import contextlib
+import json
 import logging
 import os
 import tempfile
@@ -29,6 +31,7 @@ from typing import Callable, Iterator, Literal
 
 import torch
 from PIL import Image
+from torch.profiler import record_function
 
 import config
 # Reuse the image pipeline's helper so both pods stamp the same
@@ -162,12 +165,18 @@ class Ltx23VideoPipeline:
         phases' GPU work bleeds into the next phase's measured time. Appends
         to a list so callers can run the same phase twice (e.g. stage 1 vs
         stage 2 image conditioning) and see both samples.
+
+        Also emits a ``torch.profiler.record_function(name)`` annotation so
+        per-phase ranges are visible in Perfetto when the profiler is
+        active. ``record_function`` is a no-op when no profiler is running,
+        so this costs nothing on the hot path.
         """
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         t0 = time.perf_counter()
         try:
-            yield
+            with record_function(name):
+                yield
         finally:
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
@@ -387,6 +396,7 @@ class Ltx23VideoPipeline:
         width: int | None = None,
         height: int | None = None,
         num_frames: int | None = None,
+        profile: bool = False,
     ) -> "GenerateResult":
         """Generate a video from `image`+`prompt`. Returns a ``GenerateResult``
         with `frames` (or None if cancelled), `cancel_state`, `lock_wait_ms`,
@@ -489,6 +499,7 @@ class Ltx23VideoPipeline:
                     width=width,
                     height=height,
                     num_frames=num_frames,
+                    profile=profile,
                 )
                 pipe_total_ms = self._inference_timings["pipe_total"][-1]
         finally:
@@ -531,6 +542,7 @@ class Ltx23VideoPipeline:
         width: int,
         height: int,
         num_frames: int,
+        profile: bool = False,
     ) -> list[Image.Image]:
         """Run one inference, materialize frames as PIL. Caller holds `self._lock`.
 
@@ -601,7 +613,25 @@ class Ltx23VideoPipeline:
         t_pipe = time.perf_counter()
         frames: list[Image.Image] = []
 
-        with torch.inference_mode():
+        # Optional torch.profiler capture (per-request kwarg, see plan
+        # crystalline-squishing-rivest). When `profile=True`, wrap the
+        # inference in profile() so per-op CUDA + CPU timings are captured.
+        # nullcontext() makes this a true zero-overhead no-op when off
+        # (record_function calls inside _timed are also no-ops absent an
+        # active profiler). Per-request artifacts written to /tmp/ at the
+        # bottom of this method, after pipe_total_ms is finalized.
+        if profile:
+            from torch.profiler import ProfilerActivity, profile as _torch_profile
+            profiler_ctx = _torch_profile(
+                activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                record_shapes=True,
+                profile_memory=True,
+                with_stack=False,
+            )
+        else:
+            profiler_ctx = contextlib.nullcontext()
+
+        with profiler_ctx as profiler_obj, torch.inference_mode():
             # Step 3 — Use persistent Gemma + embeddings_processor when
             # available. Falls back to per-request build if
             # LTX_PERSIST_GEMMA=0 (env kill switch for fast rollback).
@@ -842,7 +872,67 @@ class Ltx23VideoPipeline:
                 frames[0].save("/tmp/ltx-first-frame.jpg", format="JPEG", quality=90)
             except OSError as e:
                 logger.warning("Failed to save /tmp/ltx-first-frame.jpg: %s", e)
+
+        if profiler_obj is not None:
+            self._save_profile_trace(
+                profiler_obj,
+                width=width,
+                height=height,
+                num_frames=num_frames,
+                prompt=prompt,
+                seed=seed,
+                pipe_total_ms=pipe_total_ms,
+            )
         return frames
+
+    def _save_profile_trace(
+        self,
+        prof,
+        *,
+        width: int,
+        height: int,
+        num_frames: int,
+        prompt: str,
+        seed: int,
+        pipe_total_ms: int,
+    ) -> None:
+        """Write torch.profiler trace artifacts to /tmp/ for this request.
+
+        Three files per capture:
+          - .json (Chrome trace, opens in Perfetto / chrome://tracing)
+          - .txt (key_averages summary, sorted by cuda_time_total)
+          - .meta.json (request metadata for correlation)
+        """
+        timestamp = time.strftime("%H%M%S")
+        setting = f"{width}x{height}x{num_frames}"
+        base = f"/tmp/ltx-profile-{timestamp}-{setting}"
+        try:
+            prof.export_chrome_trace(f"{base}.json")
+            with open(f"{base}.txt", "w") as f:
+                f.write(prof.key_averages().table(
+                    sort_by="cuda_time_total", row_limit=30,
+                ))
+            with open(f"{base}.meta.json", "w") as f:
+                json.dump(
+                    {
+                        "prompt": (prompt or "")[:200],
+                        "seed": seed,
+                        "width": width,
+                        "height": height,
+                        "num_frames": num_frames,
+                        "pipe_total_ms": pipe_total_ms,
+                        "captured_at_iso": time.strftime(
+                            "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+                        ),
+                    },
+                    f,
+                    indent=2,
+                )
+            logger.info(
+                "LTX profile trace written: %s.{json,txt,meta.json}", base
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.error("Failed to write profile trace to %s: %s", base, e)
 
     def get_info(self) -> dict:
         gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "none"

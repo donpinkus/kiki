@@ -13,6 +13,7 @@ struct SettingsPanel: View {
                 videoSection
                 streamParametersSection
                 captureSection
+                diagnosticsSection
 
                 Section {
                     Button("Reset All to Defaults", role: .destructive) {
@@ -22,6 +23,7 @@ struct SettingsPanel: View {
                         coordinator.drawingLayout = .splitScreen
                         coordinator.videoResolution = 320
                         coordinator.videoFrames = 49
+                        coordinator.enableProfiling = false
                     }
                 }
             }
@@ -129,6 +131,18 @@ struct SettingsPanel: View {
                 }
                 Slider(value: $coordinator.streamCaptureFPS, in: 1...10, step: 1)
             }
+        }
+    }
+
+    private var diagnosticsSection: some View {
+        @Bindable var coordinator = coordinator
+
+        return Section {
+            Toggle("Profile next runs", isOn: $coordinator.enableProfiling)
+        } header: {
+            Text("Diagnostics")
+        } footer: {
+            Text("Adds ~15–25% latency. Writes a Perfetto trace to /tmp on the pod (fetch via SCP).")
         }
     }
 }
