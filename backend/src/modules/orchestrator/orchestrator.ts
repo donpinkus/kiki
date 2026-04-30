@@ -282,14 +282,18 @@ const BOOT_ENV: Array<{ key: string; value: string }> = [
   // Strict improvement (or no-op) for image pod's FLUX path too.
   // Recommended by the OOM error message itself.
   { key: 'PYTORCH_CUDA_ALLOC_CONF', value: 'expandable_segments:True' },
-  // Step P2 (perf plan, post-first-trace) — turn on torch.compile of the
-  // persistent transformer. Pod-side default is "0" (off), so this
-  // explicitly enables the experiment for all newly-booted video pods.
-  // To disable quickly: change to '0' and redeploy + re-roll pods. The
-  // wrap call is in flux-klein-server/video_pipeline.py:load(); failure
-  // falls back to eager and is surfaced on /health as
-  // compiled_transformer=false.
-  { key: 'LTX_TORCH_COMPILE', value: '1' },
+  // Step P2 (perf plan, post-first-trace) — torch.compile experiment.
+  // DISABLED 2026-04-30 after pods crashlooped: the wrap call's
+  // try/except in video_pipeline.py:load() only catches errors from
+  // torch.compile() itself, but the actual graph tracing/lowering is
+  // LAZY and fires on the first transformer(...) call inside warmup's
+  // _run_inference(). When that lowering raised, the exception bubbled
+  // out of load(), the pod stayed not-ready, and the orchestrator's
+  // health-based reaper rerolled it — infinite loop. The right fix is
+  // to wrap the warmup inference itself with a fallback-to-eager path,
+  // not just the wrap call. Until that defensive change ships, leave
+  // compile off so we don't re-trigger the crashloop.
+  { key: 'LTX_TORCH_COMPILE', value: '0' },
 ];
 
 // Forward orchestrator's PUBLIC_KEY env (set in Railway) to the pod so the
