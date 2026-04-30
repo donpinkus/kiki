@@ -564,6 +564,17 @@ export async function subscribe(
 
   // Seed with current state (if session exists) so joiner sees where we are.
   const session = await readSession(sessionId);
+  log.info(
+    {
+      sessionId,
+      seeded: !!session,
+      seededState: session?.state ?? null,
+      stateAgeMs: session?.stateEnteredAt ? Date.now() - session.stateEnteredAt : null,
+      subscriberCount: set.size,
+      event: 'subscribe_seed',
+    },
+    'subscribe_seed',
+  );
   if (session) {
     handler({
       state: session.state,
@@ -621,7 +632,23 @@ export async function emitState(
   };
 
   // Fan out to in-process subscribers (iOS WebSocket handlers in stream.ts).
-  subscribers.get(sessionId)?.forEach((h) => {
+  const subSet = subscribers.get(sessionId);
+  const subCount = subSet?.size ?? 0;
+  log.info(
+    {
+      sessionId,
+      state,
+      previousState,
+      subscriberCount: subCount,
+      // 0 subscribers ⇒ no iPad will ever see this transition. Critical
+      // signal for stuck-on-Connecting diagnoses where the state machine
+      // moved but the client never saw it.
+      orphaned: subCount === 0,
+      event: 'emit_state',
+    },
+    'emit_state',
+  );
+  subSet?.forEach((h) => {
     try { h(event); } catch (err) {
       log.warn({ sessionId, err: (err as Error).message }, 'State subscriber threw');
     }
@@ -1854,9 +1881,52 @@ const POD_CONFIGS: Record<PodKind, PodKindConfig> = {
     // below. ~500 ms per reconnect, but keeps reuse honest as a cache of
     // RunPod state rather than an authoritative claim.
     getReusableFromRow: async (row) => {
-      if (row.state !== 'ready' || !row.podUrl || !row.podId) return null;
-      const pod = await getPod(row.podId).catch(() => null);
-      if (pod && pod.desiredStatus === 'RUNNING' && pod.runtime !== null) {
+      if (row.state !== 'ready' || !row.podUrl || !row.podId) {
+        log.info(
+          {
+            sessionId: row.sessionId,
+            rowState: row.state,
+            hasPodUrl: !!row.podUrl,
+            hasPodId: !!row.podId,
+            event: 'image_reuse_skipped_row',
+          },
+          'image_reuse_skipped_row',
+        );
+        return null;
+      }
+      const probeStart = Date.now();
+      const pod = await getPod(row.podId).catch((err) => {
+        log.warn(
+          {
+            sessionId: row.sessionId,
+            podId: row.podId,
+            err: (err as Error).message,
+            elapsedMs: Date.now() - probeStart,
+            event: 'image_reuse_probe_threw',
+          },
+          'image_reuse_probe_threw',
+        );
+        return null;
+      });
+      const probeMs = Date.now() - probeStart;
+      const ok = !!pod && pod.desiredStatus === 'RUNNING' && pod.runtime !== null;
+      log.info(
+        {
+          sessionId: row.sessionId,
+          podId: row.podId,
+          ok,
+          desiredStatus: pod?.desiredStatus ?? null,
+          hasRuntime: pod?.runtime !== null && pod?.runtime !== undefined,
+          probeMs,
+          event: 'image_reuse_probe',
+        },
+        'image_reuse_probe',
+      );
+      // Note: `ok` here means RunPod thinks the pod is RUNNING. It does NOT
+      // mean the pod's WS port is reachable — a half-open backend↔pod TCP
+      // would still pass this gate and surface as a wireRelay timeout in
+      // stream.ts.
+      if (ok) {
         return { podId: row.podId, podUrl: row.podUrl };
       }
       return null;

@@ -101,6 +101,27 @@ final class StreamSession {
     private var framesSent = 0
     private var framesReceived = 0
 
+    /// Monotonic counter incremented every time `connectAndRun()` runs (initial
+    /// connect + each reconnect). Tagged into breadcrumbs so back-to-back
+    /// connect attempts within one StreamSession are distinguishable in
+    /// post-hoc trace reading.
+    private var connectionAttemptId = 0
+    /// Forensic-capture watchdog. When readiness enters `.warming(...)`, we
+    /// schedule a Task that fires `SentrySDK.capture` + `Analytics.track`
+    /// after 180s — forces upload of the breadcrumb buffer for stuck-on-
+    /// Connecting cases that would otherwise sit silently on the device until
+    /// the user force-quits. Cancelled and reset on every readiness transition
+    /// (substate progress restarts the timer; final states cancel it).
+    /// 180s threshold: forensic, not alerting — user-reported symptom is
+    /// "stuck for minutes". Avoids cold-start `warming_model` false-positives.
+    private var warmingWatchdogTask: Task<Void, Never>?
+    /// Wall-clock of the most recent successful frame received, used to log
+    /// "elapsed since last frame" on unexpected disconnect.
+    private var lastFrameReceivedAt: Date?
+    /// Wall-clock of when the current connect attempt started, for elapsed
+    /// timing on the receive-loop end and reconnect breadcrumbs.
+    private var currentConnectStartedAt: Date?
+
     private static let captureSize = CGSize(width: 768, height: 768)
 
     // MARK: - Lifecycle
@@ -223,26 +244,45 @@ final class StreamSession {
     // MARK: - Connection
 
     private func connectAndRun() async {
+        connectionAttemptId += 1
+        let attemptId = connectionAttemptId
+        currentConnectStartedAt = Date()
         warm(message: "Connecting…")
+        Self.breadcrumb(category: "stream.connection", message: "connectAndRun begin", data: [
+            "attemptId": attemptId,
+            "reconnectAttempt": reconnectAttempts,
+            "url": url.absoluteString,
+        ])
         let tx = SentrySDK.startTransaction(name: "stream.connection", operation: "stream.connection")
+        tx.setData(value: attemptId, key: "attemptId")
 
+        let connectStart = Date()
         do {
             try await client.connect()
+            let connectMs = Int(Date().timeIntervalSince(connectStart) * 1000)
             reconnectAttempts = 0
             // WS open is just a breadcrumb — don't change readiness here.
             // The server's status=ready (or status=provisioning, or type=error)
             // is what actually drives the next transition, via statusTask.
-            Self.breadcrumb(category: "stream.connection", message: "Connected to server")
+            Self.breadcrumb(category: "stream.connection", message: "Connected to server", data: [
+                "attemptId": attemptId,
+                "connectMs": connectMs,
+            ])
 
             try await client.sendConfig(config)
             lastSentConfig = config
-            Self.breadcrumb(category: "stream.config", message: "Initial config sent")
+            Self.breadcrumb(category: "stream.config", message: "Initial config sent", data: [
+                "attemptId": attemptId,
+            ])
             tx.finish()
 
             startReceiveLoop()
             startCaptureLoop()
         } catch {
+            let elapsedMs = Int(Date().timeIntervalSince(connectStart) * 1000)
             Self.breadcrumb(category: "error.connection", message: "Connection failed", data: [
+                "attemptId": attemptId,
+                "elapsedMs": elapsedMs,
                 "error": error.localizedDescription,
                 "stopped": isStopped,
             ], level: .error)
@@ -250,7 +290,9 @@ final class StreamSession {
             if !isStopped {
                 await attemptReconnect()
             } else {
-                Self.breadcrumb(category: "stream.lifecycle", message: "Not reconnecting — session stopped")
+                Self.breadcrumb(category: "stream.lifecycle", message: "Not reconnecting — session stopped", data: [
+                    "attemptId": attemptId,
+                ])
             }
         }
     }
@@ -394,8 +436,11 @@ final class StreamSession {
     // MARK: - Receive Loop
 
     private func startReceiveLoop() {
+        let attemptId = connectionAttemptId
         receiveTask = Task { [weak self] in
-            Self.breadcrumb(category: "stream.lifecycle", message: "Receive loop started")
+            Self.breadcrumb(category: "stream.lifecycle", message: "Receive loop started", data: [
+                "attemptId": attemptId,
+            ])
             guard let self else { return }
             let frames = await client.receivedFrames
             var count = 0
@@ -404,6 +449,7 @@ final class StreamSession {
                 guard let image = UIImage(data: frame.data) else { continue }
                 count += 1
                 self.setFramesReceived(count)
+                self.lastFrameReceivedAt = Date()
                 // Route by requestId: preview responses pair with the
                 // continuation that sent them. Everything else (live
                 // stream, stale pre-pause responses) goes to the normal
@@ -416,17 +462,32 @@ final class StreamSession {
                 }
             }
             let stopped = self.isStopped
+            let now = Date()
+            let lastFrameAgeMs = self.lastFrameReceivedAt.map { Int(now.timeIntervalSince($0) * 1000) } ?? -1
+            let connectAgeMs = self.currentConnectStartedAt.map { Int(now.timeIntervalSince($0) * 1000) } ?? -1
             if !Task.isCancelled, !stopped {
                 SentrySDK.capture(message: "stream.receive.unexpected_end") { scope in
                     scope.setLevel(.warning)
                     scope.setExtra(value: count, key: "frames")
+                    scope.setExtra(value: attemptId, key: "attemptId")
+                    scope.setExtra(value: lastFrameAgeMs, key: "lastFrameAgeMs")
+                    scope.setExtra(value: connectAgeMs, key: "connectAgeMs")
                 }
+                Self.breadcrumb(category: "stream.lifecycle", message: "Receive loop unexpected end → reconnect", data: [
+                    "attemptId": attemptId,
+                    "frames": count,
+                    "lastFrameAgeMs": lastFrameAgeMs,
+                    "connectAgeMs": connectAgeMs,
+                ], level: .warning)
                 await self.attemptReconnect()
             } else {
                 Self.breadcrumb(category: "stream.lifecycle", message: "Receive loop ended", data: [
+                    "attemptId": attemptId,
                     "cancelled": Task.isCancelled,
                     "stopped": stopped,
                     "frames": count,
+                    "lastFrameAgeMs": lastFrameAgeMs,
+                    "connectAgeMs": connectAgeMs,
                 ])
             }
         }
@@ -587,6 +648,40 @@ final class StreamSession {
         guard new != readiness else { return }
         readiness = new
         onReadinessChanged?(new)
+
+        // Manage the warming watchdog. Every transition cancels any pending
+        // watchdog; entering `.warming` schedules a fresh one. Substate progress
+        // (queued → finding_gpu → ...) resets the timer naturally. Terminal
+        // states (.ready/.failed/.disconnected/.idleTimeout) just cancel.
+        // Cleanup on `stop()` happens via `setReadiness(.disconnected)` →
+        // applyReadiness, so no need to touch `cancelAllTasks`.
+        warmingWatchdogTask?.cancel()
+        warmingWatchdogTask = nil
+        if case .warming(let message, _) = new {
+            let snapshot = (
+                message: message,
+                framesSent: framesSent,
+                framesReceived: framesReceived,
+                reconnectAttempts: reconnectAttempts
+            )
+            warmingWatchdogTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(180))
+                guard !Task.isCancelled, self != nil else { return }
+                SentrySDK.capture(message: "stream.warming_stalled") { scope in
+                    scope.setLevel(.warning)
+                    scope.setExtra(value: snapshot.message, key: "substateMessage")
+                    scope.setExtra(value: snapshot.framesSent, key: "framesSent")
+                    scope.setExtra(value: snapshot.framesReceived, key: "framesReceived")
+                    scope.setExtra(value: snapshot.reconnectAttempts, key: "reconnectAttempts")
+                }
+                Analytics.track(.streamWarmingStalled, properties: [
+                    "substate_message": snapshot.message,
+                    "frames_sent": snapshot.framesSent,
+                    "frames_received": snapshot.framesReceived,
+                    "reconnect_attempts": snapshot.reconnectAttempts,
+                ])
+            }
+        }
     }
 
     // MARK: - Breadcrumb helper

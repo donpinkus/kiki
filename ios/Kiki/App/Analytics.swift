@@ -42,6 +42,7 @@ enum AnalyticsEvent: String {
     case streamEnded = "stream.ended"
     case streamReconnect = "stream.reconnect"
     case streamFailed = "stream.failed"
+    case streamWarmingStalled = "stream.warming_stalled"
 
     // Drawing controls
     case styleSelected = "style.selected"

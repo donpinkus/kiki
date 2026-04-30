@@ -634,6 +634,12 @@ final class AppCoordinator {
         // launch), just push the latest config and return. The capture loop
         // will pick up the new prompt/seed before the next frame.
         if streamSession != nil {
+            streamLog.info("startStream: session already running, syncing config only — readiness=\(String(describing: self.streamReadiness))")
+            let crumb = Breadcrumb()
+            crumb.category = "stream.lifecycle"
+            crumb.message = "startStream noop (already running)"
+            crumb.data = ["readiness": String(describing: streamReadiness)]
+            SentrySDK.addBreadcrumb(crumb)
             syncStreamConfig()
             return
         }
@@ -645,9 +651,17 @@ final class AppCoordinator {
         self.pendingStartupTransaction = startupTx
         self.streamStartupBeganAt = Date()
 
+        // Per-startStream UUID — joins this attempt across iOS Sentry events
+        // and backend Railway logs. One streamId may correspond to N backend
+        // connIds if the StreamSession internally reconnects. Search by
+        // streamId for the whole user attempt; by connId for one WS upgrade.
+        let streamId = String(UUID().uuidString.prefix(8)).lowercased()
+        SentrySDK.configureScope { $0.setTag(value: streamId, key: "streamId") }
+
         var components = URLComponents(url: backendURL, resolvingAgainstBaseURL: false)!
         components.scheme = backendURL.scheme == "https" ? "wss" : "ws"
         components.path = "/v1/stream"
+        components.queryItems = [URLQueryItem(name: "streamId", value: streamId)]
         guard let wsURL = components.url else {
             streamLog.error("Failed to construct WebSocket URL from \(self.backendURL.absoluteString)")
             SentrySDK.capture(message: "stream.startup: failed to construct WebSocket URL") { scope in
@@ -795,6 +809,9 @@ final class AppCoordinator {
         let hadSession = streamSession != nil
         let finalFrameCount = streamFrameCount
         streamLog.info("Stopping stream")
+        // Clear streamId tag so post-stream events (e.g. an unrelated crash
+        // 10 min later) aren't mis-tagged with this stream's id.
+        SentrySDK.configureScope { $0.removeTag(key: "streamId") }
         streamSession?.stop()
         streamSession = nil
         streamReadiness = .disconnected
@@ -948,6 +965,26 @@ final class AppCoordinator {
     // MARK: - App Lifecycle
 
     func handleScenePhaseChange(_ phase: ScenePhase) {
+        let phaseName: String
+        switch phase {
+        case .background: phaseName = "background"
+        case .active: phaseName = "active"
+        case .inactive: phaseName = "inactive"
+        @unknown default: phaseName = "unknown"
+        }
+        let crumb = Breadcrumb()
+        crumb.category = "app.scenePhase"
+        crumb.message = "scenePhase=\(phaseName)"
+        crumb.data = [
+            "phase": phaseName,
+            "hasSession": streamSession != nil,
+            "screen": currentScreen.analyticsName,
+            "wasActiveBeforeBackground": streamWasActiveBeforeBackground,
+            "readiness": String(describing: streamReadiness),
+        ]
+        SentrySDK.addBreadcrumb(crumb)
+        streamLog.info("scenePhase=\(phaseName) hasSession=\(self.streamSession != nil) screen=\(self.currentScreen.analyticsName) wasActiveBeforeBg=\(self.streamWasActiveBeforeBackground)")
+
         switch phase {
         case .background:
             if streamSession != nil {
@@ -959,6 +996,7 @@ final class AppCoordinator {
                 && currentScreen == .drawing
                 && streamSession == nil {
                 streamWasActiveBeforeBackground = false
+                streamLog.info("scenePhase=active → restarting stream after background")
                 startStream()
             }
         case .inactive:

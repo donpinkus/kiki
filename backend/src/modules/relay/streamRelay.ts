@@ -1,4 +1,5 @@
 import WebSocket from 'ws';
+import * as Sentry from '@sentry/node';
 
 /**
  * WebSocket relay to a single upstream URL.
@@ -25,18 +26,40 @@ export class StreamRelay {
   private closeHandler: ((code: number, reason: string) => void) | null = null;
   private errorHandler: ((err: Error) => void) | null = null;
 
+  /** Optional diagnostic context; set by the caller via `setLogContext()` so
+   * relay-internal logs can be cross-referenced with stream.ts session logs. */
+  private logContext: Record<string, unknown> = {};
 
   constructor(url: string) {
     this.url = url;
   }
 
+  /** Attach context (e.g. { connId, userId, role: 'image' }) included in
+   * every Sentry breadcrumb emitted from this relay. Diagnostics-only. */
+  setLogContext(ctx: Record<string, unknown>): void {
+    this.logContext = ctx;
+  }
+
+  private breadcrumb(message: string, data: Record<string, unknown>): void {
+    Sentry.addBreadcrumb({
+      category: 'relay',
+      level: 'info',
+      message,
+      data: { ...this.logContext, url: this.url, ...data },
+    });
+  }
+
   connect(): Promise<WebSocket> {
+    const connectStart = Date.now();
+    this.breadcrumb('connect: start', {});
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(this.url, { perMessageDeflate: false });
       let settled = false;
       const timeout = setTimeout(() => {
         if (settled) return;
         settled = true;
+        const elapsedMs = Date.now() - connectStart;
+        this.breadcrumb('connect: timeout', { elapsedMs });
         ws.close();
         reject(new Error('Upstream connection timeout'));
       }, 10_000);
@@ -55,9 +78,19 @@ export class StreamRelay {
           if (settled) return;
           settled = true;
           clearTimeout(timeout);
+          const elapsedMs = Date.now() - connectStart;
+          this.breadcrumb('connect: pre-open close', {
+            code,
+            reason: reason.toString('utf-8'),
+            elapsedMs,
+          });
           reject(new Error(`Upstream closed before open (code=${code})`));
           return;
         }
+        this.breadcrumb('post-open close', {
+          code,
+          reason: reason.toString('utf-8'),
+        });
         this.closeHandler?.(code, reason.toString('utf-8'));
       });
 
@@ -66,6 +99,11 @@ export class StreamRelay {
           if (settled) return;
           settled = true;
           clearTimeout(timeout);
+          const elapsedMs = Date.now() - connectStart;
+          this.breadcrumb('connect: pre-open error', {
+            err: err.message,
+            elapsedMs,
+          });
           reject(err);
           return;
         }
@@ -76,6 +114,8 @@ export class StreamRelay {
         this.opened = true;
         settled = true;
         clearTimeout(timeout);
+        const elapsedMs = Date.now() - connectStart;
+        this.breadcrumb('connect: open', { elapsedMs });
         this.upstream = ws;
         resolve(ws);
       });

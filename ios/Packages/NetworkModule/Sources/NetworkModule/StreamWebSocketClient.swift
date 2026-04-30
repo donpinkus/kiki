@@ -74,6 +74,14 @@ public actor StreamWebSocketClient {
     /// the next binary frame. Cleared each time a binary is emitted.
     private var pendingFrameMetaRequestId: String?
 
+    /// Wall-clock of the most recent successful `task.receive()` (any kind:
+    /// status, frame, video). Used to log "time since last receive" on
+    /// disconnect so we can characterize the failure (idle drop vs immediate).
+    private var lastReceiveAt: Date?
+    /// Wall-clock when `connect()` was called, for "time-to-first-message"
+    /// diagnostics on the WS handshake path.
+    private var connectStartedAt: Date?
+
     // MARK: - Lifecycle
 
     /// Create a client for a URL (no auth headers).
@@ -118,6 +126,7 @@ public actor StreamWebSocketClient {
     public func connect() async throws {
         guard state == .disconnected else { return }
         state = .connecting
+        connectStartedAt = Date()
         Self.breadcrumb(category: "ws.connection", message: "Connecting", data: [
             "url": request.url?.absoluteString ?? "<nil>",
         ])
@@ -127,10 +136,16 @@ public actor StreamWebSocketClient {
         wsTask.resume()
 
         // Wait for initial server status message to confirm connection
+        let firstReceiveStart = Date()
         let message = try await wsTask.receive()
+        let firstReceiveMs = Int(Date().timeIntervalSince(firstReceiveStart) * 1000)
+        lastReceiveAt = Date()
         switch message {
         case .string(let text):
-            Self.breadcrumb(category: "ws.handshake", message: "Initial string message", data: ["length": text.count])
+            Self.breadcrumb(category: "ws.handshake", message: "Initial string message", data: [
+                "length": text.count,
+                "firstReceiveMs": firstReceiveMs,
+            ])
             // Check for error response (backend sends this if upstream is unavailable)
             if text.contains("\"type\":\"error\"") {
                 let errorMsg = text  // Keep for error message
@@ -205,6 +220,7 @@ public actor StreamWebSocketClient {
                     guard let task = await self.task else { break }
                     let message = try await task.receive()
 
+                    await self.markReceived()
                     switch message {
                     case .data(let data):
                         // Raw binary frame (may not be used if backend wraps in JSON)
@@ -298,6 +314,10 @@ public actor StreamWebSocketClient {
         pendingFrameMetaRequestId = requestId
     }
 
+    private func markReceived() {
+        lastReceiveAt = Date()
+    }
+
     private func yieldFrame(_ data: Data) {
         let requestId = pendingFrameMetaRequestId
         pendingFrameMetaRequestId = nil
@@ -305,8 +325,17 @@ public actor StreamWebSocketClient {
     }
 
     private func handleDisconnect() {
+        let now = Date()
+        let lastReceiveAgeMs = lastReceiveAt.map { Int(now.timeIntervalSince($0) * 1000) } ?? -1
+        let connectAgeMs = connectStartedAt.map { Int(now.timeIntervalSince($0) * 1000) } ?? -1
+        Self.breadcrumb(category: "ws.disconnect", message: "Unexpected disconnect", data: [
+            "lastReceiveAgeMs": lastReceiveAgeMs,
+            "connectAgeMs": connectAgeMs,
+        ], level: .warning)
         SentrySDK.capture(message: "ws.unexpected_disconnect") { scope in
             scope.setLevel(.warning)
+            scope.setExtra(value: lastReceiveAgeMs, key: "lastReceiveAgeMs")
+            scope.setExtra(value: connectAgeMs, key: "connectAgeMs")
         }
         state = .disconnected
         task = nil
