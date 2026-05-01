@@ -21,17 +21,45 @@ The orchestrator (Railway-hosted backend) provisions, monitors, and reaps pods. 
 
 ## Global prerequisites (state once, applies to all tasks)
 
-These need to be in place before running any task. If you can run `cd backend && npm run list-test-pods` and it doesn't error, you have everything.
+These need to be in place before running any task. To verify your setup is complete, run all four smoke checks at the bottom of this section.
 
-- **Working dir** for `npm run` commands: `backend/`. The deploy script also requires being in `backend/` because Railway CLI uses cwd to find the project.
+### One-time setup
+
+- **Clone the repo, then install backend deps:**
+  ```bash
+  cd backend && npm install
+  ```
+  This installs `tsx`, `@runpod/...`, and the deps used by every `npm run` command below.
+- **Working dir** for `npm run` commands: always `backend/`. The deploy script and Railway CLI both use `cwd` to find the project.
 - **`.env.local` at repo root** — must contain at minimum:
-  - `RUNPOD_API_KEY` — the RunPod GraphQL API key, used for all pod create/list/terminate operations
-  - `NETWORK_VOLUMES_BY_DC` (image-pod volumes) — JSON map `{"DC-NAME": "volumeId", ...}`
-  - `NETWORK_VOLUMES_BY_DC_VIDEO` (video-pod volumes) — same shape
-  - Optional: `RUNPOD_REGISTRY_AUTH_ID`, `POSTHOG_PERSONAL_API_KEY`
-- **Local SSH key** at `~/.ssh/id_ed25519`. The `.pub` half is what test pods use as `PUBLIC_KEY` to allow your SSH in.
-- **Railway CLI** installed and logged in (`railway status` should print the project info). The repo's `~/.railway/config.json` already has the project linked.
-- **gh CLI** for the rare "kill everything" workflow (Task 7c).
+  - `RUNPOD_API_KEY` — the RunPod GraphQL API key, used for all pod create/list/terminate operations. Get it from RunPod web console → Settings → API Keys.
+  - `NETWORK_VOLUMES_BY_DC` (image-pod volumes) — JSON map, e.g. `'{"EUR-NO-1":"49n6i3twuw","US-NC-1":"5vz7ubospw"}'`. Ask the team for the current map; the volumes already exist.
+  - `NETWORK_VOLUMES_BY_DC_VIDEO` (video-pod volumes) — same shape.
+  - Optional: `RUNPOD_REGISTRY_AUTH_ID`, `POSTHOG_PERSONAL_API_KEY`.
+- **Local SSH key** at `~/.ssh/id_ed25519`. If you don't have one, `ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519`. The `.pub` half is what test pods use as `PUBLIC_KEY` to allow your SSH in.
+- **Railway CLI installed AND linked to the project:**
+  ```bash
+  brew install railway          # or curl -fsSL cli.new | sh
+  railway login                  # opens browser to authenticate
+  cd backend && railway link     # interactive: select kiki-backend project + production env
+  ```
+  After linking, `railway status` should print the project + environment + service. If it errors, re-run `railway link`.
+- **gh CLI** authenticated (only needed for Task 7c, the "kill everything" workflow):
+  ```bash
+  gh auth login
+  ```
+
+### Smoke checks (run all four before relying on this doc)
+
+```bash
+cd backend
+npm run list-test-pods            # Should print "No test pods running." (or list any alive). Errors = .env.local or npm install missing.
+railway status                     # Should print kiki-backend / production / service info. Errors = need railway link.
+gh auth status                     # Should say "Logged in to github.com". Errors = run gh auth login.
+ls ~/.ssh/id_ed25519               # Should exist. If not, ssh-keygen as above.
+```
+
+If all four pass, every task in this doc should work.
 
 ---
 
@@ -91,9 +119,15 @@ Then a Railway build runs (~50s). Watch the build logs URL or `railway status --
 
 ### Failure modes
 
-- **One or more DCs failed in sync-all** (exit code 1, "X/Y DCs failed"). The script aborts before `railway up` and does NOT update `.flux-app-version` (so the next `npm run deploy` will retry). Most common cause: RunPod GPU stockout in those DCs (we observed this regularly for US-IL-1, US-NC-1, US-TX-3 during this session). Recovery options:
-  - Wait 15-30 min and re-run `npm run deploy` (capacity often returns).
-  - If the failed DCs aren't critical and you need to ship now, manually update `.git-sha` to the current `git rev-parse HEAD` and run `cd backend && railway up` to deploy backend without a fresh sync. The orchestrator's drift check will fire a Sentry warning when those stale DCs serve a pod, but it's not silent.
+- **One or more DCs failed in sync-all** (exit code 1, "X/Y DCs failed"). The script aborts before `railway up` and does NOT update `.flux-app-version` (so the next `npm run deploy` will retry). Most common cause: RunPod GPU stockout in those DCs (we observed this regularly for US-IL-1, US-NC-1, US-TX-3 in April-May 2026). Recovery options:
+  - Wait 15-30 min and re-run `cd backend && npm run deploy` (capacity often returns).
+  - If the failed DCs aren't critical and you need to ship now, manually stamp `.git-sha` to the current commit and bypass the sync gate:
+    ```bash
+    cd backend
+    git rev-parse HEAD > .git-sha
+    railway up
+    ```
+    The orchestrator's drift check will fire a Sentry warning when those stale DCs serve a pod, but it's not silent. The next `npm run deploy` will detect the still-stale `.flux-app-version` and retry the sync.
 - **`railway up` build failed.** Check the printed build logs URL. Usually a TypeScript error or a missing package — fix and re-run.
 - **Build SUCCESS but pods don't pick up new code.** Existing running pods keep the old in-memory copy. Either wait for the orchestrator's idle reaper (30 min) or terminate them manually via the RunPod web console.
 
@@ -212,7 +246,7 @@ Step 3's tail will show:
 - **launch-test-pod times out at "waiting for SSH port assignment"** (>5 min). Pod hit a stocked-out DC. Re-run with `--dc <other>` (valid DCs printed when you pass `--help`). Container is still starting normally for first-time-on-this-volume in 60–120s; the timeout is a hard cap, not a typical wait.
 - **`scp: Host key verification failed`.** Stale `known_hosts` entry from a prior pod that reused the same IP+port. Fix: `ssh-keygen -R "[<ip>]:<port>"`, then re-scp.
 - **`SSH connection refused` on first connection.** Wait 30s and retry — sshd inside the container takes a few seconds to start after the bootstrap. If still refused after 1 min, check `/tmp/ssh-bootstrap.log` from the RunPod web console "Logs" tab to see if `ssh-keygen -A` failed or `service ssh start` couldn't bind.
-- **`pkill` kills the WHOLE pod, not just python.** Should not happen on a test pod. If it does (you see the pod disappear from `npm run list-test-pods`), it means `PUBLIC_KEY` wasn't set when the pod was launched — production mode `exec python3` makes python PID 1 and killing PID 1 kills the container. The launch script always sets `PUBLIC_KEY` to force dev-mode bash respawn loop, so this should not occur unless you tampered.
+- **`pkill` kills the WHOLE pod, not just python.** Should not happen on a test pod. If it does (you see the pod disappear from `npm run list-test-pods`), it means `PUBLIC_KEY` wasn't set when the pod was launched — production mode `exec python3` makes python PID 1 and killing PID 1 kills the container. The `launch-test-pod` script always sets `PUBLIC_KEY` to force the dev-mode bash respawn loop, so this should not occur unless someone modified the script.
 - **OOM or weird VRAM behavior between iterations.** Check `nvidia-smi` over SSH. If something earlier in the session left allocations behind, restarting python (`pkill`) and waiting for the respawn should free everything (CUDA frees memory on process exit).
 - **Pod went into a bad state.** Easiest recovery: terminate it (`npm run terminate-test-pod -- <id>`) and launch a fresh one. State on the network volume persists across pods, so any scp'd code is preserved.
 
@@ -281,10 +315,10 @@ Same as Task 3, but the printed env line shows your override:
 
 ### Workflow
 
-1. Launch as above.
-2. Wait for `/health` to either become ready (success) or return `load_error` (Python exception). Poll with `curl https://<podId>-8766.proxy.runpod.net/health` every 15s, or just SSH in and tail stdout.
-3. If the experiment crashes natively (process gone, no Python error), check `dmesg | tail -50` over SSH for OOM-kill or CUDA driver errors. Native crashes can't be caught in Python; this is exactly why the experiment has to run in isolation.
-4. When done, terminate (Task 7).
+1. Launch as above. The launch output prints `<podId>` (looks like `mn9577mq9hpjal`), the SSH command, and an HTTP URL — copy these.
+2. Wait for `/health` to either become ready (success) or return `load_error` (Python exception). Poll with `curl https://<podId>-8766.proxy.runpod.net/health` every 15s, or SSH in (`ssh root@<ip> -p <port> -i ~/.ssh/id_ed25519`) and tail stdout via the command in Task 3 step 3.
+3. If the experiment crashes natively (process gone, no Python error in `/health`), SSH in and check kernel state: `dmesg | tail -50` for OOM-kill or CUDA driver errors, plus `nvidia-smi -q | head -50` for ECC errors. Native crashes can't be caught in Python; this is exactly why the experiment has to run in isolation.
+4. When done, `cd backend && npm run terminate-test-pod -- <podId>` (Task 7a).
 
 ### Time
 
@@ -312,11 +346,19 @@ When you want to confirm a pod is up, see what state it's in, or capture a Pytho
 curl https://<pod-id>-8766.proxy.runpod.net/health
 ```
 
-Get `<pod-id>` from `npm run list-test-pods` (test pods), the RunPod web console (production), or Railway logs (the orchestrator logs every pod it provisions).
+How to get `<pod-id>`:
+- **Test pod**: `cd backend && npm run list-test-pods`.
+- **Production pod (current user session)**: open the RunPod web console → Pods. Or grep Railway orchestrator logs:
+  ```bash
+  railway logs --lines 200 | grep -i 'Pod created\|podId='
+  ```
+- **From your iPad's logs**: the orchestrator emits `provision.onDemand.success podId=...` events on each new provision, visible in PostHog if you have access.
 
 ### What you'll see
 
-**Healthy:**
+The exact JSON shape differs slightly between image and video pods (different fields per pipeline), but the `status` and `load_error` fields are the same.
+
+**Healthy video pod:**
 
 ```json
 {
@@ -333,13 +375,26 @@ Get `<pod-id>` from `npm run list-test-pods` (test pods), the RunPod web console
 }
 ```
 
-**Still loading:**
+**Healthy image pod** (different schema — has `quantization`, no `persistent_*` fields):
 
 ```json
-{ "status": "loading", "video_ready": false, ... }
+{
+  "status": "ok",
+  "ready": true,
+  "quantization": "nvfp4",
+  "gpu": "NVIDIA GeForce RTX 5090",
+  "model": "FLUX.2-klein",
+  ...
+}
 ```
 
-**Pipeline failed during startup (this is the canonical way to read a load error):**
+**Still loading (either kind):**
+
+```json
+{ "status": "loading", ... }
+```
+
+**Pipeline failed during startup (either kind — this is the canonical way to read a load error):**
 
 ```json
 {
@@ -457,8 +512,9 @@ When a user's pod is misbehaving and you want to inspect logs, GPU state, or fil
 
 ```bash
 PUB="$(cat ~/.ssh/id_ed25519.pub)"
-railway variables --service kiki-backend --set "PUBLIC_KEY=$PUB"
-cd backend && npm run deploy
+cd backend
+railway variable set "PUBLIC_KEY=$PUB"   # Note: subcommand is `variable` (singular)
+npm run deploy
 # Existing pods keep the no-SSH path; terminate them so the orchestrator
 # provisions new ones with sshd active.
 ```
@@ -491,9 +547,10 @@ ssh root@<ip> -p <port> -i ~/.ssh/id_ed25519
 ### Disable SSH for prod
 
 ```bash
-railway variables --service kiki-backend --remove "PUBLIC_KEY"
-# Or set it to empty string. Newly-spawned pods skip the bootstrap.
-# Existing pods retain whichever path was active when they booted.
+cd backend && railway variable delete PUBLIC_KEY
+# Newly-spawned pods skip the bootstrap.
+# Existing pods retain whichever path was active when they booted —
+# terminate them via the RunPod web console if you want SSH off everywhere now.
 ```
 
 ### What's happening
@@ -512,20 +569,22 @@ NOT a one-line change. The base image's Python/CUDA ABI must match the venv at `
 
 ### Procedure (do not run without coordination)
 
-1. **Update the constant** in `backend/src/modules/orchestrator/orchestrator.ts`:
+1. **Update the constant in BOTH places** (it's intentionally duplicated to keep the test-pod CLI standalone):
+   - `backend/src/modules/orchestrator/orchestrator.ts` — search for `const BASE_IMAGE =`
+   - `backend/scripts/launch-test-pod.ts` — search for `const BASE_IMAGE =`
    ```typescript
    const BASE_IMAGE = 'runpod/pytorch:<new-tag>';
    ```
 
-2. **For each DC volume** (5 video DCs + 5 image DCs, listed in `.env.local` `NETWORK_VOLUMES_BY_DC` and `NETWORK_VOLUMES_BY_DC_VIDEO`):
-   - Manually launch a one-off pod with the NEW base image attached to that DC's volume.
+2. **For each DC volume** (image DCs in `.env.local` `NETWORK_VOLUMES_BY_DC` and video DCs in `NETWORK_VOLUMES_BY_DC_VIDEO`):
+   - Manually launch a one-off pod via the RunPod web console with the NEW base image attached to that DC's volume.
    - SSH in, `rm -rf /workspace/venv`.
-   - From your local machine: `cd backend && npx tsx scripts/sync-flux-app.ts --dc <DC> --volume-id <id>`. This rebuilds the venv from `flux-klein-server/requirements.txt` against the new base.
+   - From your local machine: `cd backend && RUNPOD_API_KEY=... RUNPOD_SSH_PRIVATE_KEY="$(cat ~/.ssh/id_ed25519)" npx tsx scripts/sync-flux-app.ts --dc <DC> --volume-id <id>`. This rebuilds the venv from `flux-klein-server/requirements.txt` against the new base.
    - Terminate the manual pod.
 
-3. **Verify a test pod boots cleanly with the new image.** Update `backend/scripts/launch-test-pod.ts` `BASE_IMAGE` constant if you've also bumped it locally for testing. Run a `npm run launch-test-pod` smoke test, watch warmup complete, run one inference (Task 4 + your own WS trigger).
+3. **Verify a test pod boots cleanly with the new image.** Run `cd backend && npm run launch-test-pod` (which now uses the bumped `BASE_IMAGE` from launch-test-pod.ts). Watch warmup complete, run one inference (Task 4 + your own WS trigger or curl the `/health` endpoint).
 
-4. **`cd backend && npm run deploy`.** Backend deploys, sync-all-dcs sees no flux-klein-server change (skips), `railway up` ships the orchestrator with the new BASE_IMAGE. Newly-provisioned pods now use the new base.
+4. **`cd backend && npm run deploy`.** Backend deploys, sync-all-dcs sees no flux-klein-server change (skips), `railway up` ships the orchestrator with the new `BASE_IMAGE`. Newly-provisioned pods now use the new base.
 
 5. **Old running pods** keep running with the old base until reaped.
 
@@ -545,8 +604,14 @@ The pre-2026-04-23 architecture (custom image at `ghcr.io/donpinkus/kiki-flux-kl
 
 ### Rollback procedure
 
-1. **`git revert <cutover-commit>`** — brings back the orchestrator + iOS changes + config fields. The cutover commit is the one referenced in `documents/decisions.md` 2026-04-23 entry.
-2. **On Railway:** set `FLUX_IMAGE` and `RUNPOD_GHCR_AUTH_ID` again. Last known-good tag: `ghcr.io/donpinkus/kiki-flux-klein:<sha>` for whichever commit precedes the cutover on main. GHCR retains old tags indefinitely; no rebuild needed.
+1. **`git revert 332bcad`** — the volume-entrypoint cutover commit (`refactor(provisioning): launch pods from stock runpod/pytorch + volume-entrypoint`, 2026-04-23). The revert brings back the orchestrator + iOS changes + config fields. Verify by `git log` after the revert: orchestrator.ts should reference `FLUX_IMAGE`, `RUNPOD_GHCR_AUTH_ID`, `BOOT_DOCKER_ARGS` should be absent.
+2. **On Railway:** set `FLUX_IMAGE` and `RUNPOD_GHCR_AUTH_ID` env vars. Last known-good tag: `ghcr.io/donpinkus/kiki-flux-klein:sha-<commit-before-332bcad>`. GHCR retains old tags indefinitely; no rebuild needed.
+   ```bash
+   cd backend
+   PRE_CUTOVER=$(git rev-parse 332bcad^)   # commit immediately before the cutover
+   railway variable set "FLUX_IMAGE=ghcr.io/donpinkus/kiki-flux-klein:sha-$PRE_CUTOVER"
+   railway variable set "RUNPOD_GHCR_AUTH_ID=<your-auth-id>"   # ask the team if not in 1Password
+   ```
 3. **`cd backend && railway up`.**
 4. **Rebuild iOS in Xcode, reconnect.**
 5. `/workspace/venv/` and `/workspace/app/` directories on the volumes are harmless to leave; the rolled-back orchestrator ignores them.
