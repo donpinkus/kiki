@@ -1,12 +1,23 @@
 /**
  * Thin async wrapper around RunPod's GraphQL API for pod lifecycle management.
  * Used by orchestrator.ts to provision, monitor, and terminate per-session
- * pods. All calls are authenticated with RUNPOD_API_KEY from config.
+ * pods. All calls are authenticated with RUNPOD_API_KEY from process.env.
+ *
+ * Reads RUNPOD_API_KEY directly from process.env rather than from the config
+ * singleton so this module can be imported by standalone CLI scripts
+ * (scripts/launch-test-pod.ts etc.) without triggering the orchestrator's
+ * full config validation (JWT secrets, Apple bundle ID, Sentry DSN, etc.).
+ * The orchestrator's own config validation still requires RUNPOD_API_KEY
+ * via the existing config.ts check, so production behavior is unchanged.
  */
 
-import { config } from '../../config/index.js';
-
-const API_URL = () => `https://api.runpod.io/graphql?api_key=${config.RUNPOD_API_KEY}`;
+const API_URL = () => {
+  const key = process.env['RUNPOD_API_KEY'];
+  if (!key) {
+    throw new Error('RUNPOD_API_KEY required in environment');
+  }
+  return `https://api.runpod.io/graphql?api_key=${key}`;
+};
 
 interface GraphQLResponse<T> {
   data?: T;
