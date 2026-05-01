@@ -175,11 +175,25 @@ const BASE_BOOT_ENV: Array<{ key: string; value: string }> = [
 ];
 
 // SSH_BOOTSTRAP + SERVER_LAUNCH for video_server.py with PUBLIC_KEY-aware
-// dev-mode respawn loop. Verbatim from orchestrator.ts BOOT_DOCKER_ARGS_VIDEO.
+// dev-mode respawn loop. VERBATIM from orchestrator.ts BOOT_DOCKER_ARGS_VIDEO
+// (lines 224-267). Keep in lockstep — divergence here means test pods boot
+// differently from production pods, which defeats the point of the test pod
+// being a production-equivalent canary.
 const SSH_BOOTSTRAP =
-  'mkdir -p /root/.ssh && chmod 700 /root/.ssh && ' +
-  'if [ -n "$PUBLIC_KEY" ]; then echo "$PUBLIC_KEY" > /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys; fi && ' +
-  'ssh-keygen -A 2>/dev/null && service ssh start 2>&1 | tee /tmp/ssh-bootstrap.log';
+  'if [ -n "$PUBLIC_KEY" ]; then ' +
+  '{ ' +
+  'echo "ssh bootstrap start at $(date -u +%FT%TZ)"; ' +
+  'mkdir -p /root/.ssh && ' +
+  'echo "$PUBLIC_KEY" > /root/.ssh/authorized_keys && ' +
+  'chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys && ' +
+  'echo "wrote authorized_keys"; ' +
+  'ssh-keygen -A && echo "host keys generated"; ' +
+  'if service ssh start; then echo "service ssh start ok"; ' +
+  'else echo "service ssh start failed; trying /usr/sbin/sshd"; /usr/sbin/sshd && echo "/usr/sbin/sshd ok"; ' +
+  'fi; ' +
+  'echo "ssh bootstrap done at $(date -u +%FT%TZ)"; ' +
+  '} > /tmp/ssh-bootstrap.log 2>&1 || true; ' +
+  'fi';
 
 const SERVER_LAUNCH = (script: string): string =>
   'if [ -n "$PUBLIC_KEY" ]; then ' +
@@ -295,11 +309,10 @@ async function main(): Promise<void> {
   console.log('  Then SSH in and: pkill -f video_server.py');
   console.log('  (bash respawn loop will restart with the new code in ~30s)');
   console.log('');
-  console.log('Tail logs over SSH:');
-  console.log(`  ssh root@${sshIp} -p ${sshPort} -i ~/.ssh/id_ed25519 'journalctl -f' # not used`);
+  console.log('Tail live python stdout over SSH (works through bash respawn loop):');
   console.log(
     `  ssh root@${sshIp} -p ${sshPort} -i ~/.ssh/id_ed25519 ` +
-      `'tail -f /proc/$(pgrep -f video_server)/fd/1'`,
+      `'tail -f /proc/$(pgrep -f video_server | head -1)/fd/1'`,
   );
   console.log('');
   console.log('Terminate when done:');

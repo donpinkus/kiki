@@ -27,7 +27,7 @@ Wait ~60–120s for the script to print SSH info. Then SSH in and watch warmup l
 
 ```bash
 ssh root@<ip> -p <port> -i ~/.ssh/id_ed25519
-tail -f /proc/$(pgrep -f video_server)/fd/1
+tail -f /proc/$(pgrep -f video_server | head -1)/fd/1
 ```
 
 That's the canary. Production pods stay on `LTX_TORCH_COMPILE=0` (orchestrator's `BOOT_ENV`); user traffic is never affected.
@@ -58,7 +58,7 @@ The script prints the exact SSH command. In a separate terminal, tail the python
 
 ```
 ssh root@<ip> -p <port> -i ~/.ssh/id_ed25519
-tail -f /proc/$(pgrep -f video_server)/fd/1
+tail -f /proc/$(pgrep -f video_server | head -1)/fd/1
 ```
 
 `/proc/<pid>/fd/1` is the live stdout descriptor — works even though video_server's output isn't redirected to a file. If the python process dies, you can re-run the `tail` after `pgrep` shows a new pid (the bash respawn loop will restart it).

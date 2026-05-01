@@ -17,7 +17,7 @@ This is a **~10× iteration speedup** for pod-side work:
 | Iterate on `video_pipeline.py` change | Edit → `npm run deploy` (sync to all video DCs ~5–10 min) → `railway up` (~1 min) → terminate current pod → wait for new pod (~2–3 min) → wait for warmup (~10s) → test → log capture from RunPod web console. **~15–20 min/iteration.** | Edit → `scp video_pipeline.py` (~5s) → SSH `pkill -f video_server.py` (bash respawns python automatically, ~30s warmup) → `tail -f /tmp/...` → test. **~1–2 min/iteration.** |
 | Try a profiler config | Same 15–20 min loop | Same 1–2 min loop |
 | `torch.compile` experiment | Crashloop on production pods (Apr 30 incident) | Run live, capture full stdout to disk before death |
-| Read live stdout | Have to grab from RunPod web UI after pod dies | `tail -f /proc/$(pgrep -f video_server)/fd/1` |
+| Read live stdout | Have to grab from RunPod web UI after pod dies | `tail -f /proc/$(pgrep -f video_server | head -1)/fd/1` |
 
 ---
 
@@ -81,7 +81,7 @@ Bash's `while true; do python3 -u video_server.py; sleep 2; done` loop catches t
 ### 4. Watch live logs
 
 ```
-ssh root@<ip> -p <port> -i ~/.ssh/id_ed25519 'tail -f /proc/$(pgrep -f video_server)/fd/1'
+ssh root@<ip> -p <port> -i ~/.ssh/id_ed25519 'tail -f /proc/$(pgrep -f video_server | head -1)/fd/1'
 ```
 
 `/proc/<pid>/fd/1` is the live stdout descriptor of the python process. Tailing it gives you live output without needing to re-SSH after each respawn.
