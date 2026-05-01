@@ -135,9 +135,44 @@ public actor StreamWebSocketClient {
         self.task = wsTask
         wsTask.resume()
 
-        // Wait for initial server status message to confirm connection
+        // Wait for the initial server status message — but with a hard
+        // timeout. URLSessionWebSocketTask.receive() can block indefinitely
+        // when the underlying TCP is silently dead (e.g. proxy half-close
+        // during a long idle period): the WS upgrade "succeeds" at the OS
+        // level but no bytes ever flow, no error is thrown, and the caller
+        // sits in `.warming("Connecting…")` forever. The timeout converts
+        // that hang into an error so `attemptReconnect` can take over.
+        // Backend's first message is the seed from `subscribe()`, fired
+        // synchronously inside the WS handler — should arrive in <1 s under
+        // any normal condition. 10 s is conservative.
         let firstReceiveStart = Date()
-        let message = try await wsTask.receive()
+        let message: URLSessionWebSocketTask.Message
+        do {
+            message = try await withThrowingTaskGroup(of: URLSessionWebSocketTask.Message.self) { group in
+                group.addTask { try await wsTask.receive() }
+                group.addTask {
+                    try await Task.sleep(for: .seconds(10))
+                    throw URLError(.timedOut, userInfo: [
+                        NSLocalizedDescriptionKey: "Timed out waiting for first WS message",
+                    ])
+                }
+                let result = try await group.next()!
+                group.cancelAll()
+                return result
+            }
+        } catch {
+            // Tear down the (likely zombie) task and reset state so the
+            // caller's reconnect path opens a clean URLSessionWebSocketTask
+            // instead of inheriting `.connecting` plus a stale handle.
+            wsTask.cancel(with: .normalClosure, reason: nil)
+            self.task = nil
+            state = .disconnected
+            Self.breadcrumb(category: "ws.handshake", message: "Initial receive failed", data: [
+                "error": error.localizedDescription,
+                "elapsedMs": Int(Date().timeIntervalSince(firstReceiveStart) * 1000),
+            ], level: .warning)
+            throw error
+        }
         let firstReceiveMs = Int(Date().timeIntervalSince(firstReceiveStart) * 1000)
         lastReceiveAt = Date()
         switch message {
