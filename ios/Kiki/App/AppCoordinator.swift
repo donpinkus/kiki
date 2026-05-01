@@ -577,14 +577,14 @@ final class AppCoordinator {
     func saveCurrentDrawing() {
         guard !isSuppressingObservation else { return }
         guard let drawingId = currentDrawingId else { return }
-        guard canvasViewModel.exportDrawingData() != nil else { return }
+        guard let drawingData = canvasViewModel.exportDrawingData() else { return }
 
         let id = drawingId
         var descriptor = FetchDescriptor<Drawing>(predicate: #Predicate { $0.id == id })
         descriptor.fetchLimit = 1
         guard let drawing = try? modelContext.fetch(descriptor).first else { return }
 
-        drawing.drawingData = canvasViewModel.exportDrawingData()
+        drawing.drawingData = drawingData
         drawing.backgroundImageData = canvasViewModel.exportBackgroundImageData()
         drawing.generatedImageData = lastSuccessfulImage?.jpegData(compressionQuality: 0.85)
         drawing.canvasThumbnailData = canvasViewModel.generateThumbnail()?.jpegData(compressionQuality: 0.7)

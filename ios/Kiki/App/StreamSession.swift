@@ -605,7 +605,9 @@ final class StreamSession {
     }
 
     private func resizeImage(_ image: UIImage, to size: CGSize) -> UIImage? {
-        let renderer = UIGraphicsImageRenderer(size: size)
+        let format = UIGraphicsImageRendererFormat()
+        format.preferredRange = .standard
+        let renderer = UIGraphicsImageRenderer(size: size, format: format)
         return renderer.image { _ in
             image.draw(in: CGRect(origin: .zero, size: size))
         }

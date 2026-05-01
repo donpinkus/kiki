@@ -1,5 +1,6 @@
 import UIKit
 import Metal
+import CoreImage
 import StrokeRecognizerModule
 
 /// Metal-backed drawing canvas. GPU-resident
@@ -58,6 +59,8 @@ public final class MetalCanvasView: UIView {
     private var isDirty = true
     /// Canvas bitmap deferred from loadDrawingData until layout is ready.
     private var pendingCanvasImage: CGImage?
+    /// Encoded canvas bitmap deferred from loadDrawingData until layout is ready.
+    private var pendingCanvasImageData: Data?
     /// Layered drawing deferred from loadDrawingData until layout is ready.
     private var pendingLayeredDrawing: LayeredDrawing?
 
@@ -280,6 +283,8 @@ public final class MetalCanvasView: UIView {
         // yet), apply it now that the texture is allocated.
         if pendingLayeredDrawing != nil {
             applyPendingLayeredDrawing()
+        } else if pendingCanvasImageData != nil {
+            applyPendingCanvasImageData()
         } else if pendingCanvasImage != nil {
             applyPendingCanvasImage()
         }
@@ -1340,8 +1345,7 @@ public final class MetalCanvasView: UIView {
 
         var layerEntries: [LayeredDrawing.LayerEntry] = []
         for (i, info) in layers.enumerated() {
-            guard let cgImage = renderer.layerToCGImage(at: i),
-                  let png = UIImage(cgImage: cgImage).pngData() else { continue }
+            guard let png = renderer.layerPNGData(at: i) else { continue }
             layerEntries.append(LayeredDrawing.LayerEntry(
                 id: info.id.uuidString,
                 name: info.name,
@@ -1374,6 +1378,8 @@ public final class MetalCanvasView: UIView {
         // Try layered JSON first.
         if let layered = try? JSONDecoder().decode(LayeredDrawing.self, from: data) {
             pendingLayeredDrawing = layered
+            pendingCanvasImageData = nil
+            pendingCanvasImage = nil
             strokeCount = 1
 
             guard renderer.hasCanvas else {
@@ -1385,15 +1391,16 @@ public final class MetalCanvasView: UIView {
         }
 
         // Try single PNG.
-        if let image = UIImage(data: data)?.cgImage {
-            pendingCanvasImage = image
+        if CIImage(data: data, options: [.colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!]) != nil {
+            pendingCanvasImageData = data
+            pendingCanvasImage = nil
             strokeCount = 1
 
             guard renderer.hasCanvas else {
                 isDirty = true
                 return
             }
-            applyPendingCanvasImage()
+            applyPendingCanvasImageData()
             return
         }
 
@@ -1410,6 +1417,20 @@ public final class MetalCanvasView: UIView {
             strokeCount = savedStrokes.count
             isDirty = true
         }
+    }
+
+    /// Apply a deferred encoded canvas bitmap load (single-layer backward compat).
+    private func applyPendingCanvasImageData() {
+        guard let data = pendingCanvasImageData else { return }
+        pendingCanvasImageData = nil
+        if !renderer.loadImageDataIntoCanvas(data),
+           let image = UIImage(data: data)?.cgImage {
+            renderer.loadImageIntoCanvas(image)
+        }
+        undoSnapshots.removeAll()
+        redoSnapshots.removeAll()
+        isDirty = true
+        onDrawingChanged?()
     }
 
     /// Apply a deferred canvas bitmap load (single-layer backward compat).
@@ -1442,6 +1463,9 @@ public final class MetalCanvasView: UIView {
                 isVisible: entry.isVisible,
                 texture: renderer.layers[i].texture
             )
+            if renderer.loadImageDataIntoLayer(at: i, entry.pngData) {
+                continue
+            }
             if let image = UIImage(data: entry.pngData)?.cgImage {
                 renderer.loadImageIntoLayer(at: i, image)
             }
@@ -1535,6 +1559,17 @@ public final class MetalCanvasView: UIView {
     /// for snapshots, thumbnails, and stream capture.
     public var persistentImageSnapshot: CGImage? {
         renderer.flattenedCGImage()
+    }
+
+    /// Read-only access to the canvas composited over an opaque background using
+    /// the same Metal source-over path as on-screen drawing.
+    public func opaqueImageSnapshot(backgroundImage: UIImage?, maxPixelDimension: Int? = nil) -> UIImage? {
+        let cgImage = renderer.flattenedOpaqueCGImage(
+            backgroundImage: backgroundImage?.cgImage,
+            maxPixelDimension: maxPixelDimension
+        )
+        guard let cgImage else { return nil }
+        return UIImage(cgImage: cgImage, scale: canvasScale, orientation: .up)
     }
 
     /// Render a thumbnail of a single layer's contents (no compositing). Returns nil

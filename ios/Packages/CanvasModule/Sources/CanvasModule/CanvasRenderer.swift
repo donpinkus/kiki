@@ -31,6 +31,8 @@ public final class CanvasRenderer {
     /// conversion and premultiplied alpha correctly, avoiding the color artifacts
     /// from manual getBytes + CGDataProvider construction.
     private let ciContext: CIContext
+    private let sRGBColorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
+    private let linearSRGBColorSpace = CGColorSpace(name: CGColorSpace.linearSRGB)!
 
     // MARK: - Layers
 
@@ -472,6 +474,13 @@ public final class CanvasRenderer {
         return textureToCGImage(layers[index].texture)
     }
 
+    /// Encode a specific layer as PNG without routing transparent pixels through
+    /// UIKit/CoreGraphics premultiplication.
+    func layerPNGData(at index: Int) -> Data? {
+        guard index >= 0, index < layers.count else { return nil }
+        return textureToPNGData(layers[index].texture)
+    }
+
     /// Read the flattened (all visible layers composited) canvas into a CGImage
     /// for stream capture, thumbnails, and single-image export. Includes the
     /// active stroke (scratch texture) so in-progress drawing is captured.
@@ -527,41 +536,176 @@ public final class CanvasRenderer {
         return textureToCGImage(tempTexture)
     }
 
+    /// Read the flattened canvas composited over an opaque background. This is
+    /// used for gallery thumbnails and stream snapshots, where matching the
+    /// Metal canvas' linear source-over blend matters more than preserving alpha.
+    func flattenedOpaqueCGImage(backgroundImage: CGImage?, maxPixelDimension: Int? = nil) -> CGImage? {
+        guard !layers.isEmpty else { return nil }
+        guard let targetSize = snapshotTextureSize(maxPixelDimension: maxPixelDimension) else { return nil }
+        guard let tempTexture = makeSnapshotTexture(width: targetSize.width, height: targetSize.height) else {
+            return nil
+        }
+
+        var backgroundTexture: MTLTexture?
+        if let backgroundImage {
+            backgroundTexture = makeSnapshotTexture(width: targetSize.width, height: targetSize.height)
+            if let backgroundTexture {
+                clearTexture(backgroundTexture)
+                let ciImage = CIImage(cgImage: backgroundImage, options: [.colorSpace: sRGBColorSpace])
+                renderCIImage(ciImage, to: backgroundTexture)
+            }
+        }
+
+        guard let cmdBuf = commandQueue.makeCommandBuffer() else { return nil }
+
+        let rpd = MTLRenderPassDescriptor()
+        rpd.colorAttachments[0].texture = tempTexture
+        rpd.colorAttachments[0].loadAction = .clear
+        rpd.colorAttachments[0].clearColor = MTLClearColor(red: 1, green: 1, blue: 1, alpha: 1)
+        rpd.colorAttachments[0].storeAction = .store
+
+        guard let enc = cmdBuf.makeRenderCommandEncoder(descriptor: rpd) else { return nil }
+        enc.setRenderPipelineState(compositorPSO)
+        enc.setVertexBuffer(quadVertexBuffer, offset: 0, index: 0)
+        var opacity: Float = 1.0
+
+        if let backgroundTexture {
+            enc.setFragmentTexture(backgroundTexture, index: 0)
+            enc.setFragmentBytes(&opacity, length: MemoryLayout<Float>.size, index: 0)
+            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+        }
+
+        for i in 0..<layers.count {
+            guard layers[i].isVisible else { continue }
+            enc.setFragmentTexture(layers[i].texture, index: 0)
+            enc.setFragmentBytes(&opacity, length: MemoryLayout<Float>.size, index: 0)
+            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+
+            if i == activeLayerIndex, stampCount > 0, let scratch = scratchTexture {
+                enc.setFragmentTexture(scratch, index: 0)
+                enc.setFragmentBytes(&opacity, length: MemoryLayout<Float>.size, index: 0)
+                enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+            }
+        }
+
+        if let selTex = selectionTexture, let selVB = selectionVertexBuffer {
+            enc.setFragmentTexture(selTex, index: 0)
+            enc.setFragmentBytes(&opacity, length: MemoryLayout<Float>.size, index: 0)
+            enc.setVertexBuffer(selVB, offset: 0, index: 0)
+            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+            enc.setVertexBuffer(quadVertexBuffer, offset: 0, index: 0)
+        }
+
+        enc.endEncoding()
+        cmdBuf.commit()
+        cmdBuf.waitUntilCompleted()
+
+        return textureToCGImage(tempTexture)
+    }
+
     /// Convert any Metal texture to CGImage via CIImage (correct sRGB + premultiplied alpha).
     private func textureToCGImage(_ texture: MTLTexture) -> CGImage? {
+        guard let ciImage = textureToCIImage(texture) else { return nil }
+        return ciContext.createCGImage(ciImage, from: ciImage.extent,
+                                       format: .BGRA8, colorSpace: sRGBColorSpace)
+    }
+
+    /// Encode any Metal texture as PNG through Core Image. This avoids
+    /// UIImage.pngData(), which can re-premultiply transparent pixels in the
+    /// wrong color space before persistence.
+    private func textureToPNGData(_ texture: MTLTexture) -> Data? {
+        guard let ciImage = textureToCIImage(texture) else { return nil }
+        return ciContext.pngRepresentation(of: ciImage, format: .RGBA8, colorSpace: sRGBColorSpace)
+    }
+
+    private func textureToCIImage(_ texture: MTLTexture) -> CIImage? {
         guard var ciImage = CIImage(mtlTexture: texture, options: [
-            .colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!
+            .colorSpace: sRGBColorSpace
         ]) else { return nil }
         ciImage = ciImage.transformed(by: CGAffineTransform(scaleX: 1, y: -1)
             .translatedBy(x: 0, y: -ciImage.extent.height))
-        return ciContext.createCGImage(ciImage, from: ciImage.extent,
-                                       format: .BGRA8, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!)
+        return ciImage
     }
 
     /// Load a CGImage into a specific layer texture, stretched to fill the canvas.
     func loadImageIntoLayer(at index: Int, _ image: CGImage) {
         guard index >= 0, index < layers.count else { return }
-        let texture = layers[index].texture
-        var ciImage = CIImage(cgImage: image)
+        let ciImage = CIImage(cgImage: image, options: [.colorSpace: sRGBColorSpace])
+        renderCIImageIntoLayer(at: index, ciImage)
+    }
+
+    /// Load encoded image data directly into a layer via Core Image, bypassing
+    /// UIImage/CoreGraphics decode paths for saved transparent canvas PNGs.
+    @discardableResult
+    func loadImageDataIntoLayer(at index: Int, _ data: Data) -> Bool {
+        guard index >= 0, index < layers.count,
+              let ciImage = CIImage(data: data, options: [.colorSpace: sRGBColorSpace]) else {
+            return false
+        }
+        renderCIImageIntoLayer(at: index, ciImage)
+        return true
+    }
+
+    /// Load encoded image data into the active layer (convenience wrapper).
+    @discardableResult
+    func loadImageDataIntoCanvas(_ data: Data) -> Bool {
+        loadImageDataIntoLayer(at: activeLayerIndex, data)
+    }
+
+    private func renderCIImageIntoLayer(at index: Int, _ ciImage: CIImage) {
+        guard index >= 0, index < layers.count else { return }
+        renderCIImage(ciImage, to: layers[index].texture)
+    }
+
+    private func renderCIImage(_ source: CIImage, to texture: MTLTexture) {
+        var ciImage = source
         let imgW = ciImage.extent.width
         let imgH = ciImage.extent.height
         guard imgW > 0, imgH > 0 else { return }
-        let sx = CGFloat(canvasWidth) / imgW
-        let sy = CGFloat(canvasHeight) / imgH
+        let sx = CGFloat(texture.width) / imgW
+        let sy = CGFloat(texture.height) / imgH
         ciImage = ciImage.transformed(by: CGAffineTransform(scaleX: sx, y: -sy)
             .translatedBy(x: 0, y: -imgH))
-        let bounds = CGRect(x: 0, y: 0, width: canvasWidth, height: canvasHeight)
+        let bounds = CGRect(x: 0, y: 0, width: texture.width, height: texture.height)
         // linearSRGB — texture is .bgra8Unorm_srgb, so Metal's render pipeline applies
         // linear→sRGB encoding on store. Passing sRGB here would double-encode (gamma
         // applied twice → washed-out midtones, e.g. dark grays lifting to mid-gray).
         // We tell CIContext to output linear values; Metal handles the sRGB encoding.
         ciContext.render(ciImage, to: texture, commandBuffer: nil,
-                         bounds: bounds, colorSpace: CGColorSpace(name: CGColorSpace.linearSRGB)!)
+                         bounds: bounds, colorSpace: linearSRGBColorSpace)
     }
 
     /// Load a CGImage into the active layer (convenience wrapper).
     func loadImageIntoCanvas(_ image: CGImage) {
         loadImageIntoLayer(at: activeLayerIndex, image)
+    }
+
+    private func snapshotTextureSize(maxPixelDimension: Int?) -> (width: Int, height: Int)? {
+        guard canvasWidth > 0, canvasHeight > 0 else { return nil }
+        guard let maxPixelDimension, maxPixelDimension > 0 else {
+            return (canvasWidth, canvasHeight)
+        }
+        let scale = min(
+            CGFloat(maxPixelDimension) / CGFloat(canvasWidth),
+            CGFloat(maxPixelDimension) / CGFloat(canvasHeight),
+            1
+        )
+        return (
+            max(1, Int((CGFloat(canvasWidth) * scale).rounded())),
+            max(1, Int((CGFloat(canvasHeight) * scale).rounded()))
+        )
+    }
+
+    private func makeSnapshotTexture(width: Int, height: Int) -> MTLTexture? {
+        let desc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm_srgb,
+            width: width,
+            height: height,
+            mipmapped: false
+        )
+        desc.usage = [.shaderRead, .shaderWrite, .renderTarget]
+        desc.storageMode = .shared
+        return device.makeTexture(descriptor: desc)
     }
 
     // MARK: - Lasso Selection (Metal-native)

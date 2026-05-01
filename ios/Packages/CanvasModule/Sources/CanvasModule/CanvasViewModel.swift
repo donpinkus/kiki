@@ -250,21 +250,9 @@ public final class CanvasViewModel {
         let outputSize = canvasView.bounds.size
         guard outputSize.width > 0, outputSize.height > 0 else { return nil }
 
-        // Read the canvas texture directly — no drawHierarchy, no GPU sync.
-        // `.shared` storage on Apple Silicon means coherent CPU read.
-        let canvasCGImage = canvasView.persistentImageSnapshot
-
         let rect = CGRect(origin: .zero, size: outputSize)
-        let format = UIGraphicsImageRendererFormat()
-        format.preferredRange = .standard  // sRGB — match Metal canvas color space
-        let renderer = UIGraphicsImageRenderer(size: outputSize, format: format)
-        let image = renderer.image { _ in
-            UIColor.white.setFill()
-            UIRectFill(rect)
-            container?.backgroundImage?.draw(in: rect)
-            if let cgImg = canvasCGImage {
-                UIImage(cgImage: cgImg).draw(in: rect)
-            }
+        guard let image = canvasView.opaqueImageSnapshot(backgroundImage: container?.backgroundImage) else {
+            return nil
         }
 
         return SketchSnapshot(
@@ -308,23 +296,12 @@ public final class CanvasViewModel {
         let fullSize = canvasView.bounds.size
         guard fullSize.width > 0, fullSize.height > 0 else { return nil }
 
-        let canvasCGImage = canvasView.persistentImageSnapshot
-
-        let scale = min(maxDimension / fullSize.width, maxDimension / fullSize.height, 1.0)
-        let thumbSize = CGSize(width: fullSize.width * scale, height: fullSize.height * scale)
-
-        let format = UIGraphicsImageRendererFormat()
-        format.preferredRange = .standard  // sRGB — match Metal canvas color space
-        let renderer = UIGraphicsImageRenderer(size: thumbSize, format: format)
-        return renderer.image { _ in
-            let rect = CGRect(origin: .zero, size: thumbSize)
-            UIColor.white.setFill()
-            UIRectFill(rect)
-            container?.backgroundImage?.draw(in: rect)
-            if let cgImg = canvasCGImage {
-                UIImage(cgImage: cgImg).draw(in: rect)
-            }
-        }
+        let imageScale = canvasView.window?.screen.scale ?? UIScreen.main.scale
+        let maxPixels = max(1, Int((maxDimension * imageScale).rounded()))
+        return canvasView.opaqueImageSnapshot(
+            backgroundImage: container?.backgroundImage,
+            maxPixelDimension: maxPixels
+        )
     }
 
     // MARK: - Internal
