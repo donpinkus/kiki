@@ -47,6 +47,7 @@ public final class CanvasViewModel {
     private weak var canvasView: MetalCanvasView?
     private weak var container: RotatableCanvasContainer?
     private var pendingState: CanvasState?
+    private var selectedTool: ToolState = .brush(.defaultPen)
     private var lassoClosedPath: CGPath?
 
     public let canvasChanges: AsyncStream<SketchSnapshot>
@@ -92,7 +93,6 @@ public final class CanvasViewModel {
     func attach(_ canvasView: MetalCanvasView, container: RotatableCanvasContainer) {
         self.canvasView = canvasView
         self.container = container
-        container.updateCursorSize(diameter: 5)
 
         // Apply pending state from a saved drawing (set via setPendingState before navigation).
         // This runs BEFORE callbacks are wired in makeUIView, so no handleDrawingChanged fires.
@@ -107,32 +107,23 @@ public final class CanvasViewModel {
             pendingState = nil
             updateState()
         }
+
+        applySelectedToolToAttachedViews()
     }
 
     public func selectBrush(_ config: BrushConfig) {
-        canvasView?.currentTool = .brush(config)
-        container?.updateCursorSize(
-            diameter: config.baseWidth,
-            pressureGamma: config.pressureGamma,
-            tiltSensitivity: config.tiltSensitivity
-        )
+        selectedTool = .brush(config)
+        applySelectedToolToAttachedViews()
     }
 
     public func selectEraser(width: CGFloat = 5) {
-        canvasView?.currentTool = .eraser(width: width)
-        // Eraser builds its internal BrushConfig with pressureGamma 0.7 and
-        // tiltSensitivity 0 (see MetalCanvasView.swift). Mirror those defaults
-        // here so the cursor tracks the actual eraser stamp diameter.
-        container?.updateCursorSize(
-            diameter: width,
-            pressureGamma: 0.7,
-            tiltSensitivity: 0.0
-        )
+        selectedTool = .eraser(width: width)
+        applySelectedToolToAttachedViews()
     }
 
     public func selectLasso() {
-        canvasView?.currentTool = .lasso
-        container?.updateCursorSize(diameter: 0)
+        selectedTool = .lasso
+        applySelectedToolToAttachedViews()
     }
 
     // MARK: - Lasso Selection
@@ -360,5 +351,30 @@ public final class CanvasViewModel {
         canRedo = canvasView.canRedo
         layers = canvasView.layers
         activeLayerIndex = canvasView.activeLayerIndex
+    }
+
+    private func applySelectedToolToAttachedViews() {
+        switch selectedTool {
+        case .brush(let config):
+            canvasView?.currentTool = .brush(config)
+            container?.updateCursorSize(
+                diameter: config.baseWidth,
+                pressureGamma: config.pressureGamma,
+                tiltSensitivity: config.tiltSensitivity
+            )
+        case .eraser(let width):
+            canvasView?.currentTool = .eraser(width: width)
+            // Eraser builds its internal BrushConfig with pressureGamma 0.7 and
+            // tiltSensitivity 0 (see MetalCanvasView.swift). Mirror those defaults
+            // here so the cursor tracks the actual eraser stamp diameter.
+            container?.updateCursorSize(
+                diameter: width,
+                pressureGamma: 0.7,
+                tiltSensitivity: 0.0
+            )
+        case .lasso:
+            canvasView?.currentTool = .lasso
+            container?.updateCursorSize(diameter: 0)
+        }
     }
 }
