@@ -19,9 +19,9 @@ public final class MetalCanvasView: UIView {
     public var currentTool: ToolState = .brush(.defaultPen) {
         didSet {
             // Switching tools while a snap-edit is pending finalizes it
-            // (the user has clearly moved on). The pending line gets
-            // flattened with whatever endpoint positions it currently has.
-            if case .editingHandles = snapState {
+            // (the user has clearly moved on). The pending shape gets
+            // flattened with whatever positions it currently has.
+            if isInSnapEditMode {
                 finalizeEditedSnap()
             }
         }
@@ -142,18 +142,36 @@ public final class MetalCanvasView: UIView {
 
     /// State of the snap workflow.
     ///
-    /// On hold-commit the recognizer transitions directly to `.draggingHandle`
-    /// (with the end "grabbed" by the pen) — both handles appear immediately.
-    /// On the subsequent touchesEnded the state moves to `.editingHandles`,
-    /// which persists across touches: the user can re-tap either handle to
-    /// drag, or tap elsewhere to flatten the line into the canvas.
+    /// LINE flow: hold-commit → `.draggingHandle` (end grabbed by pen) →
+    /// `.editingHandles` on lift (re-tappable). Tap elsewhere flattens.
+    ///
+    /// ELLIPSE/CIRCLE flow: hold-commit → `.editingEllipseHandles` directly
+    /// (no immediate-drag — there's no pen-natural mapping like end-of-line).
+    /// Subsequent taps on the 4 axis-endpoint handles enter
+    /// `.draggingEllipseHandle`. Tap elsewhere flattens.
     private enum SnapState {
         case drawing
         case preview(verdict: Verdict, enteredAt: TimeInterval)
+        // Line flow
         case editingHandles(start: CGPoint, end: CGPoint)
         case draggingHandle(which: HandleSide, anchored: CGPoint)
+        // Ellipse / circle flow
+        case editingEllipseHandles(geometry: EllipseGeometry, isCircle: Bool)
+        /// The OPPOSITE handle is fixed (the `anchor`). Pen position defines
+        /// the new primary axis endpoint; perpendicular axis scales uniformly
+        /// with the primary (`perpRatio` captured at drag-start). For circles,
+        /// perpendicular is forced equal to primary so circle stays a circle.
+        case draggingEllipseHandle(
+            geometry: EllipseGeometry,
+            anchor: CGPoint,
+            perpRatio: CGFloat,
+            isCircle: Bool
+        )
     }
     private enum HandleSide { case start, end }
+    /// One of the 4 ellipse axis endpoints. "Plus" / "Minus" refer to the
+    /// signed direction along the axis from the center.
+    private enum EllipseAxisSide { case majorPlus, majorMinus, minorPlus, minorMinus }
     private var snapState: SnapState = .drawing
 
     /// Hit radius for handle taps. Larger than the visual handle so finger
@@ -163,12 +181,16 @@ public final class MetalCanvasView: UIView {
     /// Visual diameter of the handle indicator (Procreate-like).
     private static let handleVisualDiameter: CGFloat = 12
 
-    /// Overlay layer showing the snap preview ghost (line outline above active stroke).
+    /// Overlay layer showing the snap preview ghost (line/ellipse outline
+    /// above the active stroke).
     private let snapPreviewLayer = CAShapeLayer()
-    /// Direct-manipulation handles shown when a snapped line is editable
-    /// (post-touchesEnded, pre-dismiss). Two CAShapeLayer circles.
+    /// Direct-manipulation handles shown when a snapped line is editable.
+    /// Reused for ellipse/circle (4 axis-endpoint handles use both + 2 more).
     private let startHandleLayer = CAShapeLayer()
     private let endHandleLayer = CAShapeLayer()
+    /// Additional handles for ellipse/circle minor axis endpoints.
+    private let minorPlusHandleLayer = CAShapeLayer()
+    private let minorMinusHandleLayer = CAShapeLayer()
     private let previewHaptic = UIImpactFeedbackGenerator(style: .light)
     private let commitHaptic = UIImpactFeedbackGenerator(style: .medium)
 
@@ -247,7 +269,7 @@ public final class MetalCanvasView: UIView {
 
         // Handle indicators for snap edit mode. Procreate-like: white-fill,
         // accent-stroke circles with subtle drop shadow.
-        for handle in [startHandleLayer, endHandleLayer] {
+        for handle in [startHandleLayer, endHandleLayer, minorPlusHandleLayer, minorMinusHandleLayer] {
             handle.fillColor = UIColor.white.cgColor
             handle.strokeColor = UIColor.tintColor.cgColor
             handle.lineWidth = 1.5
@@ -340,7 +362,48 @@ public final class MetalCanvasView: UIView {
                 // Tap elsewhere — finalize and consume this touch (don't
                 // start a new stroke; user must lift and re-touch to draw).
                 if isQuickShapeLoggingEnabled {
-                    print("[QS] tap-elsewhere — finalize edit")
+                    print("[QS] tap-elsewhere — finalize line edit")
+                }
+                finalizeEditedSnap()
+                return
+            }
+        }
+
+        // Ellipse / circle edit mode: same routing pattern with 4 handles.
+        if case .editingEllipseHandles(let geom, let isCircle) = snapState,
+           let touch = touches.first {
+            let p = touch.location(in: self)
+            if let axis = ellipseHandleHitTest(at: p, geometry: geom) {
+                // Capture the anchor (opposite handle position) and current
+                // perpendicular/primary ratio. These stay fixed throughout the
+                // drag; the live geometry is recomputed each touchesMoved.
+                let pts = ellipseHandlePositions(geom)
+                let anchor: CGPoint
+                let primarySemi: CGFloat
+                let perpSemi: CGFloat
+                switch axis {
+                case .majorPlus:
+                    anchor = pts.majorMinus; primarySemi = geom.semiMajor; perpSemi = geom.semiMinor
+                case .majorMinus:
+                    anchor = pts.majorPlus;  primarySemi = geom.semiMajor; perpSemi = geom.semiMinor
+                case .minorPlus:
+                    anchor = pts.minorMinus; primarySemi = geom.semiMinor; perpSemi = geom.semiMajor
+                case .minorMinus:
+                    anchor = pts.minorPlus;  primarySemi = geom.semiMinor; perpSemi = geom.semiMajor
+                }
+                let perpRatio = primarySemi > 0 ? perpSemi / primarySemi : 1
+                snapState = .draggingEllipseHandle(
+                    geometry: geom, anchor: anchor, perpRatio: perpRatio, isCircle: isCircle
+                )
+                drawingTouch = touch
+                onInteractionBegan?()
+                if isQuickShapeLoggingEnabled {
+                    print("[QS] ellipse handle drag begin — \(axis), anchor=(\(fmt(anchor.x)),\(fmt(anchor.y))), perpRatio=\(fmt(perpRatio))")
+                }
+                return
+            } else {
+                if isQuickShapeLoggingEnabled {
+                    print("[QS] tap-elsewhere — finalize ellipse edit")
                 }
                 finalizeEditedSnap()
                 return
@@ -415,6 +478,33 @@ public final class MetalCanvasView: UIView {
             return
         }
 
+        // Ellipse / circle handle drag — opposite handle is the anchor.
+        if case .draggingEllipseHandle(_, let anchor, let perpRatio, let isCircle) = snapState {
+            let dragPos = touch.location(in: self)
+            let newGeom = recomputeEllipseFromAnchoredDrag(
+                anchor: anchor,
+                dragPos: dragPos,
+                perpRatio: perpRatio,
+                isCircle: isCircle
+            )
+            snapState = .draggingEllipseHandle(
+                geometry: newGeom, anchor: anchor, perpRatio: perpRatio, isCircle: isCircle
+            )
+            rebuildEllipseStamps(geometry: newGeom)
+            updateEllipseHandles(geometry: newGeom)
+            return
+        }
+
+        // Snap committed during the same touch and we're now showing handles
+        // (no immediate-drag for closed shapes — stays in .editingEllipseHandles
+        // until user lifts). Suppress further pen input on this touch so the
+        // brush engine doesn't append the held-pen position to the snapped
+        // perimeter (which would draw a chord from the perimeter end back to
+        // the pen tip).
+        if isInSnapEditMode {
+            return
+        }
+
         switch currentTool {
         case .brush:
             // Append coalesced points and rebuild all stamps for live preview.
@@ -462,8 +552,7 @@ public final class MetalCanvasView: UIView {
     public override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard let touch = drawingTouch, touches.contains(touch) else { return }
 
-        // End of a handle drag: return to editingHandles with new positions.
-        // The line + handles stay visible until the user dismisses or re-edits.
+        // End of a line handle drag: return to editingHandles with new positions.
         if case .draggingHandle(let which, let anchored) = snapState {
             let final = touch.location(in: self)
             let (start, end): (CGPoint, CGPoint) = (which == .start)
@@ -477,11 +566,34 @@ public final class MetalCanvasView: UIView {
             return
         }
 
+        // End of an ellipse handle drag: return to editingEllipseHandles.
+        if case .draggingEllipseHandle(let geom, _, _, let isCircle) = snapState {
+            snapState = .editingEllipseHandles(geometry: geom, isCircle: isCircle)
+            updateEllipseHandles(geometry: geom)
+            drawingTouch = nil
+            onInteractionEnded?()
+            isDirty = true
+            return
+        }
+
+        // Snap committed during this touch as an ellipse/circle (closed
+        // shape — no immediate-drag, so we entered .editingEllipseHandles
+        // directly in commitSnap). Just clean up touch state; handles stay
+        // visible and the state machine waits for the user's next tap to
+        // either re-edit or dismiss.
+        if case .editingEllipseHandles = snapState {
+            drawingTouch = nil
+            recognizer?.reset()
+            onInteractionEnded?()
+            isDirty = true
+            return
+        }
+
         // Telemetry / diagnostic at touchesEnded.
         if isQuickShapeEnabled, let recognizer {
             // This block is only reached when the stroke ended WITHOUT having
-            // entered handle-drag mode (the .draggingHandle case returns
-            // earlier above). So we know no snap committed during this touch.
+            // entered any handle-drag mode (those cases return earlier above).
+            // So we know no snap committed during this touch.
             let v = recognizer.finalize()
             if case .abstain(let reason) = v {
                 onSnapEvent?(.abstained(SnapAbstainedInfo(
@@ -489,8 +601,8 @@ public final class MetalCanvasView: UIView {
                     confidence: Double(recognizer.currentConfidence),
                     snapshot: recognizer.lastFeatureSnapshot
                 )))
-            } else if case .line = v {
-                // Final verdict was a snap-eligible line but we didn't commit
+            } else if v.isSnap {
+                // Final verdict was a snap-eligible shape but we didn't commit
                 // (user didn't hold long enough). Treat as "abstained — no hold".
                 onSnapEvent?(.abstained(SnapAbstainedInfo(
                     reason: "no_hold",
@@ -504,6 +616,8 @@ public final class MetalCanvasView: UIView {
                 let verdictDesc: String
                 switch v {
                 case .line(let g): verdictDesc = "line[(\(fmt(g.start.x)),\(fmt(g.start.y))) → (\(fmt(g.end.x)),\(fmt(g.end.y)))]"
+                case .ellipse(let g): verdictDesc = "ellipse[c=(\(fmt(g.center.x)),\(fmt(g.center.y))), a=\(fmt(g.semiMajor)), b=\(fmt(g.semiMinor))]"
+                case .circle(let g): verdictDesc = "circle[c=(\(fmt(g.center.x)),\(fmt(g.center.y))), r=\(fmt(g.radius))]"
                 case .abstain(let r): verdictDesc = "abstain(\(r.rawValue))"
                 }
                 print("[QS] touchesEnded — final verdict=\(verdictDesc) conf=\(fmt(recognizer.currentConfidence)) snapState=\(stateDesc(snapState))")
@@ -537,6 +651,15 @@ public final class MetalCanvasView: UIView {
                 ? (pos, anchored) : (anchored, pos)
             snapState = .editingHandles(start: start, end: end)
             updateDragHandles(start: start, end: end)
+            drawingTouch = nil
+            onInteractionEnded?()
+            isDirty = true
+            return
+        }
+
+        if case .draggingEllipseHandle(let geom, _, _, let isCircle) = snapState {
+            snapState = .editingEllipseHandles(geometry: geom, isCircle: isCircle)
+            updateEllipseHandles(geometry: geom)
             drawingTouch = nil
             onInteractionEnded?()
             isDirty = true
@@ -693,9 +816,8 @@ public final class MetalCanvasView: UIView {
     /// Called when the user taps elsewhere, switches tools, or otherwise
     /// dismisses the handles.
     private func finalizeEditedSnap() {
-        guard case .editingHandles = snapState else { return }
+        guard isInSnapEditMode else { return }
         guard !activeStrokeStamps.isEmpty else {
-            // Defensive: nothing to flatten. Just clear state.
             cancelPendingSnapEdit()
             return
         }
@@ -712,12 +834,21 @@ public final class MetalCanvasView: UIView {
         isDirty = true
     }
 
-    /// Discard the pending snapped line without flattening — used when the
+    /// Discard the pending snapped shape without flattening — used when the
     /// user undoes during edit mode.
     private func cancelPendingSnapEdit() {
-        guard case .editingHandles = snapState else { return }
+        guard isInSnapEditMode else { return }
         clearSnapEditState()
         isDirty = true
+    }
+
+    /// True when the snap state is in any "editable / handles visible" state
+    /// (line or ellipse). Used to gate finalize / cancel operations.
+    private var isInSnapEditMode: Bool {
+        switch snapState {
+        case .editingHandles, .editingEllipseHandles: return true
+        default: return false
+        }
     }
 
     /// Common cleanup shared by finalize + cancel paths.
@@ -750,14 +881,68 @@ public final class MetalCanvasView: UIView {
     }
 
     private func hideDragHandles() {
-        guard !startHandleLayer.isHidden || !endHandleLayer.isHidden else { return }
+        let allHidden = startHandleLayer.isHidden && endHandleLayer.isHidden
+            && minorPlusHandleLayer.isHidden && minorMinusHandleLayer.isHidden
+        guard !allHidden else { return }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         startHandleLayer.isHidden = true
         endHandleLayer.isHidden = true
+        minorPlusHandleLayer.isHidden = true
+        minorMinusHandleLayer.isHidden = true
         startHandleLayer.path = nil
         endHandleLayer.path = nil
+        minorPlusHandleLayer.path = nil
+        minorMinusHandleLayer.path = nil
         CATransaction.commit()
+    }
+
+    /// Show the 4 axis-endpoint handles for an ellipse/circle. The two
+    /// existing handle layers (start/end) are reused for the major-axis
+    /// endpoints; the minor-axis endpoints get the additional layers.
+    private func showEllipseHandles(geometry: EllipseGeometry) {
+        let pts = ellipseHandlePositions(geometry)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        configureHandlePath(startHandleLayer, at: pts.majorPlus)
+        configureHandlePath(endHandleLayer, at: pts.majorMinus)
+        configureHandlePath(minorPlusHandleLayer, at: pts.minorPlus)
+        configureHandlePath(minorMinusHandleLayer, at: pts.minorMinus)
+        startHandleLayer.isHidden = false
+        endHandleLayer.isHidden = false
+        minorPlusHandleLayer.isHidden = false
+        minorMinusHandleLayer.isHidden = false
+        CATransaction.commit()
+    }
+
+    private func updateEllipseHandles(geometry: EllipseGeometry) {
+        let pts = ellipseHandlePositions(geometry)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        configureHandlePath(startHandleLayer, at: pts.majorPlus)
+        configureHandlePath(endHandleLayer, at: pts.majorMinus)
+        configureHandlePath(minorPlusHandleLayer, at: pts.minorPlus)
+        configureHandlePath(minorMinusHandleLayer, at: pts.minorMinus)
+        CATransaction.commit()
+    }
+
+    /// Compute the 4 axis-endpoint positions for an ellipse, accounting for rotation.
+    private func ellipseHandlePositions(_ g: EllipseGeometry) -> (
+        majorPlus: CGPoint, majorMinus: CGPoint,
+        minorPlus: CGPoint, minorMinus: CGPoint
+    ) {
+        let cosT = cos(g.rotation)
+        let sinT = sin(g.rotation)
+        let majorDx = g.semiMajor * cosT
+        let majorDy = g.semiMajor * sinT
+        let minorDx = -g.semiMinor * sinT
+        let minorDy = g.semiMinor * cosT
+        return (
+            majorPlus:  CGPoint(x: g.center.x + majorDx, y: g.center.y + majorDy),
+            majorMinus: CGPoint(x: g.center.x - majorDx, y: g.center.y - majorDy),
+            minorPlus:  CGPoint(x: g.center.x + minorDx, y: g.center.y + minorDy),
+            minorMinus: CGPoint(x: g.center.x - minorDx, y: g.center.y - minorDy)
+        )
     }
 
     private func configureHandlePath(_ layer: CAShapeLayer, at center: CGPoint) {
@@ -782,6 +967,64 @@ public final class MetalCanvasView: UIView {
         if dStart <= r { return .start }
         if dEnd <= r { return .end }
         return nil
+    }
+
+    /// Hit-test against ellipse axis handles. Returns the closest one within
+    /// the hit radius, or nil.
+    private func ellipseHandleHitTest(at p: CGPoint, geometry: EllipseGeometry) -> EllipseAxisSide? {
+        let pts = ellipseHandlePositions(geometry)
+        let candidates: [(EllipseAxisSide, CGFloat)] = [
+            (.majorPlus,  hypot(p.x - pts.majorPlus.x,  p.y - pts.majorPlus.y)),
+            (.majorMinus, hypot(p.x - pts.majorMinus.x, p.y - pts.majorMinus.y)),
+            (.minorPlus,  hypot(p.x - pts.minorPlus.x,  p.y - pts.minorPlus.y)),
+            (.minorMinus, hypot(p.x - pts.minorMinus.x, p.y - pts.minorMinus.y)),
+        ]
+        let r = Self.handleHitRadius
+        let inRange = candidates.filter { $0.1 <= r }
+        return inRange.min(by: { $0.1 < $1.1 })?.0
+    }
+
+    /// Recompute ellipse geometry when a handle is dragged with the OPPOSITE
+    /// handle as a fixed pivot ("anchor").
+    ///
+    /// The pen position defines the new primary axis endpoint. The center
+    /// becomes the midpoint of anchor↔pen; rotation matches the new direction;
+    /// primary semi-axis = half the anchor↔pen distance; perpendicular axis
+    /// scales uniformly with the primary (preserves the aspect ratio captured
+    /// at drag-start). For circles, perpendicular is forced equal to primary.
+    ///
+    /// Effect: dragging straight away/toward the anchor scales the whole
+    /// ellipse; dragging sideways rotates it around the anchor with whatever
+    /// scale the new distance produces.
+    private func recomputeEllipseFromAnchoredDrag(
+        anchor: CGPoint,
+        dragPos: CGPoint,
+        perpRatio: CGFloat,
+        isCircle: Bool
+    ) -> EllipseGeometry {
+        let dx = dragPos.x - anchor.x
+        let dy = dragPos.y - anchor.y
+        let distance = hypot(dx, dy)
+        let newPrimary = max(distance / 2, 5)
+        let newPerp = isCircle ? newPrimary : max(newPrimary * perpRatio, 5)
+        let center = CGPoint(x: (anchor.x + dragPos.x) / 2, y: (anchor.y + dragPos.y) / 2)
+        let rotation = atan2(dy, dx)
+        return EllipseGeometry(
+            center: center,
+            semiMajor: newPrimary,
+            semiMinor: newPerp,
+            rotation: rotation
+        )
+    }
+
+    /// Rebuild stamps for an ellipse/circle after a handle drag.
+    private func rebuildEllipseStamps(geometry: EllipseGeometry) {
+        guard var stroke = activeStroke,
+              let raw = preCommitRawPoints else { return }
+        stroke.points = ellipsePerimeterStrokePoints(geometry: geometry, raw: raw)
+        activeStroke = stroke
+        activeStrokeStamps = generateStampsForStroke(stroke, scale: canvasScale)
+        isDirty = true
     }
 
     /// Rebuild the snapped line's stamps for a new (start, end) pair. Used
@@ -836,6 +1079,8 @@ public final class MetalCanvasView: UIView {
             let verdictDesc: String
             switch v {
             case .line: verdictDesc = "line"
+            case .ellipse: verdictDesc = "ellipse"
+            case .circle: verdictDesc = "circle"
             case .abstain(let r): verdictDesc = "abstain(\(r.rawValue))"
             }
             let bbox = diag.map { fmt($0.bboxDiagonal) } ?? "-"
@@ -872,7 +1117,9 @@ public final class MetalCanvasView: UIView {
             // Wait for the user to hold near-stationary at the end of the stroke.
             guard recognizer.isHolding else { return }
             let verdict = recognizer.currentVerdict()
-            if case .line = verdict, recognizer.currentConfidence >= seeds.acceptScore {
+            // Any snap-eligible verdict (line, ellipse, circle) can enter
+            // preview when confidence passes acceptScore.
+            if verdict.isSnap, recognizer.currentConfidence >= seeds.acceptScore {
                 showSnapPreview(verdict: verdict)
                 snapState = .preview(verdict: verdict, enteredAt: now)
                 previewHaptic.impactOccurred()
@@ -885,6 +1132,8 @@ public final class MetalCanvasView: UIView {
                 let verdictDesc: String
                 switch verdict {
                 case .line: verdictDesc = "line"
+                case .ellipse: verdictDesc = "ellipse"
+                case .circle: verdictDesc = "circle"
                 case .abstain(let r): verdictDesc = "abstain(\(r.rawValue))"
                 }
                 print("[QS] holding but no snap — verdict=\(verdictDesc) conf=\(String(format: "%.2f", recognizer.currentConfidence)) (need ≥ \(seeds.acceptScore))")
@@ -909,13 +1158,13 @@ public final class MetalCanvasView: UIView {
                 if isQuickShapeLoggingEnabled { print("[QS] Preview → Drawing (conf \(String(format: "%.2f", confidence)) < floor \(String(format: "%.2f", floor)))") }
                 return
             }
-            // Verdict identity changed → cancel (cheap check: only line is supported in v0).
+            // Verdict identity changed → cancel.
             let nowVerdict = recognizer.currentVerdict()
-            guard case .line = nowVerdict else {
+            guard verdictsHaveSameKind(cachedVerdict, nowVerdict) else {
                 cancelSnapPreview()
                 snapState = .drawing
                 onSnapEvent?(.previewCanceled(SnapPreviewCanceledInfo(reason: "verdict_change")))
-                if isQuickShapeLoggingEnabled { print("[QS] Preview → Drawing (verdict no longer .line)") }
+                if isQuickShapeLoggingEnabled { print("[QS] Preview → Drawing (verdict kind changed)") }
                 return
             }
             // Refresh the preview geometry to track the latest fit.
@@ -926,7 +1175,8 @@ public final class MetalCanvasView: UIView {
                 commitSnap(verdict: cachedVerdict)
             }
 
-        case .editingHandles, .draggingHandle:
+        case .editingHandles, .draggingHandle,
+             .editingEllipseHandles, .draggingEllipseHandle:
             // No recognizer-driven transitions in these states; touch handlers
             // own the lifecycle here.
             break
@@ -939,16 +1189,42 @@ public final class MetalCanvasView: UIView {
         case .preview: return "preview"
         case .editingHandles: return "editingHandles"
         case .draggingHandle: return "draggingHandle"
+        case .editingEllipseHandles: return "editingEllipseHandles"
+        case .draggingEllipseHandle: return "draggingEllipseHandle"
+        }
+    }
+
+    /// True when both verdicts are the same shape kind (line/ellipse/circle/abstain).
+    /// Used to detect verdict-kind changes mid-preview that should cancel.
+    private func verdictsHaveSameKind(_ a: Verdict, _ b: Verdict) -> Bool {
+        switch (a, b) {
+        case (.line, .line), (.ellipse, .ellipse), (.circle, .circle): return true
+        case (.abstain, .abstain): return true
+        default: return false
         }
     }
 
     /// Render the snap preview as a 1.5pt outline at 50% brush opacity.
     private func showSnapPreview(verdict: Verdict) {
-        guard case .line(let geom) = verdict,
-              case .brush(let config) = currentTool else { return }
-        let path = CGMutablePath()
-        path.move(to: geom.start)
-        path.addLine(to: geom.end)
+        guard case .brush(let config) = currentTool else { return }
+        let path: CGPath
+        switch verdict {
+        case .line(let geom):
+            let m = CGMutablePath()
+            m.move(to: geom.start)
+            m.addLine(to: geom.end)
+            path = m
+        case .ellipse(let geom):
+            path = ellipsePreviewPath(geom)
+        case .circle(let geom):
+            let ell = EllipseGeometry(
+                center: geom.center,
+                semiMajor: geom.radius, semiMinor: geom.radius, rotation: 0
+            )
+            path = ellipsePreviewPath(ell)
+        case .abstain:
+            return
+        }
         let baseColor = config.color.uiColor
         let strokeColor = baseColor.withAlphaComponent(0.5).cgColor
         CATransaction.begin()
@@ -957,6 +1233,22 @@ public final class MetalCanvasView: UIView {
         snapPreviewLayer.strokeColor = strokeColor
         snapPreviewLayer.isHidden = false
         CATransaction.commit()
+    }
+
+    /// Build a CGPath for an ellipse with rotation. CoreGraphics has no
+    /// built-in rotated ellipse, so build from the axis-aligned ellipse-in-rect
+    /// and apply the rotation transform around the center.
+    private func ellipsePreviewPath(_ geom: EllipseGeometry) -> CGPath {
+        let rect = CGRect(
+            x: geom.center.x - geom.semiMajor,
+            y: geom.center.y - geom.semiMinor,
+            width: geom.semiMajor * 2,
+            height: geom.semiMinor * 2
+        )
+        var transform = CGAffineTransform(translationX: geom.center.x, y: geom.center.y)
+            .rotated(by: geom.rotation)
+            .translatedBy(x: -geom.center.x, y: -geom.center.y)
+        return CGPath(ellipseIn: rect, transform: &transform)
     }
 
     private func cancelSnapPreview() {
@@ -985,15 +1277,29 @@ public final class MetalCanvasView: UIView {
     /// Stashes the raw points so each drag tick can re-reparameterize
     /// against the original pressure curve.
     private func commitSnap(verdict: Verdict) {
-        guard case .line(let geom) = verdict, var stroke = activeStroke else { return }
-
-        // Save the raw points for post-commit handle dragging.
+        guard var stroke = activeStroke else { return }
         preCommitRawPoints = stroke.points
 
+        switch verdict {
+        case .line(let geom):
+            commitLineSnap(geom: geom, stroke: &stroke)
+        case .ellipse(let geom):
+            commitEllipseSnap(geom: geom, isCircle: false, stroke: &stroke)
+        case .circle(let geom):
+            // Promote to ellipse internally for unified rendering / handles.
+            let ellipse = EllipseGeometry(
+                center: geom.center,
+                semiMajor: geom.radius, semiMinor: geom.radius, rotation: 0
+            )
+            commitEllipseSnap(geom: ellipse, isCircle: true, stroke: &stroke)
+        case .abstain:
+            return
+        }
+    }
+
+    private func commitLineSnap(geom: LineGeometry, stroke: inout Stroke) {
         // Treat the user's hold position as the end-handle position so the
-        // line reaches exactly to the pen at the moment of commit. The line
-        // direction may differ slightly from the fitted-line direction,
-        // but that's correct — once the pen is grabbed, the line is start→pen.
+        // line reaches exactly to the pen at the moment of commit.
         let penPos = recognizer?.lastInputPositionTimestamp?.position ?? geom.end
 
         let resampled = reparameterizeStrokePoints(
@@ -1006,31 +1312,91 @@ public final class MetalCanvasView: UIView {
         activeStrokeStamps = generateStampsForStroke(stroke, scale: canvasScale)
 
         cancelSnapPreview()
-        // Enter handle-drag mode immediately. Both handles visible; end follows
-        // the pen until the user lifts.
         snapState = .draggingHandle(which: .end, anchored: geom.start)
         showDragHandles(start: geom.start, end: penPos)
         commitHaptic.impactOccurred()
         if isQuickShapeLoggingEnabled {
-            print("[QS] commitSnap — \(stroke.points.count) corrected points")
+            print("[QS] commitSnap (line) — \(stroke.points.count) corrected points")
         }
         isDirty = true
 
-        // Telemetry — capture state for both committed and any subsequent
-        // undoneWithin2s event. Payload uses the recognizer's snapshot.
+        emitCommittedTelemetry(verdict: "line")
+    }
+
+    private func commitEllipseSnap(geom: EllipseGeometry, isCircle: Bool, stroke: inout Stroke) {
+        let pts = ellipsePerimeterStrokePoints(geometry: geom, raw: stroke.points)
+        stroke.points = pts
+        activeStroke = stroke
+        activeStrokeStamps = generateStampsForStroke(stroke, scale: canvasScale)
+
+        cancelSnapPreview()
+        // Closed shape: enter editing-handles directly (no immediate-drag —
+        // there's no pen-natural mapping like end-of-line for closed shapes).
+        snapState = .editingEllipseHandles(geometry: geom, isCircle: isCircle)
+        showEllipseHandles(geometry: geom)
+        commitHaptic.impactOccurred()
+        if isQuickShapeLoggingEnabled {
+            print("[QS] commitSnap (\(isCircle ? "circle" : "ellipse")) — \(pts.count) perimeter samples")
+        }
+        isDirty = true
+
+        emitCommittedTelemetry(verdict: isCircle ? "circle" : "ellipse")
+    }
+
+    private func emitCommittedTelemetry(verdict: String) {
         lastStrokeWasSnap = true
         lastSnapCommitAt = Date()
-        lastSnapVerdict = "line"
+        lastSnapVerdict = verdict
         lastSnapSnapshot = recognizer?.lastFeatureSnapshot
         if let snapshot = recognizer?.lastFeatureSnapshot,
            let lastTouchTime = recognizer?.lastInputTimestamp {
             onSnapEvent?(.committed(SnapCommittedInfo(
-                verdict: "line",
+                verdict: verdict,
                 confidence: Double(recognizer?.currentConfidence ?? 0),
                 strokeDurationSec: lastTouchTime - currentStrokeStartTime,
                 snapshot: snapshot
             )))
         }
+    }
+
+    /// Walk the ellipse perimeter at fixed parameter intervals and emit
+    /// StrokePoints suitable for the brush engine. v0 uses uniform pressure
+    /// (mean of raw forces) — pressure variation around an ellipse rim isn't
+    /// expected by users for a snapped shape.
+    private func ellipsePerimeterStrokePoints(
+        geometry: EllipseGeometry,
+        raw: [StrokePoint]
+    ) -> [StrokePoint] {
+        let n = 64  // sufficient for visually smooth perimeter at typical sizes
+        let cosT = cos(geometry.rotation)
+        let sinT = sin(geometry.rotation)
+        let a = geometry.semiMajor
+        let b = geometry.semiMinor
+
+        // Uniform brush properties from the raw stroke.
+        let forces = raw.map { $0.force }
+        let altitudes = raw.map { $0.altitude }
+        let meanForce = forces.isEmpty ? 0.5 : forces.reduce(0, +) / CGFloat(forces.count)
+        let meanAlt = altitudes.isEmpty ? .pi / 2 : altitudes.reduce(0, +) / CGFloat(altitudes.count)
+        let baseTime = raw.first?.timestamp ?? 0
+
+        // Sample perimeter; emit n+1 points to close the loop (last == first).
+        var pts: [StrokePoint] = []
+        pts.reserveCapacity(n + 1)
+        for i in 0...n {
+            let theta = (CGFloat(i) / CGFloat(n)) * 2 * .pi
+            let lx = a * cos(theta)
+            let ly = b * sin(theta)
+            let x = geometry.center.x + lx * cosT - ly * sinT
+            let y = geometry.center.y + lx * sinT + ly * cosT
+            pts.append(StrokePoint(
+                position: CGPoint(x: x, y: y),
+                force: meanForce,
+                altitude: meanAlt,
+                timestamp: baseTime + TimeInterval(i) * 0.001
+            ))
+        }
+        return pts
     }
 
     /// Map the raw stroke's force/altitude curve onto a corrected line segment.
@@ -1234,10 +1600,10 @@ public final class MetalCanvasView: UIView {
     }
 
     public func performUndo() {
-        // If a snap-edit is pending (line in scratch, handles visible),
-        // undo discards the pending line rather than popping an undo
+        // If a snap-edit is pending (shape in scratch, handles visible),
+        // undo discards the pending shape rather than popping an undo
         // snapshot. The user expects undo to dismiss the in-progress edit.
-        if case .editingHandles = snapState {
+        if isInSnapEditMode {
             cancelPendingSnapEdit()
             onStateChanged?()
             return
