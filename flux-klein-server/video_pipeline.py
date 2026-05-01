@@ -6,9 +6,10 @@ Lightricks' official `ltx-pipelines.DistilledPipeline`:
 - Stage 1: half-resolution video generation (8 sigmas)
 - Stage 2: 2x spatial upsample + refinement (4 sigmas)
 
-Output (Iterator[Tensor], Audio). Audio is discarded — Kiki's video pane is
-silent. Frames-as-tensors get converted to PIL Images so video_server.py
-can stream them as JPEGs over the existing WebSocket protocol unchanged.
+Output (Iterator[Tensor], Audio). Frames-as-tensors get converted to PIL
+Images so video_server.py can stream them as JPEGs over the existing
+WebSocket protocol unchanged. When enabled, decoded audio is carried through
+to the final MP4 mux step.
 
 License note: LTX-2 weights are released under the LTX-2 Community License
 (https://github.com/Lightricks/LTX-2/blob/main/LICENSE), NOT Apache-2.0.
@@ -65,6 +66,15 @@ CancelState = Literal["ok", "before_start", "during_inference", "after_complete"
 
 
 @dataclass
+class GeneratedAudio:
+    """PCM audio decoded from LTX's audio latent."""
+
+    pcm_s16le: bytes
+    sample_rate: int
+    channels: int
+
+
+@dataclass
 class GenerateResult:
     """Outcome of a single ``generate()`` call.
 
@@ -74,10 +84,57 @@ class GenerateResult:
     """
 
     frames: list[Image.Image] | None
+    audio: GeneratedAudio | None
     cancel_state: CancelState
     lock_wait_ms: int
     pipe_total_ms: int
     cancelled_but_ran_ms: int
+
+
+def _decoded_audio_to_pcm_s16le(decoded_audio: object, sample_rate: int) -> GeneratedAudio | None:
+    """Normalize LTX decoded audio to interleaved signed 16-bit PCM."""
+    if decoded_audio is None:
+        return None
+    if isinstance(decoded_audio, (list, tuple)):
+        if not decoded_audio:
+            return None
+        decoded_audio = decoded_audio[0]
+    if not isinstance(decoded_audio, torch.Tensor):
+        decoded_audio = torch.as_tensor(decoded_audio)
+
+    audio = decoded_audio.detach().to("cpu")
+    if audio.numel() == 0:
+        return None
+    audio = audio.float()
+
+    while audio.dim() > 2 and audio.shape[0] == 1:
+        audio = audio.squeeze(0)
+    if audio.dim() == 0:
+        return None
+    if audio.dim() == 1:
+        audio = audio.unsqueeze(0)
+    elif audio.dim() == 2:
+        # Normalize to (channels, samples). Decoder outputs are expected to be
+        # channel-first, but accept common (samples, channels) tensors too.
+        if audio.shape[0] > audio.shape[1] and audio.shape[1] <= 8:
+            audio = audio.transpose(0, 1)
+    else:
+        audio = audio.reshape(-1, audio.shape[-1])
+
+    if audio.shape[0] > 8:
+        logger.warning(
+            "decoded audio has unexpected channel count %d; using first channel",
+            audio.shape[0],
+        )
+        audio = audio[:1]
+
+    audio = torch.nan_to_num(audio, nan=0.0, posinf=1.0, neginf=-1.0).clamp(-1.0, 1.0)
+    pcm = (audio.transpose(0, 1).contiguous().numpy() * 32767.0).astype("<i2").tobytes()
+    return GeneratedAudio(
+        pcm_s16le=pcm,
+        sample_rate=sample_rate,
+        channels=int(audio.shape[0]),
+    )
 
 
 class CancelledError(Exception):
@@ -265,12 +322,13 @@ class Ltx23VideoPipeline:
             offload_mode=offload_mode,
         )
 
-        # Kiki has no audio output. Replace audio_decoder with a stub. The new
-        # _run_inference path replicates DistilledPipeline.__call__'s flow
-        # without invoking audio_decoder, so this stub is mostly belt-and-
-        # suspenders — but if anything ever falls back to upstream __call__,
-        # the stub avoids spinning up the vocoder.
-        self.pipe.audio_decoder = lambda *_args, **_kwargs: None  # type: ignore[assignment]
+        if config.LTX_ENABLE_AUDIO:
+            logger.info("LTX audio enabled — decoded audio will be muxed into completed MP4s")
+        else:
+            # Fast rollback path: keep serving silent MP4s and avoid spinning
+            # up the audio decoder if anything falls back to upstream __call__.
+            self.pipe.audio_decoder = lambda *_args, **_kwargs: None  # type: ignore[assignment]
+            logger.info("LTX_ENABLE_AUDIO=0 — video MP4s will be silent")
 
         self._tiling_config = TilingConfig.default()
         self._phase_timings["pipeline_init_ms"] = int((time.time() - t_phase) * 1000)
@@ -457,8 +515,9 @@ class Ltx23VideoPipeline:
         profile: bool = False,
     ) -> "GenerateResult":
         """Generate a video from `image`+`prompt`. Returns a ``GenerateResult``
-        with `frames` (or None if cancelled), `cancel_state`, `lock_wait_ms`,
-        `pipe_total_ms`, and `cancelled_but_ran_ms`.
+        with `frames` (or None if cancelled), optional decoded `audio`,
+        `cancel_state`, `lock_wait_ms`, `pipe_total_ms`, and
+        `cancelled_but_ran_ms`.
 
         Per-call overrides for `width`, `height`, `num_frames` (Step 3.5
         benchmark): when None (the default — what the WebSocket path does),
@@ -504,6 +563,7 @@ class Ltx23VideoPipeline:
             logger.info("LTX-2.3 generate skipped — cancelled before start")
             return GenerateResult(
                 frames=None,
+                audio=None,
                 cancel_state="before_start",
                 lock_wait_ms=0,
                 pipe_total_ms=0,
@@ -545,12 +605,13 @@ class Ltx23VideoPipeline:
                     )
                     return GenerateResult(
                         frames=None,
+                        audio=None,
                         cancel_state="before_start",
                         lock_wait_ms=lock_wait_ms,
                         pipe_total_ms=0,
                         cancelled_but_ran_ms=0,
                     )
-                frames = self._run_inference(
+                frames, audio = self._run_inference(
                     image_path=image_path,
                     prompt=prompt or "",
                     seed=seed,
@@ -558,6 +619,7 @@ class Ltx23VideoPipeline:
                     height=height,
                     num_frames=num_frames,
                     profile=profile,
+                    is_cancelled=is_cancelled,
                 )
                 pipe_total_ms = self._inference_timings["pipe_total"][-1]
         finally:
@@ -577,6 +639,7 @@ class Ltx23VideoPipeline:
             )
             return GenerateResult(
                 frames=None,
+                audio=None,
                 cancel_state="after_complete",
                 lock_wait_ms=lock_wait_ms,
                 pipe_total_ms=pipe_total_ms,
@@ -585,6 +648,7 @@ class Ltx23VideoPipeline:
 
         return GenerateResult(
             frames=frames,
+            audio=audio,
             cancel_state="ok",
             lock_wait_ms=lock_wait_ms,
             pipe_total_ms=pipe_total_ms,
@@ -601,8 +665,9 @@ class Ltx23VideoPipeline:
         height: int,
         num_frames: int,
         profile: bool = False,
-    ) -> list[Image.Image]:
-        """Run one inference, materialize frames as PIL. Caller holds `self._lock`.
+        is_cancelled: Callable[[], bool] | None = None,
+    ) -> tuple[list[Image.Image], GeneratedAudio | None]:
+        """Run one inference, materialize frames/audio. Caller holds `self._lock`.
 
         Replicates ``DistilledPipeline.__call__``'s flow but builds the
         transformer ONCE per request via ``stage.model_context()`` and runs
@@ -619,7 +684,11 @@ class Ltx23VideoPipeline:
         """
         from ltx_core.components.noisers import GaussianNoiser
         from ltx_pipelines.utils.args import ImageConditioningInput
-        from ltx_pipelines.utils.constants import DISTILLED_SIGMAS, STAGE_2_DISTILLED_SIGMAS
+        from ltx_pipelines.utils.constants import (
+            AUDIO_SAMPLE_RATE,
+            DISTILLED_SIGMAS,
+            STAGE_2_DISTILLED_SIGMAS,
+        )
         from ltx_pipelines.utils.denoisers import SimpleDenoiser
         from ltx_pipelines.utils.gpu_model import gpu_model
         from ltx_pipelines.utils.helpers import assert_resolution, combined_image_conditionings
@@ -670,6 +739,7 @@ class Ltx23VideoPipeline:
             torch.cuda.synchronize()
         t_pipe = time.perf_counter()
         frames: list[Image.Image] = []
+        audio_track: GeneratedAudio | None = None
 
         # Optional torch.profiler capture (per-request kwarg, see plan
         # crystalline-squishing-rivest). When `profile=True`, wrap the
@@ -875,6 +945,22 @@ class Ltx23VideoPipeline:
             )
             self._inference_timings["pil_conversion"].append(int(t_pil * 1000))
 
+            if config.LTX_ENABLE_AUDIO and not (is_cancelled is not None and is_cancelled()):
+                try:
+                    with self._timed("audio_decoder"):
+                        decoded_audio = pipe.audio_decoder(audio_state.latent)
+                    with self._timed("audio_pcm_conversion"):
+                        audio_track = _decoded_audio_to_pcm_s16le(
+                            decoded_audio,
+                            int(AUDIO_SAMPLE_RATE),
+                        )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "LTX audio decode failed; continuing with silent MP4: %s",
+                        e,
+                        exc_info=True,
+                    )
+
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         pipe_total_ms = int((time.perf_counter() - t_pipe) * 1000)
@@ -948,7 +1034,7 @@ class Ltx23VideoPipeline:
                 seed=seed,
                 pipe_total_ms=pipe_total_ms,
             )
-        return frames
+        return frames, audio_track
 
     def _save_profile_trace(
         self,
@@ -1028,6 +1114,7 @@ class Ltx23VideoPipeline:
             "resolution": f"{config.LTX_WIDTH}x{config.LTX_HEIGHT}",
             "num_frames": config.LTX_NUM_FRAMES,
             "fps": config.LTX_FPS,
+            "audio_enabled": config.LTX_ENABLE_AUDIO,
             "gpu": gpu_name,
             "vram_free_gb": round(vram_free, 2),
             "load_ms": self._load_ms,

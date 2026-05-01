@@ -97,6 +97,10 @@ LTX_HEIGHT = int(os.getenv("LTX_HEIGHT", "320"))
 LTX_NUM_FRAMES = int(os.getenv("LTX_NUM_FRAMES", "49"))
 LTX_FPS = int(os.getenv("LTX_FPS", "24"))
 LTX_OUTPUT_JPEG_QUALITY = int(os.getenv("LTX_OUTPUT_QUALITY", "80"))
+# LTX generates audio latents during the same denoising pass as video. This
+# flag controls only the decoder + AAC mux path, so it is a fast rollback if
+# audio decode or encode adds unacceptable tail latency.
+LTX_ENABLE_AUDIO = os.getenv("LTX_ENABLE_AUDIO", "1") == "1"
 
 if LTX_WIDTH % 64 != 0:
     raise ValueError(

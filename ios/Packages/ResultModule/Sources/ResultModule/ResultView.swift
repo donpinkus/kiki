@@ -646,15 +646,26 @@ private struct LoopingVideoView: UIViewRepresentable {
     }
 
     private func attach(view: PlayerContainerView, coordinator: Coordinator) {
+        configureAudioSession()
         let item = AVPlayerItem(url: url)
         let player = AVQueuePlayer()
-        // Mute by default — the right pane is purely visual.
-        player.isMuted = true
+        player.isMuted = false
+        player.volume = 1.0
         coordinator.looper = AVPlayerLooper(player: player, templateItem: item)
         coordinator.player = player
         coordinator.currentURL = url
         view.attach(player: player)
         player.play()
+    }
+
+    private func configureAudioSession() {
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playback, mode: .moviePlayback, options: [.mixWithOthers])
+            try session.setActive(true)
+        } catch {
+            videoLog.warning("LoopingVideoView audio session setup failed: \(error.localizedDescription)")
+        }
     }
 
     final class Coordinator {

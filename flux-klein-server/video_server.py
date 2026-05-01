@@ -44,7 +44,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from PIL import Image
 
 import config
-from video_pipeline import Ltx23VideoPipeline
+from video_pipeline import GeneratedAudio, Ltx23VideoPipeline
 
 logging.basicConfig(
     level=logging.INFO,
@@ -255,14 +255,16 @@ async def websocket_video(ws: WebSocket):
         # dying — the create_task future has nobody awaiting it.
         try:
             encode_t0 = time.time()
-            mp4_bytes = await asyncio.to_thread(_encode_mp4, frames, config.LTX_FPS)
+            mp4_bytes = await asyncio.to_thread(_encode_mp4, frames, config.LTX_FPS, result.audio)
             encode_ms = int((time.time() - encode_t0) * 1000)
 
             videos_total += 1
             logger.info(
                 "complete: req=%s frames=%d gen_ms=%d encode_ms=%d mp4_bytes=%d "
-                "lock_wait_ms=%d pipe_total_ms=%d",
+                "audio=%s audio_bytes=%d lock_wait_ms=%d pipe_total_ms=%d",
                 request_id, len(frames), gen_ms, encode_ms, len(mp4_bytes),
+                result.audio is not None,
+                len(result.audio.pcm_s16le) if result.audio is not None else 0,
                 result.lock_wait_ms, result.pipe_total_ms,
             )
             await ws.send_text(json.dumps({
@@ -272,6 +274,9 @@ async def websocket_video(ws: WebSocket):
                 "frames": len(frames),
                 "genMs": gen_ms,
                 "encodeMs": encode_ms,
+                "hasAudio": result.audio is not None,
+                "audioSampleRate": result.audio.sample_rate if result.audio is not None else None,
+                "audioChannels": result.audio.channels if result.audio is not None else None,
             }))
             await ws.send_bytes(mp4_bytes)
         except Exception as e:  # noqa: BLE001
@@ -400,8 +405,8 @@ async def websocket_video(ws: WebSocket):
         )
 
 
-def _encode_mp4(frames: list[Image.Image], fps: int) -> bytes:
-    """Encode a frame list to H.264 MP4 for iPad playback.
+def _encode_mp4(frames: list[Image.Image], fps: int, audio: GeneratedAudio | None = None) -> bytes:
+    """Encode a frame list to H.264/AAC MP4 for iPad playback.
 
     Writes ffmpeg output to a tempfile rather than piping to stdout. The
     mp4 muxer in ffmpeg 7.x (bundled in imageio-ffmpeg 0.6.0) needs
@@ -410,6 +415,16 @@ def _encode_mp4(frames: list[Image.Image], fps: int) -> bytes:
     output" even without `-movflags +faststart`. A tempfile is seekable
     and gives AVPlayer the expected non-fragmented MP4 shape.
     """
+    if audio is not None and audio.pcm_s16le and audio.channels > 0:
+        try:
+            return _encode_mp4_with_audio(frames, fps, audio)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("AAC mux failed; falling back to silent MP4: %s", e, exc_info=True)
+    return _encode_silent_mp4(frames, fps)
+
+
+def _encode_silent_mp4(frames: list[Image.Image], fps: int) -> bytes:
+    """Encode a frame list to H.264 MP4 with no audio track."""
     if not frames:
         return b""
     width, height = frames[0].size
@@ -449,6 +464,86 @@ def _encode_mp4(frames: list[Image.Image], fps: int) -> bytes:
             os.unlink(out_path)
         except OSError:
             pass
+
+
+def _encode_mp4_with_audio(frames: list[Image.Image], fps: int, audio: GeneratedAudio) -> bytes:
+    """Encode a frame list and interleaved PCM audio to H.264/AAC MP4."""
+    if not frames:
+        return b""
+    width, height = frames[0].size
+    ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+    temp_paths: list[str] = []
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".rgb", delete=False) as video_tmp:
+            video_path = video_tmp.name
+            temp_paths.append(video_path)
+            video_tmp.write(b"".join(f.tobytes() for f in frames))
+        with tempfile.NamedTemporaryFile(suffix=".pcm", delete=False) as audio_tmp:
+            audio_path = audio_tmp.name
+            temp_paths.append(audio_path)
+            audio_tmp.write(_pcm_for_video_duration(audio, len(frames), fps))
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+            out_path = tmp.name
+            temp_paths.append(out_path)
+
+        cmd = [
+            ffmpeg_path,
+            "-y",
+            "-loglevel", "error",
+            "-f", "rawvideo",
+            "-pix_fmt", "rgb24",
+            "-s", f"{width}x{height}",
+            "-r", str(fps),
+            "-i", video_path,
+            "-f", "s16le",
+            "-ar", str(audio.sample_rate),
+            "-ac", str(audio.channels),
+            "-i", audio_path,
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "23",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-movflags", "+faststart",
+            out_path,
+        ]
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=45,
+            check=False,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"ffmpeg failed: rc={proc.returncode} "
+                f"stderr={proc.stderr.decode('utf-8', 'replace')[:500]}"
+            )
+        with open(out_path, "rb") as f:
+            return f.read()
+    finally:
+        for path in temp_paths:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
+def _pcm_for_video_duration(audio: GeneratedAudio, frame_count: int, fps: int) -> bytes:
+    """Trim or pad PCM to exactly the MP4 video duration."""
+    frame_bytes = max(1, audio.channels) * 2
+    expected_samples = max(1, round((frame_count / fps) * audio.sample_rate))
+    expected_bytes = expected_samples * frame_bytes
+    pcm = audio.pcm_s16le
+    aligned_len = len(pcm) - (len(pcm) % frame_bytes)
+    if aligned_len != len(pcm):
+        pcm = pcm[:aligned_len]
+    if len(pcm) < expected_bytes:
+        pcm += b"\x00" * (expected_bytes - len(pcm))
+    elif len(pcm) > expected_bytes:
+        pcm = pcm[:expected_bytes]
+    return pcm
 
 
 if __name__ == "__main__":
