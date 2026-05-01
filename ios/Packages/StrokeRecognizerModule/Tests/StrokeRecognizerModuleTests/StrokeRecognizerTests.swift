@@ -42,6 +42,36 @@ final class StrokeRecognizerTests: XCTestCase {
         }
     }
 
+    // MARK: - Closed-shape synthesis helpers
+
+    /// Synthesize a full ellipse with optional rotation. n samples around the
+    /// perimeter; the first and last points are the same parameter angle (so
+    /// closure ratio is near zero — like a real drawn closed loop).
+    private func ellipseShape(
+        center: CGPoint,
+        semiMajor: CGFloat,
+        semiMinor: CGFloat,
+        rotationDeg: CGFloat = 0,
+        n: Int = 80,
+        coverageDeg: CGFloat = 360
+    ) -> [CGPoint] {
+        let rotRad = rotationDeg * .pi / 180
+        let cosT = cos(rotRad)
+        let sinT = sin(rotRad)
+        return (0..<n).map { i in
+            let t = CGFloat(i) / CGFloat(n - 1)
+            let theta = (coverageDeg * t) * .pi / 180
+            // Local (axis-aligned) point on the ellipse
+            let lx = semiMajor * cos(theta)
+            let ly = semiMinor * sin(theta)
+            // Rotate + translate to world
+            return CGPoint(
+                x: center.x + lx * cosT - ly * sinT,
+                y: center.y + lx * sinT + ly * cosT
+            )
+        }
+    }
+
     // MARK: - Acceptance tests (gallery row 1, 2, 14)
 
     func test_cleanStraightLine_snapsToLine() {
@@ -312,6 +342,111 @@ final class StrokeRecognizerTests: XCTestCase {
         for p in allInputs { r.feed(point: p) }
         XCTAssertFalse(r.isHolding,
             "10pt drift is not 'holding' — user is moving the pen, just slowly")
+    }
+
+    // MARK: - Closed-shape (ellipse / circle) tests
+
+    func test_cleanCircle_snapsToCircle() {
+        let r = StrokeRecognizer()
+        // 80-sample circle, radius 100
+        let pts = ellipseShape(
+            center: CGPoint(x: 200, y: 200),
+            semiMajor: 100, semiMinor: 100, n: 80
+        )
+        for p in points(pts) { r.feed(point: p) }
+        let verdict = r.finalize()
+        guard case .circle(let c) = verdict else {
+            XCTFail("Expected .circle, got \(verdict). " +
+                "Score: \(r.currentConfidence), snapshot: \(String(describing: r.lastFeatureSnapshot))")
+            return
+        }
+        XCTAssertEqual(c.center.x, 200, accuracy: 5)
+        XCTAssertEqual(c.center.y, 200, accuracy: 5)
+        XCTAssertEqual(c.radius, 100, accuracy: 5)
+    }
+
+    func test_axisAlignedEllipse_snapsToEllipse() {
+        // 2:1 ellipse — should not promote to circle
+        let r = StrokeRecognizer()
+        let pts = ellipseShape(
+            center: CGPoint(x: 200, y: 200),
+            semiMajor: 150, semiMinor: 75, n: 80
+        )
+        for p in points(pts) { r.feed(point: p) }
+        let verdict = r.finalize()
+        guard case .ellipse(let e) = verdict else {
+            XCTFail("Expected .ellipse, got \(verdict). " +
+                "Score: \(r.currentConfidence), snapshot: \(String(describing: r.lastFeatureSnapshot))")
+            return
+        }
+        XCTAssertEqual(e.semiMajor, 150, accuracy: 8)
+        XCTAssertEqual(e.semiMinor, 75, accuracy: 8)
+        XCTAssertLessThan(e.axisRatio, 0.92,
+            "axisRatio \(e.axisRatio) should be below circle promotion gate")
+    }
+
+    func test_rotatedEllipse_snapsWithCorrectRotation() {
+        // 2:1 ellipse rotated 30°
+        let r = StrokeRecognizer()
+        let pts = ellipseShape(
+            center: CGPoint(x: 200, y: 200),
+            semiMajor: 150, semiMinor: 75,
+            rotationDeg: 30, n: 80
+        )
+        for p in points(pts) { r.feed(point: p) }
+        let verdict = r.finalize()
+        guard case .ellipse(let e) = verdict else {
+            XCTFail("Expected .ellipse, got \(verdict)")
+            return
+        }
+        // Rotation may be reported in any equivalent representation
+        // (θ ± kπ). Reduce to [0, π) and check distance to 30° in radians.
+        let normRot = ((e.rotation.truncatingRemainder(dividingBy: .pi)) + .pi)
+            .truncatingRemainder(dividingBy: .pi)
+        let target = CGFloat(30) * .pi / 180
+        let diff = min(abs(normRot - target), .pi - abs(normRot - target))
+        XCTAssertLessThan(diff, 0.1,  // ~5.7° tolerance
+            "Rotation \(e.rotation * 180 / .pi)° should be within 5.7° of 30°")
+    }
+
+    func test_openArc_doesNotRouteToClosedBranch() {
+        // 90° arc — endpoints far apart; closure ratio > gate; routes to line.
+        // Should abstain via the line branch (not snap to ellipse).
+        let r = StrokeRecognizer()
+        let pts = arc(
+            center: CGPoint(x: 200, y: 200),
+            radius: 100, startDeg: 0, coverageDeg: 90, n: 50
+        )
+        for p in points(pts) { r.feed(point: p) }
+        let verdict = r.finalize()
+        switch verdict {
+        case .ellipse, .circle:
+            XCTFail("90° open arc should NOT snap to closed shape, got \(verdict)")
+        default:
+            // Either .line, .abstain — both are acceptable for v0
+            break
+        }
+    }
+
+    func test_threeQuarterCircle_doesNotSnapToCircle() {
+        // 270° arc — endpoints are R√2 apart, path is 3πR/2.
+        // closureRatio = √2/(3π/2) ≈ 0.30, well above closureGate (0.10).
+        // Routes to OPEN branch and abstains (line scoring fails on a curve).
+        // v0 requires a fully-closed loop to snap to a circle/ellipse.
+        let r = StrokeRecognizer()
+        let pts = arc(
+            center: CGPoint(x: 200, y: 200),
+            radius: 100, startDeg: 0, coverageDeg: 270, n: 80
+        )
+        for p in points(pts) { r.feed(point: p) }
+        let verdict = r.finalize()
+        switch verdict {
+        case .circle, .ellipse:
+            XCTFail("270° arc should NOT snap to closed shape (closure too open), got \(verdict)")
+        default:
+            // .line, .abstain — both acceptable
+            break
+        }
     }
 }
 

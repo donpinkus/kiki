@@ -1,14 +1,14 @@
 import CoreGraphics
 import Foundation
 
-/// Geometric features extracted from a preprocessed stroke. v0 carries only
-/// the line-relevant subset; v1 will add `circleNormRMS`, `arcCoverageDeg`,
-/// `signRatio`, `closureRatio`, `stableCornerCount` per the parent plan §4.
+/// Geometric features extracted from a preprocessed stroke.
 struct LineFeatures: Equatable {
     let pathLength: CGFloat
     let bboxDiagonal: CGFloat
     let resampledCount: Int
     let chordLength: CGFloat
+    /// endpointGap / pathLength. ≤ closureGate routes to closed-stroke branch.
+    let closureRatio: CGFloat
     let sagittaRatio: CGFloat
     let totalSignedTurnRad: CGFloat
     let totalAbsTurnRad: CGFloat
@@ -32,6 +32,7 @@ enum FeatureExtraction {
 
         let pathLen = Preprocessing.pathLength(points)
         let chord = distance(points.first!, points.last!)
+        let closure = pathLen > 1e-6 ? chord / pathLen : 1
         let sagittaRatio = computeSagittaRatio(points, chordLength: chord)
         let (signedTurn, absTurn) = computeTurningAngles(points)
 
@@ -40,6 +41,7 @@ enum FeatureExtraction {
             bboxDiagonal: bboxDiagonal,
             resampledCount: points.count,
             chordLength: chord,
+            closureRatio: closure,
             sagittaRatio: sagittaRatio,
             totalSignedTurnRad: signedTurn,
             totalAbsTurnRad: absTurn,

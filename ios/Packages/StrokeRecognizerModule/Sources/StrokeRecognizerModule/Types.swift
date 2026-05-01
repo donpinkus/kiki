@@ -23,6 +23,8 @@ public struct RecognizerInputPoint: Equatable, Sendable {
 
 public enum Verdict: Equatable, Sendable {
     case line(LineGeometry)
+    case ellipse(EllipseGeometry)
+    case circle(CircleGeometry)
     case abstain(AbstainReason)
 
     public var isSnap: Bool {
@@ -43,6 +45,38 @@ public struct LineGeometry: Equatable, Sendable {
     }
 }
 
+public struct EllipseGeometry: Equatable, Sendable {
+    public let center: CGPoint
+    /// Semi-major axis length (always ≥ semiMinor).
+    public let semiMajor: CGFloat
+    /// Semi-minor axis length.
+    public let semiMinor: CGFloat
+    /// Rotation in radians: angle of the semi-major axis from +x.
+    public let rotation: CGFloat
+
+    public init(center: CGPoint, semiMajor: CGFloat, semiMinor: CGFloat, rotation: CGFloat) {
+        self.center = center
+        self.semiMajor = semiMajor
+        self.semiMinor = semiMinor
+        self.rotation = rotation
+    }
+
+    public var axisRatio: CGFloat {
+        guard semiMajor > 0 else { return 0 }
+        return semiMinor / semiMajor
+    }
+}
+
+public struct CircleGeometry: Equatable, Sendable {
+    public let center: CGPoint
+    public let radius: CGFloat
+
+    public init(center: CGPoint, radius: CGFloat) {
+        self.center = center
+        self.radius = radius
+    }
+}
+
 public enum AbstainReason: String, Equatable, Sendable, Codable {
     /// Stroke path length below the floor.
     case tooShort
@@ -54,6 +88,9 @@ public enum AbstainReason: String, Equatable, Sendable, Codable {
     case lowConfidence
     /// Recognizer was disabled at the call site (kill switch / wrong tool).
     case disabled
+    /// Halír–Flusser ellipse fit returned NaN, degenerate axes, or no
+    /// eigenvector satisfying the ellipse constraint.
+    case degenerateEllipseFit
 }
 
 // MARK: - Configuration
@@ -102,6 +139,23 @@ public struct RecognizerSeeds: Equatable, Sendable {
     public var minResampledPoints: Int = 12
     public var overtraceTurnMax: CGFloat = 2.5 * .pi
 
+    // Closed-stroke routing & validation
+    /// Stroke routes to closed-stroke branch (ellipse/circle) when
+    /// endpointGap / pathLength ≤ this. The 0.10 default tolerates a small
+    /// gap at the close (typical when drawing an "almost closed" loop).
+    public var closureGate: CGFloat = 0.10
+    /// Promote a fitted ellipse to a circle when min/max axis ratio is at
+    /// least this. 0.92 mirrors PaleoSketch and feels right in practice.
+    public var circleAxisRatioMin: CGFloat = 0.92
+    /// Reject ellipses thinner than this (slivers — usually noisy lines).
+    public var ellipseAxisRatioFloor: CGFloat = 0.05
+    /// Reject ellipse fits whose axis grew beyond this multiple of the
+    /// stroke's bbox diagonal (numerical blowup).
+    public var ellipseAxisMaxBboxRatio: CGFloat = 2.0
+    /// Reject ellipse fits whose center lies more than this multiple of the
+    /// bbox diagonal outside the stroke's bbox.
+    public var ellipseCenterMaxOutsideBboxRatio: CGFloat = 1.0
+
     // Endpoint hook trim
     public var endpointTrimAngleDeg: CGFloat = 30
     public var endpointTrimLengthRatio: CGFloat = 0.05
@@ -118,10 +172,17 @@ public struct RecognizerSeeds: Equatable, Sendable {
 public struct FeatureSnapshot: Equatable, Sendable, Codable {
     public let pathLength: CGFloat
     public let bboxDiagonal: CGFloat
+    public let closureRatio: CGFloat
     public let sagittaRatio: CGFloat
     public let totalAbsTurnDeg: CGFloat
     public let totalSignedTurnDeg: CGFloat
     public let lineNormRMS: CGFloat
+    /// Normalized residual of the closed-branch ellipse fit, or nil if no
+    /// fit was attempted (open stroke, or degenerate input).
+    public let ellipseNormResidual: CGFloat?
+    /// Promotion-eligible axis ratio (semiMinor/semiMajor), nil if no fit.
+    public let ellipseAxisRatio: CGFloat?
     public let resampledPointCount: Int
     public let lineScore: CGFloat
+    public let ellipseScore: CGFloat?
 }

@@ -209,17 +209,33 @@ public final class StrokeRecognizer {
             return
         }
 
+        // Route on closure: closureRatio ≤ closureGate → closed-stroke branch
+        // (ellipse/circle); otherwise → open-stroke branch (line).
+        if features.closureRatio <= seeds.closureGate {
+            classifyClosed(features: features, classification: classification, bbox: bbox)
+        } else {
+            classifyOpen(features: features, line: line, positions: positions)
+        }
+    }
+
+    // MARK: - Open-stroke (line) branch
+
+    private func classifyOpen(features: LineFeatures, line: LineFit, positions: [CGPoint]) {
         let score = LineClassifier.lineScore(features)
         cachedScore = score
         lastFeatureSnapshot = FeatureSnapshot(
             pathLength: features.pathLength,
             bboxDiagonal: features.bboxDiagonal,
+            closureRatio: features.closureRatio,
             sagittaRatio: features.sagittaRatio,
             totalAbsTurnDeg: features.totalAbsTurnDeg,
             totalSignedTurnDeg: features.totalSignedTurnDeg,
             lineNormRMS: features.lineNormRMS,
+            ellipseNormResidual: nil,
+            ellipseAxisRatio: nil,
             resampledPointCount: features.resampledCount,
-            lineScore: score
+            lineScore: score,
+            ellipseScore: nil
         )
 
         if let reason = LineClassifier.abstainReason(features: features, score: score, seeds: seeds) {
@@ -227,12 +243,78 @@ public final class StrokeRecognizer {
             return
         }
 
-        // Snap. Project the user's actual first/last raw points onto the fit.
         let geom = projectEndpoints(
             rawFirst: positions.first!,
             rawLast: positions.last!,
             line: line
         )
         cachedVerdict = .line(geom)
+    }
+
+    // MARK: - Closed-stroke (ellipse/circle) branch
+
+    private func classifyClosed(features: LineFeatures, classification: [CGPoint], bbox: CGFloat) {
+        // Try to fit an ellipse. If the fit fails (degenerate input,
+        // numerical issues, or validation gates), abstain with a clear reason.
+        guard let ellipseFit = fitEllipseHalirFlusser(classification, strokeScale: bbox, seeds: seeds) else {
+            cachedScore = 0
+            lastFeatureSnapshot = FeatureSnapshot(
+                pathLength: features.pathLength,
+                bboxDiagonal: features.bboxDiagonal,
+                closureRatio: features.closureRatio,
+                sagittaRatio: features.sagittaRatio,
+                totalAbsTurnDeg: features.totalAbsTurnDeg,
+                totalSignedTurnDeg: features.totalSignedTurnDeg,
+                lineNormRMS: features.lineNormRMS,
+                ellipseNormResidual: nil,
+                ellipseAxisRatio: nil,
+                resampledPointCount: features.resampledCount,
+                lineScore: 0,
+                ellipseScore: nil
+            )
+            cachedVerdict = .abstain(.degenerateEllipseFit)
+            return
+        }
+
+        let baseScore = EllipseClassifier.ellipseScore(
+            residual: ellipseFit.normResidual,
+            closureRatio: features.closureRatio,
+            axisRatio: ellipseFit.geometry.axisRatio
+        )
+        // Circle promotion: when axes are close to equal, add a flat bonus and
+        // emit a CircleGeometry instead of EllipseGeometry. The bonus tips
+        // ties toward circle when the fit is genuinely round.
+        let isCircle = ellipseFit.geometry.axisRatio >= seeds.circleAxisRatioMin
+        let score = baseScore + (isCircle ? EllipseClassifier.circlePromotionBonus : 0)
+        cachedScore = score
+
+        lastFeatureSnapshot = FeatureSnapshot(
+            pathLength: features.pathLength,
+            bboxDiagonal: features.bboxDiagonal,
+            closureRatio: features.closureRatio,
+            sagittaRatio: features.sagittaRatio,
+            totalAbsTurnDeg: features.totalAbsTurnDeg,
+            totalSignedTurnDeg: features.totalSignedTurnDeg,
+            lineNormRMS: features.lineNormRMS,
+            ellipseNormResidual: ellipseFit.normResidual,
+            ellipseAxisRatio: ellipseFit.geometry.axisRatio,
+            resampledPointCount: features.resampledCount,
+            lineScore: 0,
+            ellipseScore: score
+        )
+
+        if let reason = EllipseClassifier.abstainReason(features: features, score: score, seeds: seeds) {
+            cachedVerdict = .abstain(reason)
+            return
+        }
+
+        if isCircle {
+            // Use the average semi-axis as the circle radius — feels right when
+            // the ellipse is nearly round; doesn't over-anchor to either axis.
+            let r = (ellipseFit.geometry.semiMajor + ellipseFit.geometry.semiMinor) / 2
+            cachedVerdict = .circle(CircleGeometry(center: ellipseFit.geometry.center, radius: r))
+        } else {
+            cachedVerdict = .ellipse(ellipseFit.geometry)
+        }
     }
 }

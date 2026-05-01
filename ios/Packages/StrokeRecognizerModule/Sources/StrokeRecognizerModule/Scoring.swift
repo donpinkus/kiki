@@ -70,3 +70,73 @@ enum LineClassifier {
         return nil
     }
 }
+
+/// Closed-stroke classifier — scores an ellipse fit + circle-promotion bonus.
+/// Per plan §6.4. Circle promotion is a flat +0.05 bonus when axis ratio
+/// passes the gate (cleaner than a goodHigh ramp, which would punish strokes
+/// just above the threshold).
+enum EllipseClassifier {
+
+    /// Compute the ellipse score from the fit + features. Always in [0, 1].
+    ///
+    /// Weights:
+    ///   0.55 · goodLow(ellipseNormResidual, 0.045)
+    ///   0.25 · closureFit (1.0 when perfectly closed, 0.0 at closureGate)
+    ///   0.20 · goodBand(axisRatio, 0.10, 1.00)  ← penalize slivers
+    ///
+    /// Like the line classifier, calibrated loose for the v0 hold-is-opt-in
+    /// philosophy: a hand-drawn ellipse is rarely geometrically perfect, so
+    /// we accept residuals up to ~4.5% of stroke scale.
+    static func ellipseScore(
+        residual: CGFloat,
+        closureRatio: CGFloat,
+        axisRatio: CGFloat
+    ) -> CGFloat {
+        // closureRatio is endpointGap/pathLength — small means well-closed.
+        // 0 (perfect close) → 1.0 contribution; 0.10 (gate) → 0.0.
+        let closureFit = max(0, min(1, 1 - closureRatio / 0.10))
+        return 0.55 * Score.goodLow(residual, target: 0.045)
+             + 0.25 * closureFit
+             + 0.20 * Score.goodBand(axisRatio, low: 0.10, high: 1.00)
+    }
+
+    /// Bonus added when the ellipse passes the circle-promotion gate.
+    /// Flat (not a ramp) so strokes just above the gate aren't penalized.
+    static let circlePromotionBonus: CGFloat = 0.05
+
+    /// Closed-stroke abstain rules. Mirrors LineClassifier.abstainReason
+    /// shape; callers supply the relevant features+score.
+    static func abstainReason(
+        features: LineFeatures,
+        score: CGFloat,
+        seeds: RecognizerSeeds
+    ) -> AbstainReason? {
+        if features.pathLength < seeds.minPathLength {
+            return .tooShort
+        }
+        if features.resampledCount < seeds.minResampledPoints {
+            return .tooFewPoints
+        }
+        if abs(features.totalSignedTurnRad) > seeds.overtraceTurnMax {
+            return .overtraced
+        }
+        if score < seeds.acceptScore {
+            return .lowConfidence
+        }
+        return nil
+    }
+}
+
+/// Score-utility helpers extension — `goodBand` for closed-stroke scoring.
+extension Score {
+    /// Plateau between low and high; falls off linearly on either side.
+    /// Past `high`, falls to 0 over a 20% rolloff window.
+    static func goodBand(_ x: CGFloat, low: CGFloat, high: CGFloat) -> CGFloat {
+        if x >= low && x <= high { return 1 }
+        if x < low {
+            return goodHigh(x, target: low)
+        }
+        let rolloff = max(high * 0.2, 0.0001)
+        return goodLow(x - high, target: rolloff)
+    }
+}
