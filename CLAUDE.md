@@ -123,6 +123,8 @@ When diagnosing a failure, separate observations from inferences. Do not collaps
 
 ## Deploy Process
 
+For the full decision tree of pod operations (deploy / iterate / SSH / experiment / terminate), see `documents/references/pod-operations.md`. The deploy process below is one branch of that tree — included here for the architecture context.
+
 **`cd backend && npm run deploy`** — single command. The script (`scripts/deploy.ts`) handles both pod app code and backend together:
 
 1. Reads `backend/.flux-app-version` (= flux-klein-server tree hash from the last successful deploy).
@@ -160,17 +162,7 @@ cd backend && npm run deploy   # backend-only change → fast path (~30s)
 
 **Connect:** RunPod web console → pod → Connect tab → "**SSH over exposed TCP**" gives `ssh root@<ip> -p <port> -i ~/.ssh/id_ed25519`. **Use this form, not `ssh.runpod.io`.** The proxy form connects but rejects non-interactive commands ("Your SSH client doesn't support PTY") and doesn't support SCP/SFTP.
 
-**Iteration loop** (~3 min per cycle, dominated by model warmup, beats 8–10 min full deploy):
-```bash
-PORT=<pod_ssh_port>; IP=<pod_ip>
-scp -P $PORT -i ~/.ssh/id_ed25519 \
-    flux-klein-server/video_pipeline.py root@$IP:/workspace/app/
-ssh -p $PORT -i ~/.ssh/id_ed25519 root@$IP \
-    'pkill -f video_server; sleep 1; \
-     cd /workspace/app && source /workspace/venv/bin/activate && \
-     nohup python3 -u video_server.py > /tmp/video_server.log 2>&1 & disown'
-ssh -p $PORT -i ~/.ssh/id_ed25519 root@$IP 'tail -f /tmp/video_server.log'
-```
+**Iteration loop on a production pod is unsafe.** Doing `pkill + restart` on a `kiki-vsession-*` or `kiki-session-*` pod triggers the orchestrator's reaper: during the ~30s python restart, `/health` returns 502, the reaper detects the pod as unhealthy after 60s and terminates it. We hit this on 2026-04-30. **For iterating on pod code, use the test pod workflow instead — see `documents/references/pod-operations.md` Task 3.** Test pods use the `kiki-vtest-*` prefix which the reaper filters out.
 
 **If SSH refuses connection:** check `/tmp/ssh-bootstrap.log` on the pod (via RunPod web terminal — enable it from the Connect tab). The log captures all bootstrap output and tells you whether `ssh-keygen -A` failed, whether `service ssh start` worked, etc.
 

@@ -130,24 +130,7 @@ Set via `railway variables --set` or the dashboard:
 
 ## Operations
 
-### Deploy the backend
-
-```bash
-cd backend && railway up
-```
-
-Railway builds via `backend/Dockerfile`. On startup the backend terminates orphan `kiki-session-*` pods and arms the idle reaper.
-
-### Deploy pod app code (`flux-klein-server/*.py`)
-
-```bash
-cd backend
-RUNPOD_API_KEY=... \
-RUNPOD_SSH_PRIVATE_KEY="$(cat ~/.ssh/id_ed25519)" \
-  npx tsx scripts/sync-flux-app.ts --dc <DC> --volume-id <id>
-```
-
-Run once per pre-populated DC volume (5 of them; see Network volumes table above). The script rsyncs `flux-klein-server/*.py` to `/workspace/app/` and ensures `/workspace/venv/` is up to date with `requirements.txt`. Idempotent — safe to re-run. New pods pick up changes on next provision; existing running pods keep the in-memory copy of the old code until terminated.
+For the canonical pod operations decision tree (deploy / iterate / SSH / experiment / terminate / observe pod state), see **`documents/references/pod-operations.md`**. That doc has self-contained step-by-step instructions for every routine task. The remaining sections below describe orchestration architecture details (observability, kill-everything, /health curl, costs) that complement the operational doc.
 
 ### Observe
 
