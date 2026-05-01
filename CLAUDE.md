@@ -89,6 +89,10 @@ Data flows one direction: Canvas → Network → Result. Modules communicate thr
 6. **Privacy by design.** Sketch data is ephemeral on server — deleted after generation response.
 7. **App Store compliance.** Must include: first-launch AI disclosure consent (guideline 5.1.2(i)), age gate (1.2.1(a)), content filtering, "Report this image" button.
 
+## Cost during dev/testing
+
+We do not optimize for cost during development, profiling, or one-off experiments. **Anything under $100 is negligible.** Don't waste time saving a few dollars by tearing down test pods between iterations, picking cheaper GPU SKUs that complicate debugging, or skipping a clean re-test because "we already paid for the data once." User-revenue scale dominates GPU spend by orders of magnitude; iteration speed is the real constraint. This applies to RunPod test pods, Railway redeploys, repeat profiler captures, and any other dev-time GPU/infra spend.
+
 ## Debugging rigor (applies to every diagnosis)
 
 When diagnosing a failure, separate observations from inferences. Do not collapse multiple distinct failure modes into a single tidy narrative — cleaner stories mislead remediation.

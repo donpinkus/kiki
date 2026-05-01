@@ -10,67 +10,62 @@ The previous attempt enabled `LTX_TORCH_COMPILE=1` in the orchestrator's `BOOT_E
 
 Some failure modes can't be caught in Python at all — CUDA illegal memory access (segfault from the driver), OOM-kill (SIGKILL), C++ exceptions in extension modules, and `torch._inductor` failures that abort the process before raising back to Python. **No defensive `try/except` inside the same process can guarantee containment.** Only architectural isolation — running compile in a pod that user traffic never touches — protects production.
 
-This playbook is the isolation mechanism. It uses the existing SSH dev-iteration loop (documented in `CLAUDE.md` "SSHing into a running pod") to swap a healthy pod's running server for one that has compile enabled, watch the result, and clean up. Production `BOOT_ENV` keeps `LTX_TORCH_COMPILE=0` regardless of the canary outcome.
+## How to actually run the canary (revised 2026-04-30)
+
+**Use the test pod workflow** (`documents/perf-investigations/test-pod-workflow.md`), NOT the original "SSH into a production pod and pkill" approach. That earlier approach is broken because:
+
+1. `pkill -f video_server.py` triggers the dev-mode bash respawn, which restarts python with the **same env** (`LTX_TORCH_COMPILE=0` from production `BOOT_ENV`) — so the canary swap never takes effect.
+2. The orchestrator's reaper notices the pod is unresponsive during the ~30s respawn window and terminates it for being unhealthy. The whole pod gets replaced.
+
+Test pods (`kiki-vtest-*` prefix) are invisible to the reaper and accept env overrides at launch time. Run:
+
+```bash
+cd backend && npm run launch-test-pod -- --env LTX_TORCH_COMPILE=1
+```
+
+Wait ~60–120s for the script to print SSH info. Then SSH in and watch warmup live:
+
+```bash
+ssh root@<ip> -p <port> -i ~/.ssh/id_ed25519
+tail -f /proc/$(pgrep -f video_server)/fd/1
+```
+
+That's the canary. Production pods stay on `LTX_TORCH_COMPILE=0` (orchestrator's `BOOT_ENV`); user traffic is never affected.
 
 ---
 
 ## Prerequisites
 
-- A clean video pod is currently running with the production env (`LTX_TORCH_COMPILE=0` from `BOOT_ENV`, set by the orchestrator).
-- `PUBLIC_KEY` is set on Railway (so newly-booted video pods come up with sshd running).
-- The pod has gone through normal warmup (`/health` returns ready).
-- Local `~/.ssh/id_ed25519` matches the public key on Railway.
-
-If `PUBLIC_KEY` is unset on Railway, see the SSH bootstrap section in `CLAUDE.md` for how to enable it (one Railway env var + one redeploy).
+- `RUNPOD_API_KEY` and `NETWORK_VOLUMES_BY_DC_VIDEO` set in `.env.local` (already are if you've ever run a deploy).
+- Local `~/.ssh/id_ed25519.pub` exists (used by the launch script as the pod's `PUBLIC_KEY`).
+- Familiarity with the test pod workflow at `documents/perf-investigations/test-pod-workflow.md`.
 
 ---
 
 ## Procedure
 
-### Step 1: Get the pod's SSH info
+### Step 1: Launch a test pod with compile enabled
 
-RunPod web console → Pods → click the running video pod → **Connect** tab → use the **"SSH over exposed TCP"** form. (Do NOT use the proxy `ssh.runpod.io` form — it rejects non-interactive SCP/SFTP.)
-
-Copy the displayed command, e.g.:
 ```
-ssh root@91.199.227.82 -p 11323 -i ~/.ssh/id_ed25519
+cd backend && npm run launch-test-pod -- --env LTX_TORCH_COMPILE=1
 ```
 
-Save the IP and port — both are reused below for `scp`.
+Wait ~60–120s for the script to print SSH info. The pod is named `kiki-vtest-<hex>` so the orchestrator's reaper ignores it.
 
-### Step 2: SSH into the pod
+### Step 2: SSH in and watch warmup live
+
+The script prints the exact SSH command. In a separate terminal, tail the python stdout:
 
 ```
 ssh root@<ip> -p <port> -i ~/.ssh/id_ed25519
+tail -f /proc/$(pgrep -f video_server)/fd/1
 ```
 
-### Step 3: Stop the running production server
+`/proc/<pid>/fd/1` is the live stdout descriptor — works even though video_server's output isn't redirected to a file. If the python process dies, you can re-run the `tail` after `pgrep` shows a new pid (the bash respawn loop will restart it).
 
-```
-pkill -f video_server.py
-sleep 2
-ps aux | grep video_server | grep -v grep   # confirm no python video_server process remains
-```
+For longer-lived capture (in case of native crash), kill the respawn loop and run python directly with `nohup ... > /tmp/canary.log 2>&1`. See test-pod-workflow.md for that pattern.
 
-### Step 4: Restart with compile enabled, logging to disk
-
-```
-cd /workspace/app
-source /workspace/venv/bin/activate
-LTX_TORCH_COMPILE=1 nohup python3 -u video_server.py > /tmp/canary.log 2>&1 & disown
-echo "started pid $(pgrep -f video_server.py)"
-```
-
-Notes:
-- `python3 -u` forces unbuffered stdout. Without it, the buffer might not flush before a crash and we lose the error.
-- `nohup ... & disown` keeps the process alive across SSH disconnect.
-- Logging to `/tmp/canary.log` so the artifact survives even if SSH drops.
-
-### Step 5: Watch live output
-
-```
-tail -f /tmp/canary.log
-```
+### Step 3: Watch the warmup sequence
 
 Expected sequence (each line ~1–10s apart):
 
@@ -91,57 +86,36 @@ What can happen at step 11:
 #### Outcome A — Compile lowering succeeds
 
 - Long pause (30s–5min) as dynamo traces, inductor lowers, CUDA graphs capture.
-- Then: `LTX-2.3 warmup done (XXXs)` where XXX > the eager baseline of ~9s.
-- Pod becomes ready (note: it's now ready against THIS canary process, not the orchestrator-managed one — the orchestrator may not route traffic here unless we manually trigger).
-- ✅ Compile is viable on this model. Proceed to Step 6.
+- Then: `LTX-2.3 warmup done (XXXs)` where XXX >> the eager baseline of ~9s.
+- ✅ Compile is viable on this model. Proceed to Step 4.
 
 #### Outcome B — Python exception
 
-- Stack trace appears in `/tmp/canary.log`.
-- Process exits or hangs at the warmup line.
-- ✅ We have the dynamo error message. Save the full traceback. Skip to Step 7 (cleanup) and Step 8 (analysis).
+- Stack trace appears in the live tail.
+- Python process exits; bash respawn loop restarts it (will hit the same error).
+- ✅ We have the dynamo error message. Copy the traceback; skip to Step 5 (cleanup).
 
 #### Outcome C — Native crash / OOM-kill
 
-- Logs cut off mid-stream.
-- `tail -f` shows the file stops growing.
-- Run `ps aux | grep video_server | grep -v grep` — process gone.
-- Run `dmesg | tail -50` — look for OOM-kill messages, CUDA driver errors, segfaults.
+- Live tail stops; pgrep shows no python; bash respawns it; same crash; loop.
+- Run `dmesg | tail -50` — look for OOM-kill, CUDA driver errors, segfaults.
 - Run `nvidia-smi -q | head -50` — look for ECC errors or stuck GPU state.
-- ❌ Compile fails in a way Python can't catch. Pivot to Step P3 (copy/cast attribution + native FP8) per the reviewer's revised priority list.
+- ❌ Compile fails in a way Python can't catch. Pivot to copy/cast attribution + native FP8 per the reviewer's revised priority list.
 
-### Step 6 (success path only): Measure
+### Step 4 (success path only): Measure
 
-- Note `warmup_inference_ms` from the log — this absorbs first-call compile latency (will be much higher than the ~9s eager baseline).
-- Trigger a video. Two options:
-  - Easier but indirect: open the iPad and start a new session. The orchestrator may route to a different pod since it doesn't know about this canary process. If you got the same pod, the request will hit the compiled cache and produce a `pipe_total` measurement.
-  - Direct: from inside the pod, hit the WebSocket with `wscat`:
-    ```
-    pip install --break-system-packages websockets  # if needed; in-pod is fine to dirty
-    python3 -c 'import asyncio, websockets, base64, json; ...'   # assemble a video_request
-    ```
-    Bit of work. Stick with the iPad route unless really needed.
+- Note `warmup_inference_ms` from the log — this absorbs first-call compile latency (will be much higher than the ~9s eager baseline; the relevant number is what subsequent inferences take).
+- Trigger an inference. The test pod isn't routed by the orchestrator, so:
+  - Hit the WebSocket directly via a small `wscat` / python script from inside the pod (or from your Mac via the SSH-tunnel pattern).
+  - The first inference at the warmup shape (320×320×49) hits the compiled cache and gives the real `pipe_total`.
 - Compare measured `pipe_total` to the **3.74s eager baseline at 320×320×49** (from Step 3.5).
-- If win > 10%, document; propose Phase 3 (canary-only env distinction + defensive scaffolding + `/health` observability fields).
+- If win > 10%, document; plan production rollout via canary-only env distinction + defensive scaffolding + `/health` observability fields.
 
-### Step 7: Cleanup (always, regardless of outcome)
+### Step 5: Capture artifacts
 
-Two options — pick one:
+From your local Mac (new terminal, not the SSH session):
 
-**(a) Recommended: Terminate the pod from the RunPod web console.** The orchestrator detects the missing pod and provisions a fresh one with production env (`LTX_TORCH_COMPILE=0`). Cleanest — no risk of lingering canary state.
-
-**(b) Restart the production server in-pod:**
-```
-pkill -f video_server.py
-sleep 2
-cd /workspace/app && source /workspace/venv/bin/activate
-nohup python3 -u video_server.py > /tmp/video_server.log 2>&1 & disown
-```
-The new process inherits the pod's `BOOT_ENV` (production, `LTX_TORCH_COMPILE=0`). Faster than (a) but assumes pod state is clean.
-
-### Step 8: Capture artifacts
-
-From your local Mac (new terminal, NOT the SSH session):
+If you've been tailing `/proc/<pid>/fd/1`, save the relevant section by hand. If you ran python with `nohup ... > /tmp/canary.log` instead, scp the file:
 
 ```
 scp -P <port> -i ~/.ssh/id_ed25519 root@<ip>:/tmp/canary.log ~/Downloads/canary-$(date +%Y%m%d-%H%M%S).log
@@ -156,6 +130,16 @@ If Outcome A, also fetch the first decoded frame for output regression check:
 ```
 scp -P <port> -i ~/.ssh/id_ed25519 root@<ip>:/tmp/ltx-first-frame.jpg ~/Downloads/canary-first-frame.jpg
 ```
+
+### Step 6: Cleanup
+
+```
+cd backend && npm run terminate-test-pod -- <podId>
+```
+
+(The pod ID is what `launch-test-pod` printed at Step 1, or `npm run list-test-pods` to find it again.)
+
+Production pods were never affected by this canary — they kept running with `LTX_TORCH_COMPILE=0` from the orchestrator's `BOOT_ENV` the whole time.
 
 ---
 
@@ -172,13 +156,9 @@ scp -P <port> -i ~/.ssh/id_ed25519 root@<ip>:/tmp/ltx-first-frame.jpg ~/Download
 
 ## Rollback if anything goes wrong mid-canary
 
-If you can't SSH back in, can't run `pkill`, or anything else weird happens — **just terminate the pod from the RunPod web console.** The orchestrator will provision a fresh one with production `BOOT_ENV` (compile off). Production user traffic was never affected because the canary swapped only the pod's local process, never the orchestrator-side env.
+If anything weird happens with the test pod, just terminate it: `npm run terminate-test-pod -- <podId>`, or via the RunPod web console. **Production user traffic was never affected** — test pods are a separate name prefix and the orchestrator doesn't touch them either way.
 
-If for some reason you need to disable compile across all video pods quickly (you won't — the orchestrator already has it disabled), edit `backend/src/modules/orchestrator/orchestrator.ts` `BOOT_ENV` line:
-```typescript
-{ key: 'LTX_TORCH_COMPILE', value: '0' },  // already this; canary doesn't change it
-```
-Then `cd backend && railway up`. New pods boot with the production env.
+If for some reason you need to disable compile across all video pods quickly (you won't — the orchestrator already has `LTX_TORCH_COMPILE=0` in `BOOT_ENV`), confirm via `grep LTX_TORCH_COMPILE backend/src/modules/orchestrator/orchestrator.ts`. Should already be `'0'`.
 
 ---
 

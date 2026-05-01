@@ -12,7 +12,10 @@
     "lint": "eslint src/",
     "format": "prettier --write \"src/**/*.ts\"",
     "deploy": "tsx scripts/deploy.ts",
-    "sync-all": "tsx scripts/sync-all-dcs.ts"
+    "sync-all": "tsx scripts/sync-all-dcs.ts",
+    "launch-test-pod": "tsx scripts/launch-test-pod.ts",
+    "terminate-test-pod": "tsx scripts/terminate-test-pod.ts",
+    "list-test-pods": "tsx scripts/list-test-pods.ts"
   },
   "engines": {
     "node": ">=20.0.0"
