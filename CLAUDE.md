@@ -178,6 +178,7 @@ ssh -p $PORT -i ~/.ssh/id_ed25519 root@$IP 'tail -f /tmp/video_server.log'
 
 ## Git Conventions
 
+- When Donald asks to commit and push work from the current conversation, commit directly on `main` and push `origin main`. Do not create a feature branch or PR unless explicitly requested. Stage only changes that belong to the current conversation/task; leave unrelated dirty worktree changes untouched.
 - **Branches:** `feature/module-short-desc`, `fix/module-short-desc`, `chore/desc`
 - **Commits:** Conventional format — `feat(canvas): add snapshot export`, `fix(scheduler): discard stale preview`
 - One logical change per commit. Prefix with module name when scoped.
