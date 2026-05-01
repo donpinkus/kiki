@@ -12,7 +12,7 @@ Some failure modes can't be caught in Python at all — CUDA illegal memory acce
 
 ## How to actually run the canary (revised 2026-04-30)
 
-**Use the test pod workflow** (`documents/perf-investigations/test-pod-workflow.md`), NOT the original "SSH into a production pod and pkill" approach. That earlier approach is broken because:
+**Use the test pod workflow** (`documents/references/pod-operations.md` Tasks 3+4), NOT the original "SSH into a production pod and pkill" approach. That earlier approach is broken because:
 
 1. `pkill -f video_server.py` triggers the dev-mode bash respawn, which restarts python with the **same env** (`LTX_TORCH_COMPILE=0` from production `BOOT_ENV`) — so the canary swap never takes effect.
 2. The orchestrator's reaper notices the pod is unresponsive during the ~30s respawn window and terminates it for being unhealthy. The whole pod gets replaced.
@@ -38,7 +38,7 @@ That's the canary. Production pods stay on `LTX_TORCH_COMPILE=0` (orchestrator's
 
 - `RUNPOD_API_KEY` and `NETWORK_VOLUMES_BY_DC_VIDEO` set in `.env.local` (already are if you've ever run a deploy).
 - Local `~/.ssh/id_ed25519.pub` exists (used by the launch script as the pod's `PUBLIC_KEY`).
-- Familiarity with the test pod workflow at `documents/perf-investigations/test-pod-workflow.md`.
+- Familiarity with the test pod workflow at `documents/references/pod-operations.md` Tasks 3+4.
 
 ---
 
@@ -63,7 +63,7 @@ tail -f /proc/$(pgrep -f video_server | head -1)/fd/1
 
 `/proc/<pid>/fd/1` is the live stdout descriptor — works even though video_server's output isn't redirected to a file. If the python process dies, you can re-run the `tail` after `pgrep` shows a new pid (the bash respawn loop will restart it).
 
-For longer-lived capture (in case of native crash), kill the respawn loop and run python directly with `nohup ... > /tmp/canary.log 2>&1`. See test-pod-workflow.md for that pattern.
+For longer-lived capture (in case of native crash), kill the respawn loop and run python directly with `nohup ... > /tmp/canary.log 2>&1`. See `documents/references/pod-operations.md` Task 3 → "Alternative log capture" for that pattern.
 
 ### Step 3: Watch the warmup sequence
 

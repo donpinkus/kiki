@@ -209,9 +209,12 @@ Step 3's tail will show:
 
 ### Failure modes
 
-- **launch-test-pod times out at "waiting for SSH port assignment"** (>5 min). Pod hit a stocked-out DC. Re-run with `--dc <other>` (valid DCs printed when you pass `--help`).
+- **launch-test-pod times out at "waiting for SSH port assignment"** (>5 min). Pod hit a stocked-out DC. Re-run with `--dc <other>` (valid DCs printed when you pass `--help`). Container is still starting normally for first-time-on-this-volume in 60–120s; the timeout is a hard cap, not a typical wait.
 - **`scp: Host key verification failed`.** Stale `known_hosts` entry from a prior pod that reused the same IP+port. Fix: `ssh-keygen -R "[<ip>]:<port>"`, then re-scp.
+- **`SSH connection refused` on first connection.** Wait 30s and retry — sshd inside the container takes a few seconds to start after the bootstrap. If still refused after 1 min, check `/tmp/ssh-bootstrap.log` from the RunPod web console "Logs" tab to see if `ssh-keygen -A` failed or `service ssh start` couldn't bind.
 - **`pkill` kills the WHOLE pod, not just python.** Should not happen on a test pod. If it does (you see the pod disappear from `npm run list-test-pods`), it means `PUBLIC_KEY` wasn't set when the pod was launched — production mode `exec python3` makes python PID 1 and killing PID 1 kills the container. The launch script always sets `PUBLIC_KEY` to force dev-mode bash respawn loop, so this should not occur unless you tampered.
+- **OOM or weird VRAM behavior between iterations.** Check `nvidia-smi` over SSH. If something earlier in the session left allocations behind, restarting python (`pkill`) and waiting for the respawn should free everything (CUDA frees memory on process exit).
+- **Pod went into a bad state.** Easiest recovery: terminate it (`npm run terminate-test-pod -- <id>`) and launch a fresh one. State on the network volume persists across pods, so any scp'd code is preserved.
 
 ### CRITICAL: don't do this on a production pod
 
@@ -228,7 +231,31 @@ This is exactly the failure mode we hit on 2026-04-30. The test pod workflow exi
 
 Test pods are provisioned with the name prefix `kiki-vtest-*` which the orchestrator's `listPodsByPrefix` filter doesn't match — they're invisible to the reaper. The launch script always passes `PUBLIC_KEY` (your `~/.ssh/id_ed25519.pub`), which triggers the dev-mode branch of `BOOT_DOCKER_ARGS`: `while true; do python3 -u video_server.py; sleep 2; done` instead of `exec python3 -u video_server.py`. Bash stays as PID 1 and respawns python on each exit. So `pkill` ends a python process; bash starts a new one with the new code.
 
-For deeper troubleshooting (custom env vars, multi-pod usage, cost), see `documents/perf-investigations/test-pod-workflow.md`.
+### When NOT to use a test pod
+
+- **Anything that touches user-facing routing.** The iPad routes through the orchestrator; orchestrator doesn't know about test pods. Use a real session for end-to-end tests.
+- **Reaper / orchestrator logic itself.** Need a pod that's actually under the orchestrator. Use a real video session.
+- **Multi-pod / load testing.** Test pods are single-shot; load testing should mimic the production session pattern.
+
+For everything else (any pod-side code change, any profiler capture, any model experiment), use a test pod.
+
+### Alternative log capture (when bash respawn loop interferes with native crashes)
+
+The default tail (`tail -f /proc/$(pgrep -f video_server | head -1)/fd/1`) reads the live python's stdout. If python crashes natively (segfault, OOM-kill — not a Python exception), bash respawns it within 2s and the new python's stdout has a different fd descriptor; you'd lose the crash output.
+
+For experiments where native crashes are likely (e.g., new compile modes, FP8 paths), kill the bash respawn loop and run python directly with persistent logging:
+
+```
+# SSH in
+pgrep -f 'while true' | xargs -r kill   # stop the respawn loop
+pkill -f video_server.py                 # kill the current python
+sleep 2
+cd /workspace/app && source /workspace/venv/bin/activate
+LTX_TORCH_COMPILE=1 nohup python3 -u video_server.py > /tmp/canary.log 2>&1 & disown
+tail -f /tmp/canary.log
+```
+
+If the python process dies, `/tmp/canary.log` retains the full output including any traceback or kernel signal. To revert to the auto-respawn behavior, just terminate the pod and launch a fresh one.
 
 ---
 
@@ -540,7 +567,6 @@ The above tasks are operationally complete. These docs explain the WHY and the a
 
 - **`CLAUDE.md` § "Deploy Process"** — the pod-boot model, `.flux-app-version` semantics, GHCR rollback trigger conditions.
 - **`CLAUDE.md` § "SSHing into a running pod"** — pre-launch SSH bootstrap details, the inline BOOT_DOCKER_ARGS bash script that sets up sshd.
-- **`documents/perf-investigations/test-pod-workflow.md`** — extended troubleshooting for the test pod iteration loop.
 - **`documents/references/provider-config.md`** — orchestration architecture (state machine, network volumes, key files), cost numbers, observability log lines, RunPod GraphQL pod-listing snippet.
 - **`documents/references/runpod-model-serving-playbook.md`** — getting a model PERFORMANT on a pod (persistent-model architecture, OOM/perf diagnosis). Different concern from "operations".
 - **`documents/decisions.md` 2026-04-23 entry** — full context on the volume-entrypoint cutover (Task 9 + Task 10 background).

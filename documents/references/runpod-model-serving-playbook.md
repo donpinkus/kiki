@@ -304,13 +304,13 @@ with torch.inference_mode():
 
 Lightricks' own `ltx_pipelines.distilled.main()` is decorated with `@torch.inference_mode()`. Most upstream library `main()` functions do the same — check before wrapping.
 
-### `pkill -f "python3.*video_server"` matches PID 1
+### `pkill` on a serving pod triggers the orchestrator's reaper
 
-**Symptom**: Container restart after `pkill`. Orchestrator reaps pod for crashloop.
+**Symptom**: Pod gets terminated and replaced after a `pkill`, even when the pkill targeted only the python process.
 
-**Cause**: PID 1's command line is the full `bash -lc '...while true; do python3 -u video_server.py; sleep 2; done...'` wrapper, which contains the pattern.
+**Cause**: Whether or not `pkill` matches PID 1, killing the python causes `/health` to return 502 during the ~30s python restart. The orchestrator's reaper checks `/health` every 60s; when it finds the pod unhealthy, it terminates and re-provisions. The user's session breaks.
 
-**Fix**: `pkill -x python3` matches the process *name* (from `/proc/PID/comm`), not the cmdline. Hits PID 70 (the python), misses PID 1.
+**Fix**: Don't iterate on serving pods. Use a test pod (different name prefix, invisible to the reaper). See `documents/references/pod-operations.md` Task 3 for the full iteration loop.
 
 ### `model_context()` timing is misleading
 
@@ -336,45 +336,23 @@ If `peak_alloc` is fine but you see disk-read-speed (~0.5 GB/s) on a phase that 
 
 ## RunPod operational knowledge
 
-### Per-DC volumes
+### Per-DC volumes (architectural mental model)
 
-Network volumes are pinned to one data center. A `scp` to a pod in US-NE-1 only changes US-NE-1's volume. Other DCs are unaffected. When the orchestrator rerolls, it often picks a *different* DC (excluding the failed one), so your scp'd code "disappears" from the next pod's perspective.
+Network volumes are pinned to one data center. A `scp` to a pod in US-NE-1 only changes US-NE-1's volume; other DCs are unaffected. When the orchestrator rerolls and picks a *different* DC (e.g., excluding a failed one), your scp'd code "disappears" from the next pod's perspective. This is why `npm run deploy` exists: it runs `sync-all-dcs` to fan out to every DC in parallel, so all volumes converge.
 
-For committed perf changes, prefer `npm run deploy` which runs `sync-all-dcs` to all configured DCs in parallel. Reserve scp for ad-hoc experiments where one DC's pod is enough.
+For deploy commands and the stock-exhaustion workaround, see `documents/references/pod-operations.md` Task 1. The DCs that recurrently fail at sync time are US-IL-1 + US-NC-1 (image volumes) and US-TX-3 (video volumes) — RunPod stock issue, not a code bug.
 
-### `sync-all-dcs` failures on stock-exhausted DCs
+### SSH for read-only debugging
 
-US-IL-1 and US-NC-1 (image volumes) and US-TX-3 (video volumes) frequently fail with "no instances available" — a recurring RunPod stock issue, not a code bug. Pattern:
+For tailing logs, inspecting GPU state, or reading files on a serving pod — see `documents/references/pod-operations.md` Task 8. Quick summary: set `PUBLIC_KEY` on Railway, deploy, terminate the user's pod so a new one provisions with sshd. Use the **"SSH over exposed TCP"** form from RunPod web console (not the proxy `ssh.runpod.io` form, which rejects SCP and non-interactive commands).
 
-```
-✗ US-IL-1    (3s, exit=1, log=...)  ← capacity exhausted, fails fast
-```
+The architecture detail worth knowing here (relevant to model-serving debugging, not covered in pod-operations.md): stock `runpod/pytorch`'s entrypoint normally handles SSH setup, but our `BOOT_DOCKER_ARGS` overrides the entrypoint to launch python directly, so the image's SSH bootstrap never runs. We re-implement it inline in `BOOT_DOCKER_ARGS`, gated on `PUBLIC_KEY` so prod pods stay SSH-less by default. Setting `startSsh: true` in the GraphQL input alone is not enough — it exposes port 22 but doesn't actually start sshd.
 
-When this happens, the deploy script aborts. Workaround: manually stamp the state files and run `railway up`:
+### Don't iterate by restarting python on a serving pod
 
-```bash
-FLUX=$(git rev-parse HEAD:flux-klein-server)
-GIT=$(git rev-parse HEAD)
-echo "$FLUX" > backend/.flux-app-version
-echo "$GIT" > backend/.git-sha
-cd backend && railway up
-```
+For ANY code iteration — scp + pkill + respawn — use a test pod, not a serving pod. The serving pod will be reaped within 60s of `/health` going unresponsive, regardless of how careful you are with the `pkill` pattern. See `documents/references/pod-operations.md` Task 3.
 
-The skipped DCs sync the next time stock recovers (or get caught by the orchestrator's drift check on next pod boot in those DCs).
-
-### SSH on serving pods (dev only)
-
-Stock RunPod pytorch image's entrypoint normally writes `$PUBLIC_KEY` → `authorized_keys` and starts sshd. When `BOOT_DOCKER_ARGS` overrides the entrypoint to launch the python server directly, **the image's SSH setup never runs**. `startSsh: true` in the GraphQL input is not enough on its own.
-
-Fix: inline bootstrap in `BOOT_DOCKER_ARGS`, gated on `PUBLIC_KEY` so prod pods stay SSH-less by default. See `CLAUDE.md` "SSHing into a running pod (dev iteration only)" section for the canonical command + workflow.
-
-For SCP/SFTP, use the **direct TCP form** (`ssh root@<ip> -p <port>`), not `ssh.runpod.io` — the proxy form rejects non-interactive commands and doesn't support file transfer.
-
-### Don't restart python on a serving pod
-
-Even with the right `pkill -x python3` pattern that doesn't kill PID 1, restarting python causes `/health` to go 502 briefly. The orchestrator's relay layer detects the WebSocket close, calls `replaceVideoSession`, and reaps the pod. You get a fresh pod cold-start (~3.5 min), not a fast iteration.
-
-For dev iteration with a respawn-loop wrapper (`while true; do python3 ...; sleep 2; done` in `BOOT_DOCKER_ARGS`), `pkill -x python3` IS safe — bash respawns python, the respawn happens within the docker grace window, no relay disconnect. But this only works when no active session is connected. Coordinate with the user.
+Architecture detail (so you know WHY the test pod path exists): test pods (`kiki-vtest-*` name prefix) are invisible to the orchestrator's prefix-filtered reaper, AND they always have `PUBLIC_KEY` set, which triggers the dev-mode bash respawn loop in `BOOT_DOCKER_ARGS` (`while true; do python3 ...; done`). The combination — no reaper + auto-respawn — is what makes the iteration loop work.
 
 ### Crashloop detection
 

@@ -5,7 +5,7 @@
 
 ## TL;DR
 
-We ran three back-to-back experiments on test pods (`kiki-vtest-*` prefix, invisible to the orchestrator's reaper, see `test-pod-workflow.md`):
+We ran three back-to-back experiments on test pods (`kiki-vtest-*` prefix, invisible to the orchestrator's reaper, see `documents/references/pod-operations.md`):
 
 1. **`torch.compile(mode="reduce-overhead")`**: compiled successfully, but inference is **5× slower** (~18s vs 3.74s eager baseline at 320×320×49). Three back-to-back runs all converged to ~18s.
 2. **`torch.compile(mode="default")`**: same ~18s. Confirms it's not the CUDA graph capture; inductor codegen itself is the regression.
@@ -18,7 +18,7 @@ We ran three back-to-back experiments on test pods (`kiki-vtest-*` prefix, invis
 
 ## Methodology
 
-All three experiments ran on isolated test pods provisioned via the new `npm run launch-test-pod` workflow (see `test-pod-workflow.md`). Test pods use the prefix `kiki-vtest-*` which the orchestrator's reaper filters out — they survive the multi-minute `torch.compile` lowering pause that crashlooped the production attempt on 2026-04-30.
+All three experiments ran on isolated test pods provisioned via the new `npm run launch-test-pod` workflow (see `documents/references/pod-operations.md`). Test pods use the prefix `kiki-vtest-*` which the orchestrator's reaper filters out — they survive the multi-minute `torch.compile` lowering pause that crashlooped the production attempt on 2026-04-30.
 
 - **Hardware**: NVIDIA H100 SXM 80 GB HBM3, driver 565.57.01, compute cap 9.0 (Hopper).
 - **Software**: CUDA 12.8.1, PyTorch (Lightricks `ltx-pipelines` upstream pin), `runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404` base.
