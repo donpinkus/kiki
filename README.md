@@ -31,7 +31,16 @@ npm run build
 npm test
 ```
 
-Environment variables are documented in [`backend/.env.example`](./backend/.env.example). Real RunPod orchestration requires `RUNPOD_API_KEY` and `NETWORK_VOLUMES_BY_DC` (the pre-populated weight/code volumes — pods boot from stock `runpod/pytorch` and read app code off these volumes; see `documents/references/provider-config.md`).
+Deploy (backend + pod app code in one command):
+
+```bash
+cd backend
+npm run deploy
+```
+
+For the full decision tree of pod operations — deploy, iterate on pod code, run experiments, SSH, terminate — see [`documents/references/pod-operations.md`](./documents/references/pod-operations.md).
+
+Environment variables are documented in [`backend/.env.example`](./backend/.env.example). Real RunPod orchestration requires `RUNPOD_API_KEY`, `NETWORK_VOLUMES_BY_DC` (pre-populated image-pod weight/code volumes), and `NETWORK_VOLUMES_BY_DC_VIDEO` (video-pod volumes). Pods boot from stock `runpod/pytorch` and read app code off these volumes; see `documents/references/provider-config.md`.
 
 ### iOS
 
@@ -65,8 +74,9 @@ python3 flux-klein-server/test_client.py --help
 ## Key References
 
 - [`CLAUDE.md`](./CLAUDE.md): current architecture and product constraints
+- [`documents/references/pod-operations.md`](./documents/references/pod-operations.md): canonical decision tree for deploying / iterating / experimenting / SSHing / terminating pods (read this for any operations work)
 - [`documents/references/content-safety.md`](./documents/references/content-safety.md): App Store and safety requirements
-- [`documents/references/provider-config.md`](./documents/references/provider-config.md): RunPod/provider setup notes
+- [`documents/references/provider-config.md`](./documents/references/provider-config.md): orchestration architecture, network volumes, costs
 - [`documents/decisions.md`](./documents/decisions.md): implementation history and decisions
 
 ## Known Limitations

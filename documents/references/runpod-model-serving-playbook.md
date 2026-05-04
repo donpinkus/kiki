@@ -370,34 +370,26 @@ For gated models (Gemma terms, Llama terms), `HF_TOKEN` env must be set with the
 
 ## Dev iteration loop
 
-Cost per iteration matters. Three regimes:
+For deploy / iterate / experiment / SSH commands, see **`documents/references/pod-operations.md`** — that's the canonical decision tree (Tasks 1–4 cover the deploy + iteration regimes, Task 8 covers read-only SSH).
+
+Cost per iteration regime, summarized:
 
 | Approach | Per-iter cost | When to use |
 |---|---:|---|
 | `npm run deploy` (full) | 8–10 min | Committed perf changes, anything risky |
 | `npm run deploy` (backend-only, flux unchanged) | ~30s | Backend-only changes (orchestrator, etc.) |
-| SSH `scp + pkill -x python3` (with respawn loop) | ~3 min (warmup) | Pod-side experiments; reverted if pod was active |
+| Test pod (`npm run launch-test-pod` + scp + `pkill -f video_server.py`) | ~30s per scp+restart | Pod-side experiments — never on a serving pod (orchestrator's reaper will terminate it) |
 
-The full deploy goes through `sync-all-dcs` (parallelizes across 11 DCs but slowest DC dominates) then `railway up`. The backend-only fast path is detected automatically by `deploy.ts` reading `.flux-app-version`.
-
-For SSH-based iteration, see CLAUDE.md "SSHing into a running pod (dev iteration only)." Key constraints:
-- Pod must be in `Pod serving` state (past warming_model), not initial warmup
-- No active WebSocket session (orchestrator's relay watcher will reap on disconnect)
-- Use `pkill -x python3`, NOT `pkill -f`
-- `BOOT_DOCKER_ARGS` must wrap python in `while true; do ...; sleep 2; done` (respawn loop) — gated by `PUBLIC_KEY` env so prod pods get clean exec
+The full deploy goes through `sync-all-dcs` (parallelizes across all DCs but slowest DC dominates) then `railway up`. The backend-only fast path is detected automatically by `deploy.ts` reading `.flux-app-version`. The test-pod path uses the `kiki-vtest-*` prefix which the reaper filters out, plus the dev-mode bash respawn loop that catches python exits.
 
 ### Useful pod-state commands
 
 ```bash
-# Live video pod ID + DC + ports
-curl -s "https://api.runpod.io/graphql?api_key=$RUNPOD_API_KEY" -d '...' \
-  | jq '.data.pod.runtime.ports'
-
-# Pod stdout (RunPod doesn't expose via GraphQL — use web console "Logs" tab,
-# or SSH in and `tail -f /tmp/video_server.log` if your launcher redirects)
-
 # Phase timings from latest inference (from anywhere with the pod URL)
-curl -s "https://<pod>-8766.proxy.runpod.net/health" | jq
+curl -s "https://<pod-id>-8766.proxy.runpod.net/health" | jq
+
+# Live python stdout (over SSH on a test or SSH-enabled production pod)
+tail -f /proc/$(pgrep -f video_server | head -1)/fd/1
 ```
 
 ---
@@ -510,8 +502,8 @@ Documented for future reference. Order is rough priority for any future model:
 
 ## See also
 
-- `documents/references/provider-config.md` — RunPod ops, pod lifecycle, network volume topology
-- `CLAUDE.md` "SSHing into a running pod (dev iteration only)" — the canonical SSH workflow
+- `documents/references/pod-operations.md` — canonical decision tree for deploy / iterate / SSH / experiment / terminate. Read first if you're doing operations.
+- `documents/references/provider-config.md` — orchestration architecture, pod lifecycle, network volume topology, costs
 - `documents/decisions.md` — decision log; 2026-04-23 entry covers the GHCR → volume-entrypoint migration
 - `flux-klein-server/video_pipeline.py` — reference implementation of the persistent-model pattern (Steps 0–3 landed)
 - `backend/src/modules/orchestrator/orchestrator.ts` — pod lifecycle + cancellation, with the SSH bootstrap in `BOOT_DOCKER_ARGS`

@@ -73,8 +73,8 @@ Extracted shared relay-wiring into a single `wireRelay(podUrl)` helper inside th
 - GHCR image build workflow (`.github/workflows/build-flux-image.yml`), `flux-klein-server/Dockerfile`, and `backend/scripts/probe-dc-pulls.ts` are dead code after cutover. **Not deleted yet** — retained through the bake period for easy rollback; scheduled for stage-3 cleanup after 2–5 days of passing metrics (p95 ≤ 90 s, stall events ≤ 2 per 24 h).
 - Railway env vars `FLUX_IMAGE`, `RUNPOD_GHCR_AUTH_ID`, `CONTAINER_PULL_*` still present — also removed at stage-3 cleanup. The base image tag is hardcoded (`BASE_IMAGE` const in orchestrator.ts) rather than env-driven, because bumping the base image requires a coordinated `/workspace/venv/` resync against the new Python/CUDA ABI, not just a config flip.
 - **Rollback procedure (valid until stage-3 cleanup):**
-  1. `git revert <cutover-commit>` — brings back the orchestrator + iOS changes + config fields.
-  2. On Railway: set `FLUX_IMAGE` and `RUNPOD_GHCR_AUTH_ID` again. Last known-good tag: `ghcr.io/donpinkus/kiki-flux-klein:<sha>` for whichever commit precedes the cutover on main. GHCR retains old tags indefinitely; no rebuild needed.
+  1. `git revert 332bcad` — the cutover commit (`refactor(provisioning): launch pods from stock runpod/pytorch + volume-entrypoint`). Brings back the orchestrator + iOS changes + config fields.
+  2. On Railway: set `FLUX_IMAGE` and `RUNPOD_GHCR_AUTH_ID` again. Last known-good tag: `ghcr.io/donpinkus/kiki-flux-klein:sha-<commit>` where `<commit>` is `git rev-parse 332bcad^` (the commit immediately before the cutover). GHCR retains old tags indefinitely; no rebuild needed.
   3. `cd backend && railway up`.
   4. Rebuild iOS in Xcode, reconnect.
   5. `/workspace/venv/` and `/workspace/app/` dirs on the volumes are harmless to leave; old path ignores them.

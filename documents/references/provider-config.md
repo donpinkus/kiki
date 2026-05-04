@@ -2,12 +2,16 @@
 
 ## Current Stack
 
-**Each user session gets its own RTX 5090 pod.** The Railway backend (`backend/`) provisions pods on demand when an authenticated client WebSocket opens, and terminates them after 30 minutes of inactivity. FLUX.2-klein-4B runs on the pod with BFL's NVFP4 transformer checkpoint loaded on top of the BF16 pipeline. Custom FastAPI + WebSocket server at `flux-klein-server/`.
+**Each user session can use up to two pods, both managed by the same Railway-hosted orchestrator (`backend/`):**
 
-- ~1 FPS generation at 768×768 (reference mode, 4 steps, NVFP4)
-- ~96s avg cold start per session (p95 ~157s) — dominated by `warming_model` (~62s loading FLUX weights into GPU + warmup inference). Faster on hosts that already have the base image cached.
-- ~$0.53–0.58/hr spot bid in secure-cloud datacenters; $0.99/hr on-demand fallback
-- 30-min idle timeout preserves the pod across brief disconnects (reconnect = instant, no cold start)
+- **Image pod (always)** — RTX 5090, runs `flux-klein-server/server.py` (FLUX.2-klein-4B + NVFP4 transformer). The live img2img path. Name prefix `kiki-session-*`. ~1 FPS at 768×768 (reference mode, 4 steps).
+- **Video pod (idle-state animation)** — H100 SXM 80GB, runs `flux-klein-server/video_server.py` (LTX-2.3 22B distilled FP8 + Gemma-3-12B). Provisioned when `frame_meta.queueEmpty` fires (user paused drawing). Name prefix `kiki-vsession-*`.
+
+The orchestrator provisions on demand when a client WebSocket opens (and is JWT-authenticated), relays frames, and terminates pods after 30 min idle. Both pod kinds run a custom FastAPI + WebSocket server.
+
+- ~96s avg image-pod cold start (p95 ~157s), dominated by `warming_model` (~62s FLUX weights to GPU + warmup). Video cold start is similar.
+- ~$0.53–0.58/hr spot bid for image pod (secure cloud); ~$2.99/hr on-demand for video pod (no spot for H100 SXM).
+- 30-min idle timeout preserves pods across brief disconnects (reconnect = instant, no cold start)
 
 **Pod boot model (volume-entrypoint, since 2026-04-23):** Pods launch from stock `runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404` (hardcoded as `BASE_IMAGE` in `orchestrator.ts`). The attached network volume holds both the FLUX weights (`/workspace/huggingface`) and the FastAPI server code + Python deps (`/workspace/app/`, `/workspace/venv/`). Boot command activates the venv and execs `python3 -u server.py`. No custom image, no registry pull, no GHCR auth. The pre-2026-04-23 GHCR custom-image flow is retained as inactive code in `flux-klein-server/Dockerfile` + `.github/workflows/build-flux-image.yml` for emergency rollback only — see `documents/decisions.md` 2026-04-23 entry for the rollback procedure.
 
@@ -112,7 +116,7 @@ Both spawn an on-demand pod in the target DC, mount the volume, download weights
 
 ## Required env vars (Railway)
 
-Set via `railway variables --set` or the dashboard:
+Set via `railway variable set "KEY=value"` (singular subcommand, runs in `backend/` after `railway link`) or the Railway dashboard:
 
 | Env | Source | Purpose |
 |---|---|---|
@@ -149,14 +153,24 @@ Key log lines:
 
 ### Kill everything (cost panic button)
 
-**Actions → Stop All RunPod Pods → Run workflow** on GitHub. Terminates every pod on the RunPod account. Use when costs spike unexpectedly or to guarantee a clean state before testing.
+`gh workflow run stop-pods.yml` (or **Actions → Stop All RunPod Pods → Run workflow** on GitHub). Terminates every pod on the RunPod account — image, video, AND test pods. Use when costs spike unexpectedly or to guarantee a clean state before testing. (Also covered as Task 7c in `documents/references/pod-operations.md`.)
 
 ### Verify a pod health endpoint directly
 
+Image pod:
 ```bash
 curl https://<POD_ID>-8766.proxy.runpod.net/health
-# Expect: status=ok, quantization=nvfp4, gpu="NVIDIA GeForce RTX 5090"
+# Expect: status=ok, ready=true, quantization=nvfp4, gpu="NVIDIA GeForce RTX 5090"
 ```
+
+Video pod (different schema — has `video_ready` and `persistent_*_ready` fields, no `quantization`):
+```bash
+curl https://<POD_ID>-8766.proxy.runpod.net/health
+# Expect: status=ok, video_ready=true, persistent_transformer_ready=true,
+#         gpu="NVIDIA H100 80GB HBM3"
+```
+
+Either kind returns `{"status":"error","load_error":"<traceback>"}` if pipeline load failed — that's the canonical way to read a startup error without SSH.
 
 Pod IDs can be listed via:
 ```bash
@@ -167,10 +181,11 @@ curl -sS "https://api.runpod.io/graphql?api_key=$RUNPOD_API_KEY" \
 
 ### Cost
 
-- Spot RTX 5090: ~$0.53/hr bid floor + $0.05 headroom (secure cloud, varies by availability).
-- On-demand fallback: $0.99/hr (secure cloud).
-- Worst-case idle tail per user: 30 min × $0.99/hr ≈ **$0.50** per session (on-demand only mode).
-- Network volumes: ~$17.50/mo fixed (250 GB across 5 DCs).
+- Spot RTX 5090 (image pod): ~$0.53/hr bid floor + $0.05 headroom (secure cloud, varies by availability).
+- On-demand RTX 5090 fallback: $0.99/hr (secure cloud).
+- On-demand H100 SXM 80GB (video pod): ~$2.99/hr (secure cloud, no spot SKU).
+- Worst-case idle tail per user: 30 min × ($0.99 + $2.99)/hr ≈ **$2** per session (image + video on-demand).
+- Network volumes: ~$49/mo fixed (250 GB image across 5 DCs + 450 GB video across 6 DCs × $0.07/GB/mo).
 - Railway backend: ~$5/month flat.
 
 ## Key Files
