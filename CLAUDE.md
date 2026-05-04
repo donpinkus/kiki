@@ -26,6 +26,7 @@ cd backend && npm run dev          # Dev server
 cd backend && npm run build        # Build
 cd backend && npm test             # Run tests
 cd backend && npm run lint         # Lint
+cd backend && npm run deploy       # Deploy backend + pod app code (see documents/references/pod-operations.md)
 ```
 
 ## Architecture Decisions (Decided — Do Not Propose Alternatives)
@@ -107,7 +108,8 @@ When diagnosing a failure, separate observations from inferences. Do not collaps
 | When | Read |
 |------|------|
 | Content safety / App Store compliance | `documents/references/content-safety.md` |
-| RunPod deploy, provider ops, network volumes | `documents/references/provider-config.md` |
+| **Pod operations — deploy / iterate / SSH / experiment / terminate** (decision tree, self-contained) | `documents/references/pod-operations.md` |
+| Provider/orchestration architecture, network volumes, costs | `documents/references/provider-config.md` |
 | Getting a model performant on RunPod (persistent-model architecture, OOM/perf diagnosis, dev iteration loop, lessons from LTX-2.3) | `documents/references/runpod-model-serving-playbook.md` |
 | Pod lifecycle edge cases (MUST-handle matrix)          | `backend/src/modules/orchestrator/orchestrator.ts` (file header) |
 | Two-pod video architecture (LTXV split) plan + context | `documents/plans/two-pod-video-architecture.md` + GitHub #25 |
@@ -155,7 +157,7 @@ Pre-launch only: SSH on serving pods is gated behind the `PUBLIC_KEY` env var on
 ```bash
 # One-time
 PUB="$(cat ~/.ssh/id_ed25519.pub)"
-railway variables --service kiki-backend --set "PUBLIC_KEY=$PUB"
+railway variable set "PUBLIC_KEY=$PUB"
 cd backend && npm run deploy   # backend-only change → fast path (~30s)
 # Existing pods keep the no-SSH path; terminate them to refresh
 ```
