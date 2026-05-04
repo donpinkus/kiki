@@ -86,6 +86,179 @@ async function resolveIdentity(
 export const streamRoute: FastifyPluginAsync = async (fastify) => {
   fastify.get('/v1/stream', { websocket: true }, (socket, request) => {
     void (async () => {
+      // ─── Hoisted state ────────────────────────────────────────────────
+      // All state referenced by close/error/message handlers must be
+      // declared before those handlers are registered, which has to happen
+      // before any `await` so we don't miss a close event during the slow
+      // identity/quota/subscribe/provision/wire path (Node EventEmitter
+      // drops events with no listener; cold start can take ~96 s).
+      let userId: string | null = null;
+      let source: 'jwt' | 'legacy_session' | null = null;
+      let streamId: string | null = null;
+      let relay: StreamRelay | null = null;
+      let currentPodUrl: string | null = null;
+      let lastConfig: Record<string, unknown> | null = null;
+      let unsubscribeState: (() => void) | null = null;
+      let clientDisconnected = false;
+      const sessionStartMs = Date.now();
+      // Per-WS short id so back-to-back reconnects from the same userId can
+      // be told apart in logs. Diagnostics-only — never sent on the wire.
+      const connId = randomBytes(4).toString('hex');
+
+      // Diagnostics: track the journey to ready so socket.on('close') can
+      // report "did the iPad ever see ready?" and how long ago.
+      let everReachedReady = false;
+      let lastEmittedState: string | null = null;
+      let lastEmittedStateAt: number | null = null;
+      let subscribeSeededState: string | null = null;
+      let sawSubscribeSeed = false;
+
+      // ─── Video pod state (best-effort, see getOrProvisionVideoPod) ────
+      let videoRelay: StreamRelay | null = null;
+      let videoPodId: string | null = null;
+      // Once the upstream video relay closes uninitiated we don't try
+      // again for this session — image gen continues normally.
+      let videoSessionEnabled = true;
+      // Captured from the last frame_meta JSON; consumed when the
+      // following binary lands. The pair tells us "this image is video-
+      // eligible" — pod-side authoritative, more robust than a backend
+      // counter.
+      let nextImageBinaryQueueEmpty = false;
+      let nextImageBinaryRequestId: string | null = null;
+      // Set when we forward a binary from the video pod. The next text
+      // preamble gets matched with the binary that immediately follows.
+      let pendingVideoBinaryWrapper: { type: string; meta: Record<string, unknown> } | null = null;
+      let inFlightVideoRequestId: string | null = null;
+      // Counters reported in the session_close summary (paste-friendly
+      // for the triage cookbook in documents/plans/drawing-animation.md).
+      let videoTriggered = 0;
+      let videoCompleted = 0;
+      let videoCancelled = 0;
+      let videoFailed = 0;
+
+      // Single-slot buffer for the latest config + frame received before the
+      // relay is wired. iOS sends initial config immediately after WS open,
+      // well before the backend reaches `.ready` — pre-fix that config was
+      // dropped and the pod ran on whatever default it had until the iPad's
+      // next config tick, breaking the user's prompt for early frames.
+      let pendingConfig: Record<string, unknown> | null = null;
+      let pendingFrame: Buffer | null = null;
+
+      // ─── Idempotent cleanup ──────────────────────────────────────────
+      // close + error can both fire for one underlying socket teardown,
+      // and the provisioning catch may also reach this path. didCleanup
+      // gates everything: sessionClosed, unsubscribeState, relay.close,
+      // videoRelay.close, plus the per-close logline + trackSessionClosed.
+      let didCleanup = false;
+      const cleanupOnDisconnect = (): void => {
+        if (didCleanup) return;
+        didCleanup = true;
+        clientDisconnected = true;
+        unsubscribeState?.();
+        unsubscribeState = null;
+        relay?.close();
+        relay = null;
+        videoRelay?.close();
+        videoRelay = null;
+        // sessionClosed is keyed by userId; no-op if identity hadn't resolved.
+        if (userId) sessionClosed(userId);
+      };
+
+      // ─── Register close/error/message handlers BEFORE any await ───────
+      // These must run synchronously after the WS upgrade callback fires,
+      // before any `await` work, so a client that disconnects during cold
+      // start is observed and cleaned up. Pre-fix the late registration
+      // dropped close events emitted on Node's EventEmitter.
+      socket.on('close', (code: number, reason: Buffer) => {
+        // didCleanup gates the per-close logline + analytics so it fires
+        // exactly once even if `error` arrives first.
+        if (didCleanup) return;
+        const durationMs = Date.now() - sessionStartMs;
+        const lastStateAgeMs = lastEmittedStateAt
+          ? Date.now() - lastEmittedStateAt
+          : null;
+        request.log.info(
+          {
+            userId,
+            connId,
+            streamId,
+            code,
+            reason: reason?.toString('utf-8') ?? '',
+            durationMs,
+            everReachedReady,
+            lastEmittedState,
+            lastStateAgeMs,
+            subscribeSeededState,
+            videoTriggered,
+            videoCompleted,
+            videoCancelled,
+            videoFailed,
+            event: 'session_close',
+          },
+          'session_close',
+        );
+        if (userId) trackSessionClosed({ userId, durationMs });
+        cleanupOnDisconnect();
+      });
+
+      socket.on('error', (err: Error) => {
+        request.log.error({ userId, connId, streamId, err }, 'Client socket error');
+        cleanupOnDisconnect();
+      });
+
+      socket.on('message', (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
+        const buf = Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data as ArrayBuffer);
+        if (userId) touch(userId);
+        if (isBinary) {
+          if (relay) {
+            relay.sendFrame(buf);
+            // A new sketch from the iPad supersedes any in-flight video.
+            // Send video_cancel on EVERY iPad frame while a video request
+            // is in flight; the pod treats it idempotently. Once the
+            // video pod responds with video_cancelled, we clear the id.
+            if (inFlightVideoRequestId && videoRelay) {
+              const t0 = Date.now();
+              videoRelay.sendConfig({
+                type: 'video_cancel',
+                requestId: inFlightVideoRequestId,
+              });
+              request.log.info(
+                {
+                  userId,
+                  connId,
+                  streamId,
+                  req: inFlightVideoRequestId,
+                  elapsedSinceRequestMs: t0 - sessionStartMs,
+                  event: 'video_cancel_sent',
+                },
+                'video_cancel_sent',
+              );
+              inFlightVideoRequestId = null;
+            }
+          } else {
+            // Coalesce: only the latest pre-wire frame matters for img2img.
+            pendingFrame = buf;
+          }
+        } else {
+          const text = buf.toString('utf-8');
+          try {
+            const parsed = JSON.parse(text) as Record<string, unknown>;
+            if (parsed.type === 'config') {
+              lastConfig = parsed;
+              if (relay) {
+                relay.sendConfig(parsed);
+              } else {
+                // Buffered for flush after wireRelay completes.
+                pendingConfig = parsed;
+              }
+            }
+          } catch {
+            request.log.warn({ userId, connId, streamId }, 'Invalid JSON from client');
+          }
+        }
+      });
+
+      // ─── Now the slow path: identity → entitlement/quota → subscribe → provision ──
       const identity = await resolveIdentity({
         url: request.url,
         headers: { authorization: request.headers.authorization },
@@ -97,15 +270,19 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         return;
       }
 
-      const { userId, source } = identity;
-      // Per-WS short id so back-to-back reconnects from the same userId can
-      // be told apart in logs. Diagnostics-only — never sent on the wire.
-      const connId = randomBytes(4).toString('hex');
+      userId = identity.userId;
+      source = identity.source;
+      // Non-nullable shadow for the slow path. The hoisted `let userId`
+      // is captured by close/error/message handlers (which null-check it);
+      // closures defined later in this scope (wireVideoRelay,
+      // handleUpstreamClose) need a `string` and TypeScript can't narrow
+      // a let through async closures.
+      const uid: string = identity.userId;
       // Per-startStream id issued by iOS. One streamId may correspond to N
       // connIds if the client internally reconnects within one StreamSession.
       // Search by streamId for the whole user attempt; by connId for one
       // specific WS upgrade. null when an older client without streamId connects.
-      const streamId = extractQueryParam(request.url, 'streamId');
+      streamId = extractQueryParam(request.url, 'streamId');
       request.log.info({ userId, source, connId, streamId, event: 'ws_open' }, 'Stream client connected');
 
       // Entitlement check — only applies when authenticated via JWT. Legacy
@@ -157,41 +334,6 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         }
       }
 
-      let relay: StreamRelay | null = null;
-      let currentPodUrl: string | null = null;
-      let lastConfig: Record<string, unknown> | null = null;
-      let clientDisconnected = false;
-      const sessionStartMs = Date.now();
-      // Diagnostics: track the journey to ready so socket.on('close') can
-      // report "did the iPad ever see ready?" and how long ago.
-      let everReachedReady = false;
-      let lastEmittedState: string | null = null;
-      let lastEmittedStateAt: number | null = null;
-      let subscribeSeededState: string | null = null;
-
-      // ─── Video pod state (best-effort, see getOrProvisionVideoPod) ────
-      let videoRelay: StreamRelay | null = null;
-      let videoPodId: string | null = null;
-      // Once the upstream video relay closes uninitiated we don't try
-      // again for this session — image gen continues normally.
-      let videoSessionEnabled = true;
-      // Captured from the last frame_meta JSON; consumed when the
-      // following binary lands. The pair tells us "this image is video-
-      // eligible" — pod-side authoritative, more robust than a backend
-      // counter.
-      let nextImageBinaryQueueEmpty = false;
-      let nextImageBinaryRequestId: string | null = null;
-      // Set when we forward a binary from the video pod. The next text
-      // preamble gets matched with the binary that immediately follows.
-      let pendingVideoBinaryWrapper: { type: string; meta: Record<string, unknown> } | null = null;
-      let inFlightVideoRequestId: string | null = null;
-      // Counters reported in the session_close summary (paste-friendly
-      // for the triage cookbook in documents/plans/drawing-animation.md).
-      let videoTriggered = 0;
-      let videoCompleted = 0;
-      let videoCancelled = 0;
-      let videoFailed = 0;
-
       // Subscribe to provision state events so the iOS client sees every
       // transition — fresh caller AND joiner both go through this single path.
       // The broker seeds the handler with the current Redis state (if any),
@@ -208,8 +350,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       // separately so we can distinguish "iPad got the seed" from "iPad got
       // a fresh transition fired AFTER subscribe returned" in stuck-on-
       // Connecting diagnoses.
-      let sawSubscribeSeed = false;
-      const unsubscribeState = await subscribe(userId, (event) => {
+      unsubscribeState = await subscribe(userId, (event) => {
         const isSeed = !sawSubscribeSeed;
         sawSubscribeSeed = true;
         if (isSeed) {
@@ -325,6 +466,9 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
                 // profiling (zero overhead on the pod).
                 if (lastConfig['enableProfiling'] === true) {
                   videoRequestPayload['enableProfiling'] = true;
+                }
+                if (typeof lastConfig['videoPromptSuffix'] === 'string') {
+                  videoRequestPayload['videoPromptSuffix'] = lastConfig['videoPromptSuffix'];
                 }
                 videoRelay.sendConfig(videoRequestPayload);
                 inFlightVideoRequestId = reqId;
@@ -516,7 +660,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
 
           // Slow path: replace the pod. Best-effort; null on failure.
           if (clientDisconnected || socket.readyState !== socket.OPEN) return;
-          const result = await replaceVideoSession(userId);
+          const result = await replaceVideoSession(uid);
           if (!result || clientDisconnected || socket.readyState !== socket.OPEN) {
             videoSessionEnabled = false;
             videoPodId = null;
@@ -538,7 +682,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             // up so it doesn't sit idle until reconcile. Mirrors the
             // initial-provision wire-failure handling above.
             terminateVideoPod(result.podId).catch(() => {});
-            await clearVideoPod(userId).catch(() => {});
+            await clearVideoPod(uid).catch(() => {});
             videoPodId = null;
             videoSessionEnabled = false;
           }
@@ -577,7 +721,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
           try {
             if (clientDisconnected || socket.readyState !== socket.OPEN) return;
 
-            await emitState(userId, 'connecting');
+            await emitState(uid, 'connecting');
 
             // Fast path: reconnect to the same pod. If the close was a
             // transient transport drop the pod is still serving and this
@@ -598,7 +742,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
                   },
                   'same_pod_reconnect_ok',
                 );
-                await emitState(userId, 'ready');
+                await emitState(uid, 'ready');
                 return;
               } catch (reconnectErr) {
                 request.log.info(
@@ -620,15 +764,15 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             // replacementCount > 0 so the iOS UI prefixes "Replacing — ".
             // MAX_SESSION_REPLACEMENTS protects against flapping pods — if
             // exhausted, replaceSession throws and the outer catch bounces iPad.
-            trackPodPreempted({ userId, replacementAttempt: 1 });
-            const { podUrl: newPodUrl } = await replaceSession(userId);
+            trackPodPreempted({ userId: uid, replacementAttempt: 1 });
+            const { podUrl: newPodUrl } = await replaceSession(uid);
             if (clientDisconnected || socket.readyState !== socket.OPEN) {
               request.log.info({ userId, connId, streamId }, 'Client disconnected during replacement — pod will idle-reap');
               return;
             }
             await wireRelay(newPodUrl);
             if (clientDisconnected || socket.readyState !== socket.OPEN) return;
-            await emitState(userId, 'ready');
+            await emitState(uid, 'ready');
           } catch (err) {
             request.log.error({ userId, connId, streamId, err }, 'Upstream recovery failed');
             if (socket.readyState === socket.OPEN) {
@@ -756,53 +900,41 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         }
         request.log.info({ userId, connId, streamId, event: 'relay_connected' }, 'Upstream connected, relaying');
 
-        socket.on('message', (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
-          if (!relay) return;
-          const buf = Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data as ArrayBuffer);
-          touch(userId);
-          if (isBinary) {
-            relay.sendFrame(buf);
-            // A new sketch from the iPad supersedes any in-flight video.
-            // Send video_cancel on EVERY iPad frame while a video request
-            // is in flight; the pod treats it idempotently. Once the
-            // video pod responds with video_cancelled, we clear the id.
-            if (inFlightVideoRequestId && videoRelay) {
-              const t0 = Date.now();
-              videoRelay.sendConfig({
-                type: 'video_cancel',
-                requestId: inFlightVideoRequestId,
-              });
-              request.log.info(
-                {
-                  userId,
-                  connId,
-                  streamId,
-                  req: inFlightVideoRequestId,
-                  elapsedSinceRequestMs: t0 - sessionStartMs,
-                  event: 'video_cancel_sent',
-                },
-                'video_cancel_sent',
-              );
-              inFlightVideoRequestId = null;
-            }
-          } else {
-            const text = buf.toString('utf-8');
-            try {
-              const parsed = JSON.parse(text) as Record<string, unknown>;
-              if (parsed.type === 'config') {
-                lastConfig = parsed;
-                relay.sendConfig(parsed);
-              }
-            } catch {
-              request.log.warn({ userId, connId, streamId }, 'Invalid JSON from client');
-            }
-          }
-        });
+        // Flush any messages buffered by the early-registered message
+        // handler during cold start. Order matters: config first (so the
+        // pod sees the right prompt before the first frame), then the
+        // latest pending frame.
+        if (pendingConfig && relay) {
+          (relay as StreamRelay).sendConfig(pendingConfig);
+          pendingConfig = null;
+        }
+        if (pendingFrame && relay) {
+          (relay as StreamRelay).sendFrame(pendingFrame);
+          pendingFrame = null;
+        }
 
-        // Relay connected AND message handler registered — iOS frames will
-        // now flow to the pod. Safe to tell iOS we're truly ready.
+        // Relay connected AND any buffered messages flushed — iOS frames
+        // are now flowing to the pod. Safe to tell iOS we're truly ready.
         await emitState(userId, 'ready');
       } catch (err) {
+        // Distinguish "user closed the app mid-cold-start" from "real
+        // provisioning failure". The early-registered close handler sets
+        // clientDisconnected = true and runs cleanupOnDisconnect; here we
+        // just log and return. Calling abortSession in this case would
+        // tear down a perfectly good pod the user might reconnect to.
+        if (clientDisconnected || socket.readyState !== socket.OPEN) {
+          request.log.info(
+            {
+              userId,
+              connId,
+              streamId,
+              err: err instanceof Error ? err.message : String(err),
+              event: 'provisioning_aborted_after_client_disconnect',
+            },
+            'provisioning aborted after client disconnect',
+          );
+          return;
+        }
         request.log.error({ userId, connId, streamId, err }, 'Provisioning or relay failed');
         // If the failure happened essentially-instantly, getOrProvisionPod
         // returned a cached podUrl and the relay then 404'd — i.e. the pod
@@ -834,56 +966,16 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
           request.log.info({ userId, connId, streamId }, 'Sending provisioning error to client and closing socket');
           socket.send(JSON.stringify({ type: 'error', message: errMsg }));
           socket.close(1011, 'Provisioning failed');
+          // socket.close triggers the early-registered close handler,
+          // which runs cleanupOnDisconnect (idempotent).
         } else {
           request.log.warn({ userId, connId, streamId, readyState: socket.readyState }, 'Cannot send provisioning error — socket not open');
         }
       }
-
-      socket.on('close', (code: number, reason: Buffer) => {
-        clientDisconnected = true;
-        const durationMs = Date.now() - sessionStartMs;
-        const lastStateAgeMs = lastEmittedStateAt
-          ? Date.now() - lastEmittedStateAt
-          : null;
-        request.log.info(
-          {
-            userId,
-            connId,
-            streamId,
-            code,
-            reason: reason?.toString('utf-8') ?? '',
-            durationMs,
-            everReachedReady,
-            lastEmittedState,
-            lastStateAgeMs,
-            subscribeSeededState,
-            videoTriggered,
-            videoCompleted,
-            videoCancelled,
-            videoFailed,
-            event: 'session_close',
-          },
-          'session_close',
-        );
-        trackSessionClosed({ userId, durationMs });
-        sessionClosed(userId);
-        unsubscribeState();
-        relay?.close();
-        // Close the video relay WS so the pod sees the disconnect and stops
-        // any in-flight generation, but DO NOT terminate the pod itself.
-        // The pod is Redis-tracked on the session row; the next iPad
-        // reconnect will reuse it via getOrProvisionVideoPod (no 3-min
-        // cold start). The reaper terminates the pod when the image
-        // session itself is reaped (orchestrator.ts: runReaper).
-        videoRelay?.close();
-      });
-
-      socket.on('error', (err: Error) => {
-        request.log.error({ userId, connId, streamId, err }, 'Client socket error');
-        unsubscribeState();
-        relay?.close();
-        videoRelay?.close();
-      });
+      // close + error handlers are registered at the top of the IIFE,
+      // before any await — see "Register close/error/message handlers
+      // BEFORE any await" above. Late registration here would miss close
+      // events fired during the slow path.
     })();
   });
 };

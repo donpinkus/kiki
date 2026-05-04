@@ -292,7 +292,14 @@ final class StreamSession {
         do {
             try await client.connect()
             let connectMs = Int(Date().timeIntervalSince(connectStart) * 1000)
-            reconnectAttempts = 0
+            // NOTE: do NOT reset reconnectAttempts here. A bare URLSession WS
+            // handshake is not a stable-connection signal — sendConfig can
+            // still fail post-handshake, and the orchestrator may take ~96 s
+            // to declare the session usable. Resetting here previously caused
+            // an infinite retry loop because runReconnect's catch would loop
+            // back, increment attempts, hit a fresh handshake, reset to 0,
+            // and the maxReconnectAttempts cap would never trip. Reset is now
+            // gated on the backend's `.ready` state (see handleState).
             // WS open is just a breadcrumb — don't change readiness here.
             // The server's status=ready (or status=provisioning, or type=error)
             // is what actually drives the next transition, via statusTask.
@@ -648,6 +655,12 @@ final class StreamSession {
             self.warm(message: displayText(for: state, replacementCount: replacementCount), serverStartedAt: warmingStartedAt)
         case .ready:
             self.setReadiness(.ready)
+            // Reset retry budget here (not on bare WS handshake): `.ready`
+            // means the orchestrator has provisioned, warmed, and declared
+            // the session usable. That's the canonical stable-connection
+            // signal; failures before this point should still count against
+            // maxReconnectAttempts so the cap actually trips.
+            self.reconnectAttempts = 0
             // Re-send config now that the server is ready to accept it.
             self.lastSentConfig = nil
         case .failed:
