@@ -40,7 +40,11 @@ npm run deploy
 
 For the full decision tree of pod operations — deploy, iterate on pod code, run experiments, SSH, terminate — see [`documents/references/pod-operations.md`](./documents/references/pod-operations.md).
 
-Environment variables are documented in [`backend/.env.example`](./backend/.env.example). Real RunPod orchestration requires `RUNPOD_API_KEY`, `NETWORK_VOLUMES_BY_DC` (pre-populated image-pod weight/code volumes), and `NETWORK_VOLUMES_BY_DC_VIDEO` (video-pod volumes). Pods boot from stock `runpod/pytorch` and read app code off these volumes; see `documents/references/provider-config.md`.
+Environment vars in two places:
+- **Production** (Railway-hosted backend) — values live on Railway. Template is [`backend/.env.example`](./backend/.env.example); the team has current values set already.
+- **Local scripts** (`npm run deploy`, `npm run launch-test-pod`, etc.) — read from `<repo-root>/.env.local` (gitignored). Minimum set: `RUNPOD_API_KEY`, `NETWORK_VOLUMES_BY_DC`, `NETWORK_VOLUMES_BY_DC_VIDEO`. See pod-operations.md "Global prerequisites" for the full list.
+
+Pods themselves boot from stock `runpod/pytorch` and read app code off pre-populated network volumes; see `documents/references/provider-config.md`.
 
 ### iOS
 

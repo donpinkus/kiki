@@ -112,11 +112,15 @@ or APIs.
 
 All scripts that talk to RunPod need:
 
-- `RUNPOD_API_KEY` — RunPod GraphQL auth
-- `RUNPOD_SSH_PRIVATE_KEY` — for SSHing into spawned pods (sync/populate);
-  set via `RUNPOD_SSH_PRIVATE_KEY="$(cat ~/.ssh/id_ed25519)"`
+- `RUNPOD_API_KEY` — RunPod GraphQL auth.
+- `RUNPOD_SSH_PRIVATE_KEY` — for SSHing into spawned pods (sync/populate
+  scripts only). `sync-all-dcs.ts` falls back to reading `~/.ssh/id_ed25519`
+  automatically when this env var is unset, so `npm run deploy` users don't
+  need to set it manually. Standalone `sync-flux-app.ts` and
+  `populate-volume.ts` invocations DO require it inline:
+  `RUNPOD_SSH_PRIVATE_KEY="$(cat ~/.ssh/id_ed25519)"`.
 - `RUNPOD_REGISTRY_AUTH_ID` (optional) — Docker Hub auth for the
-  `runpod/pytorch` base pull; reduces cold-host pull times
+  `runpod/pytorch` base pull; reduces cold-host pull times.
 
 Scripts that read PostHog (`check-*`) need:
 
