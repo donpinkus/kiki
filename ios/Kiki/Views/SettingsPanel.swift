@@ -23,6 +23,7 @@ struct SettingsPanel: View {
                         coordinator.drawingLayout = .splitScreen
                         coordinator.videoResolution = 320
                         coordinator.videoFrames = 49
+                        coordinator.videoPromptSuffix = AppCoordinator.defaultVideoPromptSuffix
                         coordinator.enableProfiling = false
                     }
                 }
@@ -55,7 +56,7 @@ struct SettingsPanel: View {
     private var videoSection: some View {
         @Bindable var coordinator = coordinator
 
-        return Section("Video") {
+        return Section {
             Picker("Resolution", selection: $coordinator.videoResolution) {
                 ForEach(Self.resolutionOptions, id: \.self) { px in
                     Text("\(px) × \(px)").tag(px)
@@ -68,6 +69,25 @@ struct SettingsPanel: View {
                     Text(String(format: "%d frames (%.1fs)", n, seconds)).tag(n)
                 }
             }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Prompt suffix")
+                    .font(.subheadline)
+                TextField(
+                    "Appended to the user's prompt before LTX-2.3",
+                    text: $coordinator.videoPromptSuffix,
+                    axis: .vertical
+                )
+                .font(.subheadline)
+                .textFieldStyle(.roundedBorder)
+                .lineLimit(3...8)
+                .autocorrectionDisabled()
+                .textInputAutocapitalization(.never)
+            }
+        } header: {
+            Text("Video")
+        } footer: {
+            Text("Suffix is sent to the pod every config update — edit and the next video request picks it up. Empty = use the user's prompt verbatim.")
         }
     }
 

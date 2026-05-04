@@ -513,6 +513,7 @@ class Ltx23VideoPipeline:
         height: int | None = None,
         num_frames: int | None = None,
         profile: bool = False,
+        prompt_suffix: str | None = None,
     ) -> "GenerateResult":
         """Generate a video from `image`+`prompt`. Returns a ``GenerateResult``
         with `frames` (or None if cancelled), optional decoded `audio`,
@@ -611,9 +612,21 @@ class Ltx23VideoPipeline:
                         pipe_total_ms=0,
                         cancelled_but_ran_ms=0,
                     )
+                base = (prompt or "").strip()
+                suffix = (prompt_suffix or "").strip()
+                if base and suffix:
+                    if base[-1] not in ".!?":
+                        base += "."
+                    final_prompt = f"{base} {suffix}"
+                else:
+                    final_prompt = base or suffix
+                logger.info(
+                    "LTX-2.3 prompt: user='%s' suffix='%s' final='%s'",
+                    base[:80], suffix[:80], final_prompt[:200],
+                )
                 frames, audio = self._run_inference(
                     image_path=image_path,
-                    prompt=prompt or "",
+                    prompt=final_prompt,
                     seed=seed,
                     width=width,
                     height=height,

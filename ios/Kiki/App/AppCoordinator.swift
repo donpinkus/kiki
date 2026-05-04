@@ -210,6 +210,17 @@ final class AppCoordinator {
     /// LTX-2.3 video override — frame count. Session-only (see `videoResolution`).
     var videoFrames: Int = 49 { didSet { syncStreamConfig() } }
 
+    /// LTX-2.3 video override — cinematic prompt suffix. Session-only (see `videoResolution`).
+    var videoPromptSuffix: String = AppCoordinator.defaultVideoPromptSuffix {
+        didSet { syncStreamConfig() }
+    }
+
+    static let defaultVideoPromptSuffix = (
+        "Subtle natural motion throughout the scene with gentle organic movement. "
+        + "Slow cinematic camera with a barely perceptible push-in. "
+        + "Soft natural lighting, calm atmosphere, high detail."
+    )
+
     /// LTX-2.3 diagnostic — when true, every video request triggers a
     /// `torch.profiler` capture on the pod (Chrome trace JSON + summary
     /// txt + meta JSON written to `/tmp/ltx-profile-*` for SCP-out).
@@ -1014,6 +1025,7 @@ final class AppCoordinator {
             videoWidth: videoResolution,
             videoHeight: videoResolution,
             videoFrames: videoFrames,
+            videoPromptSuffix: videoPromptSuffix,
             enableProfiling: enableProfiling
         )
     }

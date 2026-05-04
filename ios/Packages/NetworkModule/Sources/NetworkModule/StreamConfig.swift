@@ -22,6 +22,7 @@ public struct StreamConfig: Codable, Sendable, Equatable {
     public let videoWidth: Int
     public let videoHeight: Int
     public let videoFrames: Int
+    public let videoPromptSuffix: String
     public let enableProfiling: Bool
 
     public init(
@@ -32,6 +33,7 @@ public struct StreamConfig: Codable, Sendable, Equatable {
         videoWidth: Int = 320,
         videoHeight: Int = 320,
         videoFrames: Int = 49,
+        videoPromptSuffix: String = "",
         enableProfiling: Bool = false
     ) {
         self.type = "config"
@@ -42,6 +44,7 @@ public struct StreamConfig: Codable, Sendable, Equatable {
         self.videoWidth = videoWidth
         self.videoHeight = videoHeight
         self.videoFrames = videoFrames
+        self.videoPromptSuffix = videoPromptSuffix
         self.enableProfiling = enableProfiling
     }
 }

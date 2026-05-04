@@ -160,7 +160,8 @@ async def websocket_video(ws: WebSocket):
                         req_width: int | None = None,
                         req_height: int | None = None,
                         req_frames: int | None = None,
-                        req_profile: bool = False) -> None:
+                        req_profile: bool = False,
+                        prompt_suffix: str | None = None) -> None:
         """Generate video, stream frames, encode MP4. Updates outer counters."""
         nonlocal videos_total, videos_cancelled, videos_failed
         t0 = time.time()
@@ -178,7 +179,7 @@ async def websocket_video(ws: WebSocket):
             result = await asyncio.to_thread(
                 video_pipeline.generate, image, prompt, seed, _is_cancelled,
                 width=req_width, height=req_height, num_frames=req_frames,
-                profile=req_profile,
+                profile=req_profile, prompt_suffix=prompt_suffix,
             )
         except Exception as e:  # noqa: BLE001
             videos_failed += 1
@@ -354,6 +355,10 @@ async def websocket_video(ws: WebSocket):
                 # so a missing/non-bool field defaults to False.
                 req_profile = bool(data.get("enableProfiling") or False)
 
+                req_prompt_suffix = data.get("videoPromptSuffix")
+                if req_prompt_suffix is not None and not isinstance(req_prompt_suffix, str):
+                    req_prompt_suffix = None
+
                 image_b64 = data.get("image_b64") or ""
                 try:
                     image_bytes = base64.b64decode(image_b64)
@@ -368,9 +373,10 @@ async def websocket_video(ws: WebSocket):
                     continue
 
                 logger.info(
-                    "video_request: req=%s prompt='%s' image=%dx%d seed=%s "
+                    "video_request: req=%s prompt='%s' suffix='%s' image=%dx%d seed=%s "
                     "videoWidth=%s videoHeight=%s videoFrames=%s profile=%s",
-                    request_id, prompt[:60], image.width, image.height, seed,
+                    request_id, prompt[:60], (req_prompt_suffix or "")[:60],
+                    image.width, image.height, seed,
                     req_width, req_height, req_frames, req_profile,
                 )
                 cancel = Event()
@@ -380,7 +386,7 @@ async def websocket_video(ws: WebSocket):
                     run_video(
                         request_id, image, prompt, seed, cancel,
                         req_width=req_width, req_height=req_height, req_frames=req_frames,
-                        req_profile=req_profile,
+                        req_profile=req_profile, prompt_suffix=req_prompt_suffix,
                     )
                 )
 
