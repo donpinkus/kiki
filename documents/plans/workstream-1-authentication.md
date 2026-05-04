@@ -286,7 +286,7 @@ Phase 3 — Flip:
 - Legacy clients get 401 + "please update"
 
 **Rollback:**
-- Phase 1: `railway variables --set AUTH_REQUIRED=false` + redeploy previous backend. Zero user impact.
+- Phase 1: `railway variable set "AUTH_REQUIRED=false"` + redeploy previous backend. Zero user impact.
 - Phase 2: previous TestFlight build remains installable. Remote Config flag (`enforceAuthentication`) can tell clients to skip sign-in if backend is broken.
 - Phase 3: flip `AUTH_REQUIRED` back to `false`.
 

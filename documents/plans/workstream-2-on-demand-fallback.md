@@ -183,7 +183,7 @@ Reasoning:
 - Default-false on merge prevents accidental re-enable via unrelated redeploys before verification.
 
 Day-0: Deploy with flag off. Confirm spot-only path unchanged via normal user session.
-Day-0 +1h: Flip `ONDEMAND_FALLBACK_ENABLED=true` via `railway variables`. Wait for natural exhaustion or force one via bogus `GPU_TYPE_ID` override for one test session.
+Day-0 +1h: Flip `ONDEMAND_FALLBACK_ENABLED=true` via `railway variable set "ONDEMAND_FALLBACK_ENABLED=true"`. Wait for natural exhaustion or force one via bogus `GPU_TYPE_ID` override for one test session.
 Day-7: Metrics clean → remove flag and dead branch. Keep `policy.allowsOnDemand()` hook permanently.
 
 ## 7. Open questions

@@ -181,7 +181,7 @@ The `MAX_MONTHLY_SPEND` threshold is unique because it's a **hard cap** (per pro
 1. Fires the webhook alert (one-time, not rate-limited — the whole point is urgency).
 2. Flips an in-memory `costGateOpen=false` flag that `getOrProvisionPod` checks *before* acquiring the semaphore.
 3. New provisions fail with `{ type: 'error', code: 'monthly_cap_reached', message: '...' }`; client shows a "Kiki is full for the month" state.
-4. Flag stays tripped until you manually raise the cap via `railway variables --set COST_ALERT_MAX_MONTHLY_SPEND=<new>` (or wait for the month to roll over).
+4. Flag stays tripped until you manually raise the cap via `railway variable set "COST_ALERT_MAX_MONTHLY_SPEND=<new>"` (or wait for the month to roll over).
 
 Tuning is operational chore; ship and adjust on first false alarm.
 

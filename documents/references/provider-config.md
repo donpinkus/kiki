@@ -122,12 +122,14 @@ Set via `railway variable set "KEY=value"` (singular subcommand, runs in `backen
 |---|---|---|
 | `RUNPOD_API_KEY` | RunPod Console → Settings → API Keys | GraphQL auth for pod lifecycle |
 | `NETWORK_VOLUMES_BY_DC` | JSON: `{"EUR-NO-1":"49n6i3twuw",...}` | Image-pod DC → volume ID map (5090 DCs) |
-| `NETWORK_VOLUMES_BY_DC_VIDEO` | JSON: `{"EU-FR-1":"...",...}` | Video-pod DC → volume ID map (H100 SXM DCs) |
+| `NETWORK_VOLUMES_BY_DC_VIDEO` | JSON: `{"US-CA-2":"4iq4uchi49",...}` | Video-pod DC → volume ID map (H100 SXM DCs) |
 | `ONDEMAND_FALLBACK_ENABLED` | `true` | Allow on-demand when spot exhausted |
-| `JWT_ACCESS_SECRET` | ≥32 byte hex | HS256 secret for access tokens |
-| `JWT_REFRESH_SECRET` | ≥32 byte hex | HS256 secret for refresh tokens |
-| `APPLE_BUNDLE_ID` | iOS bundle ID | Apple identity token audience |
-| `AUTH_REQUIRED` | `true` | Reject unauthenticated connections |
+| `VIDEO_POD_ENABLED` | `true` | Provision video pod alongside image pod when iPad requests it. Off = image-only. |
+| `JWT_ACCESS_SECRET` | ≥32 byte hex (`openssl rand -hex 32`) | HS256 secret for access tokens. Required, must differ from refresh. |
+| `JWT_REFRESH_SECRET` | ≥32 byte hex (`openssl rand -hex 32`) | HS256 secret for refresh tokens. Required, must differ from access. |
+| `APPLE_BUNDLE_ID` | iOS bundle ID | Apple identity token audience. Required. |
+| `AUTH_REQUIRED` | `true` | Reject unauthenticated connections. Production must always be `true`. |
+| `REDIS_URL` | `redis://...` | Session registry backing store. Required in production; falls back to in-memory if unset (for local dev). |
 | `MAX_CONCURRENT_PROVISIONS` | default 5 | Semaphore cap on concurrent cold starts |
 
 `FLUX_IMAGE` and `RUNPOD_GHCR_AUTH_ID` are no longer used by the live provision path. They remain set on Railway for now so the rollback procedure in the 2026-04-23 decision entry is a single env-var flip.

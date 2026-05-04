@@ -287,7 +287,7 @@ Local `.env`: `REDIS_URL=redis://localhost:6379`.
 1. **Provision Redis on Railway.** Dashboard → plugin → Redis. Grab `REDIS_URL`.
 2. **Deploy code with flag off.** `SESSION_REGISTRY=memory` default. Code on disk but inert. Verify `redis.ping()` succeeds at boot.
 3. **Test in staging.** If no staging, local docker-compose + single-user smoke against Railway with flag flipped for just our iPad.
-4. **Flip flag in production.** `railway variables --set SESSION_REGISTRY=redis` + redeploy. One destructive deploy; pick quiet hour. In-memory sessions lost once.
+4. **Flip flag in production.** `railway variable set "SESSION_REGISTRY=redis"` + redeploy. One destructive deploy; pick quiet hour. In-memory sessions lost once.
 5. **Observe one week.** Watch for Redis connection churn, reaper errors, double-provisions.
 6. **Remove `memory` path** after stable week. Delete flag. Orchestrator Redis-only.
 
