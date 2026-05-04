@@ -52,6 +52,22 @@ public actor StreamWebSocketClient {
         case cancelled(requestId: String?, atStep: Int?, error: String?)
     }
 
+    /// Sendable payload for `ConnectionEvent`. Holds a human-readable message
+    /// only — raw `Error` is intentionally not exposed across the stream
+    /// boundary because `any Error` is not reliably `Sendable`.
+    public struct DisconnectInfo: Sendable {
+        public let message: String?
+    }
+
+    /// First-class connection lifecycle event. Currently only `.disconnected`
+    /// is emitted; the contract is "exactly one disconnect event per client
+    /// instance, then the stream finishes." StreamSession uses this as the
+    /// load-bearing reconnect signal — AsyncStream termination on the data
+    /// continuations is preserved as cleanup but is no longer the trigger.
+    public enum ConnectionEvent: Sendable {
+        case disconnected(DisconnectInfo)
+    }
+
     // MARK: - Properties
 
     private let request: URLRequest
@@ -69,6 +85,16 @@ public actor StreamWebSocketClient {
 
     private let videoContinuation: AsyncStream<VideoEvent>.Continuation
     public let videoEvents: AsyncStream<VideoEvent>
+
+    private let connectionContinuation: AsyncStream<ConnectionEvent>.Continuation
+    public let connectionEvents: AsyncStream<ConnectionEvent>
+
+    /// Guards `connectionContinuation` so disconnect emission is exactly-once
+    /// per client lifecycle. Both `handleDisconnect` and the explicit
+    /// `disconnect()` path can fire in the same lifecycle (e.g. receive
+    /// error → handleDisconnect, then session.stop() → client.disconnect());
+    /// without this flag we'd yield twice or yield after `finish()`.
+    private var didEmitDisconnectEvent: Bool = false
 
     /// Most recent `frame_meta` from the pod, waiting to be paired with
     /// the next binary frame. Cleared each time a binary is emitted.
@@ -100,6 +126,10 @@ public actor StreamWebSocketClient {
         var videoCont: AsyncStream<VideoEvent>.Continuation!
         self.videoEvents = AsyncStream { videoCont = $0 }
         self.videoContinuation = videoCont
+
+        var connectionCont: AsyncStream<ConnectionEvent>.Continuation!
+        self.connectionEvents = AsyncStream { connectionCont = $0 }
+        self.connectionContinuation = connectionCont
     }
 
     // MARK: - Connection
@@ -121,6 +151,10 @@ public actor StreamWebSocketClient {
         var videoCont: AsyncStream<VideoEvent>.Continuation!
         self.videoEvents = AsyncStream { videoCont = $0 }
         self.videoContinuation = videoCont
+
+        var connectionCont: AsyncStream<ConnectionEvent>.Continuation!
+        self.connectionEvents = AsyncStream { connectionCont = $0 }
+        self.connectionContinuation = connectionCont
     }
 
     public func connect() async throws {
@@ -132,6 +166,9 @@ public actor StreamWebSocketClient {
         ])
 
         let wsTask = session.webSocketTask(with: request)
+        // Default is 1 MB; a single base64-wrapped video_complete MP4 routinely
+        // exceeds that and aborts the receive with "Message too long".
+        wsTask.maximumMessageSize = 16 * 1024 * 1024
         self.task = wsTask
         wsTask.resume()
 
@@ -222,6 +259,7 @@ public actor StreamWebSocketClient {
         task = nil
 
         state = .disconnected
+        emitDisconnectEventIfNeeded(message: nil)
         framesContinuation.finish()
         statusContinuation.finish()
         videoContinuation.finish()
@@ -337,7 +375,7 @@ public actor StreamWebSocketClient {
                         SentrySDK.capture(error: error) { scope in
                             scope.setTag(value: "ws.receive", key: "op")
                         }
-                        await self.handleDisconnect()
+                        await self.handleDisconnect(error: error)
                     }
                     break
                 }
@@ -359,7 +397,7 @@ public actor StreamWebSocketClient {
         framesContinuation.yield(ReceivedFrame(requestId: requestId, data: data))
     }
 
-    private func handleDisconnect() {
+    private func handleDisconnect(error: Error? = nil) {
         let now = Date()
         let lastReceiveAgeMs = lastReceiveAt.map { Int(now.timeIntervalSince($0) * 1000) } ?? -1
         let connectAgeMs = connectStartedAt.map { Int(now.timeIntervalSince($0) * 1000) } ?? -1
@@ -375,10 +413,32 @@ public actor StreamWebSocketClient {
         state = .disconnected
         task = nil
         receiveLoopTask = nil
+        emitDisconnectEventIfNeeded(message: error?.localizedDescription)
         framesContinuation.finish()
         statusContinuation.finish()
         videoContinuation.finish()
     }
+
+    /// Idempotent disconnect-event emission. Yields exactly once per client
+    /// lifecycle, then finishes the connection event stream. Safe to call
+    /// from both `handleDisconnect` (receive-error path) and `disconnect()`
+    /// (explicit teardown) — only the first call wins.
+    private func emitDisconnectEventIfNeeded(message: String?) {
+        guard !didEmitDisconnectEvent else { return }
+        didEmitDisconnectEvent = true
+        connectionContinuation.yield(.disconnected(DisconnectInfo(message: message)))
+        connectionContinuation.finish()
+    }
+
+    #if DEBUG
+    /// Test seam: directly drive the disconnect-event emitter so we can
+    /// verify exactly-once / idempotent behavior without setting up a real
+    /// WebSocket. Production code reaches `emitDisconnectEventIfNeeded` via
+    /// `handleDisconnect` (receive failure) or `disconnect()` (teardown).
+    internal func _testSimulateDisconnect(message: String?) {
+        emitDisconnectEventIfNeeded(message: message)
+    }
+    #endif
 
     // MARK: - Breadcrumb helper
 

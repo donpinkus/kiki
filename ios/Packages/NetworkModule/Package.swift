@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "NetworkModule",
-    platforms: [.iOS(.v17)],
+    platforms: [.iOS(.v17), .macOS(.v14)],
     products: [
         .library(name: "NetworkModule", targets: ["NetworkModule"]),
     ],
@@ -16,6 +16,10 @@ let package = Package(
             dependencies: [
                 .product(name: "Sentry", package: "sentry-cocoa"),
             ]
+        ),
+        .testTarget(
+            name: "NetworkModuleTests",
+            dependencies: ["NetworkModule"]
         ),
     ]
 )

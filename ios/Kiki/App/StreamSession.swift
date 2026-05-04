@@ -43,6 +43,14 @@ final class StreamSession {
     private var receiveTask: Task<Void, Never>?
     private var statusTask: Task<Void, Never>?
     private var videoTask: Task<Void, Never>?
+    /// Subscribes to `client.connectionEvents`; turns an explicit
+    /// `.disconnected` event into a `attemptReconnect()` call. This is the
+    /// load-bearing reconnect trigger — `receiveTask`'s post-loop branch is
+    /// cleanup-only.
+    private var connectionEventTask: Task<Void, Never>?
+    /// Owns one in-flight reconnect cycle. Set when `attemptReconnect()`
+    /// schedules `runReconnect`, cleared when that task finishes. The
+    /// non-nil check inside `attemptReconnect()` makes scheduling idempotent.
     private var reconnectTask: Task<Void, Never>?
 
     /// How often to capture and send frames (default ~2 FPS for FLUX.2-klein).
@@ -156,7 +164,18 @@ final class StreamSession {
         self.framesReceived = 0
         self.lastSentJpegData = nil
 
-        await connectAndRun()
+        do {
+            try await connectAndRunOnce()
+        } catch {
+            // Tear down the partially-set-up client before scheduling
+            // reconnect. See `connectAndRunOnce`'s failure-cleanup contract.
+            await client.disconnect()
+            if !isStopped {
+                attemptReconnect()
+            } else {
+                Self.breadcrumb(category: "stream.lifecycle", message: "Not reconnecting — session stopped")
+            }
+        }
     }
 
     // MARK: - Preview mode
@@ -236,14 +255,27 @@ final class StreamSession {
             "framesReceived": framesReceived,
         ])
         isStopped = true
-        cancelAllTasks()
+        cancelStreamingTasks()
+        reconnectTask?.cancel()
+        reconnectTask = nil
         Task { await client.disconnect() }
         setReadiness(finalReadiness)
     }
 
     // MARK: - Connection
 
-    private func connectAndRun() async {
+    /// Connect the WS, send the initial config, and start the child consumer
+    /// tasks (capture/receive/video/status/connection-event). Returns as soon
+    /// as setup succeeds — does NOT block for the session lifetime. Throws on
+    /// any failure during connect/sendConfig.
+    ///
+    /// Failure-cleanup contract: if this throws, the caller MUST call
+    /// `await client.disconnect()` before discarding the client. The throw
+    /// can happen mid-handshake (no internal state to clean) or after
+    /// `connect()` succeeded but before `startReceiveLoop()` ran (the
+    /// client's internal receive loop and `URLSessionWebSocketTask` are
+    /// alive and will leak otherwise).
+    private func connectAndRunOnce() async throws {
         connectionAttemptId += 1
         let attemptId = connectionAttemptId
         currentConnectStartedAt = Date()
@@ -287,63 +319,101 @@ final class StreamSession {
                 "stopped": isStopped,
             ], level: .error)
             tx.finish(status: .internalError)
-            if !isStopped {
-                await attemptReconnect()
-            } else {
-                Self.breadcrumb(category: "stream.lifecycle", message: "Not reconnecting — session stopped", data: [
-                    "attemptId": attemptId,
-                ])
-            }
+            throw error
         }
     }
 
-    private func attemptReconnect() async {
+    /// Schedule a reconnect attempt. Idempotent: if a reconnect is already
+    /// running, this is a no-op; if readiness is `.failed` (attempts
+    /// exhausted), also a no-op so stale events don't reschedule. Synchronous
+    /// fire-and-forget — the reconnect runs on `reconnectTask`, NOT on the
+    /// caller's task. That's load-bearing: previously this was `async` and
+    /// invoked from inside `receiveTask`, so the cancel-streaming-tasks step
+    /// inside the reconnect cancelled its own caller, the post-sleep
+    /// `Task.isCancelled` guard returned, and the UI stuck on "Connecting…".
+    /// Marked `internal` so the test target can drive it directly via
+    /// `@testable import` (Layer 1 idempotency test).
+    func attemptReconnect() {
         guard !isStopped else {
             Self.breadcrumb(category: "stream.retry", message: "Reconnect skipped — session stopped")
             return
         }
-        reconnectAttempts += 1
-        let delay = pow(2.0, Double(reconnectAttempts - 1))  // 1, 2, 4, 8, 16s
-        Self.breadcrumb(category: "stream.retry", message: "Reconnect attempt", data: [
-            "attempt": reconnectAttempts,
-            "max": Self.maxReconnectAttempts,
-            "backoffSec": delay,
-        ])
-        Analytics.track(.streamReconnect, properties: [
-            "attempt": reconnectAttempts,
-            "backoff_sec": delay,
-        ])
-
-        if reconnectAttempts > Self.maxReconnectAttempts {
-            SentrySDK.capture(message: "stream.reconnect.exhausted") { scope in
-                scope.setLevel(.error)
-                scope.setTag(value: String(Self.maxReconnectAttempts), key: "maxAttempts")
-            }
-            setReadiness(.failed(message: "Unable to connect. Please restart the app."))
+        if case .failed = readiness {
+            // Attempts already exhausted; don't reschedule from stale events.
             return
         }
+        if reconnectTask != nil {
+            // Coalesce: another disconnect signal landed while a reconnect is
+            // already in flight. The active task will keep retrying.
+            return
+        }
+        reconnectTask = Task { [weak self] in
+            await self?.runReconnect()
+            self?.reconnectTask = nil
+        }
+    }
 
-        let tx = SentrySDK.startTransaction(name: "stream.reconnect", operation: "stream.reconnect")
-        tx.setData(value: reconnectAttempts, key: "attempt")
-        tx.setData(value: delay, key: "backoffSec")
-
-        cancelAllTasks()
-        warm(message: "Connecting…")
-
-        try? await Task.sleep(for: .seconds(delay))
-        guard !isStopped, !Task.isCancelled else {
-            Self.breadcrumb(category: "stream.retry", message: "Reconnect cancelled during backoff", data: [
-                "stopped": isStopped,
-                "taskCancelled": Task.isCancelled,
+    /// Reconnect retry loop. Owns: backoff schedule, max-attempts cap, client
+    /// replacement. Each iteration cancels the streaming tasks, sleeps with
+    /// exponential backoff, builds a fresh client, runs `connectAndRunOnce`.
+    /// On success: returns. On failure: tears down the partially-set-up
+    /// client, increments backoff, retries.
+    private func runReconnect() async {
+        while !isStopped, !Task.isCancelled {
+            reconnectAttempts += 1
+            let delay = pow(2.0, Double(reconnectAttempts - 1))  // 1, 2, 4, 8, 16s
+            Self.breadcrumb(category: "stream.retry", message: "Reconnect attempt", data: [
+                "attempt": reconnectAttempts,
+                "max": Self.maxReconnectAttempts,
+                "backoffSec": delay,
             ])
-            tx.finish(status: .cancelled)
-            return
-        }
+            Analytics.track(.streamReconnect, properties: [
+                "attempt": reconnectAttempts,
+                "backoff_sec": delay,
+            ])
 
-        Self.breadcrumb(category: "stream.retry", message: "Reconnecting", data: ["url": url.absoluteString])
-        self.client = StreamWebSocketClient(request: request)
-        tx.finish()
-        await connectAndRun()
+            if reconnectAttempts > Self.maxReconnectAttempts {
+                SentrySDK.capture(message: "stream.reconnect.exhausted") { scope in
+                    scope.setLevel(.error)
+                    scope.setTag(value: String(Self.maxReconnectAttempts), key: "maxAttempts")
+                }
+                setReadiness(.failed(message: "Unable to connect. Please restart the app."))
+                return
+            }
+
+            let tx = SentrySDK.startTransaction(name: "stream.reconnect", operation: "stream.reconnect")
+            tx.setData(value: reconnectAttempts, key: "attempt")
+            tx.setData(value: delay, key: "backoffSec")
+
+            cancelStreamingTasks()
+            warm(message: "Connecting…")
+
+            try? await Task.sleep(for: .seconds(delay))
+            guard !isStopped, !Task.isCancelled else {
+                Self.breadcrumb(category: "stream.retry", message: "Reconnect cancelled during backoff", data: [
+                    "stopped": isStopped,
+                    "taskCancelled": Task.isCancelled,
+                ])
+                tx.finish(status: .cancelled)
+                return
+            }
+
+            Self.breadcrumb(category: "stream.retry", message: "Reconnecting", data: ["url": url.absoluteString])
+            self.client = StreamWebSocketClient(request: request)
+            tx.finish()
+
+            do {
+                try await connectAndRunOnce()
+                return  // success — drop out of loop
+            } catch {
+                // Tear down the partially-set-up client so its receive loop
+                // and WS task don't linger. If `connect()` succeeded but
+                // `sendConfig` failed, the client is `.connected` with an
+                // active receiveLoopTask — disconnect() shuts both down.
+                await client.disconnect()
+                continue  // back off again
+            }
+        }
     }
 
     // MARK: - Capture Loop
@@ -466,6 +536,11 @@ final class StreamSession {
             let lastFrameAgeMs = self.lastFrameReceivedAt.map { Int(now.timeIntervalSince($0) * 1000) } ?? -1
             let connectAgeMs = self.currentConnectStartedAt.map { Int(now.timeIntervalSince($0) * 1000) } ?? -1
             if !Task.isCancelled, !stopped {
+                // Reconnect is driven by `connectionEventTask` (subscribes to
+                // `client.connectionEvents`), not by this branch. Receive-loop
+                // exit and the disconnect event always pair today, but if a
+                // future client refactor finishes the frames stream without a
+                // matching event, this Sentry capture will surface it.
                 SentrySDK.capture(message: "stream.receive.unexpected_end") { scope in
                     scope.setLevel(.warning)
                     scope.setExtra(value: count, key: "frames")
@@ -473,13 +548,12 @@ final class StreamSession {
                     scope.setExtra(value: lastFrameAgeMs, key: "lastFrameAgeMs")
                     scope.setExtra(value: connectAgeMs, key: "connectAgeMs")
                 }
-                Self.breadcrumb(category: "stream.lifecycle", message: "Receive loop unexpected end → reconnect", data: [
+                Self.breadcrumb(category: "stream.lifecycle", message: "Receive loop unexpected end", data: [
                     "attemptId": attemptId,
                     "frames": count,
                     "lastFrameAgeMs": lastFrameAgeMs,
                     "connectAgeMs": connectAgeMs,
                 ], level: .warning)
-                await self.attemptReconnect()
             } else {
                 Self.breadcrumb(category: "stream.lifecycle", message: "Receive loop ended", data: [
                     "attemptId": attemptId,
@@ -540,6 +614,21 @@ final class StreamSession {
                 }
             }
         }
+
+        connectionEventTask = Task { [weak self] in
+            guard let self else { return }
+            let events = await client.connectionEvents
+            for await event in events {
+                guard !Task.isCancelled else { break }
+                switch event {
+                case .disconnected(let info):
+                    Self.breadcrumb(category: "stream.connection", message: "Disconnect event", data: [
+                        "message": info.message ?? "(none)",
+                    ], level: .warning)
+                    self.attemptReconnect()
+                }
+            }
+        }
     }
 
     /// Map a server state event to UI readiness. Non-terminal states use
@@ -591,7 +680,13 @@ final class StreamSession {
         framesReceived = count
     }
 
-    private func cancelAllTasks() {
+    /// Cancel the I/O child tasks (capture/receive/video/status/connection-event).
+    /// Does NOT touch `reconnectTask` — safe to call from inside a running
+    /// reconnect. Calling this from `runReconnect` previously cancelled the
+    /// reconnect's own task (when invoked via `await self.attemptReconnect()`
+    /// from inside `receiveTask`); splitting reconnectTask out fixes that
+    /// self-cancellation. `stop()` cancels reconnectTask separately.
+    private func cancelStreamingTasks() {
         captureTask?.cancel()
         captureTask = nil
         receiveTask?.cancel()
@@ -600,8 +695,8 @@ final class StreamSession {
         statusTask = nil
         videoTask?.cancel()
         videoTask = nil
-        reconnectTask?.cancel()
-        reconnectTask = nil
+        connectionEventTask?.cancel()
+        connectionEventTask = nil
     }
 
     private func resizeImage(_ image: UIImage, to size: CGSize) -> UIImage? {
@@ -656,7 +751,7 @@ final class StreamSession {
         // (queued → finding_gpu → ...) resets the timer naturally. Terminal
         // states (.ready/.failed/.disconnected/.idleTimeout) just cancel.
         // Cleanup on `stop()` happens via `setReadiness(.disconnected)` →
-        // applyReadiness, so no need to touch `cancelAllTasks`.
+        // applyReadiness, so no need to touch `cancelStreamingTasks`.
         warmingWatchdogTask?.cancel()
         warmingWatchdogTask = nil
         if case .warming(let message, _) = new {
