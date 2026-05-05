@@ -174,7 +174,7 @@ public struct RecognizerSeeds: Equatable, Sendable {
     public var confidenceHysteresis: CGFloat = 0.05
 
     // Hold detection
-    public var holdStabilityWindow: TimeInterval = 0.120
+    public var holdStabilityWindow: TimeInterval = 0.400
     public var holdCommitDelay: TimeInterval = 0.450
     /// Bounding-box diagonal (pt) of recent positions that still counts as
     /// "stationary." Tolerates hand tremor and Apple Pencil position noise.
@@ -182,9 +182,9 @@ public struct RecognizerSeeds: Equatable, Sendable {
     /// 240 pt/s, which would blow past any reasonable velocity threshold.
     /// Position-spread is the right framing.
     ///
-    /// 8pt: real micro-tremor on a still pen is < 3pt bbox over 120ms;
+    /// 8pt: real micro-tremor on a still pen is < 3pt bbox over 400ms;
     /// 8pt comfortably catches that while still rejecting careful drawing
-    /// (a pen moving > ~67pt/s covers > 8pt in 120ms). Briefly inflated to
+    /// (a pen moving > ~20pt/s covers > 8pt in 400ms). Briefly inflated to
     /// 20 during an early diagnostic, which turned out to mask a separate
     /// scoring bug rather than a hold-detection problem.
     public var holdJitterTolerance: CGFloat = 8      // pt — bbox diagonal in the window

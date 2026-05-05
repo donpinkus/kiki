@@ -253,14 +253,14 @@ final class StrokeRecognizerTests: XCTestCase {
 
     func test_isHolding_trueAfterStationaryWindow() {
         let r = StrokeRecognizer()
-        // 30 samples of motion, then 30 samples stationary at the end.
+        // 30 samples of motion, then 400ms stationary at the end.
         let drawingPts = straightLine(from: CGPoint(x: 100, y: 100),
                                       to: CGPoint(x: 400, y: 100), n: 30)
         var allInputs = points(drawingPts)
         let lastTime = allInputs.last!.timestamp
         let lastPos = allInputs.last!.position
-        // Add 200ms of stationary samples (well over 120ms holdStabilityWindow).
-        for i in 1...30 {
+        // Add 400ms of stationary samples (meets holdStabilityWindow).
+        for i in 1...50 {
             allInputs.append(RecognizerInputPoint(
                 position: lastPos,
                 timestamp: lastTime + TimeInterval(i) * 0.008
@@ -268,6 +268,25 @@ final class StrokeRecognizerTests: XCTestCase {
         }
         for p in allInputs { r.feed(point: p) }
         XCTAssertTrue(r.isHolding)
+    }
+
+    func test_isHolding_falseBeforeStationaryWindowCompletes() {
+        let r = StrokeRecognizer()
+        let drawingPts = straightLine(from: CGPoint(x: 100, y: 100),
+                                      to: CGPoint(x: 400, y: 100), n: 30)
+        var allInputs = points(drawingPts)
+        let lastTime = allInputs.last!.timestamp
+        let lastPos = allInputs.last!.position
+        // 240ms used to be enough under the old 120ms window; it should no
+        // longer trigger with the 400ms window.
+        for i in 1...30 {
+            allInputs.append(RecognizerInputPoint(
+                position: lastPos,
+                timestamp: lastTime + TimeInterval(i) * 0.008
+            ))
+        }
+        for p in allInputs { r.feed(point: p) }
+        XCTAssertFalse(r.isHolding)
     }
 
     func test_isHolding_trueWithMicroHandJitter() {
@@ -281,8 +300,8 @@ final class StrokeRecognizerTests: XCTestCase {
         let lastTime = allInputs.last!.timestamp
         let lastPos = allInputs.last!.position
         var rng = SeededRNG(seed: 7)
-        // 200ms of "stationary" samples with realistic ±2pt hand tremor.
-        for i in 1...30 {
+        // 400ms of "stationary" samples with realistic ±2pt hand tremor.
+        for i in 1...50 {
             let jitterX = (rng.nextUnit() - 0.5) * 4
             let jitterY = (rng.nextUnit() - 0.5) * 4
             allInputs.append(RecognizerInputPoint(
@@ -304,7 +323,7 @@ final class StrokeRecognizerTests: XCTestCase {
         let lastTime = allInputs.last!.timestamp
         let lastPos = allInputs.last!.position
         var rng = SeededRNG(seed: 11)
-        for i in 1...30 {
+        for i in 1...50 {
             let jitterX = (rng.nextUnit() - 0.5) * 20  // ±10 pt
             let jitterY = (rng.nextUnit() - 0.5) * 20
             allInputs.append(RecognizerInputPoint(
