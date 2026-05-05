@@ -68,42 +68,44 @@ _load_error_traceback: str | None = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _load_error_traceback
-    logger.info(
-        f"Starting {config.LTX_MODEL_FAMILY} video server: "
-        f"model={config.LTX_MODEL_REPO}/{config.LTX_MODEL_FILE} "
-        f"pipeline=DistilledPipeline "
-        f"quantization={config.LTX_QUANTIZATION} "
-        f"resolution={config.LTX_WIDTH}x{config.LTX_HEIGHT} "
-        f"num_frames={config.LTX_NUM_FRAMES} fps={config.LTX_FPS}",
-        extra={
-            "model_family": config.LTX_MODEL_FAMILY,
-            "model_repo": config.LTX_MODEL_REPO,
-            "model_file": config.LTX_MODEL_FILE,
-            "quantization": config.LTX_QUANTIZATION,
-            "width": config.LTX_WIDTH,
-            "height": config.LTX_HEIGHT,
-            "num_frames": config.LTX_NUM_FRAMES,
-            "fps": config.LTX_FPS,
-        },
-    )
-    try:
-        video_pipeline.load()
-    except Exception:
-        import traceback
-        _load_error_traceback = traceback.format_exc()
-        logger.exception("LTX-2.3 pipeline load failed — exposing traceback via /health")
-        # Don't re-raise — keep the FastAPI app alive so /health can return
-        # the traceback. The pipeline is unusable but observable.
+    with sentry_init.phase("session_starting"):
+        logger.info(
+            f"Starting {config.LTX_MODEL_FAMILY} video server: "
+            f"model={config.LTX_MODEL_REPO}/{config.LTX_MODEL_FILE} "
+            f"pipeline=DistilledPipeline "
+            f"quantization={config.LTX_QUANTIZATION} "
+            f"resolution={config.LTX_WIDTH}x{config.LTX_HEIGHT} "
+            f"num_frames={config.LTX_NUM_FRAMES} fps={config.LTX_FPS}",
+            extra={
+                "model_family": config.LTX_MODEL_FAMILY,
+                "model_repo": config.LTX_MODEL_REPO,
+                "model_file": config.LTX_MODEL_FILE,
+                "quantization": config.LTX_QUANTIZATION,
+                "width": config.LTX_WIDTH,
+                "height": config.LTX_HEIGHT,
+                "num_frames": config.LTX_NUM_FRAMES,
+                "fps": config.LTX_FPS,
+            },
+        )
+        try:
+            video_pipeline.load()
+        except Exception:
+            import traceback
+            _load_error_traceback = traceback.format_exc()
+            logger.exception("LTX-2.3 pipeline load failed — exposing traceback via /health")
+            # Don't re-raise — keep the FastAPI app alive so /health can return
+            # the traceback. The pipeline is unusable but observable.
     yield
     # Step 2 — release persistent transformer (and later Gemma/processor) on
     # graceful shutdown. Idempotent inside the pipeline; runs in a thread to
     # avoid blocking the event loop on CUDA cleanup.
-    logger.info("Shutting down — releasing persistent models...")
-    try:
-        await asyncio.to_thread(video_pipeline.shutdown_persistent_models)
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"Error during shutdown_persistent_models: {e}")
-    logger.info("Shutting down.")
+    with sentry_init.phase("session_ending"):
+        logger.info("Shutting down — releasing persistent models...")
+        try:
+            await asyncio.to_thread(video_pipeline.shutdown_persistent_models)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Error during shutdown_persistent_models: {e}")
+        logger.info("Shutting down.")
 
 
 app = FastAPI(lifespan=lifespan)
@@ -329,7 +331,9 @@ async def websocket_video(ws: WebSocket):
         except Exception as e:  # noqa: BLE001
             videos_failed += 1
             logger.error(
-                "encode/send failed: req=%s err=%s", request_id, e, exc_info=True,
+                f"encode/send failed: req={request_id} err={e}",
+                exc_info=True,
+                extra={"req": request_id},
             )
             try:
                 await ws.send_text(json.dumps({
@@ -444,13 +448,18 @@ async def websocket_video(ws: WebSocket):
                 cancel = Event()
                 current_request_id = request_id
                 current_cancel = cancel
-                current_task = asyncio.create_task(
-                    run_video(
-                        request_id, image, prompt, seed, cancel,
-                        req_width=req_width, req_height=req_height, req_frames=req_frames,
-                        req_profile=req_profile, prompt_suffix=req_prompt_suffix,
+                # asyncio.create_task copies the current contextvars snapshot
+                # into the new Task, so setting phase here propagates to every
+                # log emitted inside run_video (including its asyncio.to_thread
+                # calls). Parent WS handler's phase stays unset.
+                with sentry_init.phase("animating"):
+                    current_task = asyncio.create_task(
+                        run_video(
+                            request_id, image, prompt, seed, cancel,
+                            req_width=req_width, req_height=req_height, req_frames=req_frames,
+                            req_profile=req_profile, prompt_suffix=req_prompt_suffix,
+                        )
                     )
-                )
 
             elif mtype == "video_cancel":
                 cancel_req = data.get("requestId")

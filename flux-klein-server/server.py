@@ -58,10 +58,12 @@ pipeline = FluxKleinPipeline()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Load the model on startup."""
-    logger.info("Starting FLUX.2-klein server...")
-    pipeline.load()
+    with sentry_init.phase("session_starting"):
+        logger.info("Starting FLUX.2-klein server...")
+        pipeline.load()
     yield
-    logger.info("Shutting down.")
+    with sentry_init.phase("session_ending"):
+        logger.info("Shutting down.")
 
 
 app = FastAPI(lifespan=lifespan)
@@ -209,59 +211,60 @@ async def websocket_stream(ws: WebSocket):
             if jpeg_data is None:
                 continue
 
-            try:
-                cfg = dict(current_config)
-                gen_start = time.time()
-                result_jpeg = await asyncio.to_thread(_process_frame, jpeg_data, cfg)
-                gen_ms = int((time.time() - gen_start) * 1000)
-                if not done:
-                    request_id = cfg.get("requestId")
-                    # Evaluated at frame-completion time: if no new frame has
-                    # arrived during generation, the iPad has stopped drawing
-                    # and this image is eligible for video animation.
-                    queue_empty = latest_frame is None
-                    await ws.send_text(json.dumps({
-                        "type": "frame_meta",
-                        "requestId": request_id,
-                        "queueEmpty": queue_empty,
-                    }))
-                    await ws.send_bytes(result_jpeg)
-                    frames_processed += 1
-
-                    # Edge log: false -> true transition. This is the moment
-                    # the backend will dispatch the just-sent image to the
-                    # video pod. Single grep target during triage.
-                    if queue_empty and prev_queue_empty is not True:
-                        queue_drained_count += 1
-                        logger.info(
-                            f"queue drained: req={request_id} last_generated_set=true",
-                            extra={"req": request_id},
-                        )
-                    prev_queue_empty = queue_empty
-
-                    logger.info(
-                        f"frame: req={request_id} queueEmpty={queue_empty} "
-                        f"gen_ms={gen_ms} "
-                        f"dropped_since_last={frames_dropped_since_last_send}",
-                        extra={
-                            "req": request_id,
-                            "queue_empty": queue_empty,
-                            "gen_ms": gen_ms,
-                            "dropped_since_last": frames_dropped_since_last_send,
-                        },
-                    )
-                    frames_dropped_since_last_send = 0
-            except Exception as e:
-                logger.error(f"Frame processing error: {e}", exc_info=True)
-                if not done:
-                    try:
+            with sentry_init.phase("drawing"):
+                try:
+                    cfg = dict(current_config)
+                    gen_start = time.time()
+                    result_jpeg = await asyncio.to_thread(_process_frame, jpeg_data, cfg)
+                    gen_ms = int((time.time() - gen_start) * 1000)
+                    if not done:
+                        request_id = cfg.get("requestId")
+                        # Evaluated at frame-completion time: if no new frame has
+                        # arrived during generation, the iPad has stopped drawing
+                        # and this image is eligible for video animation.
+                        queue_empty = latest_frame is None
                         await ws.send_text(json.dumps({
-                            "type": "status",
-                            "status": "error",
-                            "message": str(e),
+                            "type": "frame_meta",
+                            "requestId": request_id,
+                            "queueEmpty": queue_empty,
                         }))
-                    except Exception:
-                        pass
+                        await ws.send_bytes(result_jpeg)
+                        frames_processed += 1
+
+                        # Edge log: false -> true transition. This is the moment
+                        # the backend will dispatch the just-sent image to the
+                        # video pod. Single grep target during triage.
+                        if queue_empty and prev_queue_empty is not True:
+                            queue_drained_count += 1
+                            logger.info(
+                                f"queue drained: req={request_id} last_generated_set=true",
+                                extra={"req": request_id},
+                            )
+                        prev_queue_empty = queue_empty
+
+                        logger.info(
+                            f"frame: req={request_id} queueEmpty={queue_empty} "
+                            f"gen_ms={gen_ms} "
+                            f"dropped_since_last={frames_dropped_since_last_send}",
+                            extra={
+                                "req": request_id,
+                                "queue_empty": queue_empty,
+                                "gen_ms": gen_ms,
+                                "dropped_since_last": frames_dropped_since_last_send,
+                            },
+                        )
+                        frames_dropped_since_last_send = 0
+                except Exception as e:
+                    logger.error(f"Frame processing error: {e}", exc_info=True)
+                    if not done:
+                        try:
+                            await ws.send_text(json.dumps({
+                                "type": "status",
+                                "status": "error",
+                                "message": str(e),
+                            }))
+                        except Exception:
+                            pass
 
     # Run both loops concurrently
     try:

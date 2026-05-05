@@ -7,9 +7,34 @@ from __future__ import annotations
 
 import logging
 import os
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Iterator
 
 import sentry_sdk
 from sentry_sdk.integrations.logging import LoggingIntegration
+
+
+# Cross-stack phase vocabulary (shared with backend + iOS when they catch up):
+#   session_starting | drawing | animating | reconnecting | session_ending
+# Pods set: session_starting, session_ending, drawing, animating.
+# reconnecting is iOS/backend only — pod can't tell fresh boot from reconnect.
+_phase: ContextVar[str | None] = ContextVar("kiki_phase", default=None)
+
+
+@contextmanager
+def phase(name: str) -> Iterator[None]:
+    """Tag every log emitted within this block with `phase=<name>`.
+
+    Propagates through asyncio tasks and `asyncio.to_thread` calls (Python 3.9+
+    copies the context into worker threads). Nested blocks override their parent
+    and restore on exit.
+    """
+    token = _phase.set(name)
+    try:
+        yield
+    finally:
+        _phase.reset(token)
 
 
 def init(pod_kind: str) -> None:
@@ -20,12 +45,16 @@ def init(pod_kind: str) -> None:
     pod_id = os.environ.get("RUNPOD_POD_ID")
 
     # Scope tags don't propagate to Logs-product entries — only to errors/spans.
-    # Inject pod_kind / pod_id as log attributes via before_send_log so they're
-    # queryable in the Sentry UI Logs explorer (e.g. `pod_kind:image`).
+    # Inject pod_kind / pod_id / phase as log attributes via before_send_log so
+    # they're queryable in the Sentry UI Logs explorer (e.g. `pod_kind:image`,
+    # `phase:session_starting`).
     def before_send_log(log, _hint):
         log["attributes"]["pod_kind"] = pod_kind
         if pod_id:
             log["attributes"]["pod_id"] = pod_id
+        active_phase = _phase.get()
+        if active_phase is not None:
+            log["attributes"]["phase"] = active_phase
         return log
 
     sentry_sdk.init(

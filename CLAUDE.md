@@ -124,6 +124,22 @@ Pods log via stdlib `logging` → `LoggingIntegration` ships `INFO+` lines into 
 - **`sentry_sdk.set_tag()` ≠ log attribute.** Tags propagate to errors/spans only, not to the Logs product. To attach something to log entries, use `before_send_log` (global) or `extra={}` (per-call).
 - **Reading logs back via Sentry MCP `search_events`:** the MCP's query agent silently drops unrecognized attribute names from `fields=[...]` — if a field is missing from the response but visible in the Sentry UI, the data is fine, the MCP agent just didn't surface it. Cross-check in `donki.sentry.io` → Logs before chasing it as a code bug.
 
+**Cross-stack `phase` attribute** — for filtering "what user-journey moment is this log from" across iOS / backend / pods. Single shared vocabulary; the layer dimension is filterable independently via Sentry project + `pod_kind`.
+
+| `phase` value | When |
+|---|---|
+| `session_starting` | Fresh launch through "able to draw". Pod: model load + warmup. Backend: orchestrator provisioning. iOS: loading state. |
+| `drawing` | Active drawing, image stream live. Pod: per-frame generation. Backend: WS relay. iOS: stroke handling + preview. |
+| `animating` | User paused, video idle-state running. Pod: LTX inference + encode + stream (one block). Backend: WS relay. iOS: video preview. |
+| `reconnecting` | Recovering from a mid-session disconnect. Set by iOS + backend only; pod stays on `session_starting` for any boot since it can't tell fresh-vs-reconnect. Cross-layer correlation via `trace_id`. |
+| `session_ending` | Session winding down. |
+
+**Pod-side mechanism:** `flux-klein-server/sentry_init.py` exports a `phase()` context manager backed by `contextvars.ContextVar`. Set with `with sentry_init.phase("drawing"):` and the value propagates through `asyncio.create_task` and `asyncio.to_thread` into all logs emitted within (verified — Python 3.9+ copies the contextvars snapshot into spawned tasks/threads). The `before_send_log` hook injects the active value as a top-level `phase` log attribute. Logs outside any phase block have no `phase` attribute (filterable as `!has:phase`).
+
+**Don't introduce pod-internal sub-phases** like `video_generate` / `video_encode` as separate top-level values — fold those into the user-journey phase (`animating`) and rely on existing structured fields (`gen_ms`, `encode_ms`) and `code.function.name` (auto-attached) for sub-stage discrimination. If a real cross-stack debugging need requires finer granularity, add a `subphase` attribute alongside.
+
+**Backend (TS) and iOS (Swift) rollout — vocabulary above is shared, mechanisms when implemented:** Backend uses `AsyncLocalStorage` + a `withPhase("...", () => { ... })` helper, injecting via the `beforeSendLog` equivalent. iOS uses `@TaskLocal` on a static, same context-manager-ish pattern via Swift Concurrency.
+
 **Cross-project search:** Sentry's UI page-filter handles "all projects" or any subset. To stitch a single user action across iOS → backend → pod: use trace_id propagation (auto over HTTP, manual over WS) plus `session_id` tagged on every event. Project boundary is *not* a data silo — it's just for permissions, alert routing, and quotas.
 
 **PostHog** stays in its lane: product analytics events only (per `feedback_single_observability.md`). Errors and stdout/stderr go to Sentry exclusively.
