@@ -28,7 +28,10 @@ def _load_app_version() -> dict[str, str | bool]:
             data = json.load(f)
         return {f"app_{k}": v for k, v in data.items() if isinstance(v, (str, int, float, bool))}
     except (OSError, json.JSONDecodeError) as e:
-        logger.info("No app version file at %s (%s); reporting empty", path, type(e).__name__)
+        logger.info(
+            f"No app version file at {path} ({type(e).__name__}); reporting empty",
+            extra={"path": path, "error_type": type(e).__name__},
+        )
         return {}
 
 # How many parallel reads to issue against the network volume during prefetch.
@@ -64,7 +67,7 @@ def _read_to_devnull(path: str) -> None:
     except OSError as e:
         # Don't fail the boot if a prefetch read errors — pipe.to("cuda") will
         # fall back to its own mmap reads, just slower.
-        logger.warning("Prefetch read failed for %s: %s", path, e)
+        logger.warning(f"Prefetch read failed for {path}: {e}", extra={"path": path})
 
 
 class FluxKleinPipeline:
@@ -98,7 +101,10 @@ class FluxKleinPipeline:
 
     def load(self) -> None:
         """Load FLUX.2-klein model and warm up."""
-        logger.info("Loading model: %s (dtype=%s)", config.MODEL_ID, config.DTYPE)
+        logger.info(
+            f"Loading model: {config.MODEL_ID} (dtype={config.DTYPE})",
+            extra={"model_id": config.MODEL_ID, "dtype": config.DTYPE},
+        )
         t0 = time.time()
 
         from diffusers import Flux2KleinPipeline
@@ -129,8 +135,9 @@ class FluxKleinPipeline:
             device_map_used = True
         except (TypeError, ValueError, NotImplementedError) as e:
             logger.warning(
-                "device_map='cuda' rejected (%s: %s); falling back to standard load + to('cuda')",
-                type(e).__name__, e,
+                f"device_map='cuda' rejected ({type(e).__name__}: {e}); "
+                f"falling back to standard load + to('cuda')",
+                extra={"error_type": type(e).__name__},
             )
             self.pipe = Flux2KleinPipeline.from_pretrained(
                 config.MODEL_ID,
@@ -167,9 +174,15 @@ class FluxKleinPipeline:
             self.pipe.to("cuda")
         self._phase_timings["to_cuda_ms"] = int((time.time() - t_phase) * 1000)
 
+        load_s = time.time() - t0
         logger.info(
-            "Model loaded in %.1fs (quantization=%s, device_map=%s)",
-            time.time() - t0, self._quantization, device_map_used,
+            f"Model loaded in {load_s:.1f}s "
+            f"(quantization={self._quantization}, device_map={device_map_used})",
+            extra={
+                "load_s": round(load_s, 1),
+                "quantization": self._quantization,
+                "device_map_used": device_map_used,
+            },
         )
 
         # Warmup with a dummy txt2img generation
@@ -185,7 +198,11 @@ class FluxKleinPipeline:
                 generator=torch.Generator(device="cuda").manual_seed(0),
             )
         self._phase_timings["warmup_inference_ms"] = int((time.time() - t_phase) * 1000)
-        logger.info("Warmup done (%.1fs)", self._phase_timings["warmup_inference_ms"] / 1000)
+        warmup_s = self._phase_timings["warmup_inference_ms"] / 1000
+        logger.info(
+            f"Warmup done ({warmup_s:.1f}s)",
+            extra={"warmup_s": round(warmup_s, 1)},
+        )
 
         # Capture memory headroom after load completes — high prefetch worker
         # counts can pin gigabytes of page cache. If MemAvailable trends low
@@ -196,9 +213,13 @@ class FluxKleinPipeline:
             self._phase_timings["cpu_mem_avail_mb_at_ready"] = mem_avail
 
         self._ready = True
+        total_s = time.time() - t0
         logger.info(
-            "Pipeline ready. Total init: %.1fs (phases: %s)",
-            time.time() - t0, self._phase_timings,
+            f"Pipeline ready. Total init: {total_s:.1f}s (phases: {self._phase_timings})",
+            extra={
+                "total_init_s": round(total_s, 1),
+                "phases": self._phase_timings,
+            },
         )
 
     def generate_reference(
@@ -263,7 +284,10 @@ class FluxKleinPipeline:
         cache_name = "models--" + config.MODEL_ID.replace("/", "--")
         base = os.path.join(hf_home, "hub", cache_name)
         if not os.path.isdir(base):
-            logger.info("FLUX cache dir %s missing; skipping prefetch", base)
+            logger.info(
+                f"FLUX cache dir {base} missing; skipping prefetch",
+                extra={"cache_dir": str(base)},
+            )
             return None
 
         targets: list[str] = []
@@ -275,14 +299,23 @@ class FluxKleinPipeline:
                     targets.append(os.path.join(root, f))
 
         if not targets:
-            logger.info("No safetensors found under %s; skipping prefetch", base)
+            logger.info(
+                f"No safetensors found under {base}; skipping prefetch",
+                extra={"cache_dir": str(base)},
+            )
             return None
 
         total_bytes = sum(os.path.getsize(p) for p in targets)
         self._phase_timings["prefetch_bytes_mb"] = total_bytes >> 20
+        total_gb = total_bytes / (1 << 30)
         logger.info(
-            "Prefetching %d safetensors (%.1f GB) into page cache (%d workers)...",
-            len(targets), total_bytes / (1 << 30), _PREFETCH_WORKERS,
+            f"Prefetching {len(targets)} safetensors ({total_gb:.1f} GB) "
+            f"into page cache ({_PREFETCH_WORKERS} workers)...",
+            extra={
+                "safetensor_count": len(targets),
+                "total_gb": round(total_gb, 1),
+                "workers": _PREFETCH_WORKERS,
+            },
         )
 
         phase_timings = self._phase_timings  # capture for closure
@@ -293,7 +326,11 @@ class FluxKleinPipeline:
                 list(ex.map(_read_to_devnull, targets))
             elapsed_ms = int((time.time() - t0) * 1000)
             phase_timings["prefetch_total_ms"] = elapsed_ms
-            logger.info("Prefetch complete in %.1fs", elapsed_ms / 1000)
+            elapsed_s = elapsed_ms / 1000
+            logger.info(
+                f"Prefetch complete in {elapsed_s:.1f}s",
+                extra={"elapsed_s": round(elapsed_s, 1)},
+            )
 
         thread = threading.Thread(target=worker, name="weight-prefetch", daemon=True)
         thread.start()
@@ -313,8 +350,9 @@ class FluxKleinPipeline:
         major, _ = torch.cuda.get_device_capability(0)
         if major < 10:
             logger.warning(
-                "NVFP4 requires Blackwell (SM 10+); detected SM %d.x. Staying on BF16.",
-                major,
+                f"NVFP4 requires Blackwell (SM 10+); detected SM {major}.x. "
+                f"Staying on BF16.",
+                extra={"sm_major": major},
             )
             return
 
@@ -323,8 +361,12 @@ class FluxKleinPipeline:
             from safetensors.torch import load_file
 
             logger.info(
-                "Loading NVFP4 transformer weights from %s (%s)...",
-                config.NVFP4_REPO, config.NVFP4_FILENAME,
+                f"Loading NVFP4 transformer weights from "
+                f"{config.NVFP4_REPO} ({config.NVFP4_FILENAME})...",
+                extra={
+                    "nvfp4_repo": config.NVFP4_REPO,
+                    "nvfp4_filename": config.NVFP4_FILENAME,
+                },
             )
             t0 = time.time()
             nvfp4_path = hf_hub_download(
@@ -336,20 +378,30 @@ class FluxKleinPipeline:
             try:
                 state_dict = load_file(nvfp4_path, device="cuda")
             except (TypeError, ValueError) as e:
-                logger.info("safetensors load_file device='cuda' rejected (%s); using CPU load", type(e).__name__)
+                logger.info(
+                    f"safetensors load_file device='cuda' rejected "
+                    f"({type(e).__name__}); using CPU load",
+                    extra={"error_type": type(e).__name__},
+                )
                 state_dict = load_file(nvfp4_path)
             missing, unexpected = self.pipe.transformer.load_state_dict(
                 state_dict, strict=False,
             )
+            nvfp4_load_s = time.time() - t0
             logger.info(
-                "NVFP4 weights loaded in %.1fs (missing=%d, unexpected=%d)",
-                time.time() - t0, len(missing), len(unexpected),
+                f"NVFP4 weights loaded in {nvfp4_load_s:.1f}s "
+                f"(missing={len(missing)}, unexpected={len(unexpected)})",
+                extra={
+                    "nvfp4_load_s": round(nvfp4_load_s, 1),
+                    "missing_count": len(missing),
+                    "unexpected_count": len(unexpected),
+                },
             )
             self._quantization = "nvfp4"
         except Exception as e:  # noqa: BLE001 — want all-exception fallback
             logger.warning(
-                "NVFP4 load failed (%s: %s); falling back to BF16",
-                type(e).__name__, e,
+                f"NVFP4 load failed ({type(e).__name__}: {e}); falling back to BF16",
+                extra={"error_type": type(e).__name__},
             )
 
     def get_info(self) -> dict:

@@ -135,8 +135,9 @@ def _decoded_audio_to_pcm_s16le(decoded_audio: object, sample_rate: int) -> Gene
 
     if audio.shape[0] > 8:
         logger.warning(
-            "decoded audio has unexpected channel count %d; using first channel",
-            audio.shape[0],
+            f"decoded audio has unexpected channel count {audio.shape[0]}; "
+            f"using first channel",
+            extra={"channel_count": int(audio.shape[0])},
         )
         audio = audio[:1]
 
@@ -264,14 +265,20 @@ class Ltx23VideoPipeline:
 
     def load(self) -> None:
         logger.info(
-            "Loading %s: model=%s/%s gemma=%s upscaler=%s/%s quantization=%s",
-            config.LTX_MODEL_FAMILY,
-            config.LTX_MODEL_REPO,
-            config.LTX_MODEL_FILE,
-            config.LTX_TEXT_ENCODER_REPO,
-            config.LTX_SPATIAL_UPSCALER_REPO,
-            config.LTX_SPATIAL_UPSCALER_FILE,
-            config.LTX_QUANTIZATION,
+            f"Loading {config.LTX_MODEL_FAMILY}: "
+            f"model={config.LTX_MODEL_REPO}/{config.LTX_MODEL_FILE} "
+            f"gemma={config.LTX_TEXT_ENCODER_REPO} "
+            f"upscaler={config.LTX_SPATIAL_UPSCALER_REPO}/{config.LTX_SPATIAL_UPSCALER_FILE} "
+            f"quantization={config.LTX_QUANTIZATION}",
+            extra={
+                "model_family": config.LTX_MODEL_FAMILY,
+                "model_repo": config.LTX_MODEL_REPO,
+                "model_file": config.LTX_MODEL_FILE,
+                "gemma_repo": config.LTX_TEXT_ENCODER_REPO,
+                "upscaler_repo": config.LTX_SPATIAL_UPSCALER_REPO,
+                "upscaler_file": config.LTX_SPATIAL_UPSCALER_FILE,
+                "quantization": config.LTX_QUANTIZATION,
+            },
         )
         t0 = time.time()
 
@@ -293,10 +300,13 @@ class Ltx23VideoPipeline:
         gemma_root = _resolve_hf_snapshot_path(config.LTX_TEXT_ENCODER_REPO)
         self._phase_timings["resolve_paths_ms"] = int((time.time() - t_phase) * 1000)
         logger.info(
-            "Resolved offline paths: checkpoint=%s upscaler=%s gemma=%s",
-            checkpoint_path,
-            upscaler_path,
-            gemma_root,
+            f"Resolved offline paths: checkpoint={checkpoint_path} "
+            f"upscaler={upscaler_path} gemma={gemma_root}",
+            extra={
+                "checkpoint_path": str(checkpoint_path),
+                "upscaler_path": str(upscaler_path),
+                "gemma_root": str(gemma_root),
+            },
         )
 
         # Quantization + offload mode are env-controlled so we can flip without
@@ -319,10 +329,16 @@ class Ltx23VideoPipeline:
                 if fp8_mode == "scaled_mm"
                 else QuantizationPolicy.fp8_cast()
             )
-            logger.info("LTX quantization=fp8_%s offload_mode=none", fp8_mode)
+            logger.info(
+                f"LTX quantization=fp8_{fp8_mode} offload_mode=none",
+                extra={"quantization": f"fp8_{fp8_mode}", "offload_mode": "none"},
+            )
         else:
             quantization = None
-            logger.info("LTX quantization=disabled offload_mode=%s", offload_mode_name)
+            logger.info(
+                f"LTX quantization=disabled offload_mode={offload_mode_name}",
+                extra={"quantization": "disabled", "offload_mode": offload_mode_name},
+            )
 
         t_phase = time.time()
         self.pipe = DistilledPipeline(
@@ -344,7 +360,11 @@ class Ltx23VideoPipeline:
 
         self._tiling_config = TilingConfig.default()
         self._phase_timings["pipeline_init_ms"] = int((time.time() - t_phase) * 1000)
-        logger.info("LTX-2.3 pipeline loaded in %.1fs", time.time() - t_phase)
+        loaded_s = time.time() - t_phase
+        logger.info(
+            f"LTX-2.3 pipeline loaded in {loaded_s:.1f}s",
+            extra={"loaded_s": round(loaded_s, 1)},
+        )
 
         # Step 2 — Build persistent transformer BEFORE warmup so that warmup
         # validates the persistent path, not the legacy per-request build path.
@@ -366,9 +386,13 @@ class Ltx23VideoPipeline:
             self._vram_after_transformer_gb = torch.cuda.memory_allocated() / (1024**3)
         self._persistent_transformer_ready = True
         logger.info(
-            "LTX-2.3 persistent transformer ready (%dms, vram_after=%.2f GiB)",
-            self._persistent_transformer_build_ms,
-            self._vram_after_transformer_gb,
+            f"LTX-2.3 persistent transformer ready "
+            f"({self._persistent_transformer_build_ms}ms, "
+            f"vram_after={self._vram_after_transformer_gb:.2f} GiB)",
+            extra={
+                "build_ms": self._persistent_transformer_build_ms,
+                "vram_after_gb": round(self._vram_after_transformer_gb, 2),
+            },
         )
 
         # Step P2 — experimental torch.compile pass over the persistent
@@ -393,7 +417,8 @@ class Ltx23VideoPipeline:
         if os.getenv("LTX_TORCH_COMPILE", "0") == "1":
             logger.info(
                 "LTX-2.3 torch.compile transformer (mode=reduce-overhead, "
-                "lowering deferred to first call)..."
+                "lowering deferred to first call)...",
+                extra={"compile_mode": "reduce-overhead"},
             )
             t_compile_call = time.time()
             try:
@@ -406,14 +431,15 @@ class Ltx23VideoPipeline:
                 self._compiled_transformer = True
                 self._compile_ms = int((time.time() - t_compile_call) * 1000)
                 logger.info(
-                    "LTX-2.3 torch.compile wrap call returned in %dms "
-                    "(actual lowering happens at warmup)",
-                    self._compile_ms,
+                    f"LTX-2.3 torch.compile wrap call returned in {self._compile_ms}ms "
+                    f"(actual lowering happens at warmup)",
+                    extra={"compile_ms": self._compile_ms},
                 )
             except Exception as e:  # noqa: BLE001
                 logger.error(
-                    "torch.compile wrap failed, falling back to eager "
-                    "transformer: %s", e, exc_info=True,
+                    f"torch.compile wrap failed, falling back to eager "
+                    f"transformer: {e}",
+                    exc_info=True,
                 )
                 # self._transformer remains the eager nn.Module.
                 self._compiled_transformer = False
@@ -446,9 +472,13 @@ class Ltx23VideoPipeline:
             if torch.cuda.is_available():
                 self._vram_after_gemma_gb = torch.cuda.memory_allocated() / (1024**3)
             logger.info(
-                "LTX-2.3 persistent Gemma ready (%dms, vram_after=%.2f GiB)",
-                self._persistent_gemma_build_ms,
-                self._vram_after_gemma_gb,
+                f"LTX-2.3 persistent Gemma ready "
+                f"({self._persistent_gemma_build_ms}ms, "
+                f"vram_after={self._vram_after_gemma_gb:.2f} GiB)",
+                extra={
+                    "build_ms": self._persistent_gemma_build_ms,
+                    "vram_after_gb": round(self._vram_after_gemma_gb, 2),
+                },
             )
 
             # Persistent embeddings processor. Build same way upstream's
@@ -475,9 +505,13 @@ class Ltx23VideoPipeline:
                 )
             self._persistent_gemma_ready = True
             logger.info(
-                "LTX-2.3 persistent embeddings_processor ready (%dms, vram_after=%.2f GiB)",
-                self._persistent_embeddings_processor_build_ms,
-                self._vram_after_embeddings_processor_gb,
+                f"LTX-2.3 persistent embeddings_processor ready "
+                f"({self._persistent_embeddings_processor_build_ms}ms, "
+                f"vram_after={self._vram_after_embeddings_processor_gb:.2f} GiB)",
+                extra={
+                    "build_ms": self._persistent_embeddings_processor_build_ms,
+                    "vram_after_gb": round(self._vram_after_embeddings_processor_gb, 2),
+                },
             )
         else:
             logger.info("LTX_PERSIST_GEMMA=0 — skipping Step 3 (Gemma rebuilds per request)")
@@ -509,7 +543,11 @@ class Ltx23VideoPipeline:
             except OSError:
                 pass
         self._phase_timings["warmup_inference_ms"] = int((time.time() - t1) * 1000)
-        logger.info("LTX-2.3 warmup done (%.1fs)", time.time() - t1)
+        warmup_s = time.time() - t1
+        logger.info(
+            f"LTX-2.3 warmup done ({warmup_s:.1f}s)",
+            extra={"warmup_s": round(warmup_s, 1)},
+        )
 
         self._load_ms = int((time.time() - t0) * 1000)
         self._ready = True
@@ -612,9 +650,9 @@ class Ltx23VideoPipeline:
                 # closes that window before Step 5's mid-denoise hook lands.
                 if is_cancelled():
                     logger.info(
-                        "LTX-2.3 generate cancelled after acquiring lock "
-                        "(lock_wait_ms=%d)",
-                        lock_wait_ms,
+                        f"LTX-2.3 generate cancelled after acquiring lock "
+                        f"(lock_wait_ms={lock_wait_ms})",
+                        extra={"lock_wait_ms": lock_wait_ms},
                     )
                     return GenerateResult(
                         frames=None,
@@ -632,9 +670,17 @@ class Ltx23VideoPipeline:
                     final_prompt = f"{base} {suffix}"
                 else:
                     final_prompt = base or suffix
+                user_preview = base[:80]
+                suffix_preview = suffix[:80]
+                final_preview = final_prompt[:200]
                 logger.info(
-                    "LTX-2.3 prompt: user='%s' suffix='%s' final='%s'",
-                    base[:80], suffix[:80], final_prompt[:200],
+                    f"LTX-2.3 prompt: user='{user_preview}' "
+                    f"suffix='{suffix_preview}' final='{final_preview}'",
+                    extra={
+                        "user_prompt": user_preview,
+                        "suffix": suffix_preview,
+                        "final_prompt": final_preview,
+                    },
                 )
                 frames, audio = self._run_inference(
                     image_path=image_path,
@@ -658,9 +704,9 @@ class Ltx23VideoPipeline:
         # cancel) and Step 1's classification makes it visible in metrics.
         if is_cancelled():
             logger.info(
-                "LTX-2.3 generate completed but cancellation arrived; discarding "
-                "(wasted_ms=%d)",
-                pipe_total_ms,
+                f"LTX-2.3 generate completed but cancellation arrived; discarding "
+                f"(wasted_ms={pipe_total_ms})",
+                extra={"wasted_ms": pipe_total_ms},
             )
             return GenerateResult(
                 frames=None,
@@ -991,8 +1037,7 @@ class Ltx23VideoPipeline:
                         )
                 except Exception as e:  # noqa: BLE001
                     logger.warning(
-                        "LTX audio decode failed; continuing with silent MP4: %s",
-                        e,
+                        f"LTX audio decode failed; continuing with silent MP4: {e}",
                         exc_info=True,
                     )
 
@@ -1026,17 +1071,26 @@ class Ltx23VideoPipeline:
             free_b, _ = torch.cuda.mem_get_info()
             peak_alloc_gb = torch.cuda.max_memory_allocated() / (1024**3)
             request_peak_delta_gb = peak_alloc_gb - self._resident_alloc_gb_at_request_start
+            peak_reserved_gb = torch.cuda.max_memory_reserved() / (1024**3)
+            now_alloc_gb = torch.cuda.memory_allocated() / (1024**3)
+            now_reserved_gb = torch.cuda.memory_reserved() / (1024**3)
+            free_gb = free_b / (1024**3)
             logger.info(
-                "LTX VRAM GiB: peak_alloc=%.2f peak_reserved=%.2f "
-                "now_alloc=%.2f now_reserved=%.2f free=%.2f "
-                "resident_alloc=%.2f request_peak_delta=%.2f",
-                peak_alloc_gb,
-                torch.cuda.max_memory_reserved() / (1024**3),
-                torch.cuda.memory_allocated() / (1024**3),
-                torch.cuda.memory_reserved() / (1024**3),
-                free_b / (1024**3),
-                self._resident_alloc_gb_at_request_start,
-                request_peak_delta_gb,
+                f"LTX VRAM GiB: peak_alloc={peak_alloc_gb:.2f} "
+                f"peak_reserved={peak_reserved_gb:.2f} "
+                f"now_alloc={now_alloc_gb:.2f} now_reserved={now_reserved_gb:.2f} "
+                f"free={free_gb:.2f} "
+                f"resident_alloc={self._resident_alloc_gb_at_request_start:.2f} "
+                f"request_peak_delta={request_peak_delta_gb:.2f}",
+                extra={
+                    "peak_alloc_gb": round(peak_alloc_gb, 2),
+                    "peak_reserved_gb": round(peak_reserved_gb, 2),
+                    "now_alloc_gb": round(now_alloc_gb, 2),
+                    "now_reserved_gb": round(now_reserved_gb, 2),
+                    "free_gb": round(free_gb, 2),
+                    "resident_alloc_gb": round(self._resident_alloc_gb_at_request_start, 2),
+                    "request_peak_delta_gb": round(request_peak_delta_gb, 2),
+                },
             )
 
         # Phase breakdown — single line, easy to scan in pod logs. Lists for
@@ -1047,7 +1101,10 @@ class Ltx23VideoPipeline:
             f"{name}={vs[0] if len(vs) == 1 else vs}"
             for name, vs in sorted(self._inference_timings.items())
         )
-        logger.info("LTX phase timings ms: %s", timings_summary)
+        logger.info(
+            f"LTX phase timings ms: {timings_summary}",
+            extra={"phase_timings_ms": timings_summary},
+        )
 
         # Diagnostic: dump the first decoded frame to disk so that if the iPad
         # video looks wrong, we can SSH in and check whether the bug is in
@@ -1057,7 +1114,7 @@ class Ltx23VideoPipeline:
             try:
                 frames[0].save("/tmp/ltx-first-frame.jpg", format="JPEG", quality=90)
             except OSError as e:
-                logger.warning("Failed to save /tmp/ltx-first-frame.jpg: %s", e)
+                logger.warning(f"Failed to save /tmp/ltx-first-frame.jpg: {e}")
 
         if profiler_obj is not None:
             self._save_profile_trace(
@@ -1099,9 +1156,15 @@ class Ltx23VideoPipeline:
         # logged and the others still land.
         try:
             prof.export_chrome_trace(f"{base}.json")
-            logger.info("LTX profile chrome trace written: %s.json", base)
+            logger.info(
+                f"LTX profile chrome trace written: {base}.json",
+                extra={"trace_base": str(base)},
+            )
         except Exception as e:  # noqa: BLE001
-            logger.error("Failed to export Chrome trace %s.json: %s", base, e)
+            logger.error(
+                f"Failed to export Chrome trace {base}.json: {e}",
+                extra={"trace_base": str(base)},
+            )
         try:
             with open(f"{base}.meta.json", "w") as f:
                 json.dump(
@@ -1120,7 +1183,10 @@ class Ltx23VideoPipeline:
                     indent=2,
                 )
         except Exception as e:  # noqa: BLE001
-            logger.error("Failed to write %s.meta.json: %s", base, e)
+            logger.error(
+                f"Failed to write {base}.meta.json: {e}",
+                extra={"trace_base": str(base)},
+            )
         try:
             with open(f"{base}.txt", "w") as f:
                 f.write(prof.key_averages().table(
@@ -1128,8 +1194,9 @@ class Ltx23VideoPipeline:
                 ))
         except Exception as e:  # noqa: BLE001
             logger.error(
-                "Failed to write %s.txt summary (Chrome trace JSON still "
-                "has the data): %s", base, e
+                f"Failed to write {base}.txt summary (Chrome trace JSON still "
+                f"has the data): {e}",
+                extra={"trace_base": str(base)},
             )
 
     def get_info(self) -> dict:
@@ -1192,7 +1259,9 @@ class Ltx23VideoPipeline:
                 logger.info("LTX-2.3 releasing persistent embeddings_processor...")
                 self._embeddings_processor_ctx.__exit__(None, None, None)
             except Exception as e:  # noqa: BLE001
-                logger.warning("Error during persistent embeddings_processor shutdown: %s", e)
+                logger.warning(
+                    f"Error during persistent embeddings_processor shutdown: {e}"
+                )
             finally:
                 self._embeddings_processor_ctx = None
                 self._embeddings_processor = None
@@ -1203,7 +1272,7 @@ class Ltx23VideoPipeline:
                 logger.info("LTX-2.3 releasing persistent Gemma text encoder...")
                 self._text_encoder_ctx.__exit__(None, None, None)
             except Exception as e:  # noqa: BLE001
-                logger.warning("Error during persistent Gemma shutdown: %s", e)
+                logger.warning(f"Error during persistent Gemma shutdown: {e}")
             finally:
                 self._text_encoder_ctx = None
                 self._text_encoder = None
@@ -1215,7 +1284,7 @@ class Ltx23VideoPipeline:
                 logger.info("LTX-2.3 releasing persistent transformer...")
                 self._transformer_ctx.__exit__(None, None, None)
             except Exception as e:  # noqa: BLE001
-                logger.warning("Error during persistent transformer shutdown: %s", e)
+                logger.warning(f"Error during persistent transformer shutdown: {e}")
             finally:
                 self._transformer_ctx = None
                 self._transformer = None

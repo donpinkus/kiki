@@ -80,7 +80,7 @@ async def health():
 async def websocket_stream(ws: WebSocket):
     await ws.accept()
     client_id = id(ws)
-    logger.info("Client %d connected", client_id)
+    logger.info(f"Client {client_id} connected", extra={"client_id": client_id})
 
     # Send initial status
     if pipeline.ready:
@@ -153,14 +153,22 @@ async def websocket_stream(ws: WebSocket):
                             # mid-generation.
                             current_config["requestId"] = data.get("requestId")
 
+                            prompt_preview = str(current_config["prompt"])[:50]
                             logger.info(
-                                "Client %d config: prompt='%s', steps=%d",
-                                client_id,
-                                str(current_config["prompt"])[:50],
-                                current_config["steps"],
+                                f"Client {client_id} config: "
+                                f"prompt='{prompt_preview}', "
+                                f"steps={current_config['steps']}",
+                                extra={
+                                    "client_id": client_id,
+                                    "prompt": prompt_preview,
+                                    "steps": current_config["steps"],
+                                },
                             )
                     except json.JSONDecodeError:
-                        logger.warning("Client %d sent invalid JSON", client_id)
+                        logger.warning(
+                            f"Client {client_id} sent invalid JSON",
+                            extra={"client_id": client_id},
+                        )
                     continue
 
                 # Binary frame: input image — replace buffer (drop old frame)
@@ -176,7 +184,10 @@ async def websocket_stream(ws: WebSocket):
             done = True
             frame_event.set()
         except Exception as e:
-            logger.error("Client %d receive error: %s", client_id, e)
+            logger.error(
+                f"Client {client_id} receive error: {e}",
+                extra={"client_id": client_id},
+            )
             done = True
             frame_event.set()
 
@@ -223,18 +234,25 @@ async def websocket_stream(ws: WebSocket):
                     if queue_empty and prev_queue_empty is not True:
                         queue_drained_count += 1
                         logger.info(
-                            "queue drained: req=%s last_generated_set=true",
-                            request_id,
+                            f"queue drained: req={request_id} last_generated_set=true",
+                            extra={"req": request_id},
                         )
                     prev_queue_empty = queue_empty
 
                     logger.info(
-                        "frame: req=%s queueEmpty=%s gen_ms=%d dropped_since_last=%d",
-                        request_id, queue_empty, gen_ms, frames_dropped_since_last_send,
+                        f"frame: req={request_id} queueEmpty={queue_empty} "
+                        f"gen_ms={gen_ms} "
+                        f"dropped_since_last={frames_dropped_since_last_send}",
+                        extra={
+                            "req": request_id,
+                            "queue_empty": queue_empty,
+                            "gen_ms": gen_ms,
+                            "dropped_since_last": frames_dropped_since_last_send,
+                        },
                     )
                     frames_dropped_since_last_send = 0
             except Exception as e:
-                logger.error("Frame processing error: %s", e, exc_info=True)
+                logger.error(f"Frame processing error: {e}", exc_info=True)
                 if not done:
                     try:
                         await ws.send_text(json.dumps({
@@ -249,13 +267,28 @@ async def websocket_stream(ws: WebSocket):
     try:
         await asyncio.gather(receive_loop(), process_loop())
     except Exception as e:
-        logger.error("WebSocket error for client %d: %s", client_id, e, exc_info=True)
+        logger.error(
+            f"WebSocket error for client {client_id}: {e}",
+            exc_info=True,
+            extra={"client_id": client_id},
+        )
     finally:
         elapsed = time.time() - session_start
         fps = frames_processed / elapsed if elapsed > 0 else 0
         logger.info(
-            "Client %d disconnected. Received %d, processed %d, dropped %d, queue_drained %d, %.1f FPS over %.1fs",
-            client_id, frames_received, frames_processed, frames_dropped, queue_drained_count, fps, elapsed,
+            f"Client {client_id} disconnected. Received {frames_received}, "
+            f"processed {frames_processed}, dropped {frames_dropped}, "
+            f"queue_drained {queue_drained_count}, "
+            f"{fps:.1f} FPS over {elapsed:.1f}s",
+            extra={
+                "client_id": client_id,
+                "frames_received": frames_received,
+                "frames_processed": frames_processed,
+                "frames_dropped": frames_dropped,
+                "queue_drained_count": queue_drained_count,
+                "fps": round(fps, 1),
+                "duration_s": round(elapsed, 1),
+            },
         )
 
 

@@ -69,16 +69,22 @@ _load_error_traceback: str | None = None
 async def lifespan(app: FastAPI):
     global _load_error_traceback
     logger.info(
-        "Starting %s video server: model=%s/%s pipeline=DistilledPipeline "
-        "quantization=%s resolution=%dx%d num_frames=%d fps=%d",
-        config.LTX_MODEL_FAMILY,
-        config.LTX_MODEL_REPO,
-        config.LTX_MODEL_FILE,
-        config.LTX_QUANTIZATION,
-        config.LTX_WIDTH,
-        config.LTX_HEIGHT,
-        config.LTX_NUM_FRAMES,
-        config.LTX_FPS,
+        f"Starting {config.LTX_MODEL_FAMILY} video server: "
+        f"model={config.LTX_MODEL_REPO}/{config.LTX_MODEL_FILE} "
+        f"pipeline=DistilledPipeline "
+        f"quantization={config.LTX_QUANTIZATION} "
+        f"resolution={config.LTX_WIDTH}x{config.LTX_HEIGHT} "
+        f"num_frames={config.LTX_NUM_FRAMES} fps={config.LTX_FPS}",
+        extra={
+            "model_family": config.LTX_MODEL_FAMILY,
+            "model_repo": config.LTX_MODEL_REPO,
+            "model_file": config.LTX_MODEL_FILE,
+            "quantization": config.LTX_QUANTIZATION,
+            "width": config.LTX_WIDTH,
+            "height": config.LTX_HEIGHT,
+            "num_frames": config.LTX_NUM_FRAMES,
+            "fps": config.LTX_FPS,
+        },
     )
     try:
         video_pipeline.load()
@@ -96,7 +102,7 @@ async def lifespan(app: FastAPI):
     try:
         await asyncio.to_thread(video_pipeline.shutdown_persistent_models)
     except Exception as e:  # noqa: BLE001
-        logger.warning("Error during shutdown_persistent_models: %s", e)
+        logger.warning(f"Error during shutdown_persistent_models: {e}")
     logger.info("Shutting down.")
 
 
@@ -122,7 +128,7 @@ async def health():
 async def websocket_video(ws: WebSocket):
     await ws.accept()
     client_id = id(ws)
-    logger.info("client connected: id=%d", client_id)
+    logger.info(f"client connected: id={client_id}", extra={"client_id": client_id})
 
     if video_pipeline.ready:
         await ws.send_text(json.dumps({"type": "status", "status": "ready"}))
@@ -145,15 +151,24 @@ async def websocket_video(ws: WebSocket):
     async def cancel_running(reason: str) -> None:
         nonlocal current_task, current_cancel
         if current_task and not current_task.done():
-            logger.info("cancelling in-flight gen: req=%s reason=%s", current_request_id, reason)
+            logger.info(
+                f"cancelling in-flight gen: req={current_request_id} reason={reason}",
+                extra={"req": current_request_id, "reason": reason},
+            )
             if current_cancel is not None:
                 current_cancel.set()
             try:
                 await asyncio.wait_for(current_task, timeout=10.0)
             except asyncio.TimeoutError:
-                logger.warning("cancel wait timed out (req=%s)", current_request_id)
+                logger.warning(
+                    f"cancel wait timed out (req={current_request_id})",
+                    extra={"req": current_request_id},
+                )
             except Exception as e:  # noqa: BLE001
-                logger.error("cancel task error (req=%s): %s", current_request_id, e)
+                logger.error(
+                    f"cancel task error (req={current_request_id}): {e}",
+                    extra={"req": current_request_id},
+                )
         current_task = None
         current_cancel = None
 
@@ -186,7 +201,11 @@ async def websocket_video(ws: WebSocket):
             )
         except Exception as e:  # noqa: BLE001
             videos_failed += 1
-            logger.error("LTX-2.3 generate error: req=%s err=%s", request_id, e, exc_info=True)
+            logger.error(
+                f"LTX-2.3 generate error: req={request_id} err={e}",
+                exc_info=True,
+                extra={"req": request_id},
+            )
             await ws.send_text(json.dumps({
                 "type": "video_cancelled",
                 "requestId": request_id,
@@ -206,15 +225,19 @@ async def websocket_video(ws: WebSocket):
             # cancelled_but_ran_ms is the explicit "wasted GPU" metric.
             videos_cancelled += 1
             logger.info(
-                "cancelled: req=%s state=%s at_step=%d elapsed_ms=%d "
-                "lock_wait_ms=%d pipe_total_ms=%d cancelled_but_ran_ms=%d",
-                request_id,
-                result.cancel_state,
-                current_step_count["step"],
-                gen_ms,
-                result.lock_wait_ms,
-                result.pipe_total_ms,
-                result.cancelled_but_ran_ms,
+                f"cancelled: req={request_id} state={result.cancel_state} "
+                f"at_step={current_step_count['step']} elapsed_ms={gen_ms} "
+                f"lock_wait_ms={result.lock_wait_ms} pipe_total_ms={result.pipe_total_ms} "
+                f"cancelled_but_ran_ms={result.cancelled_but_ran_ms}",
+                extra={
+                    "req": request_id,
+                    "state": result.cancel_state,
+                    "at_step": current_step_count["step"],
+                    "elapsed_ms": gen_ms,
+                    "lock_wait_ms": result.lock_wait_ms,
+                    "pipe_total_ms": result.pipe_total_ms,
+                    "cancelled_but_ran_ms": result.cancelled_but_ran_ms,
+                },
             )
             await ws.send_text(json.dumps({
                 "type": "video_cancelled",
@@ -228,7 +251,10 @@ async def websocket_video(ws: WebSocket):
         for i, frame in enumerate(frames):
             if cancel.is_set():
                 videos_cancelled += 1
-                logger.info("cancelled mid-stream: req=%s frame=%d/%d", request_id, i, len(frames))
+                logger.info(
+                    f"cancelled mid-stream: req={request_id} frame={i}/{len(frames)}",
+                    extra={"req": request_id, "frame": i, "total_frames": len(frames)},
+                )
                 await ws.send_text(json.dumps({
                     "type": "video_cancelled",
                     "requestId": request_id,
@@ -246,9 +272,15 @@ async def websocket_video(ws: WebSocket):
             await ws.send_bytes(buf.getvalue())
 
             if config.LTX_DEBUG and i % 4 == 0:
+                elapsed_ms = int((time.time() - t0) * 1000)
                 logger.info(
-                    "frame %d/%d streamed elapsed_ms=%d",
-                    i + 1, len(frames), int((time.time() - t0) * 1000),
+                    f"frame {i + 1}/{len(frames)} streamed elapsed_ms={elapsed_ms}",
+                    extra={
+                        "req": request_id,
+                        "frame": i + 1,
+                        "total_frames": len(frames),
+                        "elapsed_ms": elapsed_ms,
+                    },
                 )
 
         # Encode MP4 via the bundled ffmpeg binary. Using a subprocess
@@ -263,13 +295,24 @@ async def websocket_video(ws: WebSocket):
             encode_ms = int((time.time() - encode_t0) * 1000)
 
             videos_total += 1
+            audio_present = result.audio is not None
+            audio_bytes = len(result.audio.pcm_s16le) if audio_present else 0
             logger.info(
-                "complete: req=%s frames=%d gen_ms=%d encode_ms=%d mp4_bytes=%d "
-                "audio=%s audio_bytes=%d lock_wait_ms=%d pipe_total_ms=%d",
-                request_id, len(frames), gen_ms, encode_ms, len(mp4_bytes),
-                result.audio is not None,
-                len(result.audio.pcm_s16le) if result.audio is not None else 0,
-                result.lock_wait_ms, result.pipe_total_ms,
+                f"complete: req={request_id} frames={len(frames)} gen_ms={gen_ms} "
+                f"encode_ms={encode_ms} mp4_bytes={len(mp4_bytes)} "
+                f"audio={audio_present} audio_bytes={audio_bytes} "
+                f"lock_wait_ms={result.lock_wait_ms} pipe_total_ms={result.pipe_total_ms}",
+                extra={
+                    "req": request_id,
+                    "frames": len(frames),
+                    "gen_ms": gen_ms,
+                    "encode_ms": encode_ms,
+                    "mp4_bytes": len(mp4_bytes),
+                    "audio": audio_present,
+                    "audio_bytes": audio_bytes,
+                    "lock_wait_ms": result.lock_wait_ms,
+                    "pipe_total_ms": result.pipe_total_ms,
+                },
             )
             await ws.send_text(json.dumps({
                 "type": "video_complete",
@@ -367,7 +410,10 @@ async def websocket_video(ws: WebSocket):
                     image_bytes = base64.b64decode(image_b64)
                     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
                 except Exception as e:  # noqa: BLE001
-                    logger.error("invalid image_b64: req=%s err=%s", request_id, e)
+                    logger.error(
+                        f"invalid image_b64: req={request_id} err={e}",
+                        extra={"req": request_id},
+                    )
                     await ws.send_text(json.dumps({
                         "type": "video_cancelled",
                         "requestId": request_id,
@@ -375,12 +421,25 @@ async def websocket_video(ws: WebSocket):
                     }))
                     continue
 
+                prompt_preview = prompt[:60]
+                suffix_preview = (req_prompt_suffix or "")[:60]
                 logger.info(
-                    "video_request: req=%s prompt='%s' suffix='%s' image=%dx%d seed=%s "
-                    "videoWidth=%s videoHeight=%s videoFrames=%s profile=%s",
-                    request_id, prompt[:60], (req_prompt_suffix or "")[:60],
-                    image.width, image.height, seed,
-                    req_width, req_height, req_frames, req_profile,
+                    f"video_request: req={request_id} prompt='{prompt_preview}' "
+                    f"suffix='{suffix_preview}' image={image.width}x{image.height} "
+                    f"seed={seed} videoWidth={req_width} videoHeight={req_height} "
+                    f"videoFrames={req_frames} profile={req_profile}",
+                    extra={
+                        "req": request_id,
+                        "prompt": prompt_preview,
+                        "suffix": suffix_preview,
+                        "image_width": image.width,
+                        "image_height": image.height,
+                        "seed": seed,
+                        "video_width": req_width,
+                        "video_height": req_height,
+                        "video_frames": req_frames,
+                        "profile": req_profile,
+                    },
                 )
                 cancel = Event()
                 current_request_id = request_id
@@ -394,23 +453,35 @@ async def websocket_video(ws: WebSocket):
                 )
 
             elif mtype == "video_cancel":
-                logger.info("video_cancel: req=%s", data.get("requestId"))
+                cancel_req = data.get("requestId")
+                logger.info(f"video_cancel: req={cancel_req}", extra={"req": cancel_req})
                 if current_cancel is not None:
                     current_cancel.set()
 
             else:
-                logger.warning("unknown message type: %s", mtype)
+                logger.warning(f"unknown message type: {mtype}", extra={"message_type": mtype})
 
     except WebSocketDisconnect:
-        logger.info("client disconnected: id=%d", client_id)
+        logger.info(
+            f"client disconnected: id={client_id}",
+            extra={"client_id": client_id},
+        )
     except Exception as e:  # noqa: BLE001
-        logger.error("ws handler error: %s", e, exc_info=True)
+        logger.error(f"ws handler error: {e}", exc_info=True)
     finally:
         await cancel_running(reason="ws_close")
         elapsed = time.time() - session_start
         logger.info(
-            "session: id=%d videos_total=%d cancelled=%d failed=%d duration_s=%.1f",
-            client_id, videos_total, videos_cancelled, videos_failed, elapsed,
+            f"session: id={client_id} videos_total={videos_total} "
+            f"cancelled={videos_cancelled} failed={videos_failed} "
+            f"duration_s={elapsed:.1f}",
+            extra={
+                "client_id": client_id,
+                "videos_total": videos_total,
+                "videos_cancelled": videos_cancelled,
+                "videos_failed": videos_failed,
+                "duration_s": round(elapsed, 1),
+            },
         )
 
 
@@ -428,7 +499,7 @@ def _encode_mp4(frames: list[Image.Image], fps: int, audio: GeneratedAudio | Non
         try:
             return _encode_mp4_with_audio(frames, fps, audio)
         except Exception as e:  # noqa: BLE001
-            logger.warning("AAC mux failed; falling back to silent MP4: %s", e, exc_info=True)
+            logger.warning(f"AAC mux failed; falling back to silent MP4: {e}", exc_info=True)
     return _encode_silent_mp4(frames, fps)
 
 
