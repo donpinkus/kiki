@@ -303,6 +303,12 @@ if (process.env['PUBLIC_KEY']) {
   BOOT_ENV.push({ key: 'PUBLIC_KEY', value: process.env['PUBLIC_KEY'] });
 }
 
+// Forward Sentry DSN for the kiki-pod project. Conditional so local runs
+// without the env var stay silent (sentry_init.init no-ops when unset).
+if (process.env['SENTRY_DSN_POD']) {
+  BOOT_ENV.push({ key: 'SENTRY_DSN_POD', value: process.env['SENTRY_DSN_POD'] });
+}
+
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 const REAPER_INTERVAL_MS = 60 * 1000;
 const MAX_CONCURRENT_PROVISIONS = Number(process.env['MAX_CONCURRENT_PROVISIONS'] ?? 5);

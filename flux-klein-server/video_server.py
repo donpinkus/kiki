@@ -44,6 +44,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from PIL import Image
 
 import config
+import sentry_init
 from video_pipeline import GeneratedAudio, Ltx23VideoPipeline
 
 logging.basicConfig(
@@ -51,6 +52,8 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+sentry_init.init(pod_kind="video")
 
 video_pipeline = Ltx23VideoPipeline()
 # Captures any load() failure so /health can surface it to whoever's polling

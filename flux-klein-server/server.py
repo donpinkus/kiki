@@ -41,6 +41,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from PIL import Image
 
 import config
+import sentry_init
 from pipeline import FluxKleinPipeline
 
 logging.basicConfig(
@@ -48,6 +49,8 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+sentry_init.init(pod_kind="image")
 
 pipeline = FluxKleinPipeline()
 

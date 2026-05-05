@@ -33,6 +33,9 @@ uvicorn[standard]>=0.25.0
 websockets>=12.0
 Pillow>=10.0.0
 
+# Sentry — structured logs + error tracking. 2.35.0+ for enable_logs / LoggingIntegration.sentry_logs_level.
+sentry-sdk>=2.35.0
+
 # Video pod's MP4 encoder uses imageio-ffmpeg (bundled static ffmpeg, ~30 MB).
 # Kept after the LTX-2.3 migration: ltx-pipelines exposes a PyAV-based
 # encode_video() but its API expects a tensor iterator, file path, and
