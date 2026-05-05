@@ -70,13 +70,22 @@ if (!SSH_KEY) {
 // were in the old list, so syncs there exhausted all candidates and bailed.
 // Discovery reflects whatever RunPod has stocked today.
 //
-// 4090 is filtered out at discovery time. Verified bug: hosts in EUR-NO-1,
-// US-IL-1, US-NC-1, US-TX-3 boot the container but `startSsh:true` never
-// opens port 22. The createPod returns success, the pod sits in RUNNING
-// with no SSH info, and the next-candidate fallback never triggers — sync
-// hangs until waitForSsh's 15-min timeout. Do NOT re-enable 4090 without
-// confirming RunPod has fixed the startSsh handshake on this SKU.
-const SKIP_GPU_PATTERNS = ['4090'];
+// Filtered out at discovery time:
+//   - 4090: verified bug. Hosts in EUR-NO-1, US-IL-1, US-NC-1, US-TX-3
+//     boot the container but `startSsh:true` never opens port 22. The
+//     createPod returns success, the pod sits in RUNNING with no SSH
+//     info, and the next-candidate fallback never triggers — sync hangs
+//     until waitForSsh's 15-min timeout.
+//   - "Blackwell Server Edition": observed 2026-05-05 on US-NC-1 with
+//     RTX PRO 6000 Blackwell Server Edition. Same RUNNING/no-runtime
+//     symptom as 4090; pod creates cleanly but no port 22 ever appears.
+//     "Server Edition" is the headless variant of the workstation card,
+//     and RunPod's startSsh handshake apparently doesn't run on it.
+//     Workstation Blackwell SKUs (e.g. RTX PRO 4500 Blackwell) are NOT
+//     blocked — those work fine.
+// Do NOT re-enable any of these without confirming RunPod has fixed the
+// startSsh handshake on the SKU.
+const SKIP_GPU_PATTERNS = ['4090', 'Blackwell Server Edition'];
 const PINNED_GPU_TYPE = process.env['SYNC_GPU_TYPE_ID'];
 // Must match the pinned base used by runtime pods (orchestrator.ts / runpodClient.ts).
 // Base image determines torch/CUDA ABI; venv + pip installs are tied to this.
@@ -281,6 +290,12 @@ async function waitForSsh(podId: string, timeoutMs = 15 * 60 * 1000): Promise<Ss
     }
     const ssh = pod?.runtime?.ports?.find((p) => p.privatePort === 22);
     if (ssh?.ip) return { ip: ssh.ip, port: ssh.publicPort };
+    // Fail-fast on terminated/exited pods. Without this, an externally-
+    // killed broken-SSH pod (4090/Blackwell-Server-Edition style) would
+    // burn the full 15-min timeout — the runtime stays null forever.
+    if (pod === null || pod?.desiredStatus === 'EXITED' || pod?.desiredStatus === 'TERMINATED') {
+      throw new Error(`Pod ${podId} ${pod?.desiredStatus ?? 'gone'} before SSH came up`);
+    }
     await new Promise((r) => setTimeout(r, 10_000));
   }
   throw new Error(`Pod ${podId} never got SSH info within ${Math.round(timeoutMs / 1000)}s`);
