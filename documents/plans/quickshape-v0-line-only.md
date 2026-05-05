@@ -1,10 +1,12 @@
 # QuickShape v0 — Line-Only Implementation
 
-**Status:** In implementation.
-**Parent plan:** [quickshape-stroke-recognizer.md](./quickshape-stroke-recognizer.md)
-**Goal:** Ship the smallest possible Procreate-style hold-to-snap feature — recognizing only **lines** — to validate the UX, hold detection, brush regeneration, and telemetry pipeline before investing in arc / ellipse / circle / triangle / rectangle / polyline branches.
+**Status:** ✅ **Shipped + superseded.** Line-only v0 was the first ship (commits `2e52431`–`f74e715`). Subsequent shipping work added arc, ellipse, and circle on top — see the parent plan's "What's shipped" section for the current state. Polyline / triangle / rectangle remain unshipped pending corner detection.
 
-This document is a **focused subset** of the parent plan. Where this conflicts with the parent plan, this wins for v0. Once v0 ships and we have telemetry, expand to the full primitive set per the parent plan.
+**Parent plan:** [quickshape-stroke-recognizer.md](./quickshape-stroke-recognizer.md)
+
+**Original goal:** Ship the smallest possible Procreate-style hold-to-snap feature — recognizing only **lines** — to validate the UX, hold detection, brush regeneration, and telemetry pipeline before investing in arc / ellipse / circle / triangle / rectangle / polyline branches.
+
+This document was a **focused subset** of the parent plan, scoping the first ship. Kept for historical reference; refer to the parent plan for current shape coverage.
 
 ---
 

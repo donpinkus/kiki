@@ -1,8 +1,24 @@
 # QuickShape-Like Stroke Recognizer for Kiki — v5 Plan
 
-**Status:** Implementation plan, partially stubbed.
+**Status:** **SHIPPED — line + arc + ellipse + circle.** Polyline / triangle / rectangle still planned (would require corner detection — IStraw or similar — which hasn't been built yet).
+
 **Authors:** Claude (architecture, Swift), with researcher TODOs called out inline.
+
 **Supersedes:** four prior research-team drafts (referred to as v1–v4 below). Where this document conflicts with prior drafts, this document wins.
+
+## What's shipped (as of 2026-05)
+
+| Primitive | Status | Commits |
+|---|---|---|
+| **Line** | ✅ shipped, with edit handles + immediate-drag UX | `2e52431`, `915046b`, `1667813`, `09d297d`, `5bf54da`, `f74e715` |
+| **Ellipse** | ✅ shipped, with 4-handle anchored-pivot drag | `32b31d8`, `e93f23d` |
+| **Circle** | ✅ shipped (promoted from ellipse when axis ratio ≥ 0.92) | `32b31d8`, `e93f23d` |
+| **Arc** | ✅ shipped, with 3-handle drag (start/end = rigid rotation+scale, mid = changes coverage) | `250594b`, `3392889` |
+| Polyline | not yet — needs corner detection (IStraw) | — |
+| Triangle | not yet — needs corner detection + polygon validator | — |
+| Rectangle | not yet — needs corner detection + polygon validator | — |
+
+What's in production as of writing: a stroke is recognized as line, arc, ellipse, or circle (with abstain as the safe default). All four primitives have edit-handle UX. Hold-to-snap with ~450 ms commit, single undo unit, telemetry events on every commit/abstain/undo. Both `StrokeRecognizerModule` (recognizer math, no UIKit/Metal deps) and `MetalCanvasView` integration are committed.
 
 This plan is the union of what's been agreed across iterations plus the substantive sections that prior drafts kept omitting (worked stroke gallery, reference Swift kernel, brush-engine integration, failure-mode table, etc.). Sections marked **`TODO[researcher]`** are deliberately stubbed — they require either verification against original source papers, hands-on evaluation of competing apps/libraries, or empirical data we don't yet have. Each TODO specifies what the deliverable should look like.
 
