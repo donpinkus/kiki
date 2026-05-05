@@ -113,7 +113,16 @@ When diagnosing a failure, separate observations from inferences. Do not collaps
 | `kiki-backend` | Node/Fastify on Railway | `SENTRY_DSN` (Railway) | Backend orchestrator errors + structured logs |
 | `kiki-pod` | Python image+video pods | `SENTRY_DSN_POD` (Railway → forwarded to pod env by orchestrator) | Forwarded by `orchestrator.ts` BOOT_ENV when set |
 
-Pods log via stdlib `logging` → `LoggingIntegration` ships `INFO+` lines into Sentry's Logs product. Init lives in `flux-klein-server/sentry_init.py`, called from `server.py` (image) and `video_server.py` (video). Every event is tagged `pod_kind:image|video` and `pod_id:<RUNPOD_POD_ID>`. No-op when `SENTRY_DSN_POD` is unset (local runs stay quiet).
+Pods log via stdlib `logging` → `LoggingIntegration` ships `INFO+` lines into Sentry's Logs product. Init lives in `flux-klein-server/sentry_init.py`, called from `server.py` (image) and `video_server.py` (video). `pod_kind:image|video` and `pod_id:<RUNPOD_POD_ID>` are attached **two ways**: as scope tags (covers errors/spans/transactions) and as log attributes via a `before_send_log` hook (covers the Logs product — scope tags don't propagate there, found out the hard way). No-op when `SENTRY_DSN_POD` is unset (local runs stay quiet).
+
+**Pod logging conventions** — apply to every new `logger.X(...)` call in `flux-klein-server/`:
+
+- **Use f-string body + `extra={...}`. Never positional `%s`/`%d`.** Positional args become opaque `message.parameter.0..N` indices in Sentry's Logs UI. f-strings render the body literally so the expanded view is human-readable, and `extra` keys auto-promote to top-level queryable attributes (Sentry SDK's `_extra_from_record` does this — same path used by `code.*` / `thread.*` / `process.*`).
+- **Use `extra={}` for fields you'd want to filter or aggregate on** (e.g. `gen_ms`, `frames`, `client_id`). Skip it for throwaway diagnostics — no value in indexing every transient string.
+- **Don't manually set `pod_kind` / `pod_id`.** The `before_send_log` hook in `sentry_init.py` injects them on every log. If you want pod-scoped attributes added globally, extend that hook — don't sprinkle them per-call.
+- **Avoid stdlib LogRecord-reserved keys in `extra={}`** — `name`, `msg`, `args`, `levelname`, `levelno`, `pathname`, `filename`, `module`, `exc_info`, `exc_text`, `stack_info`, `lineno`, `funcName`, `created`, `msecs`, `relativeCreated`, `thread`, `threadName`, `processName`, `process`, `message`. Python's logging raises `KeyError` on collision. Prefix domain keys (`pod_id`, `client_id`, `gen_ms`) and you'll be fine.
+- **`sentry_sdk.set_tag()` ≠ log attribute.** Tags propagate to errors/spans only, not to the Logs product. To attach something to log entries, use `before_send_log` (global) or `extra={}` (per-call).
+- **Reading logs back via Sentry MCP `search_events`:** the MCP's query agent silently drops unrecognized attribute names from `fields=[...]` — if a field is missing from the response but visible in the Sentry UI, the data is fine, the MCP agent just didn't surface it. Cross-check in `donki.sentry.io` → Logs before chasing it as a code bug.
 
 **Cross-project search:** Sentry's UI page-filter handles "all projects" or any subset. To stitch a single user action across iOS → backend → pod: use trace_id propagation (auto over HTTP, manual over WS) plus `session_id` tagged on every event. Project boundary is *not* a data silo — it's just for permissions, alert routing, and quotas.
 
