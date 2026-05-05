@@ -133,6 +133,7 @@ Pods log via stdlib `logging` → `LoggingIntegration` ships `INFO+` lines into 
 | `animating` | User paused, video idle-state running. Pod: LTX inference + encode + stream (one block). Backend: WS relay. iOS: video preview. |
 | `reconnecting` | Recovering from a mid-session disconnect. Set by iOS + backend only; pod stays on `session_starting` for any boot since it can't tell fresh-vs-reconnect. Cross-layer correlation via `trace_id`. |
 | `session_ending` | Session winding down. |
+| `deploying` | Ops-side: a deploy is in flight. Set by `backend/scripts/deploy.ts`, `sync-all-dcs.ts`, and `sync-flux-app.ts` via `backend/scripts/lib/deploy-sentry.ts`. Distinct from user-journey phases (deploys can run during active sessions). Lets you query "everything that happened during the last deploy" — including any pod boots that fired after a `sync-flux-app` finished. Requires `SENTRY_DSN` in `.env.local` for local CLI runs to ship to Sentry; no-op without it. |
 
 **Pod-side mechanism:** `flux-klein-server/sentry_init.py` exports a `phase()` context manager backed by `contextvars.ContextVar`. Set with `with sentry_init.phase("drawing"):` and the value propagates through `asyncio.create_task` and `asyncio.to_thread` into all logs emitted within (verified — Python 3.9+ copies the contextvars snapshot into spawned tasks/threads). The `before_send_log` hook injects the active value as a top-level `phase` log attribute. Logs outside any phase block have no `phase` attribute (filterable as `!has:phase`).
 

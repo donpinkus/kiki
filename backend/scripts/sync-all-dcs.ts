@@ -24,6 +24,7 @@ import { existsSync, openSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { initDeployLogging, flushDeployLogging } from './lib/deploy-sentry.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BACKEND_DIR = resolve(__dirname, '..');
@@ -53,6 +54,7 @@ function loadEnvLocal(): void {
   }
 }
 loadEnvLocal();
+initDeployLogging('sync-all-dcs');
 
 // SSH key fallback — most users keep their RunPod-registered key at the
 // default ed25519 path. Letting npm run deploy auto-resolve it removes one
@@ -158,12 +160,15 @@ async function main(): Promise<void> {
   const failed = results.filter((r) => !r.ok);
   if (failed.length > 0) {
     console.error(`\n[sync-all] ${failed.length}/${results.length} DCs failed; check log files`);
+    await flushDeployLogging();
     process.exit(1);
   }
   console.log(`\n[sync-all] all ${results.length} DCs synced successfully`);
+  await flushDeployLogging();
 }
 
-main().catch((e) => {
+main().catch(async (e) => {
   console.error('[sync-all] FATAL:', e);
+  await flushDeployLogging();
   process.exit(1);
 });

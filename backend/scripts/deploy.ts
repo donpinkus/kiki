@@ -30,6 +30,9 @@ import { execSync, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { initDeployLogging, flushDeployLogging } from './lib/deploy-sentry.js';
+
+initDeployLogging('deploy');
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BACKEND_DIR = resolve(__dirname, '..');
@@ -52,10 +55,15 @@ function runInherit(cmd: string, args: string[]): number {
   return r.status ?? -1;
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const prevFlux = readTrimmed(FLUX_VERSION_FILE);
   const newFlux = git('rev-parse HEAD:flux-klein-server');
   const newGit = git('rev-parse HEAD');
+  const startedAt = Date.now();
+
+  console.log(
+    `[deploy] starting: git=${newGit.slice(0, 8)} flux=${newFlux.slice(0, 8)} prev_flux=${prevFlux.slice(0, 8) || '(none)'}`,
+  );
 
   if (prevFlux === newFlux) {
     console.log(`[deploy] flux-klein-server unchanged (${newFlux.slice(0, 8)}); skipping sync`);
@@ -69,6 +77,7 @@ function main(): void {
     if (syncCode !== 0) {
       console.error(`\n[deploy] sync-all failed (exit ${syncCode}); aborting deploy`);
       console.error('[deploy] state files NOT updated — fix the failing DC and re-run npm run deploy');
+      await flushDeployLogging();
       process.exit(syncCode);
     }
   }
@@ -82,7 +91,18 @@ function main(): void {
 
   console.log('[deploy] running railway up...');
   const upCode = runInherit('railway', ['up']);
+  const durationSec = Math.round((Date.now() - startedAt) / 1000);
+  if (upCode === 0) {
+    console.log(`[deploy] complete: duration_s=${durationSec} git=${newGit.slice(0, 8)}`);
+  } else {
+    console.error(`[deploy] railway up failed (exit ${upCode}); duration_s=${durationSec}`);
+  }
+  await flushDeployLogging();
   process.exit(upCode);
 }
 
-main();
+main().catch(async (e) => {
+  console.error('[deploy] FATAL:', e);
+  await flushDeployLogging();
+  process.exit(1);
+});

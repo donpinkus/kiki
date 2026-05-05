@@ -31,6 +31,9 @@ import { chmodSync, writeFileSync } from 'node:fs';
 import { hostname, userInfo } from 'node:os';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { initDeployLogging, flushDeployLogging, setLogAttribute } from './lib/deploy-sentry.js';
+
+initDeployLogging('sync-flux-app');
 
 // ─── CLI args ─────────────────────────────────────────────────────────────
 function getArg(flag: string): string {
@@ -44,6 +47,10 @@ function getArg(flag: string): string {
 
 const DC = getArg('--dc');
 const VOLUME_ID = getArg('--volume-id');
+
+// Tag every Sentry log from this process with the DC so per-DC sync activity
+// is filterable in the Logs UI: `phase:deploying dc:US-TX-3`.
+setLogAttribute('dc', DC);
 
 const API_KEY = process.env['RUNPOD_API_KEY'];
 const SSH_KEY = process.env['RUNPOD_SSH_PRIVATE_KEY'];
@@ -530,7 +537,12 @@ VEREOF`);
   console.log(`[sync] done. Volume ${VOLUME_ID} ready to serve runtime pods in ${DC}.`);
 }
 
-main().catch((e) => {
-  console.error('[sync] FAILED:', e);
-  process.exit(1);
-});
+main()
+  .then(async () => {
+    await flushDeployLogging();
+  })
+  .catch(async (e) => {
+    console.error('[sync] FAILED:', e);
+    await flushDeployLogging();
+    process.exit(1);
+  });
