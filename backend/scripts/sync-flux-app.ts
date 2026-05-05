@@ -60,36 +60,24 @@ if (!SSH_KEY) {
 // ─── Constants ────────────────────────────────────────────────────────────
 
 // We don't need a GPU for pip install + rsync — we just need a pod that can
-// mount the network volume. RunPod requires gpuCount ≥ 1, so we try an
-// ordered list of cheap GPUs (cheapest first) and use whichever one has
-// capacity in the target DC. Set SYNC_GPU_TYPE_ID to pin a specific type.
+// mount the network volume. RunPod requires gpuCount ≥ 1, so we discover
+// GPU types stocked in the target DC at runtime via lowestPrice probes
+// (see listAvailableGpuTypesInDc) and try them cheapest-first. Set
+// SYNC_GPU_TYPE_ID to pin a specific type.
 //
-// The candidates include enough variety that at least one stocks in every
-// DC we use. 5090 covers our image DCs. RTX 4000 Ada covers the H100-SXM
-// DCs (US-CA-2, US-TX-3, EU-NL-1, EUR-IS-3, US-MO-1, US-NE-1) where the
-// cheaper RTX 2000 Ada / A4000 / 3090 / L4 SKUs aren't stocked. H100 SXM
-// is the last-resort fallback so we never fail a sync just because a DC
-// is sparse on cheap stock.
+// Why dynamic discovery: a hardcoded candidate list went stale every time
+// RunPod added/removed a SKU. US-TX-3 stocks 4090/H100 SXM/L40S — none
+// were in the old list, so syncs there exhausted all candidates and bailed.
+// Discovery reflects whatever RunPod has stocked today.
 //
-// 4090 deliberately omitted: hosts in EUR-NO-1, US-IL-1, US-NC-1, EUR-NO-1,
-// US-TX-3, EUR-NO-1 boot the container but `startSsh:true` never opens
-// port 22. The bug is post-create (the createPod returns success, then
-// the pod sits in RUNNING state with no SSH info), so the next-candidate
-// fallback never triggers — sync hangs until waitForSsh's 15-min timeout.
-// Verified across multiple sessions; do NOT re-add 4090 without confirming
-// RunPod has fixed the startSsh handshake on this SKU.
-const DEFAULT_GPU_CANDIDATES = [
-  'NVIDIA RTX 2000 Ada Generation',
-  'NVIDIA RTX 4000 Ada Generation',
-  'NVIDIA RTX A4000',
-  'NVIDIA GeForce RTX 3090',
-  'NVIDIA L4',
-  'NVIDIA GeForce RTX 5090',
-  'NVIDIA H100 80GB HBM3',
-];
-const GPU_CANDIDATES = process.env['SYNC_GPU_TYPE_ID']
-  ? [process.env['SYNC_GPU_TYPE_ID']!]
-  : DEFAULT_GPU_CANDIDATES;
+// 4090 is filtered out at discovery time. Verified bug: hosts in EUR-NO-1,
+// US-IL-1, US-NC-1, US-TX-3 boot the container but `startSsh:true` never
+// opens port 22. The createPod returns success, the pod sits in RUNNING
+// with no SSH info, and the next-candidate fallback never triggers — sync
+// hangs until waitForSsh's 15-min timeout. Do NOT re-enable 4090 without
+// confirming RunPod has fixed the startSsh handshake on this SKU.
+const SKIP_GPU_PATTERNS = ['4090'];
+const PINNED_GPU_TYPE = process.env['SYNC_GPU_TYPE_ID'];
 // Must match the pinned base used by runtime pods (orchestrator.ts / runpodClient.ts).
 // Base image determines torch/CUDA ABI; venv + pip installs are tied to this.
 const IMAGE_NAME = 'runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404';
@@ -117,12 +105,98 @@ async function gql<T>(query: string): Promise<T> {
 
 // ─── Pod lifecycle ────────────────────────────────────────────────────────
 
+interface DcGpuCandidate {
+  id: string;
+  price: number;       // uninterruptable USD/hr
+  stock: string;       // 'High' | 'Medium' | 'Low' (Unknown / None filtered out)
+}
+
+/**
+ * Probe RunPod for GPU types currently stocked in `dc`. Returns candidates
+ * sorted cheapest-first. Filters out:
+ *   - GPUs with stockStatus None or Unknown (no allocatable capacity).
+ *   - Any GPU matching SKIP_GPU_PATTERNS (e.g. 4090 SSH bug).
+ *
+ * One `lowestPrice` query per known GPU type — the full `gpuTypes` listing
+ * has ~30-40 entries, so this is ~30s of GraphQL latency for a 5-15 min
+ * sync. Acceptable.
+ */
+async function listAvailableGpuTypesInDc(dc: string): Promise<DcGpuCandidate[]> {
+  const allTypes = await gql<{ gpuTypes: Array<{ id: string }> }>(
+    'query { gpuTypes { id } }',
+  );
+  const ids = allTypes.gpuTypes.map((g) => g.id);
+  const candidates: DcGpuCandidate[] = [];
+  // Probe in parallel — RunPod's GraphQL endpoint handles concurrent
+  // queries fine and serializing makes a 30-type probe take 30+ seconds.
+  const probes = await Promise.all(
+    ids.map(async (gpuTypeId) => {
+      if (SKIP_GPU_PATTERNS.some((p) => gpuTypeId.includes(p))) return null;
+      try {
+        const data = await gql<{
+          gpuTypes: Array<{
+            lowestPrice: {
+              uninterruptablePrice: number | null;
+              stockStatus: string | null;
+            };
+          }>;
+        }>(`query {
+          gpuTypes(input: { id: "${gpuTypeId}" }) {
+            lowestPrice(input: { gpuCount: 1, secureCloud: true, dataCenterId: "${dc}" }) {
+              uninterruptablePrice
+              stockStatus
+            }
+          }
+        }`);
+        const lp = data.gpuTypes[0]?.lowestPrice;
+        if (!lp) return null;
+        const stock = lp.stockStatus;
+        // RunPod returns null/'None' when the SKU has zero allocatable
+        // capacity in this DC. Anything else (High / Medium / Low) is fair
+        // game — we retry on per-pod create failure anyway.
+        if (!stock || stock === 'None') return null;
+        const price = lp.uninterruptablePrice;
+        if (price == null) return null;
+        return { id: gpuTypeId, price, stock };
+      } catch {
+        return null;
+      }
+    }),
+  );
+  for (const p of probes) if (p) candidates.push(p);
+  candidates.sort((a, b) => a.price - b.price);
+  return candidates;
+}
+
 async function createPod(): Promise<{ id: string; costPerHr: number; gpuType: string }> {
   const authField = REGISTRY_AUTH_ID
     ? `, containerRegistryAuthId: "${REGISTRY_AUTH_ID}"`
     : '';
+
+  // Discover candidates: pinned override → DC stock probe.
+  let candidates: DcGpuCandidate[];
+  if (PINNED_GPU_TYPE) {
+    candidates = [{ id: PINNED_GPU_TYPE, price: 0, stock: 'pinned' }];
+  } else {
+    console.log(`[sync] probing GPU stock in ${DC}...`);
+    candidates = await listAvailableGpuTypesInDc(DC);
+    if (candidates.length === 0) {
+      throw new Error(
+        `No allocatable GPU types reported in ${DC} (all SKUs returned stockStatus=None or Unknown). ` +
+          `RunPod may be experiencing a regional capacity outage; retry later.`,
+      );
+    }
+    const summary = candidates
+      .slice(0, 6)
+      .map((c) => `${c.id} ($${c.price}/hr, ${c.stock})`)
+      .join(', ');
+    console.log(
+      `[sync] ${candidates.length} stocked SKUs in ${DC}; trying cheapest first: ${summary}${candidates.length > 6 ? `, ...` : ''}`,
+    );
+  }
+
   const failures: string[] = [];
-  for (const gpuType of GPU_CANDIDATES) {
+  for (const { id: gpuType } of candidates) {
     const query = `mutation {
       podFindAndDeployOnDemand(input: {
         name: "${POD_NAME}",
@@ -155,7 +229,7 @@ async function createPod(): Promise<{ id: string; costPerHr: number; gpuType: st
     }
   }
   throw new Error(
-    `Failed to create sync pod in ${DC} — exhausted ${GPU_CANDIDATES.length} GPU types:\n  ${failures.join('\n  ')}`,
+    `Failed to create sync pod in ${DC} — tried ${candidates.length} stocked GPU types:\n  ${failures.join('\n  ')}`,
   );
 }
 
