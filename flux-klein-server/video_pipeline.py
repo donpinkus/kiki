@@ -99,6 +99,18 @@ def _decoded_audio_to_pcm_s16le(decoded_audio: object, sample_rate: int) -> Gene
         if not decoded_audio:
             return None
         decoded_audio = decoded_audio[0]
+    # `pipe.audio_decoder(latent)` returns an `ltx_core.types.Audio` frozen
+    # dataclass with `.waveform: torch.Tensor` and `.sampling_rate: int`.
+    # Older ltx-core builds returned a raw tensor; duck-type for `.waveform`
+    # so we work with either shape. The Audio's own sampling_rate is the
+    # vocoder's authoritative output rate — prefer it over the caller's
+    # AUDIO_SAMPLE_RATE constant when present.
+    waveform_attr = getattr(decoded_audio, "waveform", None)
+    if isinstance(waveform_attr, torch.Tensor):
+        rate_attr = getattr(decoded_audio, "sampling_rate", None)
+        if isinstance(rate_attr, int) and rate_attr > 0:
+            sample_rate = rate_attr
+        decoded_audio = waveform_attr
     if not isinstance(decoded_audio, torch.Tensor):
         decoded_audio = torch.as_tensor(decoded_audio)
 
