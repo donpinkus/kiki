@@ -431,8 +431,37 @@ async function main(): Promise<void> {
   ensureSshKey();
 
   console.log(`[sync] creating on-demand pod in ${DC}...`);
-  const { id: podId, costPerHr, gpuType } = await createPod();
-  console.log(`[sync] pod ${podId} created on ${gpuType} ($${costPerHr}/hr)`);
+  // Ride out transient regional capacity outages — RunPod's stockStatus
+  // for entire DCs can flicker to None for a few minutes during stock churn,
+  // and a parallel deploy across 10 DCs is much more likely to hit one
+  // than a single-DC sync. Retry every 30s up to MAX_ATTEMPTS rather than
+  // failing the whole deploy and forcing a manual re-run.
+  const MAX_ATTEMPTS = 12; // 12 × 30s = 6 min cap; longer outages need manual attention
+  let attempt = 0;
+  let podCreate: { id: string; costPerHr: number; gpuType: string } | null = null;
+  while (true) {
+    attempt += 1;
+    try {
+      podCreate = await createPod();
+      break;
+    } catch (e) {
+      const msg = (e as Error).message;
+      if (attempt >= MAX_ATTEMPTS) {
+        console.error(
+          `[sync] createPod failed after ${attempt} attempts in ${DC}; giving up. Last error: ${msg}`,
+        );
+        throw e;
+      }
+      console.warn(
+        `[sync] createPod attempt ${attempt}/${MAX_ATTEMPTS} failed in ${DC} (${msg}); retrying in 30s...`,
+      );
+      await new Promise((r) => setTimeout(r, 30_000));
+    }
+  }
+  const { id: podId, costPerHr, gpuType } = podCreate;
+  console.log(
+    `[sync] pod ${podId} created on ${gpuType} ($${costPerHr}/hr)${attempt > 1 ? ` after ${attempt} attempts` : ''}`,
+  );
 
   try {
     console.log('[sync] waiting for SSH...');
