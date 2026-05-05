@@ -698,10 +698,20 @@ class Ltx23VideoPipeline:
         from ltx_core.components.noisers import GaussianNoiser
         from ltx_pipelines.utils.args import ImageConditioningInput
         from ltx_pipelines.utils.constants import (
-            AUDIO_SAMPLE_RATE,
             DISTILLED_SIGMAS,
             STAGE_2_DISTILLED_SIGMAS,
         )
+        # AUDIO_SAMPLE_RATE was added to ltx_pipelines.utils.constants
+        # upstream after the version we pin (LTX-2 commit 41d92437). On the
+        # pinned version this symbol doesn't exist and a tuple-import would
+        # crash pod boot during warmup, even when LTX_ENABLE_AUDIO=False.
+        # Fall back to LTX's audio_vae default (16 kHz, packages/ltx-core/...
+        # /audio_vae.py at 41d92437). When the pin is bumped past upstream
+        # adding this constant, the try-import wins and we track it again.
+        try:
+            from ltx_pipelines.utils.constants import AUDIO_SAMPLE_RATE
+        except ImportError:
+            AUDIO_SAMPLE_RATE = 16000
         from ltx_pipelines.utils.denoisers import SimpleDenoiser
         from ltx_pipelines.utils.gpu_model import gpu_model
         from ltx_pipelines.utils.helpers import assert_resolution, combined_image_conditionings
