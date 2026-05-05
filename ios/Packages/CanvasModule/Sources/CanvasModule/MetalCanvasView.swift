@@ -167,7 +167,20 @@ public final class MetalCanvasView: UIView {
             perpRatio: CGFloat,
             isCircle: Bool
         )
+        /// Arc edit mode. 3 handles: start, end, and midpoint.
+        /// Dragging start/end → rigid rotation+scale of the whole arc around
+        /// the OPPOSITE endpoint (preserves coverage angle).
+        /// Dragging mid → recomputes the unique circle through start, mid, end
+        /// (changes coverage angle).
+        case editingArcHandles(geometry: ArcGeometry)
+        case draggingArcHandle(
+            geometry: ArcGeometry,
+            which: ArcHandleSide,
+            originalGeometry: ArcGeometry
+        )
     }
+    /// Which arc handle is being dragged.
+    private enum ArcHandleSide { case start, end, mid }
     private enum HandleSide { case start, end }
     /// One of the 4 ellipse axis endpoints. "Plus" / "Minus" refer to the
     /// signed direction along the axis from the center.
@@ -189,6 +202,7 @@ public final class MetalCanvasView: UIView {
     private let startHandleLayer = CAShapeLayer()
     private let endHandleLayer = CAShapeLayer()
     /// Additional handles for ellipse/circle minor axis endpoints.
+    /// Also reused for the arc midpoint handle (uses `minorPlusHandleLayer`).
     private let minorPlusHandleLayer = CAShapeLayer()
     private let minorMinusHandleLayer = CAShapeLayer()
     private let previewHaptic = UIImpactFeedbackGenerator(style: .light)
@@ -369,6 +383,29 @@ public final class MetalCanvasView: UIView {
             }
         }
 
+        // Arc edit mode: 3 handles (start, end, mid).
+        if case .editingArcHandles(let geom) = snapState,
+           let touch = touches.first {
+            let p = touch.location(in: self)
+            if let which = arcHandleHitTest(at: p, geometry: geom) {
+                snapState = .draggingArcHandle(
+                    geometry: geom, which: which, originalGeometry: geom
+                )
+                drawingTouch = touch
+                onInteractionBegan?()
+                if isQuickShapeLoggingEnabled {
+                    print("[QS] arc handle drag begin — \(which)")
+                }
+                return
+            } else {
+                if isQuickShapeLoggingEnabled {
+                    print("[QS] tap-elsewhere — finalize arc edit")
+                }
+                finalizeEditedSnap()
+                return
+            }
+        }
+
         // Ellipse / circle edit mode: same routing pattern with 4 handles.
         if case .editingEllipseHandles(let geom, let isCircle) = snapState,
            let touch = touches.first {
@@ -478,6 +515,25 @@ public final class MetalCanvasView: UIView {
             return
         }
 
+        // Arc handle drag — start/end is rigid rotation+scale around opposite
+        // endpoint; mid changes coverage via 3-point circle fit.
+        if case .draggingArcHandle(_, let which, let originalGeom) = snapState {
+            let dragPos = touch.location(in: self)
+            if let newGeom = recomputeArcFromHandleDrag(
+                originalGeometry: originalGeom,
+                which: which,
+                dragPos: dragPos
+            ) {
+                snapState = .draggingArcHandle(
+                    geometry: newGeom, which: which, originalGeometry: originalGeom
+                )
+                rebuildArcStamps(geometry: newGeom)
+                updateArcHandles(geometry: newGeom)
+            }
+            // If degenerate (collinear or zero-length chord), keep prior geometry.
+            return
+        }
+
         // Ellipse / circle handle drag — opposite handle is the anchor.
         if case .draggingEllipseHandle(_, let anchor, let perpRatio, let isCircle) = snapState {
             let dragPos = touch.location(in: self)
@@ -576,12 +632,27 @@ public final class MetalCanvasView: UIView {
             return
         }
 
-        // Snap committed during this touch as an ellipse/circle (closed
-        // shape — no immediate-drag, so we entered .editingEllipseHandles
-        // directly in commitSnap). Just clean up touch state; handles stay
-        // visible and the state machine waits for the user's next tap to
-        // either re-edit or dismiss.
+        // End of an arc handle drag: return to editingArcHandles.
+        if case .draggingArcHandle(let geom, _, _) = snapState {
+            snapState = .editingArcHandles(geometry: geom)
+            updateArcHandles(geometry: geom)
+            drawingTouch = nil
+            onInteractionEnded?()
+            isDirty = true
+            return
+        }
+
+        // Snap committed during this touch as an ellipse/circle/arc — no
+        // immediate-drag, so we entered the corresponding edit state directly
+        // in commitSnap. Just clean up touch state; handles stay visible.
         if case .editingEllipseHandles = snapState {
+            drawingTouch = nil
+            recognizer?.reset()
+            onInteractionEnded?()
+            isDirty = true
+            return
+        }
+        if case .editingArcHandles = snapState {
             drawingTouch = nil
             recognizer?.reset()
             onInteractionEnded?()
@@ -616,6 +687,7 @@ public final class MetalCanvasView: UIView {
                 let verdictDesc: String
                 switch v {
                 case .line(let g): verdictDesc = "line[(\(fmt(g.start.x)),\(fmt(g.start.y))) → (\(fmt(g.end.x)),\(fmt(g.end.y)))]"
+                case .arc(let g): verdictDesc = "arc[c=(\(fmt(g.center.x)),\(fmt(g.center.y))), r=\(fmt(g.radius))]"
                 case .ellipse(let g): verdictDesc = "ellipse[c=(\(fmt(g.center.x)),\(fmt(g.center.y))), a=\(fmt(g.semiMajor)), b=\(fmt(g.semiMinor))]"
                 case .circle(let g): verdictDesc = "circle[c=(\(fmt(g.center.x)),\(fmt(g.center.y))), r=\(fmt(g.radius))]"
                 case .abstain(let r): verdictDesc = "abstain(\(r.rawValue))"
@@ -660,6 +732,15 @@ public final class MetalCanvasView: UIView {
         if case .draggingEllipseHandle(let geom, _, _, let isCircle) = snapState {
             snapState = .editingEllipseHandles(geometry: geom, isCircle: isCircle)
             updateEllipseHandles(geometry: geom)
+            drawingTouch = nil
+            onInteractionEnded?()
+            isDirty = true
+            return
+        }
+
+        if case .draggingArcHandle(let geom, _, _) = snapState {
+            snapState = .editingArcHandles(geometry: geom)
+            updateArcHandles(geometry: geom)
             drawingTouch = nil
             onInteractionEnded?()
             isDirty = true
@@ -842,11 +923,11 @@ public final class MetalCanvasView: UIView {
         isDirty = true
     }
 
-    /// True when the snap state is in any "editable / handles visible" state
-    /// (line or ellipse). Used to gate finalize / cancel operations.
+    /// True when the snap state is in any "editable / handles visible" state.
+    /// Used to gate finalize / cancel operations.
     private var isInSnapEditMode: Bool {
         switch snapState {
-        case .editingHandles, .editingEllipseHandles: return true
+        case .editingHandles, .editingEllipseHandles, .editingArcHandles: return true
         default: return false
         }
     }
@@ -924,6 +1005,189 @@ public final class MetalCanvasView: UIView {
         configureHandlePath(minorPlusHandleLayer, at: pts.minorPlus)
         configureHandlePath(minorMinusHandleLayer, at: pts.minorMinus)
         CATransaction.commit()
+    }
+
+    // MARK: - Arc handles
+
+    /// Show the 3 arc handles (start, end, midpoint). Reuses `startHandleLayer`,
+    /// `endHandleLayer`, and `minorPlusHandleLayer`.
+    private func showArcHandles(geometry: ArcGeometry) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        configureHandlePath(startHandleLayer, at: geometry.startPoint)
+        configureHandlePath(endHandleLayer, at: geometry.endPoint)
+        configureHandlePath(minorPlusHandleLayer, at: geometry.midPoint)
+        startHandleLayer.isHidden = false
+        endHandleLayer.isHidden = false
+        minorPlusHandleLayer.isHidden = false
+        // Minor-minus is unused for arcs.
+        minorMinusHandleLayer.isHidden = true
+        CATransaction.commit()
+    }
+
+    private func updateArcHandles(geometry: ArcGeometry) {
+        showArcHandles(geometry: geometry)  // same as show — just reset positions
+    }
+
+    /// Hit-test against the 3 arc handles (start, end, mid). Returns the
+    /// closest one within hit radius.
+    private func arcHandleHitTest(at p: CGPoint, geometry: ArcGeometry) -> ArcHandleSide? {
+        let candidates: [(ArcHandleSide, CGFloat)] = [
+            (.start, hypot(p.x - geometry.startPoint.x, p.y - geometry.startPoint.y)),
+            (.end,   hypot(p.x - geometry.endPoint.x,   p.y - geometry.endPoint.y)),
+            (.mid,   hypot(p.x - geometry.midPoint.x,   p.y - geometry.midPoint.y)),
+        ]
+        let inRange = candidates.filter { $0.1 <= Self.handleHitRadius }
+        return inRange.min(by: { $0.1 < $1.1 })?.0
+    }
+
+    /// Compute the unique circle through 3 non-collinear points. Returns
+    /// (center, radius), or nil if they're collinear or coincident.
+    private func circleThrough(_ p1: CGPoint, _ p2: CGPoint, _ p3: CGPoint) -> (center: CGPoint, radius: CGFloat)? {
+        // Standard circumcircle formula.
+        let ax = p1.x, ay = p1.y
+        let bx = p2.x, by = p2.y
+        let cx = p3.x, cy = p3.y
+        let d = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
+        guard abs(d) > 1e-6 else { return nil }
+        let ux = ((ax * ax + ay * ay) * (by - cy)
+                + (bx * bx + by * by) * (cy - ay)
+                + (cx * cx + cy * cy) * (ay - by)) / d
+        let uy = ((ax * ax + ay * ay) * (cx - bx)
+                + (bx * bx + by * by) * (ax - cx)
+                + (cx * cx + cy * cy) * (bx - ax)) / d
+        let center = CGPoint(x: ux, y: uy)
+        let radius = hypot(ax - ux, ay - uy)
+        return (center, radius)
+    }
+
+    /// Recompute arc geometry when a handle is dragged.
+    ///
+    /// **Start/end drag** = rigid rotation+scale of the entire arc around
+    /// the OPPOSITE endpoint. Coverage angle is preserved; the arc just
+    /// rotates and scales as the user moves the dragged endpoint.
+    ///
+    /// **Mid drag** = recomputes the unique circle through (start, dragPos,
+    /// end) and rebuilds an arc passing through dragPos. Changes coverage.
+    private func recomputeArcFromHandleDrag(
+        originalGeometry og: ArcGeometry,
+        which: ArcHandleSide,
+        dragPos: CGPoint
+    ) -> ArcGeometry? {
+        switch which {
+        case .start:
+            return rigidlyTransformedArc(
+                original: og, anchor: og.endPoint, originalDragged: og.startPoint, newDragged: dragPos
+            )
+        case .end:
+            return rigidlyTransformedArc(
+                original: og, anchor: og.startPoint, originalDragged: og.endPoint, newDragged: dragPos
+            )
+        case .mid:
+            // Three-point fit; start/end stay where they were.
+            let start = og.startPoint
+            let end = og.endPoint
+            guard let circ = circleThrough(start, dragPos, end) else { return nil }
+            let startAngle = atan2(start.y - circ.center.y, start.x - circ.center.x)
+            let endAngle = atan2(end.y - circ.center.y, end.x - circ.center.x)
+            let midAngle = atan2(dragPos.y - circ.center.y, dragPos.x - circ.center.x)
+            let sweep: ArcGeometry.Sweep =
+                angleIsBetweenCCW(midAngle, from: startAngle, to: endAngle) ? .counterClockwise : .clockwise
+            return ArcGeometry(
+                center: circ.center,
+                radius: circ.radius,
+                startAngle: startAngle,
+                endAngle: endAngle,
+                sweep: sweep
+            )
+        }
+    }
+
+    /// Apply a rigid rotation+scale to an arc, anchored at one endpoint.
+    /// The arc keeps its shape (coverage angle, sweep direction); only its
+    /// position, scale, and orientation change.
+    private func rigidlyTransformedArc(
+        original og: ArcGeometry,
+        anchor: CGPoint,
+        originalDragged: CGPoint,
+        newDragged: CGPoint
+    ) -> ArcGeometry? {
+        let oldDx = originalDragged.x - anchor.x
+        let oldDy = originalDragged.y - anchor.y
+        let newDx = newDragged.x - anchor.x
+        let newDy = newDragged.y - anchor.y
+        let oldLen = hypot(oldDx, oldDy)
+        let newLen = hypot(newDx, newDy)
+        guard oldLen > 1e-6, newLen > 1e-6 else { return nil }
+        let scale = newLen / oldLen
+        let oldAngle = atan2(oldDy, oldDx)
+        let newAngle = atan2(newDy, newDx)
+        let dTheta = newAngle - oldAngle
+
+        // Rotate + scale the center around the anchor.
+        let cdx = og.center.x - anchor.x
+        let cdy = og.center.y - anchor.y
+        let cosT = cos(dTheta)
+        let sinT = sin(dTheta)
+        let rotatedCx = cdx * cosT - cdy * sinT
+        let rotatedCy = cdx * sinT + cdy * cosT
+        let newCenter = CGPoint(
+            x: anchor.x + rotatedCx * scale,
+            y: anchor.y + rotatedCy * scale
+        )
+
+        // Clamp radius to a sensible minimum so the arc never collapses to a point.
+        let newRadius = max(og.radius * scale, 5)
+        let newStartAngle = og.startAngle + dTheta
+        let newEndAngle = og.endAngle + dTheta
+
+        return ArcGeometry(
+            center: newCenter,
+            radius: newRadius,
+            startAngle: newStartAngle,
+            endAngle: newEndAngle,
+            sweep: og.sweep
+        )
+    }
+
+    /// True if angle θ lies on the counter-clockwise arc from `from` to `to`.
+    private func angleIsBetweenCCW(_ theta: CGFloat, from a: CGFloat, to b: CGFloat) -> Bool {
+        // Normalize all to [0, 2π).
+        let twoPi = 2 * CGFloat.pi
+        let na = (a.truncatingRemainder(dividingBy: twoPi) + twoPi).truncatingRemainder(dividingBy: twoPi)
+        var nb = (b.truncatingRemainder(dividingBy: twoPi) + twoPi).truncatingRemainder(dividingBy: twoPi)
+        var nt = (theta.truncatingRemainder(dividingBy: twoPi) + twoPi).truncatingRemainder(dividingBy: twoPi)
+        // CCW from na to nb. If nb < na, wrap.
+        if nb < na { nb += twoPi }
+        if nt < na { nt += twoPi }
+        return nt > na && nt < nb
+    }
+
+    /// Rebuild stamps for an arc after a handle drag.
+    private func rebuildArcStamps(geometry: ArcGeometry) {
+        guard var stroke = activeStroke,
+              let raw = preCommitRawPoints else { return }
+        stroke.points = arcPerimeterStrokePoints(geometry: geometry, raw: raw)
+        activeStroke = stroke
+        activeStrokeStamps = generateStampsForStroke(stroke, scale: canvasScale)
+        isDirty = true
+    }
+
+    /// Build a CGPath for an arc preview (used by snapPreviewLayer for arc verdicts).
+    private func arcPreviewPath(_ g: ArcGeometry) -> CGPath {
+        let path = CGMutablePath()
+        // CGPath.addArc clockwise param matches our convention if we map
+        // CCW → false (since UIKit y is down, the convention may feel
+        // inverted; this matches the rendering of ellipses we already do).
+        let clockwise = g.sweep == .clockwise
+        path.addArc(
+            center: g.center,
+            radius: g.radius,
+            startAngle: g.startAngle,
+            endAngle: g.endAngle,
+            clockwise: !clockwise  // CG convention is inverted from ours
+        )
+        return path
     }
 
     /// Compute the 4 axis-endpoint positions for an ellipse, accounting for rotation.
@@ -1079,6 +1343,7 @@ public final class MetalCanvasView: UIView {
             let verdictDesc: String
             switch v {
             case .line: verdictDesc = "line"
+            case .arc: verdictDesc = "arc"
             case .ellipse: verdictDesc = "ellipse"
             case .circle: verdictDesc = "circle"
             case .abstain(let r): verdictDesc = "abstain(\(r.rawValue))"
@@ -1132,6 +1397,7 @@ public final class MetalCanvasView: UIView {
                 let verdictDesc: String
                 switch verdict {
                 case .line: verdictDesc = "line"
+                case .arc: verdictDesc = "arc"
                 case .ellipse: verdictDesc = "ellipse"
                 case .circle: verdictDesc = "circle"
                 case .abstain(let r): verdictDesc = "abstain(\(r.rawValue))"
@@ -1176,7 +1442,8 @@ public final class MetalCanvasView: UIView {
             }
 
         case .editingHandles, .draggingHandle,
-             .editingEllipseHandles, .draggingEllipseHandle:
+             .editingEllipseHandles, .draggingEllipseHandle,
+             .editingArcHandles, .draggingArcHandle:
             // No recognizer-driven transitions in these states; touch handlers
             // own the lifecycle here.
             break
@@ -1191,14 +1458,17 @@ public final class MetalCanvasView: UIView {
         case .draggingHandle: return "draggingHandle"
         case .editingEllipseHandles: return "editingEllipseHandles"
         case .draggingEllipseHandle: return "draggingEllipseHandle"
+        case .editingArcHandles: return "editingArcHandles"
+        case .draggingArcHandle: return "draggingArcHandle"
         }
     }
 
-    /// True when both verdicts are the same shape kind (line/ellipse/circle/abstain).
-    /// Used to detect verdict-kind changes mid-preview that should cancel.
+    /// True when both verdicts are the same shape kind. Used to detect
+    /// verdict-kind changes mid-preview that should cancel.
     private func verdictsHaveSameKind(_ a: Verdict, _ b: Verdict) -> Bool {
         switch (a, b) {
-        case (.line, .line), (.ellipse, .ellipse), (.circle, .circle): return true
+        case (.line, .line), (.arc, .arc),
+             (.ellipse, .ellipse), (.circle, .circle): return true
         case (.abstain, .abstain): return true
         default: return false
         }
@@ -1214,14 +1484,12 @@ public final class MetalCanvasView: UIView {
             m.move(to: geom.start)
             m.addLine(to: geom.end)
             path = m
-        case .ellipse(let geom):
-            path = ellipsePreviewPath(geom)
-        case .circle(let geom):
-            let ell = EllipseGeometry(
-                center: geom.center,
-                semiMajor: geom.radius, semiMinor: geom.radius, rotation: 0
-            )
-            path = ellipsePreviewPath(ell)
+        case .arc(let geom):
+            path = arcPreviewPath(geom)
+        case .ellipse, .circle:
+            // Per user direction: no preview ghost for closed shapes.
+            // The haptic + handles-on-commit are sufficient feedback.
+            return
         case .abstain:
             return
         }
@@ -1283,6 +1551,8 @@ public final class MetalCanvasView: UIView {
         switch verdict {
         case .line(let geom):
             commitLineSnap(geom: geom, stroke: &stroke)
+        case .arc(let geom):
+            commitArcSnap(geom: geom, stroke: &stroke)
         case .ellipse(let geom):
             commitEllipseSnap(geom: geom, isCircle: false, stroke: &stroke)
         case .circle(let geom):
@@ -1323,6 +1593,28 @@ public final class MetalCanvasView: UIView {
         emitCommittedTelemetry(verdict: "line")
     }
 
+    private func commitArcSnap(geom: ArcGeometry, stroke: inout Stroke) {
+        let pts = arcPerimeterStrokePoints(geometry: geom, raw: stroke.points)
+        stroke.points = pts
+        activeStroke = stroke
+        activeStrokeStamps = generateStampsForStroke(stroke, scale: canvasScale)
+
+        cancelSnapPreview()
+        // Open shape: enter editing-handles directly. Same rationale as the
+        // ellipse path — there's no obvious "pen-grabs-an-endpoint" mapping
+        // since the user's finishing position is at one end of the arc, but
+        // the ARC isn't anchored at start/end the way a line is anchored at
+        // its endpoints — radius/center can change too. Keep it simple.
+        snapState = .editingArcHandles(geometry: geom)
+        showArcHandles(geometry: geom)
+        commitHaptic.impactOccurred()
+        if isQuickShapeLoggingEnabled {
+            print("[QS] commitSnap (arc) — \(pts.count) perimeter samples, coverage=\(geom.midAngle * 180 / .pi)")
+        }
+        isDirty = true
+        emitCommittedTelemetry(verdict: "arc")
+    }
+
     private func commitEllipseSnap(geom: EllipseGeometry, isCircle: Bool, stroke: inout Stroke) {
         let pts = ellipsePerimeterStrokePoints(geometry: geom, raw: stroke.points)
         stroke.points = pts
@@ -1357,6 +1649,46 @@ public final class MetalCanvasView: UIView {
                 snapshot: snapshot
             )))
         }
+    }
+
+    /// Walk the arc from startAngle to endAngle (in the swept direction)
+    /// emitting StrokePoints. Uniform pressure for the same reason as the
+    /// ellipse perimeter.
+    private func arcPerimeterStrokePoints(
+        geometry: ArcGeometry,
+        raw: [StrokePoint]
+    ) -> [StrokePoint] {
+        // Compute swept angle in [-2π, 2π].
+        var sweptAngle = geometry.endAngle - geometry.startAngle
+        switch geometry.sweep {
+        case .counterClockwise:
+            while sweptAngle <= 0 { sweptAngle += 2 * .pi }
+        case .clockwise:
+            while sweptAngle >= 0 { sweptAngle -= 2 * .pi }
+        }
+        // ~64 samples per full circle worth of sweep; minimum 16 for short arcs.
+        let n = max(16, Int(64 * abs(sweptAngle) / (2 * .pi)))
+        let forces = raw.map { $0.force }
+        let altitudes = raw.map { $0.altitude }
+        let meanForce = forces.isEmpty ? 0.5 : forces.reduce(0, +) / CGFloat(forces.count)
+        let meanAlt = altitudes.isEmpty ? .pi / 2 : altitudes.reduce(0, +) / CGFloat(altitudes.count)
+        let baseTime = raw.first?.timestamp ?? 0
+
+        var pts: [StrokePoint] = []
+        pts.reserveCapacity(n + 1)
+        for i in 0...n {
+            let t = CGFloat(i) / CGFloat(n)
+            let theta = geometry.startAngle + sweptAngle * t
+            let x = geometry.center.x + geometry.radius * cos(theta)
+            let y = geometry.center.y + geometry.radius * sin(theta)
+            pts.append(StrokePoint(
+                position: CGPoint(x: x, y: y),
+                force: meanForce,
+                altitude: meanAlt,
+                timestamp: baseTime + TimeInterval(i) * 0.001
+            ))
+        }
+        return pts
     }
 
     /// Walk the ellipse perimeter at fixed parameter intervals and emit
