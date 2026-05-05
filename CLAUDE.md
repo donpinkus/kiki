@@ -103,6 +103,24 @@ When diagnosing a failure, separate observations from inferences. Do not collaps
 - **Label claim strength.** Distinguish between "proven by event X", "consistent with but not proven", and "inferred from behavior Y". Weak and strong evidence must not share the same confident voice.
 - **A punchy one-liner root cause is a warning sign.** If you catch yourself writing "everything is X" or "the whole thing is broken because Y", reopen the evidence — don't close it. The clean story usually dropped something that matters.
 
+## Observability
+
+**Three Sentry projects, one per platform:**
+
+| Project | Covers | DSN env var | Notes |
+|---|---|---|---|
+| `kiki-ios` | Swift app | (in iOS app config) | iOS app errors + crashes |
+| `kiki-backend` | Node/Fastify on Railway | `SENTRY_DSN` (Railway) | Backend orchestrator errors + structured logs |
+| `kiki-pod` | Python image+video pods | `SENTRY_DSN_POD` (Railway → forwarded to pod env by orchestrator) | Forwarded by `orchestrator.ts` BOOT_ENV when set |
+
+Pods log via stdlib `logging` → `LoggingIntegration` ships `INFO+` lines into Sentry's Logs product. Init lives in `flux-klein-server/sentry_init.py`, called from `server.py` (image) and `video_server.py` (video). Every event is tagged `pod_kind:image|video` and `pod_id:<RUNPOD_POD_ID>`. No-op when `SENTRY_DSN_POD` is unset (local runs stay quiet).
+
+**Cross-project search:** Sentry's UI page-filter handles "all projects" or any subset. To stitch a single user action across iOS → backend → pod: use trace_id propagation (auto over HTTP, manual over WS) plus `session_id` tagged on every event. Project boundary is *not* a data silo — it's just for permissions, alert routing, and quotas.
+
+**PostHog** stays in its lane: product analytics events only (per `feedback_single_observability.md`). Errors and stdout/stderr go to Sentry exclusively.
+
+**Querying logs programmatically** (e.g. for analysis without copy-pasting): use the Sentry MCP server (`https://mcp.sentry.dev/mcp`) — registered at user scope on Donald's Claude Code config, exposes `search_events` / `search_issues` / `search_spans`. Avoids the manual "paste logs into chat" workflow.
+
 ## Key References
 
 | When | Read |
@@ -169,6 +187,23 @@ cd backend && npm run deploy   # backend-only change → fast path (~30s)
 **If SSH refuses connection:** check `/tmp/ssh-bootstrap.log` on the pod (via RunPod web terminal — enable it from the Connect tab). The log captures all bootstrap output and tells you whether `ssh-keygen -A` failed, whether `service ssh start` worked, etc.
 
 **Disable SSH for prod:** unset `PUBLIC_KEY` in Railway env (no code change needed). Newly-spawned pods skip the bootstrap. Existing pods retain whichever path was active when they booted.
+
+## Completion reporting
+
+At the end of any task that touches code, config, or infra, finish with a short status block so Donald knows whether he can test next or whether something else is gating him. Skip the block on read-only/research turns where nothing changed.
+
+Format:
+
+- **Code state:** one of — `uncommitted` (working tree only) / `committed on main (local)` / `pushed to origin/main`.
+- **Ready to test?** `yes` or `no`. If `no`, list every step that remains before Donald can exercise the change. Common gates in this repo:
+  - **Backend (Railway) redeploy** — `cd backend && npm run deploy`. Required for any change under `backend/src/**`. If `flux-klein-server/` also changed, this same command fans out `sync-flux-app.ts` to all DCs; call that out.
+  - **Pod sync only** — `cd backend && npm run sync-all`. Required for `flux-klein-server/` or `ltx-server/` changes when backend itself didn't change.
+  - **Existing pods keep the old code in memory after a sync.** If Donald is mid-session, his pod must be terminated (or he must start a fresh session) to pick up the change. Say so when relevant.
+  - **iOS rebuild + reinstall** — Swift changes don't hot-reload. Note simulator vs. device. Flag if SwiftData schema changed (state reset needed).
+  - **Env var / secret / third-party config** — name it explicitly (e.g. "set `PUBLIC_KEY` in Railway", "accept Gemma terms on HF").
+- **What to test:** one or two sentences on the golden path that verifies the change.
+
+If a step is something Donald has to run himself (e.g. RunPod web console click, App Store Connect change, anything requiring his credentials/2FA), say so explicitly rather than leaving it ambiguous.
 
 ## Git Conventions
 
