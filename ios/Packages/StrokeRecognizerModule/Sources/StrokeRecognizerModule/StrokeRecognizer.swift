@@ -218,11 +218,45 @@ public final class StrokeRecognizer {
         }
     }
 
-    // MARK: - Open-stroke (line) branch
+    // MARK: - Open-stroke (line vs arc) branch
 
     private func classifyOpen(features: LineFeatures, line: LineFit, positions: [CGPoint]) {
-        let score = LineClassifier.lineScore(features)
-        cachedScore = score
+        let lineScoreVal = LineClassifier.lineScore(features)
+
+        // Try the arc fit alongside the line. If the fit fails (degenerate
+        // input), arc score is nil and line decides on its own.
+        let circle = fitCircleTaubin(positions, strokeScale: features.bboxDiagonal, seeds: seeds)
+        let arcCoverage: CGFloat?
+        let circleNormRMS: CGFloat?
+        let arcScoreVal: CGFloat?
+        if let circle = circle {
+            let coverage = arcCoverageDegrees(positions, center: circle.center)
+            arcCoverage = coverage
+            circleNormRMS = circle.normRMS
+            arcScoreVal = ArcClassifier.arcScore(
+                features: features,
+                circleNormRMS: circle.normRMS,
+                arcCoverageDeg: coverage
+            )
+        } else {
+            arcCoverage = nil
+            circleNormRMS = nil
+            arcScoreVal = nil
+        }
+
+        // Pick the winner. Arc must beat line by at least lineArcMargin to
+        // overcome the user's expectation that "lines are simpler" — a stroke
+        // that's plausibly either should default to line.
+        let arcWins: Bool
+        if let arcScoreVal = arcScoreVal {
+            arcWins = arcScoreVal >= lineScoreVal + seeds.lineArcMargin
+        } else {
+            arcWins = false
+        }
+
+        let topScore = arcWins ? (arcScoreVal ?? 0) : lineScoreVal
+        cachedScore = topScore
+
         lastFeatureSnapshot = FeatureSnapshot(
             pathLength: features.pathLength,
             bboxDiagonal: features.bboxDiagonal,
@@ -230,19 +264,50 @@ public final class StrokeRecognizer {
             sagittaRatio: features.sagittaRatio,
             totalAbsTurnDeg: features.totalAbsTurnDeg,
             totalSignedTurnDeg: features.totalSignedTurnDeg,
+            signRatio: features.signRatio,
             lineNormRMS: features.lineNormRMS,
+            circleNormRMS: circleNormRMS,
+            arcCoverageDeg: arcCoverage,
             ellipseNormResidual: nil,
             ellipseAxisRatio: nil,
             resampledPointCount: features.resampledCount,
-            lineScore: score,
+            lineScore: lineScoreVal,
+            arcScore: arcScoreVal,
             ellipseScore: nil
         )
 
-        if let reason = LineClassifier.abstainReason(features: features, score: score, seeds: seeds) {
+        // Floors apply regardless of which won.
+        if let reason = LineClassifier.abstainReason(features: features, score: topScore, seeds: seeds) {
             cachedVerdict = .abstain(reason)
             return
         }
 
+        if arcWins, let circle = circle, let coverage = arcCoverage {
+            // Arc-too-shallow guard.
+            if coverage < seeds.arcCoverageMin {
+                cachedVerdict = .abstain(.arcTooShallow)
+                return
+            }
+            // Build ArcGeometry: project raw first/last onto the fitted circle
+            // (radial projection) so the arc starts/ends near where the user
+            // actually drew. Sweep direction follows totalSignedTurn sign.
+            let startAngle = atan2(positions.first!.y - circle.center.y,
+                                   positions.first!.x - circle.center.x)
+            let endAngle = atan2(positions.last!.y - circle.center.y,
+                                 positions.last!.x - circle.center.x)
+            let sweep: ArcGeometry.Sweep =
+                features.totalSignedTurnRad >= 0 ? .counterClockwise : .clockwise
+            cachedVerdict = .arc(ArcGeometry(
+                center: circle.center,
+                radius: circle.radius,
+                startAngle: startAngle,
+                endAngle: endAngle,
+                sweep: sweep
+            ))
+            return
+        }
+
+        // Line wins (or arc unavailable).
         let geom = projectEndpoints(
             rawFirst: positions.first!,
             rawLast: positions.last!,
@@ -265,11 +330,15 @@ public final class StrokeRecognizer {
                 sagittaRatio: features.sagittaRatio,
                 totalAbsTurnDeg: features.totalAbsTurnDeg,
                 totalSignedTurnDeg: features.totalSignedTurnDeg,
+                signRatio: features.signRatio,
                 lineNormRMS: features.lineNormRMS,
+                circleNormRMS: nil,
+                arcCoverageDeg: nil,
                 ellipseNormResidual: nil,
                 ellipseAxisRatio: nil,
                 resampledPointCount: features.resampledCount,
                 lineScore: 0,
+                arcScore: nil,
                 ellipseScore: nil
             )
             cachedVerdict = .abstain(.degenerateEllipseFit)
@@ -295,11 +364,15 @@ public final class StrokeRecognizer {
             sagittaRatio: features.sagittaRatio,
             totalAbsTurnDeg: features.totalAbsTurnDeg,
             totalSignedTurnDeg: features.totalSignedTurnDeg,
+            signRatio: features.signRatio,
             lineNormRMS: features.lineNormRMS,
+            circleNormRMS: nil,
+            arcCoverageDeg: nil,
             ellipseNormResidual: ellipseFit.normResidual,
             ellipseAxisRatio: ellipseFit.geometry.axisRatio,
             resampledPointCount: features.resampledCount,
             lineScore: 0,
+            arcScore: nil,
             ellipseScore: score
         )
 

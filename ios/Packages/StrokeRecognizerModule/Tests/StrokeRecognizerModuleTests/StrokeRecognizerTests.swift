@@ -112,40 +112,37 @@ final class StrokeRecognizerTests: XCTestCase {
         }
     }
 
-    func test_moderate30DegArc_snapsToLine() {
-        // After the 2026-04 aggressive loosening, ~30° bows snap. Hold = opt-in:
-        // the user explicitly committed to correction by holding the pen.
-        // Empirically, lineRMS for a uniform 30° arc is only ~0.020 (the
-        // best-fit line is offset from the chord, not equal to it), so the
-        // line-fit gate doesn't trip until ~45° arcs. See test_uniform45DegArc.
+    func test_moderate30DegArc_snapsToArc() {
+        // 30° uniform arc — pre-arc-branch (v0) this snapped to line because
+        // line was the only open-shape verdict. With the v1 arc classifier,
+        // a 30° uniform arc is clearly an arc (low circle residual, signRatio
+        // = 1.0, coverage in band) and beats line by lineArcMargin.
         let r = StrokeRecognizer()
         let pts = arc(center: CGPoint(x: 250, y: 600),
                       radius: 300, startDeg: -105, coverageDeg: 30, n: 60)
         for p in points(pts) { r.feed(point: p) }
         let verdict = r.finalize()
-        if case .line = verdict {
+        if case .arc = verdict {
             // pass
         } else {
-            XCTFail("Expected .line for 30° bow (aggressive snap), got \(verdict). " +
+            XCTFail("Expected .arc for 30° bow, got \(verdict). " +
                     "Score: \(r.currentConfidence), snapshot: \(String(describing: r.lastFeatureSnapshot))")
         }
     }
 
-    func test_uniform45DegArc_abstains() {
-        // 45° arc (sag ~10%) is genuinely curved — should abstain even with the
-        // aggressive 2026-04 loosening. This is the new boundary between
-        // "line-ish bow" and "actual arc."
+    func test_uniform45DegArc_snapsToArc() {
+        // Pre-arc-branch this asserted abstain. Now: snaps to arc (45° is
+        // well within the 25°…300° arc-coverage band).
         let r = StrokeRecognizer()
         let pts = arc(center: CGPoint(x: 250, y: 600),
                       radius: 300, startDeg: -112.5, coverageDeg: 45, n: 60)
         for p in points(pts) { r.feed(point: p) }
         let verdict = r.finalize()
-        if case .abstain(let reason) = verdict {
-            XCTAssertEqual(reason, .lowConfidence,
-                "Expected low-confidence abstain on uniform 45° arc, got \(reason)")
+        if case .arc = verdict {
+            // pass
         } else {
-            XCTFail("Expected abstain for uniform 45° arc, got \(verdict). " +
-                    "Score: \(r.currentConfidence), snapshot: \(String(describing: r.lastFeatureSnapshot))")
+            XCTFail("Expected .arc for 45° arc, got \(verdict). " +
+                    "Score: \(r.currentConfidence)")
         }
     }
 
@@ -168,34 +165,10 @@ final class StrokeRecognizerTests: XCTestCase {
 
     // MARK: - Abstain tests (gallery rows 4, 5, 16, 17)
 
-    func test_clear90DegArc_abstains() {
-        // Per gallery row 4: clear 90° arc → in v0 (no arc branch), should
-        // abstain on lowConfidence (line score is poor).
-        let r = StrokeRecognizer()
-        let pts = arc(center: CGPoint(x: 200, y: 200),
-                      radius: 100, startDeg: 0, coverageDeg: 90, n: 50)
-        for p in points(pts) { r.feed(point: p) }
-        let verdict = r.finalize()
-        if case .abstain(let reason) = verdict {
-            XCTAssertEqual(reason, .lowConfidence,
-                "Arc should abstain on lowConfidence in v0, got \(reason)")
-        } else {
-            XCTFail("Expected .abstain for 90° arc, got \(verdict)")
-        }
-    }
-
-    func test_halfCircle_abstains() {
-        let r = StrokeRecognizer()
-        let pts = arc(center: CGPoint(x: 200, y: 200),
-                      radius: 100, startDeg: 0, coverageDeg: 180, n: 80)
-        for p in points(pts) { r.feed(point: p) }
-        let verdict = r.finalize()
-        if case .abstain = verdict {
-            // pass — line score is very poor
-        } else {
-            XCTFail("Expected .abstain for half circle, got \(verdict)")
-        }
-    }
+    // (Note: previous v0 tests asserted abstain for 90° arc / half-circle —
+    // those held when line was the only open-shape verdict. With the v1 arc
+    // branch they correctly snap to .arc; see test_clean90DegArc_snapsToArc
+    // and test_halfCircleArc_snapsToArc.)
 
     func test_tinyDot_abstainsTooShort() {
         // Path length < minPathLength = 16 pt
@@ -425,6 +398,79 @@ final class StrokeRecognizerTests: XCTestCase {
         default:
             // Either .line, .abstain — both are acceptable for v0
             break
+        }
+    }
+
+    // MARK: - Arc tests
+
+    func test_clean90DegArc_snapsToArc() {
+        // 90° arc, well above arcCoverageMin (25°), clearly curved.
+        // Should beat line by lineArcMargin and snap to .arc.
+        let r = StrokeRecognizer()
+        let pts = arc(center: CGPoint(x: 200, y: 200),
+                      radius: 100, startDeg: 0, coverageDeg: 90, n: 50)
+        for p in points(pts) { r.feed(point: p) }
+        let verdict = r.finalize()
+        guard case .arc(let g) = verdict else {
+            XCTFail("Expected .arc for 90° arc, got \(verdict). " +
+                "Score: \(r.currentConfidence), snapshot: \(String(describing: r.lastFeatureSnapshot))")
+            return
+        }
+        XCTAssertEqual(g.center.x, 200, accuracy: 8)
+        XCTAssertEqual(g.center.y, 200, accuracy: 8)
+        XCTAssertEqual(g.radius, 100, accuracy: 8)
+    }
+
+    func test_halfCircleArc_snapsToArc() {
+        // 180° arc — well past arc threshold but still open (closure > gate).
+        let r = StrokeRecognizer()
+        let pts = arc(center: CGPoint(x: 200, y: 200),
+                      radius: 100, startDeg: 0, coverageDeg: 180, n: 80)
+        for p in points(pts) { r.feed(point: p) }
+        let verdict = r.finalize()
+        guard case .arc = verdict else {
+            XCTFail("Expected .arc for half-circle, got \(verdict). " +
+                "Score: \(r.currentConfidence)")
+            return
+        }
+    }
+
+    func test_subtleBow_prefersLineOverArc() {
+        // 15° arc — covered by both line and arc branches; arc shouldn't beat
+        // line because the line is a totally fine approximation. With the
+        // lineArcMargin (0.08), arc must be CLEARLY better to win.
+        let r = StrokeRecognizer()
+        let pts = arc(center: CGPoint(x: 250, y: 600),
+                      radius: 300, startDeg: -97.5, coverageDeg: 15, n: 60)
+        for p in points(pts) { r.feed(point: p) }
+        let verdict = r.finalize()
+        if case .line = verdict {
+            // pass — preferred line on a subtle bow
+        } else if case .arc = verdict {
+            XCTFail("Expected .line for subtle 15° bow (subtle enough to be a line), got .arc")
+        } else {
+            XCTFail("Expected .line or .arc for 15° bow, got \(verdict)")
+        }
+    }
+
+    func test_fullCircle_routesToClosedBranch_notArc() {
+        // A fully-closed 360° loop should route to the CLOSED branch
+        // (ellipse/circle), not to the OPEN/arc branch.
+        let r = StrokeRecognizer()
+        let pts = ellipseShape(
+            center: CGPoint(x: 200, y: 200),
+            semiMajor: 100, semiMinor: 100, n: 80
+        )
+        for p in points(pts) { r.feed(point: p) }
+        let verdict = r.finalize()
+        switch verdict {
+        case .circle, .ellipse:
+            // pass — closed branch handled it
+            break
+        case .arc:
+            XCTFail("Closed circle should NOT snap to .arc (closure ratio low — closed branch should win)")
+        default:
+            XCTFail("Expected .circle or .ellipse for full circle, got \(verdict)")
         }
     }
 

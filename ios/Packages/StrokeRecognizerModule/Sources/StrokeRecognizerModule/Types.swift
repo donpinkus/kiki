@@ -23,6 +23,7 @@ public struct RecognizerInputPoint: Equatable, Sendable {
 
 public enum Verdict: Equatable, Sendable {
     case line(LineGeometry)
+    case arc(ArcGeometry)
     case ellipse(EllipseGeometry)
     case circle(CircleGeometry)
     case abstain(AbstainReason)
@@ -77,6 +78,63 @@ public struct CircleGeometry: Equatable, Sendable {
     }
 }
 
+/// A circular arc — the portion of a circle between `startAngle` and
+/// `endAngle`, traversed in `sweepDirection`. Angles are in radians,
+/// with 0 along +x and π/2 along +y (UIKit convention: +y is *down*).
+public struct ArcGeometry: Equatable, Sendable {
+    public let center: CGPoint
+    public let radius: CGFloat
+    /// Angle of the arc's start point from the circle center.
+    public let startAngle: CGFloat
+    /// Angle of the arc's end point from the circle center.
+    public let endAngle: CGFloat
+    public enum Sweep: Sendable { case clockwise, counterClockwise }
+    /// Which direction the user's stroke traversed the arc.
+    public let sweep: Sweep
+
+    public init(
+        center: CGPoint,
+        radius: CGFloat,
+        startAngle: CGFloat,
+        endAngle: CGFloat,
+        sweep: Sweep
+    ) {
+        self.center = center
+        self.radius = radius
+        self.startAngle = startAngle
+        self.endAngle = endAngle
+        self.sweep = sweep
+    }
+
+    /// Position of the arc start in world coords.
+    public var startPoint: CGPoint {
+        CGPoint(x: center.x + radius * cos(startAngle), y: center.y + radius * sin(startAngle))
+    }
+    /// Position of the arc end in world coords.
+    public var endPoint: CGPoint {
+        CGPoint(x: center.x + radius * cos(endAngle), y: center.y + radius * sin(endAngle))
+    }
+    /// Position of the arc midpoint (halfway around the swept path).
+    public var midPoint: CGPoint {
+        let mid = midAngle
+        return CGPoint(x: center.x + radius * cos(mid), y: center.y + radius * sin(mid))
+    }
+    /// Angle (radians) at the arc's midpoint along the swept direction.
+    public var midAngle: CGFloat {
+        var d = endAngle - startAngle
+        // Normalize to the swept direction:
+        switch sweep {
+        case .counterClockwise:
+            // Want d in (0, 2π]
+            while d <= 0 { d += 2 * .pi }
+        case .clockwise:
+            // Want d in [-2π, 0)
+            while d >= 0 { d -= 2 * .pi }
+        }
+        return startAngle + d / 2
+    }
+}
+
 public enum AbstainReason: String, Equatable, Sendable, Codable {
     /// Stroke path length below the floor.
     case tooShort
@@ -91,6 +149,11 @@ public enum AbstainReason: String, Equatable, Sendable, Codable {
     /// Halír–Flusser ellipse fit returned NaN, degenerate axes, or no
     /// eigenvector satisfying the ellipse constraint.
     case degenerateEllipseFit
+    /// Taubin circle fit returned NaN, near-line input, or other degeneracy.
+    case degenerateCircleFit
+    /// Arc score won the line-vs-arc contest but coverage was below the
+    /// `arcCoverageMin` threshold (would look like a barely-visible bow).
+    case arcTooShallow
 }
 
 // MARK: - Configuration
@@ -139,6 +202,15 @@ public struct RecognizerSeeds: Equatable, Sendable {
     public var minResampledPoints: Int = 12
     public var overtraceTurnMax: CGFloat = 2.5 * .pi
 
+    // Arc (open-stroke curved) — competes against line for open strokes.
+    /// Arc-score wins must beat the line-score by at least this margin to
+    /// trigger an arc snap; otherwise we fall back to whichever has the
+    /// higher absolute score.
+    public var lineArcMargin: CGFloat = 0.08
+    /// Minimum angular sweep (degrees) for an arc to commit. Bows shallower
+    /// than this look like noisy lines; abstain rather than snap to arc.
+    public var arcCoverageMin: CGFloat = 25
+
     // Closed-stroke routing & validation
     /// Stroke routes to closed-stroke branch (ellipse/circle) when
     /// endpointGap / pathLength ≤ this. The 0.10 default tolerates a small
@@ -176,7 +248,13 @@ public struct FeatureSnapshot: Equatable, Sendable, Codable {
     public let sagittaRatio: CGFloat
     public let totalAbsTurnDeg: CGFloat
     public let totalSignedTurnDeg: CGFloat
+    public let signRatio: CGFloat
     public let lineNormRMS: CGFloat
+    /// Normalized residual of the open-branch arc fit, or nil if no fit
+    /// (closed stroke, or degenerate input).
+    public let circleNormRMS: CGFloat?
+    /// Angular sweep of the arc (degrees), nil if no arc fit.
+    public let arcCoverageDeg: CGFloat?
     /// Normalized residual of the closed-branch ellipse fit, or nil if no
     /// fit was attempted (open stroke, or degenerate input).
     public let ellipseNormResidual: CGFloat?
@@ -184,5 +262,6 @@ public struct FeatureSnapshot: Equatable, Sendable, Codable {
     public let ellipseAxisRatio: CGFloat?
     public let resampledPointCount: Int
     public let lineScore: CGFloat
+    public let arcScore: CGFloat?
     public let ellipseScore: CGFloat?
 }

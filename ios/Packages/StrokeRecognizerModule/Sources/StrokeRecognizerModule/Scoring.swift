@@ -71,6 +71,33 @@ enum LineClassifier {
     }
 }
 
+/// Arc classifier — competes against the line classifier for open strokes.
+/// A high arc score requires: low circle-fit residual, consistent curvature
+/// direction (signRatio near 1), meaningful angular sweep, visible sagitta,
+/// and a reasonable totalAbsTurn.
+enum ArcClassifier {
+
+    /// Compute the arc score from features + circle fit. Always in [0, 1].
+    ///
+    /// Weights:
+    ///   0.40 · goodLow(circleNormRMS,    0.025)
+    ///   0.20 · goodHigh(signRatio,       0.85)         ← consistent direction
+    ///   0.15 · goodBand(arcCoverageDeg,  30°…300°)
+    ///   0.15 · goodHigh(sagittaRatio,    0.040)        ← visible bow
+    ///   0.10 · goodBand(totalAbsTurnDeg, 25°…270°)
+    static func arcScore(
+        features: LineFeatures,
+        circleNormRMS: CGFloat,
+        arcCoverageDeg: CGFloat
+    ) -> CGFloat {
+        return 0.40 * Score.goodLow(circleNormRMS, target: 0.025)
+             + 0.20 * Score.goodHigh(features.signRatio, target: 0.85)
+             + 0.15 * Score.goodBand(arcCoverageDeg, low: 30, high: 300)
+             + 0.15 * Score.goodHigh(features.sagittaRatio, target: 0.040)
+             + 0.10 * Score.goodBand(features.totalAbsTurnDeg, low: 25, high: 270)
+    }
+}
+
 /// Closed-stroke classifier — scores an ellipse fit + circle-promotion bonus.
 /// Per plan §6.4. Circle promotion is a flat +0.05 bonus when axis ratio
 /// passes the gate (cleaner than a goodHigh ramp, which would punish strokes

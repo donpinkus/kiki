@@ -12,6 +12,9 @@ struct LineFeatures: Equatable {
     let sagittaRatio: CGFloat
     let totalSignedTurnRad: CGFloat
     let totalAbsTurnRad: CGFloat
+    /// |signedTurn| / absTurn. ≈1 when the stroke turns consistently one way
+    /// (arc-like), ≈0 when turning cancels (S-curve / scribble).
+    let signRatio: CGFloat
     let lineNormRMS: CGFloat
 
     var totalAbsTurnDeg: CGFloat { totalAbsTurnRad * 180 / .pi }
@@ -35,6 +38,7 @@ enum FeatureExtraction {
         let closure = pathLen > 1e-6 ? chord / pathLen : 1
         let sagittaRatio = computeSagittaRatio(points, chordLength: chord)
         let (signedTurn, absTurn) = computeTurningAngles(points)
+        let signRatio = absTurn > 1e-6 ? abs(signedTurn) / absTurn : 0
 
         return LineFeatures(
             pathLength: pathLen,
@@ -45,6 +49,7 @@ enum FeatureExtraction {
             sagittaRatio: sagittaRatio,
             totalSignedTurnRad: signedTurn,
             totalAbsTurnRad: absTurn,
+            signRatio: signRatio,
             lineNormRMS: line.normRMS
         )
     }
