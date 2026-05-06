@@ -1,6 +1,7 @@
 // Sentry must init before all other imports for auto-instrumentation.
 import * as Sentry from '@sentry/node';
 import { getActivePhase } from './modules/observability/phase.js';
+import { getActiveBackgroundTask } from './modules/observability/scope.js';
 
 // Pino fields → Sentry log attribute names. Keep snake_case across the stack
 // (pod side already does — pod_kind, pod_id, phase, user_id, stream_id) so
@@ -58,6 +59,14 @@ Sentry.init({
     const activePhase = getActivePhase();
     if (activePhase !== undefined) {
       log.attributes['phase'] = activePhase;
+    }
+    // Background-task tagging: scope tags don't propagate to the Logs
+    // product (verified empirically — same gotcha pod-side `before_send_log`
+    // works around). Read the active task name from `inBackgroundScope`'s
+    // AsyncLocalStorage and inject as `background_task` attribute.
+    const activeBackgroundTask = getActiveBackgroundTask();
+    if (activeBackgroundTask !== undefined) {
+      log.attributes['background_task'] = activeBackgroundTask;
     }
     return log;
   },
