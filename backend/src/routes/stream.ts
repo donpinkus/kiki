@@ -20,7 +20,8 @@ import {
   clearVideoPod,
   markPodDead,
 } from '../modules/orchestrator/orchestrator.js';
-import { StreamRelay } from '../modules/relay/streamRelay.js';
+import { StreamRelay, WireRelayError, type WireRelayPhaseTimings, type RelevantHttpHeaders } from '../modules/relay/streamRelay.js';
+import { getPod } from '../modules/orchestrator/runpodClient.js';
 import {
   checkProvisionQuota,
   recordProvision,
@@ -141,6 +142,43 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       let videoCompleted = 0;
       let videoCancelled = 0;
       let videoFailed = 0;
+
+      // Per-attempt diagnostic accumulator for wire_relay attempts within this
+      // WS handler's lifetime (initial attempt + retries). Each entry captures
+      // the structured failure shape from `WireRelayError` plus an attempt
+      // index. Drained into the rich `wire_relay_session_failed` log if all
+      // attempts fail — answers "what exactly happened in this user's
+      // incident" without manual log-stitching. Empty when wire_relay
+      // succeeded on the first attempt.
+      type WireRelayAttempt = {
+        attempt: number;
+        kind: WireRelayError['kind'];
+        elapsedMs: number;
+        phaseTimings: WireRelayPhaseTimings;
+        wsCode?: number;
+        httpStatus?: number;
+        httpHeaders?: RelevantHttpHeaders;
+        httpBodySample?: string;
+        errno?: string;
+        syscall?: string;
+        message: string;
+      };
+      const wireRelayAttempts: WireRelayAttempt[] = [];
+
+      // Captured between attempts: RunPod's external view of the pod plus
+      // a Railway→pod /health probe through the same RunPod proxy that the
+      // WS upgrade traverses. Both observations are best-effort (timeouts
+      // captured as failure_kind values) and the pair discriminates
+      // proxy-level vs pod-process vs route-level failures.
+      type WireRelayMidProbe = {
+        runpod_desired_status: string | null;
+        runpod_has_runtime: boolean;
+        runpod_uptime_seconds: number | null;
+        health_probe_status: number | 'timeout' | 'error';
+        health_probe_ms: number;
+        health_probe_error_code?: string;
+      };
+      let wireRelayMidProbe: WireRelayMidProbe | null = null;
 
       // Single-slot buffer for the latest config + frame received before the
       // relay is wired. iOS sends initial config immediately after WS open,
@@ -412,8 +450,12 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       // reconnects after a transient upstream drop, and replacement pods.
       const wireRelay = async (podUrl: string, podId?: string | null): Promise<void> => {
         const wireStart = Date.now();
+        // Attempt index threaded into per-attempt logs; matches the
+        // accumulator entry's `attempt` field so log lines and array
+        // entries cross-reference cleanly when triaging.
+        const attemptIndex = wireRelayAttempts.length + 1;
         request.log.info(
-          { userId, connId, streamId, podId, podUrl, event: 'wire_relay_start' },
+          { userId, connId, streamId, podId, podUrl, attempt: attemptIndex, event: 'wire_relay_start' },
           'wire_relay_start',
         );
         relay?.close();
@@ -533,6 +575,26 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         try {
           await newRelay.connect();
         } catch (err) {
+          // Structured rejection from `streamRelay.connect()`. WireRelayError
+          // carries kind, phase timings, HTTP response info (when the
+          // server returned non-101), socket errno (ECONNREFUSED etc.).
+          // Defensive fallback for any non-WireRelayError that escapes —
+          // shouldn't happen, but logging shape stays uniform.
+          const wre = err instanceof WireRelayError ? err : null;
+          const elapsedMs = wre ? wre.elapsedMs : Date.now() - wireStart;
+          wireRelayAttempts.push({
+            attempt: attemptIndex,
+            kind: wre?.kind ?? 'socket_error',
+            elapsedMs,
+            phaseTimings: wre?.phaseTimings ?? {},
+            wsCode: wre?.wsCode,
+            httpStatus: wre?.httpStatus,
+            httpHeaders: wre?.httpHeaders,
+            httpBodySample: wre?.httpBodySample,
+            errno: wre?.errno,
+            syscall: wre?.syscall,
+            message: (err as Error).message,
+          });
           request.log.warn(
             {
               userId,
@@ -540,7 +602,16 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
               streamId,
               podId,
               podUrl,
-              elapsedMs: Date.now() - wireStart,
+              attempt: attemptIndex,
+              elapsedMs,
+              kind: wre?.kind ?? 'socket_error',
+              phaseTimings: wre?.phaseTimings ?? {},
+              wsCode: wre?.wsCode,
+              httpStatus: wre?.httpStatus,
+              httpHeaders: wre?.httpHeaders,
+              httpBodySample: wre?.httpBodySample,
+              errno: wre?.errno,
+              syscall: wre?.syscall,
               err: (err as Error).message,
               event: 'wire_relay_failed',
             },
@@ -548,6 +619,11 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
           );
           throw err;
         }
+        // Phase timings populated on the success path too — every successful
+        // session contributes to the `dnsMs`/`tcpMs`/`tlsMs`/`upgradeMs`
+        // baseline distribution. Failure timings are interpretable only
+        // against this baseline (e.g. "tcpMs was 9s when normally <100ms").
+        const phaseTimings = newRelay.getLastPhaseTimings();
         request.log.info(
           {
             userId,
@@ -555,7 +631,9 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             streamId,
             podId,
             podUrl,
+            attempt: attemptIndex,
             elapsedMs: Date.now() - wireStart,
+            phaseTimings,
             event: 'wire_relay_open',
           },
           'wire_relay_open',
@@ -935,9 +1013,49 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
           await wireRelay(podUrl, podId);
         } catch (firstErr) {
           if (clientDisconnected || socket.readyState !== socket.OPEN) throw firstErr;
+          // Mid-failure dual-probe — captures the pod's external state at
+          // the moment the first attempt failed, so the structured failure
+          // log can show whether the pod was alive (RunPod RUNNING + /health
+          // 200), wedged (RUNNING but /health hangs), or gone (EXITED). Run
+          // in parallel; both are best-effort with bounded timeouts. The
+          // pair discriminates proxy-level vs pod-process vs route-level
+          // failures — single-source observation can't tell those apart.
+          const probeStart = Date.now();
+          const healthUrl = podId
+            ? `https://${podId}-8766.proxy.runpod.net/health`
+            : null;
+          const [runpodRes, healthRes] = await Promise.all([
+            podId ? getPod(podId).catch((): null => null) : Promise.resolve(null),
+            healthUrl
+              ? fetch(healthUrl, { signal: AbortSignal.timeout(3000) })
+                  .then(async (r) => ({ status: r.status as number | 'timeout' | 'error', ms: Date.now() - probeStart, errCode: undefined as string | undefined }))
+                  .catch((e: Error & { name?: string; code?: string }) => ({
+                    status: (e.name === 'TimeoutError' || e.name === 'AbortError') ? ('timeout' as const) : ('error' as const),
+                    ms: Date.now() - probeStart,
+                    errCode: e.code ?? e.name,
+                  }))
+              : Promise.resolve({ status: 'error' as const, ms: 0, errCode: 'no_pod_id' }),
+          ]);
+          wireRelayMidProbe = {
+            runpod_desired_status: runpodRes?.desiredStatus ?? null,
+            runpod_has_runtime: runpodRes?.runtime !== null && runpodRes?.runtime !== undefined,
+            runpod_uptime_seconds: runpodRes?.runtime?.uptimeInSeconds ?? null,
+            health_probe_status: healthRes.status,
+            health_probe_ms: healthRes.ms,
+            health_probe_error_code: healthRes.errCode,
+          };
           request.log.warn(
-            { userId, connId, streamId, podId, podUrl, err: (firstErr as Error).message, event: 'initial_wire_retry' },
-            'Initial relay connect failed, retrying in 2s',
+            {
+              userId,
+              connId,
+              streamId,
+              podId,
+              podUrl,
+              err: (firstErr as Error).message,
+              ...wireRelayMidProbe,
+              event: 'initial_wire_retry',
+            },
+            'Initial relay connect failed, mid-probed pod state, retrying in 2s',
           );
           await new Promise((r) => setTimeout(r, 2000));
           await wireRelay(podUrl, podId);
@@ -980,6 +1098,51 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
           return;
         }
         request.log.error({ userId, connId, streamId, err }, 'Provisioning or relay failed');
+
+        // wire_relay-specific outcome logs. Only emit when at least one
+        // wire_relay attempt was made (wireRelayAttempts non-empty); if
+        // we never reached wireRelay (e.g., getOrProvisionPod itself
+        // threw), these don't apply.
+        const lastAttempt = wireRelayAttempts[wireRelayAttempts.length - 1];
+        if (lastAttempt !== undefined) {
+          // (a) Low-cardinality metric counter — for alerting + frequency
+          // tracking. Bounded label space: dc × failure_kind × runpod_status
+          // × health_probe_ok aggregates cleanly under
+          // `count() group by dc, failure_kind` in Sentry.
+          request.log.warn(
+            {
+              userId,
+              connId,
+              streamId,
+              event: 'pod.ws_upgrade_unreachable',
+              failure_kind: lastAttempt.kind,
+              attempts: wireRelayAttempts.length,
+              runpod_status: wireRelayMidProbe?.runpod_desired_status ?? null,
+              runpod_has_runtime: wireRelayMidProbe?.runpod_has_runtime ?? null,
+              health_probe_ok: wireRelayMidProbe?.health_probe_status === 200,
+            },
+            'pod.ws_upgrade_unreachable',
+          );
+          // (b) Rich forensic log — narrative shape, high cardinality.
+          // One row per failed session containing the per-attempt array
+          // (phase timings, errors, HTTP responses) plus the mid-failure
+          // pod state. Used for triaging individual user complaints —
+          // `event:wire_relay_session_failed user_id:<X>` returns one
+          // row with the full picture.
+          request.log.warn(
+            {
+              userId,
+              connId,
+              streamId,
+              event: 'wire_relay_session_failed',
+              attempts: wireRelayAttempts,
+              mid_failure_probe: wireRelayMidProbe,
+              total_elapsed_ms: wireRelayAttempts.reduce((a, x) => a + x.elapsedMs, 0),
+            },
+            'wire_relay_session_failed',
+          );
+        }
+
         // If the failure happened essentially-instantly, getOrProvisionPod
         // returned a cached podUrl and the relay then 404'd — i.e. the pod
         // we thought was ready turned out dead. Tracking this distinctly

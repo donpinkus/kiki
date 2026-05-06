@@ -32,6 +32,7 @@ import asyncio
 import io
 import json
 import logging
+import os
 import random
 import time
 from contextlib import asynccontextmanager
@@ -69,6 +70,22 @@ async def lifespan(app: FastAPI):
             pipeline.load()
         finally:
             stop_heartbeat.set()
+        # ASGI lifespan completed — pipeline ready, app about to accept
+        # connections. One-time log so post-hoc analysis can correlate
+        # WS failures against pod-config baselines: was lifespan reached,
+        # how many uvicorn workers, what pid. Useful when triaging "is
+        # this pod's setup unusual?" after a wire_relay failure.
+        logger.info(
+            "ASGI startup complete",
+            extra={
+                "event": "pod.app.startup",
+                "pid": os.getpid(),
+                # We launch with `uvicorn.run(... workers=None)` (single
+                # worker per process); record the value if it's ever
+                # changed in the future.
+                "uvicorn_workers": 1,
+            },
+        )
     yield
     with sentry_init.phase("session_ending"):
         logger.info("Shutting down.")
@@ -88,11 +105,38 @@ async def health():
 
 @app.websocket("/ws")
 async def websocket_stream(ws: WebSocket):
-    await ws.accept()
+    # WS handshake lifecycle instrumentation. Each transition fires its own
+    # log line so post-hoc analysis can see exactly *where* the pod-side
+    # flow halted when traffic landed:
+    #   - upgrade_attempt logged but no `accepted` → accept() hung/threw
+    #   - accepted logged but no `first_send_ok` → connection torn down mid-handshake
+    #   - none of the above logged → traffic never reached this handler
+    #     (proxy dropped it, or routing didn't match /ws)
+    # Cross-stack: backend's `wire_relay_failed` paired with the absence
+    # of a matching `pod.ws.upgrade_attempt` is conclusive evidence that
+    # the upgrade traffic was dropped before reaching the pod.
+    client_ip = ws.client.host if ws.client else None
+    logger.info(
+        f"WS upgrade attempt from {client_ip or '?'}",
+        extra={"event": "pod.ws.upgrade_attempt", "client_ip": client_ip},
+    )
+    try:
+        await ws.accept()
+    except Exception as e:
+        logger.error(
+            f"WS accept() failed: {e}",
+            extra={"event": "pod.ws.accept_failed", "err": str(e), "client_ip": client_ip},
+        )
+        raise
     client_id = id(ws)
-    logger.info(f"Client {client_id} connected", extra={"client_id": client_id})
+    logger.info(
+        f"Client {client_id} connected",
+        extra={"event": "pod.ws.accepted", "client_id": client_id, "client_ip": client_ip},
+    )
 
-    # Send initial status
+    # Send initial status. Successful first send proves the bidirectional
+    # pipe is up — distinguishes "accepted but immediately torn down" from
+    # "accepted and serving normally."
     if pipeline.ready:
         await ws.send_text(json.dumps({"type": "status", "status": "ready"}))
     else:
@@ -104,6 +148,10 @@ async def websocket_stream(ws: WebSocket):
         while not pipeline.ready:
             await asyncio.sleep(0.5)
         await ws.send_text(json.dumps({"type": "status", "status": "ready"}))
+    logger.info(
+        f"WS first send ok, client {client_id}",
+        extra={"event": "pod.ws.first_send_ok", "client_id": client_id, "client_ip": client_ip},
+    )
 
     # Per-connection state. Default seed is random-per-session (not per-frame)
     # so output is stable when the sketch doesn't change. Client can override.

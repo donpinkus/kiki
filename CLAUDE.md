@@ -193,6 +193,29 @@ When a user reports an issue, default workflow:
 4. If pod-specific death (`event:pod.death`).
 5. Cross-check Errors UI for stack traces around that timeframe.
 
+### Reading wire_relay failures
+
+When the backend can't open a WS to a freshly-ready pod (`wire_relay_failed`), the symptom alone is consistent with several causes. The structured logs added in commit `<TBD>` capture enough detail to narrow without manual cross-referencing. `pod.ws_upgrade_unreachable` (low-card metric) and `wire_relay_session_failed` (rich forensic) fire on every fully-failed wire_relay session; `pod.ws.upgrade_attempt` / `pod.ws.accepted` / `pod.ws.first_send_ok` fire pod-side at each handshake transition; and `wire_relay_failed` per-attempt logs carry phase timings (`dnsMs`/`tcpMs`/`tlsMs`/`upgradeMs`), error codes (`errno`), and HTTP response details (`httpStatus`, `httpHeaders.cf-ray`/`server`, truncated `httpBodySample`).
+
+Reading the patterns — *interpretation guide, not proof of cause*. A given query result may match multiple candidates; goal is to narrow.
+
+| If queries show… | …a candidate explanation that fits |
+|---|---|
+| `kind:timeout` + `health_probe_ok:true` + `runpod_status:RUNNING` + no `pod.ws.upgrade_attempt` on pod | Proxy-level drop: pod alive, /health works through proxy, only /ws traffic lost between proxy and pod |
+| `kind:unexpected_response` + `httpStatus:5xx` + `httpHeaders.cf-ray` populated | Cloudflare-style proxy upstream returned 5xx before reaching pod |
+| `kind:unexpected_response` + `httpStatus:5xx` + `httpHeaders.server:uvicorn` + traceback in `httpBodySample` | Pod-side route handler issue (FastAPI threw, etc.) |
+| `health_probe_ok:false` (timeout/error) + `runpod_status:RUNNING` | Pod's Uvicorn workers wedged (process alive, HTTP unresponsive) |
+| `runpod_status:EXITED` or `runtime:null` | Pod itself died |
+| `errno:ENOTFOUND` / `EAI_AGAIN`, or `phaseTimings.dnsMs > 1000` | DNS / Railway-side network |
+| `phaseTimings.tlsMs > 5000` | TLS handshake slow (rare; possibly MITM or congested network) |
+| Same `pod_id` repeats across multiple incidents | Pod-specific (memory, route handler corruption) |
+| Each incident has unique `pod_id`, mostly different DCs | Spread = transient infra |
+| Pod has `event:pod.ws.upgrade_attempt` matching the failed connId timestamp | Rules out proxy-level drop — traffic reached pod, failure is between accept() and 'open' |
+
+**Note:** retry policy is intentionally NOT tuned in the same PR that added these logs. Future tuning should follow from the captured per-attempt timings + failure-kind distribution, not from any code-comment priors. The current behavior (1 retry @ 2s, 10s per-attempt timeout) was inherited from an unproven assumption ("RunPod proxy occasionally drops") and may or may not be correct — observation will tell.
+
+**Event-name family:** new dot-notation events for this debugging surface — `wire_relay_failed`, `wire_relay_open`, `wire_relay_session_failed`, `pod.ws_upgrade_unreachable`, `pod.ws.upgrade_attempt`, `pod.ws.accept_failed`, `pod.ws.accepted`, `pod.ws.first_send_ok`, `pod.app.startup`. Search by `event:<name>` in Sentry Logs UI; use `has:event` for the MCP-rewriting workaround documented elsewhere in this file.
+
 ## Key References
 
 | When | Read |

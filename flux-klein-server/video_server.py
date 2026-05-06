@@ -103,6 +103,17 @@ async def lifespan(app: FastAPI):
             # the traceback. The pipeline is unusable but observable.
         finally:
             stop_heartbeat.set()
+        # ASGI lifespan completed. One-time log so post-hoc analysis can
+        # correlate WS failures against pod-config baselines. See server.py
+        # for the same pattern.
+        logger.info(
+            "ASGI startup complete",
+            extra={
+                "event": "pod.app.startup",
+                "pid": os.getpid(),
+                "uvicorn_workers": 1,
+            },
+        )
     yield
     # Step 2 — release persistent transformer (and later Gemma/processor) on
     # graceful shutdown. Idempotent inside the pipeline; runs in a thread to
@@ -136,9 +147,28 @@ async def health():
 
 @app.websocket("/ws")
 async def websocket_video(ws: WebSocket):
-    await ws.accept()
+    # WS handshake lifecycle instrumentation. See server.py for the same
+    # pattern — log lines on upgrade_attempt / accept_failed / accepted /
+    # first_send_ok let us trace where pod-side handling halted when
+    # backend's wire_relay failed but traffic *did* reach the pod.
+    client_ip = ws.client.host if ws.client else None
+    logger.info(
+        f"WS upgrade attempt from {client_ip or '?'}",
+        extra={"event": "pod.ws.upgrade_attempt", "client_ip": client_ip},
+    )
+    try:
+        await ws.accept()
+    except Exception as e:
+        logger.error(
+            f"WS accept() failed: {e}",
+            extra={"event": "pod.ws.accept_failed", "err": str(e), "client_ip": client_ip},
+        )
+        raise
     client_id = id(ws)
-    logger.info(f"client connected: id={client_id}", extra={"client_id": client_id})
+    logger.info(
+        f"client connected: id={client_id}",
+        extra={"event": "pod.ws.accepted", "client_id": client_id, "client_ip": client_ip},
+    )
 
     if video_pipeline.ready:
         await ws.send_text(json.dumps({"type": "status", "status": "ready"}))
@@ -147,6 +177,10 @@ async def websocket_video(ws: WebSocket):
         while not video_pipeline.ready:
             await asyncio.sleep(0.5)
         await ws.send_text(json.dumps({"type": "status", "status": "ready"}))
+    logger.info(
+        f"WS first send ok, client {client_id}",
+        extra={"event": "pod.ws.first_send_ok", "client_id": client_id, "client_ip": client_ip},
+    )
 
     # Per-connection state
     current_task: asyncio.Task | None = None
