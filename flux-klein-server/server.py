@@ -41,6 +41,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from PIL import Image
 
 import config
+import preparing_heartbeat
 import sentry_init
 from pipeline import FluxKleinPipeline
 
@@ -58,9 +59,16 @@ pipeline = FluxKleinPipeline()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Load the model on startup."""
-    with sentry_init.phase("session_starting"):
+    with sentry_init.phase("preparing"):
         logger.info("Starting FLUX.2-klein server...")
-        pipeline.load()
+        # Threaded heartbeat — pipeline.load() blocks the asyncio event loop
+        # for 60-90s, so an asyncio task wouldn't fire during the load.
+        # See preparing_heartbeat.py header for context.
+        stop_heartbeat = preparing_heartbeat.start_heartbeat()
+        try:
+            pipeline.load()
+        finally:
+            stop_heartbeat.set()
     yield
     with sentry_init.phase("session_ending"):
         logger.info("Shutting down.")

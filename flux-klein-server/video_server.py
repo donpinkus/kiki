@@ -44,6 +44,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from PIL import Image
 
 import config
+import preparing_heartbeat
 import sentry_init
 from video_pipeline import GeneratedAudio, Ltx23VideoPipeline
 
@@ -68,7 +69,7 @@ _load_error_traceback: str | None = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _load_error_traceback
-    with sentry_init.phase("session_starting"):
+    with sentry_init.phase("preparing"):
         logger.info(
             f"Starting {config.LTX_MODEL_FAMILY} video server: "
             f"model={config.LTX_MODEL_REPO}/{config.LTX_MODEL_FILE} "
@@ -87,6 +88,11 @@ async def lifespan(app: FastAPI):
                 "fps": config.LTX_FPS,
             },
         )
+        # Threaded heartbeat — video_pipeline.load() blocks the asyncio event
+        # loop for ~3 minutes (LTX-2.3 22B FP8 transformer + Gemma encoder
+        # load), so an asyncio task wouldn't fire during the load. See
+        # preparing_heartbeat.py header for context.
+        stop_heartbeat = preparing_heartbeat.start_heartbeat()
         try:
             video_pipeline.load()
         except Exception:
@@ -95,6 +101,8 @@ async def lifespan(app: FastAPI):
             logger.exception("LTX-2.3 pipeline load failed — exposing traceback via /health")
             # Don't re-raise — keep the FastAPI app alive so /health can return
             # the traceback. The pipeline is unusable but observable.
+        finally:
+            stop_heartbeat.set()
     yield
     # Step 2 — release persistent transformer (and later Gemma/processor) on
     # graceful shutdown. Idempotent inside the pipeline; runs in a thread to

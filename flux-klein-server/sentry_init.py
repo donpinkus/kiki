@@ -15,9 +15,9 @@ import sentry_sdk
 from sentry_sdk.integrations.logging import LoggingIntegration
 
 
-# Cross-stack phase vocabulary (shared with backend + iOS when they catch up):
-#   session_starting | drawing | animating | reconnecting | session_ending
-# Pods set: session_starting, session_ending, drawing, animating.
+# Cross-stack phase vocabulary (shared with backend + iOS):
+#   preparing | drawing | animating | reconnecting | session_ending
+# Pods set: preparing, session_ending, drawing, animating.
 # reconnecting is iOS/backend only — pod can't tell fresh boot from reconnect.
 _phase: ContextVar[str | None] = ContextVar("kiki_phase", default=None)
 
@@ -43,15 +43,29 @@ def init(pod_kind: str) -> None:
         return
 
     pod_id = os.environ.get("RUNPOD_POD_ID")
+    # KIKI_USER_ID / KIKI_STREAM_ID are set by the orchestrator's BOOT_ENV
+    # for each freshly-provisioned pod (see backend `bootEnvFor`). Constant
+    # for the pod's lifetime — pods are 1:1 with users (idle-reaped after
+    # 30 min). When a user reconnects within the same pod's lifetime they
+    # may receive a new stream_id on iOS; the pod-side stream_id reflects
+    # the BOOT_ENV value, i.e. the *initial* connection. Cross-reference by
+    # user_id + timestamp if you need to discriminate. Empty string falls
+    # back to None so we don't tag empty values.
+    user_id = os.environ.get("KIKI_USER_ID") or None
+    stream_id = os.environ.get("KIKI_STREAM_ID") or None
 
     # Scope tags don't propagate to Logs-product entries — only to errors/spans.
-    # Inject pod_kind / pod_id / phase as log attributes via before_send_log so
-    # they're queryable in the Sentry UI Logs explorer (e.g. `pod_kind:image`,
-    # `phase:session_starting`).
+    # Inject pod_kind / pod_id / user_id / stream_id / phase as log attributes
+    # via before_send_log so they're queryable in the Sentry UI Logs explorer
+    # (e.g. `pod_kind:image`, `phase:preparing`, `user_id:<X>`).
     def before_send_log(log, _hint):
         log["attributes"]["pod_kind"] = pod_kind
         if pod_id:
             log["attributes"]["pod_id"] = pod_id
+        if user_id:
+            log["attributes"]["user_id"] = user_id
+        if stream_id:
+            log["attributes"]["stream_id"] = stream_id
         active_phase = _phase.get()
         if active_phase is not None:
             log["attributes"]["phase"] = active_phase
@@ -79,3 +93,9 @@ def init(pod_kind: str) -> None:
     sentry_sdk.set_tag("pod_kind", pod_kind)
     if pod_id:
         sentry_sdk.set_tag("pod_id", pod_id)
+    # set_user attaches user.id to errors/spans (the Errors product covers it
+    # via scope; the Logs product gets it via before_send_log above).
+    if user_id:
+        sentry_sdk.set_user({"id": user_id})
+    if stream_id:
+        sentry_sdk.set_tag("stream_id", stream_id)
