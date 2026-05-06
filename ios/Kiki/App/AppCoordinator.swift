@@ -392,6 +392,14 @@ final class AppCoordinator {
             if let userId {
                 Analytics.identify(userId: userId, email: email)
                 Analytics.track(.userSignedIn, properties: ["user_id": userId])
+                // Tag every Sentry event/log/span emitted on this device with
+                // user.id so cross-stack queries `user_id:<X>` return iOS
+                // logs alongside backend + pod. Cleared on sign-out below.
+                SentrySDK.setUser(User(userId: userId))
+                Log.info("auth.signed_in", attributes: [
+                    "event": "auth.signed_in",
+                    "user_id": userId,
+                ])
             }
 
             // After sign-in, route to gallery (or create a new drawing if none exist).
@@ -424,6 +432,10 @@ final class AppCoordinator {
             await MainActor.run {
                 Analytics.track(.userSignedOut)
                 Analytics.reset()
+                Log.info("auth.signed_out", attributes: ["event": "auth.signed_out"])
+                // Clear user attribution so the next signed-in (or anonymous)
+                // user's events don't get tagged with this user's id.
+                SentrySDK.setUser(nil)
                 self.signedInUserId = nil
                 self.currentScreen = .signIn
                 self.stopStream()
@@ -531,6 +543,10 @@ final class AppCoordinator {
             "has_background_image": drawing.backgroundImageData != nil,
             "has_generated_image": drawing.generatedImageData != nil,
             "is_new": false,
+        ])
+        Log.info("drawing.opened", attributes: [
+            "event": "drawing.opened",
+            "drawing_id": drawing.id.uuidString,
         ])
 
         startStream()
@@ -668,6 +684,9 @@ final class AppCoordinator {
         // streamId for the whole user attempt; by connId for one WS upgrade.
         let streamId = String(UUID().uuidString.prefix(8)).lowercased()
         SentrySDK.configureScope { $0.setTag(value: streamId, key: "streamId") }
+        // Mirror into the cross-stack-aware static so `Log.X` and `beforeSendLog`
+        // tag every iOS log entry with `stream_id`. Cleared in `stopStream()`.
+        StreamContext.set(streamId)
 
         var components = URLComponents(url: backendURL, resolvingAgainstBaseURL: false)!
         components.scheme = backendURL.scheme == "https" ? "wss" : "ws"
@@ -691,6 +710,17 @@ final class AppCoordinator {
         startCrumb.data = ["wsURL": wsURL.absoluteString]
         SentrySDK.addBreadcrumb(startCrumb)
         Analytics.track(.streamStarted, properties: [
+            "drawing_id": currentDrawingId?.uuidString ?? "unknown",
+        ])
+        // Enter `preparing` phase. The `Log` facade reads `Phase.current` at
+        // emit time and tags every subsequent log line with `phase: preparing`
+        // until we transition to `.drawing` on first frame received (below).
+        // Cross-stack `user_id:X phase:preparing` joins these iOS lines with
+        // backend's `withPhase('preparing')` block and pod's
+        // `with sentry_init.phase("preparing")` block.
+        Phase.set(.preparing)
+        Log.info("stream.startup_begin", attributes: [
+            "event": "stream.startup_begin",
             "drawing_id": currentDrawingId?.uuidString ?? "unknown",
         ])
 
@@ -750,17 +780,45 @@ final class AppCoordinator {
                 // First generated frame — user-perceived spin-up complete.
                 self.pendingStartupTransaction?.finish()
                 self.pendingStartupTransaction = nil
-                if let startedAt = self.streamStartupBeganAt {
-                    let waitMs = Int(Date().timeIntervalSince(startedAt) * 1000)
+                let waitMs: Int? = self.streamStartupBeganAt.map {
+                    Int(Date().timeIntervalSince($0) * 1000)
+                }
+                if let waitMs {
                     Analytics.track(.streamFirstFrame, properties: ["wait_ms": waitMs])
                 }
                 self.streamStartupBeganAt = nil
+                // Phase transition: preparing → drawing. Subsequent logs
+                // until tear-down (or video animation start) carry
+                // `phase: drawing`.
+                Phase.set(.drawing)
+                Log.info("stream.first_frame", attributes: [
+                    "event": "stream.first_frame",
+                    "wait_ms": waitMs as Any,
+                ])
+            } else if Phase.current != .drawing {
+                // Resume-drawing after a video animation: flip back to
+                // `.drawing` so subsequent img2img logs aren't tagged
+                // `animating`. Only emit the structured log on transition,
+                // not every frame, to avoid log spam.
+                Phase.set(.drawing)
             }
         }
 
         session.onReadinessChanged = { [weak self] readiness in
             guard let self else { return }
             streamLog.info("Readiness changed: \(String(describing: readiness))")
+            // Phase: detect mid-session reconnect. We're in "warming after
+            // already reaching ready" if streamFrameCount > 0 AND new state
+            // is .warming. Distinct from initial pre-first-frame warming
+            // (preparing). Cross-stack: backend's `handleUpstreamClose` is
+            // wrapped in `withPhase('reconnecting')` and the pod stays on
+            // `.preparing` for the new pod's boot since it can't tell
+            // fresh-vs-reconnect from inside.
+            if case .warming = readiness, self.streamFrameCount > 0,
+               Phase.current != .reconnecting {
+                Phase.set(.reconnecting)
+                Log.info("stream.reconnecting", attributes: ["event": "stream.reconnecting"])
+            }
             self.streamReadiness = readiness
             if case .failed(let message) = readiness {
                 self.generationError = message
@@ -774,6 +832,18 @@ final class AppCoordinator {
                     "message": message,
                     "elapsed_ms": elapsedMs,
                     "frames_received": self.streamFrameCount,
+                    "got_first_frame": self.streamFrameCount > 0,
+                ])
+                // The user's-eye view of "what went wrong." Carries the
+                // exact `display_message` shown in the UI so support
+                // queries (`user_id:X stream.error_shown`) match the
+                // verbatim string the user reported. Distinct from
+                // backend's `event:provision.failed` — that's the cause;
+                // this is the symptom.
+                Log.warn("stream.error_shown", attributes: [
+                    "event": "stream.error_shown",
+                    "display_message": message,
+                    "elapsed_ms": elapsedMs,
                     "got_first_frame": self.streamFrameCount > 0,
                 ])
             }
@@ -823,6 +893,20 @@ final class AppCoordinator {
         // Clear streamId tag so post-stream events (e.g. an unrelated crash
         // 10 min later) aren't mis-tagged with this stream's id.
         SentrySDK.configureScope { $0.removeTag(key: "streamId") }
+        if hadSession {
+            // Phase transition: → session_ending. Emit the tear-down log
+            // BEFORE clearing StreamContext so the line still carries
+            // `stream_id`. Then clear so post-stream activity doesn't leak
+            // the just-closed stream's id.
+            Phase.set(.sessionEnding)
+            Log.info("stream.tore_down", attributes: [
+                "event": "stream.tore_down",
+                "frames_received": finalFrameCount,
+                "reason": "stopped",
+            ])
+        }
+        StreamContext.set(nil)
+        Phase.set(nil)
         streamSession?.stop()
         streamSession = nil
         streamReadiness = .disconnected
@@ -902,6 +986,12 @@ final class AppCoordinator {
             }
             resultState = .videoStreaming(latestFrame: frame, fallback: fallback)
             streamLog.info("[result] \(prev) → videoStreaming index=\(index ?? -1)/\(total ?? -1)")
+            // Phase transition: → animating. Set on every video frame so a
+            // resume-drawing → frame-arrives transition cleanly flips back
+            // to .drawing in onImageReceived.
+            if Phase.current != .animating {
+                Phase.set(.animating)
+            }
         case .complete(_, let mp4Data, _, let frames):
             guard let fallback = lastSuccessfulImage else { return }
             // Clean up any prior MP4 we wrote — only one in flight at a time.
