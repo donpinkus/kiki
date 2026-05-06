@@ -1,9 +1,11 @@
 import { randomBytes } from 'crypto';
+import * as Sentry from '@sentry/node';
 import type { FastifyPluginAsync } from 'fastify';
 
 import { config } from '../config/index.js';
 import { extractBearer } from '../modules/auth/index.js';
 import { verifyAccess } from '../modules/auth/jwt.js';
+import { withPhase } from '../modules/observability/phase.js';
 import {
   getOrProvisionPod,
   hasReadySession,
@@ -17,6 +19,7 @@ import {
   replaceVideoSession,
   terminateVideoPod,
   clearVideoPod,
+  markPodDead,
 } from '../modules/orchestrator/orchestrator.js';
 import { StreamRelay } from '../modules/relay/streamRelay.js';
 import {
@@ -97,6 +100,10 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       let streamId: string | null = null;
       let relay: StreamRelay | null = null;
       let currentPodUrl: string | null = null;
+      // Mirror of currentPodUrl as a structured field. Logs that today only
+      // carry currentPodUrl (e.g. upstream_closed, wire_relay_*) need pod_id
+      // queryable in Sentry, not buried in a `wss://<id>-...` substring.
+      let currentPodId: string | null = null;
       let lastConfig: Record<string, unknown> | null = null;
       let unsubscribeState: (() => void) | null = null;
       let clientDisconnected = false;
@@ -283,6 +290,11 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       // Search by streamId for the whole user attempt; by connId for one
       // specific WS upgrade. null when an older client without streamId connects.
       streamId = extractQueryParam(request.url, 'streamId');
+      // WS connections live for minutes; tag the long-lived isolation scope
+      // with user.id so every log/error/span emitted on this connection
+      // carries user attribution. Per-request scope from fastifyIntegration
+      // covers the upgrade request itself; this call covers the WS lifetime.
+      Sentry.setUser({ id: userId });
       request.log.info({ userId, source, connId, streamId, event: 'ws_open' }, 'Stream client connected');
 
       // Entitlement check — only applies when authenticated via JWT. Legacy
@@ -395,10 +407,10 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       // handlers, connect, resend lastConfig. On success, `relay` and
       // `currentPodUrl` are updated. Used for the initial connect, same-pod
       // reconnects after a transient upstream drop, and replacement pods.
-      const wireRelay = async (podUrl: string): Promise<void> => {
+      const wireRelay = async (podUrl: string, podId?: string | null): Promise<void> => {
         const wireStart = Date.now();
         request.log.info(
-          { userId, connId, streamId, podUrl, event: 'wire_relay_start' },
+          { userId, connId, streamId, podId, podUrl, event: 'wire_relay_start' },
           'wire_relay_start',
         );
         relay?.close();
@@ -523,6 +535,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
               userId,
               connId,
               streamId,
+              podId,
               podUrl,
               elapsedMs: Date.now() - wireStart,
               err: (err as Error).message,
@@ -537,6 +550,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             userId,
             connId,
             streamId,
+            podId,
             podUrl,
             elapsedMs: Date.now() - wireStart,
             event: 'wire_relay_open',
@@ -545,6 +559,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         );
         relay = newRelay;
         currentPodUrl = podUrl;
+        if (podId) currentPodId = podId;
         if (lastConfig) newRelay.sendConfig(lastConfig);
       };
 
@@ -660,7 +675,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
 
           // Slow path: replace the pod. Best-effort; null on failure.
           if (clientDisconnected || socket.readyState !== socket.OPEN) return;
-          const result = await replaceVideoSession(uid);
+          const result = await replaceVideoSession(uid, streamId);
           if (!result || clientDisconnected || socket.readyState !== socket.OPEN) {
             videoSessionEnabled = false;
             videoPodId = null;
@@ -681,6 +696,13 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             // The replacement pod is alive but unreachable. Eagerly clean
             // up so it doesn't sit idle until reconcile. Mirrors the
             // initial-provision wire-failure handling above.
+            void markPodDead({
+              podId: result.podId,
+              podKind: 'video',
+              userId: uid,
+              reason: 'provision_error',
+              note: `replacement relay-wire failed: ${(err as Error).message}`,
+            });
             terminateVideoPod(result.podId).catch(() => {});
             await clearVideoPod(uid).catch(() => {});
             videoPodId = null;
@@ -698,7 +720,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       // the clientDisconnected check.
       function handleUpstreamClose(code: number, reason: string): void {
         request.log.info(
-          { userId, connId, streamId, code, reason, currentPodUrl, event: 'upstream_closed' },
+          { userId, connId, streamId, podId: currentPodId, code, reason, currentPodUrl, event: 'upstream_closed' },
           'Upstream closed',
         );
 
@@ -717,7 +739,12 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         relay?.close();
         relay = null;
 
-        void (async () => {
+        // Tag every log emitted during the recovery attempt with
+        // `phase: reconnecting` (read by `beforeSendLog` from
+        // AsyncLocalStorage). Distinct from `preparing` so triage can spot
+        // mid-session failures (where bug reports start) separately from
+        // fresh-launch issues.
+        void withPhase('reconnecting', async () => {
           try {
             if (clientDisconnected || socket.readyState !== socket.OPEN) return;
 
@@ -730,7 +757,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             if (currentPodUrl) {
               const samePodStart = Date.now();
               try {
-                await wireRelay(currentPodUrl);
+                await wireRelay(currentPodUrl, currentPodId);
                 if (clientDisconnected || socket.readyState !== socket.OPEN) return;
                 request.log.info(
                   {
@@ -765,12 +792,12 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             // MAX_SESSION_REPLACEMENTS protects against flapping pods — if
             // exhausted, replaceSession throws and the outer catch bounces iPad.
             trackPodPreempted({ userId: uid, replacementAttempt: 1 });
-            const { podUrl: newPodUrl } = await replaceSession(uid);
+            const { podId: newPodId, podUrl: newPodUrl } = await replaceSession(uid, streamId);
             if (clientDisconnected || socket.readyState !== socket.OPEN) {
-              request.log.info({ userId, connId, streamId }, 'Client disconnected during replacement — pod will idle-reap');
+              request.log.info({ userId, connId, streamId, podId: newPodId }, 'Client disconnected during replacement — pod will idle-reap');
               return;
             }
-            await wireRelay(newPodUrl);
+            await wireRelay(newPodUrl, newPodId);
             if (clientDisconnected || socket.readyState !== socket.OPEN) return;
             await emitState(uid, 'ready');
           } catch (err) {
@@ -782,9 +809,15 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
               socket.close(1011, 'Recovery failed');
             }
           }
-        })();
+        });
       }
 
+      // Tag every log emitted during the slow path (provision → wire-relay
+      // → ready) with `phase: preparing` via Node AsyncLocalStorage. Read at
+      // log-emit time by the `beforeSendLog` hook in `index.ts`. Cross-stack
+      // query `user_id:X phase:preparing` returns iOS preparing logs +
+      // backend provision lifecycle + pod boot logs, in one filter.
+      await withPhase('preparing', async () => {
       let getOrProvisionMs = 0;
       try {
         // Record this provision in the sliding-window history for hourly/daily
@@ -807,7 +840,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         if (config.VIDEO_POD_ENABLED) {
           void (async () => {
           try {
-            const result = await getOrProvisionVideoPod(userId);
+            const result = await getOrProvisionVideoPod(userId, streamId);
             if (!result || clientDisconnected || socket.readyState !== socket.OPEN) {
               // Client left during provision/reuse. We don't terminate
               // here — the pod (whether fresh or reused) is on the
@@ -834,6 +867,13 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
                 { userId, connId, streamId, videoPodId, err: (err as Error).message, event: '[provision/video] relay connect failed' },
                 'video relay connect failed; terminating pod',
               );
+              void markPodDead({
+                podId: result.podId,
+                podKind: 'video',
+                userId,
+                reason: 'provision_error',
+                note: `initial relay-wire failed: ${(err as Error).message}`,
+              });
               terminateVideoPod(result.podId).catch(() => {});
               videoPodId = null;
               await clearVideoPod(userId);
@@ -856,13 +896,14 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         }
 
         const getOrProvisionStart = Date.now();
-        const { podUrl } = await getOrProvisionPod(userId);
+        const { podId, podUrl } = await getOrProvisionPod(userId, streamId);
         getOrProvisionMs = Date.now() - getOrProvisionStart;
         request.log.info(
           {
             userId,
             connId,
             streamId,
+            podId,
             podUrl,
             isReconnect,
             elapsedMs: getOrProvisionMs,
@@ -875,7 +916,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         );
 
         if (socket.readyState !== socket.OPEN) {
-          request.log.info({ userId, connId, streamId }, 'Client disconnected during provisioning');
+          request.log.info({ userId, connId, streamId, podId }, 'Client disconnected during provisioning');
           return;
         }
 
@@ -888,15 +929,15 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         // timed out). A brief second attempt usually succeeds; if it
         // doesn't, the outer catch aborts the session cleanly.
         try {
-          await wireRelay(podUrl);
+          await wireRelay(podUrl, podId);
         } catch (firstErr) {
           if (clientDisconnected || socket.readyState !== socket.OPEN) throw firstErr;
           request.log.warn(
-            { userId, connId, streamId, podUrl, err: (firstErr as Error).message, event: 'initial_wire_retry' },
+            { userId, connId, streamId, podId, podUrl, err: (firstErr as Error).message, event: 'initial_wire_retry' },
             'Initial relay connect failed, retrying in 2s',
           );
           await new Promise((r) => setTimeout(r, 2000));
-          await wireRelay(podUrl);
+          await wireRelay(podUrl, podId);
         }
         request.log.info({ userId, connId, streamId, event: 'relay_connected' }, 'Upstream connected, relaying');
 
@@ -972,6 +1013,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
           request.log.warn({ userId, connId, streamId, readyState: socket.readyState }, 'Cannot send provisioning error — socket not open');
         }
       }
+      }); // end withPhase('preparing')
       // close + error handlers are registered at the top of the IIFE,
       // before any await — see "Register close/error/message handlers
       // BEFORE any await" above. Late registration here would miss close

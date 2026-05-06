@@ -309,6 +309,30 @@ if (process.env['SENTRY_DSN_POD']) {
   BOOT_ENV.push({ key: 'SENTRY_DSN_POD', value: process.env['SENTRY_DSN_POD'] });
 }
 
+/**
+ * Build the per-pod env, appending KIKI_USER_ID + KIKI_STREAM_ID to BOOT_ENV.
+ *
+ * The pod's `flux-klein-server/sentry_init.py` reads these once at startup
+ * and attaches them as Sentry log attributes (`user_id`, `stream_id`) on
+ * every log entry, plus tags errors with `set_user({id})`. This is what
+ * makes `user_id:X` cross-stack queries return both pod's logs alongside
+ * iOS + backend.
+ *
+ * Constant for the pod's lifetime — pods are 1:1 with users (idle-reaped
+ * after 30 min). A single pod *can* serve multiple `streamId`s when a user
+ * reconnects within the idle window; we accept slight `stream_id`
+ * staleness on the second connect (cross-reference via timestamps if
+ * needed). Live update via WS-hello deferred — `user_id` covers the
+ * common debugging query.
+ */
+function bootEnvFor(userId: string, streamId?: string | null): typeof BOOT_ENV {
+  return [
+    ...BOOT_ENV,
+    { key: 'KIKI_USER_ID', value: userId },
+    { key: 'KIKI_STREAM_ID', value: streamId ?? '' },
+  ];
+}
+
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 const REAPER_INTERVAL_MS = 60 * 1000;
 const MAX_CONCURRENT_PROVISIONS = Number(process.env['MAX_CONCURRENT_PROVISIONS'] ?? 5);
@@ -383,10 +407,15 @@ interface PodKindConfig {
   stallMs: number;
   /** Create a pod for the chosen DC. Image: spot then on-demand fallback.
    *  Video: on-demand only (preemption recovery via replaceVideoSession is
-   *  cleaner than spot complexity at our scale). */
+   *  cleaner than spot complexity at our scale).
+   *
+   *  `streamId` flows through into BOOT_ENV (via `bootEnvFor`) so the pod
+   *  can tag every log with `stream_id` from the moment its python process
+   *  starts. May be `null` when called for legacy non-JWT sessions. */
   createPodForDc: (
     target: PlacementTarget,
     sessionId: string,
+    streamId?: string | null,
   ) => Promise<{ podId: string; podType: PodType; dc: string | null }>;
   /** Look up a reusable pod from an existing session row. null if none.
    *  Image: trusts row.state === 'ready' && row.podUrl (fast Redis-only).
@@ -725,11 +754,26 @@ export async function abortSession(
     if (session?.podId) {
       const lifetimeMs = session.createdAt > 0 ? Date.now() - session.createdAt : 0;
       trackPodTerminated({ userId: sessionId, reason, lifetimeMs });
+      void markPodDead({
+        podId: session.podId,
+        podKind: 'image',
+        userId: sessionId,
+        lifetimeMs,
+        reason: 'manual',
+        note: `abortSession reason=${reason}`,
+      });
       terminatePod(session.podId).catch((err) =>
         log.warn({ sessionId, podId: session.podId, err: (err as Error).message }, 'abortSession: terminatePod failed'),
       );
     }
     if (session?.videoPodId) {
+      void markPodDead({
+        podId: session.videoPodId,
+        podKind: 'video',
+        userId: sessionId,
+        reason: 'manual',
+        note: `abortSession reason=${reason}`,
+      });
       terminatePod(session.videoPodId).catch((err) =>
         log.warn({ sessionId, videoPodId: session.videoPodId, err: (err as Error).message }, 'abortSession: terminate video pod failed'),
       );
@@ -754,14 +798,17 @@ export async function abortSession(
  * during provision fan out to the broker; stream.ts subscribes to drive the
  * WebSocket status envelope.
  */
-export async function getOrProvisionPod(sessionId: string): Promise<{ podUrl: string }> {
+export async function getOrProvisionPod(
+  sessionId: string,
+  streamId?: string | null,
+): Promise<{ podId: string; podUrl: string }> {
   // 1. Check Redis for existing session
   const existing = await readSession(sessionId);
 
   const reusable = existing ? await POD_CONFIGS.image.getReusableFromRow(existing) : null;
   if (reusable) {
     log.info({ sessionId, podId: reusable.podId }, 'Reusing existing session pod');
-    return { podUrl: reusable.podUrl };
+    return { podId: reusable.podId, podUrl: reusable.podUrl };
   }
 
   // 2. Check local in-flight map (same-process concurrent callers — fresh
@@ -771,7 +818,7 @@ export async function getOrProvisionPod(sessionId: string): Promise<{ podUrl: st
   const inFlight = inFlightProvisions.get(key);
   if (inFlight) {
     log.info({ sessionId }, 'Joining in-flight provision');
-    return inFlight.promise.then((r) => ({ podUrl: r.podUrl }));
+    return inFlight.promise.then((r) => ({ podId: r.podId, podUrl: r.podUrl }));
   }
 
   // 3. If Redis has a non-ready session but we don't own the promise
@@ -807,7 +854,7 @@ export async function getOrProvisionPod(sessionId: string): Promise<{ podUrl: st
       await acquireSemaphore();
       try {
         await emitState(sessionId, 'finding_gpu');
-        const result = await provision(sessionId, controller.signal);
+        const result = await provision(sessionId, controller.signal, streamId);
         provisionedPodId = result.podId;
         return { podId: result.podId, podUrl: result.podUrl, podType: result.podType, dc: null };
       } finally {
@@ -819,6 +866,14 @@ export async function getOrProvisionPod(sessionId: string): Promise<{ podUrl: st
       log.error({ sessionId, err, category, elapsedMs }, 'Provision failed');
       if (provisionedPodId) {
         notifyPodProgress(provisionedPodId, `❌ **Failed:** ${(err as Error).message}`);
+        void markPodDead({
+          podId: provisionedPodId,
+          podKind: 'image',
+          userId: sessionId,
+          lifetimeMs: elapsedMs,
+          reason: 'provision_error',
+          note: (err as Error).message,
+        });
         terminatePod(provisionedPodId).catch((e) =>
           log.warn({ podId: provisionedPodId, err: e }, 'Failed to clean up pod after provision failure'),
         );
@@ -833,7 +888,7 @@ export async function getOrProvisionPod(sessionId: string): Promise<{ podUrl: st
   })();
 
   inFlightProvisions.set(key, { promise, controller });
-  return promise.then((r) => ({ podUrl: r.podUrl }));
+  return promise.then((r) => ({ podId: r.podId, podUrl: r.podUrl }));
 }
 
 export function touch(sessionId: string): void {
@@ -870,7 +925,10 @@ export async function hasReadySession(sessionId: string): Promise<boolean> {
  *
  * Returns the new podUrl. Throws if replacement fails or retry bound exceeded.
  */
-export async function replaceSession(sessionId: string): Promise<{ podUrl: string }> {
+export async function replaceSession(
+  sessionId: string,
+  streamId?: string | null,
+): Promise<{ podId: string; podUrl: string }> {
   const session = await readSession(sessionId);
   if (!session) throw new Error('No session to replace');
 
@@ -902,6 +960,13 @@ export async function replaceSession(sessionId: string): Promise<{ podUrl: strin
 
   // Clean up old pod (fire-and-forget — may already be gone)
   if (oldPodId) {
+    void markPodDead({
+      podId: oldPodId,
+      podKind: 'image',
+      userId: sessionId,
+      reason: 'replaced',
+      note: `attempt ${attempt}`,
+    });
     terminatePod(oldPodId).catch((e) =>
       log.warn(
         { sessionId, oldPodId, err: (e as Error).message },
@@ -920,7 +985,7 @@ export async function replaceSession(sessionId: string): Promise<{ podUrl: strin
       await acquireSemaphore();
       try {
         await emitState(sessionId, 'finding_gpu');
-        const result = await provision(sessionId, controller.signal);
+        const result = await provision(sessionId, controller.signal, streamId);
         newPodId = result.podId;
         const replacementMs = Date.now() - t0;
         log.info({ sessionId, oldPodId, newPodId: result.podId, replacementMs, attempt }, 'Session replaced');
@@ -934,6 +999,13 @@ export async function replaceSession(sessionId: string): Promise<{ podUrl: strin
         tags: { sessionId, attempt: String(attempt), phase: 'session_replacement' },
       });
       if (newPodId) {
+        void markPodDead({
+          podId: newPodId,
+          podKind: 'image',
+          userId: sessionId,
+          reason: 'provision_error',
+          note: `replacement attempt ${attempt} failed`,
+        });
         terminatePod(newPodId).catch((e) => {
           log.warn({ sessionId, newPodId, err: (e as Error).message }, 'Failed to clean up replacement pod');
           Sentry.captureException(e, {
@@ -959,7 +1031,7 @@ export async function replaceSession(sessionId: string): Promise<{ podUrl: strin
   // Register in inFlight so concurrent getOrProvisionPod calls join this
   // replacement instead of starting a duplicate.
   inFlightProvisions.set(key, { promise: replacementPromise, controller });
-  return replacementPromise.then((r) => ({ podUrl: r.podUrl }));
+  return replacementPromise.then((r) => ({ podId: r.podId, podUrl: r.podUrl }));
 }
 
 export function sessionClosed(sessionId: string): void {
@@ -1033,6 +1105,92 @@ function releaseSemaphore(): void {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// Pod death tombstone — single chokepoint
+// ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Reasons a pod stops serving its session. The orchestrator either causes
+ * the death (idle_reaped, replaced, manual, …) or merely observes it
+ * (runpod_exited, boot_stalled, unhealthy_timeout). Either way, every pod
+ * death emits one structured `event: 'pod.death'` log so a Sentry query
+ * can answer "what happened to pod X" without grep-by-substring.
+ */
+export type PodDeathReason =
+  | 'idle_reaped'           // Reaper terminated the pod after IDLE_TIMEOUT_MS of no traffic.
+  | 'orphan_reconciled'     // No Redis row claimed the pod; reconcile reaped it.
+  | 'replaced'              // Old pod superseded by a fresh one (preemption recovery / replaceSession).
+  | 'provision_error'       // Provision pipeline failed after pod creation; old pod cleaned up.
+  | 'boot_stalled'          // POD_BOOT_STALL_MS expired without runtime ready (handled via PodBootStallError).
+  | 'manual'                // abortSession called by the WS handler (user disconnected mid-provision, error path).
+  | 'unhealthy_timeout'     // Health check loop exhausted budget on a previously-healthy pod.
+  | 'runpod_exited';        // RunPod state poll observed pod EXITED without the orchestrator initiating termination.
+
+interface MarkPodDeadArgs {
+  podId: string;
+  podKind: PodKind;
+  userId?: string | null;
+  dc?: string | null;
+  lifetimeMs?: number;
+  reason: PodDeathReason;
+  /** ms since epoch of the last successful /health probe, if known. Helps
+   *  triage how far into its lifetime the pod was when it died. */
+  lastHealthAt?: number | null;
+  /** Free-form human note (e.g. boot-stall elapsed seconds, provision error
+   *  message). Log-only; not promoted to a Sentry attribute. */
+  note?: string;
+}
+
+/**
+ * Emit a single structured `event: 'pod.death'` Pino log line. Routed
+ * through `pinoIntegration` + `beforeSendLog` (in `src/index.ts`) into
+ * Sentry's Logs product with `pod_id`, `pod_kind`, `user_id`, `dc`, and
+ * `reason` as queryable attributes. NOT a Sentry exception/issue — those
+ * still fire from their own throw sites (e.g. PodBootStallError). The
+ * tombstone log gives us the searchable surface; the exceptions give us
+ * the alerting + grouping surface.
+ *
+ * For `runpod_exited` and `boot_stalled` we additionally poll RunPod for
+ * the pod's current `desiredStatus`. RunPod doesn't surface the kernel
+ * exit reason (OOMKilled etc.) on the standard pod query, but `desiredStatus`
+ * + `runtime !== null` distinguishes "RunPod thinks it's running but health
+ * timed out" from "RunPod itself moved the pod to EXITED."
+ *
+ * Never throws — death logging is best-effort observability.
+ */
+export async function markPodDead(args: MarkPodDeadArgs): Promise<void> {
+  const { podId, podKind, userId, dc, lifetimeMs, reason, lastHealthAt, note } = args;
+  let runpodDesiredStatus: string | undefined;
+  let runpodRuntimePresent: boolean | undefined;
+  if (reason === 'runpod_exited' || reason === 'boot_stalled' || reason === 'unhealthy_timeout') {
+    try {
+      const pod = await getPod(podId);
+      if (pod) {
+        runpodDesiredStatus = pod.desiredStatus;
+        runpodRuntimePresent = pod.runtime !== null;
+      }
+    } catch {
+      // Best-effort; absence is logged via the undefined fields below.
+    }
+  }
+  log.info(
+    {
+      event: 'pod.death',
+      podId,
+      kind: podKind,
+      userId: userId ?? undefined,
+      dc: dc ?? undefined,
+      reason,
+      lifetimeMs: lifetimeMs ?? undefined,
+      lastHealthAt: lastHealthAt ?? undefined,
+      runpodDesiredStatus,
+      runpodRuntimePresent,
+      note,
+    },
+    'pod.death',
+  );
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // Reaper + reconcile
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -1066,6 +1224,7 @@ async function runReaper(): Promise<void> {
       log.info({ sessionId, podId, videoPodId, idleMs, lifetimeMs, kind: 'image' }, '[reaper] terminating idle session');
       trackPodTerminated({ userId: sessionId, reason: 'idle', lifetimeMs });
       notifyPodTerminated(podId, `idle ${Math.round(idleMs / 1000)}s`);
+      void markPodDead({ podId, podKind: 'image', userId: sessionId, lifetimeMs, reason: 'idle_reaped' });
       // Emit through the broker so the iPad sees state='terminated' with
       // failure_category='idle_timeout' BEFORE we close the upstream pod WS.
       // stream.ts's broker subscriber will close the iPad WS cleanly with
@@ -1078,6 +1237,7 @@ async function runReaper(): Promise<void> {
         .catch((err) => log.error({ sessionId, podId, err }, 'Reap failed'));
       if (videoPodId) {
         log.info({ sessionId, videoPodId, kind: 'video' }, '[reaper] terminating video pod alongside image');
+        void markPodDead({ podId: videoPodId, podKind: 'video', userId: sessionId, lifetimeMs, reason: 'idle_reaped' });
         terminatePod(videoPodId).catch((err) =>
           log.error({ sessionId, videoPodId, err }, 'Reap video pod failed'),
         );
@@ -1158,6 +1318,13 @@ async function reconcileOrphanPods(minAgeSec = 0): Promise<void> {
       // Genuine orphan — no Redis session references this pod and it's old enough
       log.warn({ podId: pod.id, name: pod.name }, 'Reconcile: terminating orphan pod');
       terminated++;
+      void markPodDead({
+        podId: pod.id,
+        podKind: 'image',
+        lifetimeMs: pod.runtime?.uptimeInSeconds != null ? pod.runtime.uptimeInSeconds * 1000 : undefined,
+        reason: 'orphan_reconciled',
+        note: pod.name,
+      });
       await terminatePod(pod.id).catch((err) =>
         log.error({ podId: pod.id, name: pod.name, err }, 'Failed to terminate orphan'),
       );
@@ -1185,6 +1352,13 @@ async function reconcileOrphanPods(minAgeSec = 0): Promise<void> {
       }
       log.warn({ podId: pod.id, name: pod.name, kind: 'video' }, '[reconcile] orphans found terminating video pod');
       videoTerminated++;
+      void markPodDead({
+        podId: pod.id,
+        podKind: 'video',
+        lifetimeMs: pod.runtime?.uptimeInSeconds != null ? pod.runtime.uptimeInSeconds * 1000 : undefined,
+        reason: 'orphan_reconciled',
+        note: pod.name,
+      });
       await terminatePod(pod.id).catch((err) =>
         log.error({ podId: pod.id, name: pod.name, err }, 'Failed to terminate orphan video pod'),
       );
@@ -1411,13 +1585,18 @@ function handleRecoverableProvisionError(
  * for runtime + health, retry across DCs on stall/vanish) and the cross-
  * kind concerns (analytics, Sentry exception capture).
  */
-async function provision(sessionId: string, signal?: AbortSignal): Promise<ProvisionResult> {
+async function provision(
+  sessionId: string,
+  signal?: AbortSignal,
+  streamId?: string | null,
+): Promise<ProvisionResult> {
   return Sentry.startSpan(
     { name: 'pod.provision', op: 'pod.provision', attributes: { sessionId } },
     async () => {
       try {
         const result = await _runProvisionLoop('image', sessionId, {
           signal,
+          streamId,
           onProvisionPhase: async (phase, podId) => {
             await emitState(sessionId, phase);
             if (podId && phase === 'fetching_image') {
@@ -1464,12 +1643,13 @@ async function provision(sessionId: string, signal?: AbortSignal): Promise<Provi
  *  acceptable. */
 async function _runVideoProvision(
   sessionId: string,
+  streamId?: string | null,
 ): Promise<{ podId: string; podUrl: string } | null> {
   const key = `video:${sessionId}`;
   const controller = new AbortController();
   const promise = (async () => {
     try {
-      return await _runProvisionLoop('video', sessionId, { signal: controller.signal });
+      return await _runProvisionLoop('video', sessionId, { signal: controller.signal, streamId });
     } finally {
       inFlightProvisions.delete(key);
     }
@@ -1500,6 +1680,7 @@ async function _runVideoProvision(
  */
 export async function getOrProvisionVideoPod(
   sessionId: string,
+  streamId?: string | null,
 ): Promise<{ podId: string; podUrl: string } | null> {
   const existing = await readSession(sessionId);
 
@@ -1542,7 +1723,7 @@ export async function getOrProvisionVideoPod(
   }
 
   // ── Fresh provision. ──────────────────────────────────────────────
-  return _runVideoProvision(sessionId);
+  return _runVideoProvision(sessionId, streamId);
 }
 
 /**
@@ -1559,6 +1740,7 @@ export async function getOrProvisionVideoPod(
  */
 export async function replaceVideoSession(
   sessionId: string,
+  streamId?: string | null,
 ): Promise<{ podId: string; podUrl: string } | null> {
   const session = await readSession(sessionId);
   if (!session) {
@@ -1573,6 +1755,12 @@ export async function replaceVideoSession(
   // Clear old pod ref + terminate (fire-and-forget).
   await clearVideoPod(sessionId).catch(() => {});
   if (session.videoPodId) {
+    void markPodDead({
+      podId: session.videoPodId,
+      podKind: 'video',
+      userId: sessionId,
+      reason: 'replaced',
+    });
     terminatePod(session.videoPodId).catch((e) =>
       log.warn(
         { sessionId, oldPodId: session.videoPodId, err: (e as Error).message },
@@ -1581,7 +1769,7 @@ export async function replaceVideoSession(
     );
   }
 
-  return _runVideoProvision(sessionId);
+  return _runVideoProvision(sessionId, streamId);
 }
 
 /** Terminate a video pod by ID. Never throws. Used by stream.ts on relay
@@ -1725,7 +1913,9 @@ async function createPodWithFallback(
   target: PlacementTarget,
   podName: string,
   bootDockerArgs: string,
+  streamId?: string | null,
 ): Promise<{ podId: string; podType: PodType; dc: string | null }> {
+  const env = bootEnvFor(sessionId, streamId);
   // Volume-entrypoint mode: stock RunPod pytorch image + our code/deps from
   // the attached network volume. See BASE_IMAGE / BOOT_DOCKER_ARGS / BOOT_ENV
   // constants near top of file. Replaces the previous GHCR custom-image flow —
@@ -1788,7 +1978,7 @@ async function createPodWithFallback(
         gpuTypeId: GPU_TYPE_ID,
         bidPerGpu: bid,
         dockerArgs: bootDockerArgs,
-        env: BOOT_ENV,
+        env,
         containerRegistryAuthId: config.RUNPOD_REGISTRY_AUTH_ID,
         ...dcField,
         ...volField,
@@ -1839,7 +2029,7 @@ async function createPodWithFallback(
       gpuTypeId: GPU_TYPE_ID,
       cloudType: 'SECURE',
       dockerArgs: bootDockerArgs,
-      env: BOOT_ENV,
+      env,
       containerRegistryAuthId: config.RUNPOD_REGISTRY_AUTH_ID,
       ...dcField,
       ...volField,
@@ -1875,9 +2065,9 @@ const POD_CONFIGS: Record<PodKind, PodKindConfig> = {
     gpuTypeId: 'NVIDIA GeForce RTX 5090',
     volumesByDc: config.NETWORK_VOLUMES_BY_DC,
     stallMs: config.POD_BOOT_WATCHDOG_ENABLED ? config.POD_BOOT_STALL_MS : Infinity,
-    createPodForDc: (target, sessionId) => {
+    createPodForDc: (target, sessionId, streamId) => {
       const podName = `${POD_PREFIX}${sessionId.slice(0, 16)}`;
-      return createPodWithFallback(sessionId, target, podName, BOOT_DOCKER_ARGS);
+      return createPodWithFallback(sessionId, target, podName, BOOT_DOCKER_ARGS, streamId);
     },
     // Image: row says ready, but the pod may have died externally (RunPod-
     // side preemption, host failure, manual termination during ops). The
@@ -1953,7 +2143,7 @@ const POD_CONFIGS: Record<PodKind, PodKindConfig> = {
     // LTX-2.3 22B + Gemma encoder load is heavier than LTXV 0.9.8's 2B —
     // the previous 180s budget routinely tripped the watchdog on cold pulls.
     stallMs: 240_000,
-    createPodForDc: async (target, sessionId) => {
+    createPodForDc: async (target, sessionId, streamId) => {
       const podName = `${VIDEO_POD_PREFIX}${sessionId.slice(0, 16)}`;
       const dcField = target.dataCenterId ? { dataCenterId: target.dataCenterId } : {};
       const volField = target.networkVolumeId ? { networkVolumeId: target.networkVolumeId } : {};
@@ -1966,7 +2156,7 @@ const POD_CONFIGS: Record<PodKind, PodKindConfig> = {
         gpuTypeId: 'NVIDIA H100 80GB HBM3',
         cloudType: 'SECURE',
         dockerArgs: BOOT_DOCKER_ARGS_VIDEO,
-        env: BOOT_ENV,
+        env: bootEnvFor(sessionId, streamId),
         containerRegistryAuthId: config.RUNPOD_REGISTRY_AUTH_ID,
         ...dcField,
         ...volField,
@@ -2021,6 +2211,8 @@ async function _runProvisionLoop(
     preferredDc?: string;
     signal?: AbortSignal;
     onProvisionPhase?: (phase: State, podId: string | null) => Promise<void>;
+    /** Forwarded into BOOT_ENV.KIKI_STREAM_ID so pod logs carry it. */
+    streamId?: string | null;
   } = {},
 ): Promise<{ podId: string; podUrl: string; podType: PodType; dc: string | null }> {
   const cfg = POD_CONFIGS[kind];
@@ -2074,7 +2266,7 @@ async function _runProvisionLoop(
       currentState = 'creating_pod';
       const created = await Sentry.startSpan(
         { name: 'pod.create', op: 'pod.create', attributes: { sessionId, kind, attempt } },
-        () => cfg.createPodForDc(target, sessionId),
+        () => cfg.createPodForDc(target, sessionId, opts.streamId),
       );
       podId = created.podId;
       podType = created.podType;
@@ -2096,6 +2288,15 @@ async function _runProvisionLoop(
       // throw, but inlining the terminate makes the intent unambiguous.
       if (opts.signal?.aborted) {
         log.info({ sessionId, kind, podId, dc }, 'Provision aborted post-create — terminating pod');
+        void markPodDead({
+          podId,
+          podKind: kind,
+          userId: sessionId,
+          dc,
+          lifetimeMs: Date.now() - attemptStart,
+          reason: 'manual',
+          note: 'aborted post_create',
+        });
         terminatePod(podId).catch((e) =>
           log.warn({ podId, err: (e as Error).message }, 'Failed to terminate aborted pod'),
         );
@@ -2141,6 +2342,15 @@ async function _runProvisionLoop(
             { sessionId, kind, podId, dc, totalMs },
             'Provision aborted post-health — terminating pod before stamp',
           );
+          void markPodDead({
+            podId,
+            podKind: kind,
+            userId: sessionId,
+            dc,
+            lifetimeMs: totalMs,
+            reason: 'manual',
+            note: 'aborted post_health',
+          });
           terminatePod(podId).catch((e) =>
             log.warn({ podId, err: (e as Error).message }, 'Failed to terminate aborted pod'),
           );
@@ -2185,6 +2395,21 @@ async function _runProvisionLoop(
           { sessionId, kind, podId, err: (err as Error).message, state: currentState, attempt },
           'Provision failed after pod creation — terminating pod',
         );
+        // PodBootStallError signals "ran out of waitForRuntime/waitForHealth
+        // budget" — the pod was alive but never reached ready. Tagged
+        // separately from generic provision_error so triage can distinguish
+        // "boot took forever" from "boot pipeline blew up." The recoverable-
+        // error helper above re-emits the captureException for alerting.
+        const reason = err instanceof PodBootStallError ? 'boot_stalled' : 'provision_error';
+        void markPodDead({
+          podId,
+          podKind: kind,
+          userId: sessionId,
+          dc,
+          lifetimeMs: Date.now() - attemptStart,
+          reason,
+          note: `state=${currentState} ${(err as Error).message}`,
+        });
         terminatePod(podId).catch((e) =>
           log.warn({ podId, err: (e as Error).message }, 'Failed to terminate pod after provision failure'),
         );

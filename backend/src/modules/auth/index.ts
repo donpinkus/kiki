@@ -1,3 +1,4 @@
+import * as Sentry from '@sentry/node';
 import type { FastifyPluginAsync } from 'fastify';
 
 import { verifyAccess, type AccessClaims } from './jwt.js';
@@ -47,6 +48,10 @@ export const authPlugin: FastifyPluginAsync = async (fastify) => {
       const claims = await verifyAccess(token);
       request.userId = claims.sub;
       request.authClaims = claims;
+      // Per-request scope (from `fastifyIntegration` in index.ts) keeps this
+      // from leaking across requests. All errors/spans/logs emitted while
+      // handling this request inherit user.id automatically.
+      Sentry.setUser({ id: claims.sub });
     } catch {
       await reply.code(401).send({ error: 'invalid_token' });
       return;

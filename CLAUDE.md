@@ -128,24 +128,66 @@ Pods log via stdlib `logging` → `LoggingIntegration` ships `INFO+` lines into 
 
 | `phase` value | When |
 |---|---|
-| `session_starting` | Fresh launch through "able to draw". Pod: model load + warmup. Backend: orchestrator provisioning. iOS: loading state. |
+| `preparing` | Fresh launch through "able to draw". Pod: model load + warmup. Backend: orchestrator provisioning (WS-open slow path). iOS: loading state. User-language phrasing — the app is preparing to be ready. |
 | `drawing` | Active drawing, image stream live. Pod: per-frame generation. Backend: WS relay. iOS: stroke handling + preview. |
-| `animating` | User paused, video idle-state running. Pod: LTX inference + encode + stream (one block). Backend: WS relay. iOS: video preview. |
-| `reconnecting` | Recovering from a mid-session disconnect. Set by iOS + backend only; pod stays on `session_starting` for any boot since it can't tell fresh-vs-reconnect. Cross-layer correlation via `trace_id`. |
+| `animating` | User paused, video idle-state running. Pod: LTX inference + encode + stream (one block). Backend: relay (no `withPhase('animating')` wrapper — message-handler boundary; backend during video relay stays on `drawing` or unset). iOS: video preview. |
+| `reconnecting` | Recovering from a mid-session disconnect. Set by iOS + backend only; pod stays on `preparing` for any boot since it can't tell fresh-vs-reconnect. iOS detects via "warming after first frame already received." Backend wraps `handleUpstreamClose` recovery in `withPhase('reconnecting')`. |
 | `session_ending` | Session winding down. |
 | `deploying` | Ops-side: a deploy is in flight. Set by `backend/scripts/deploy.ts`, `sync-all-dcs.ts`, and `sync-flux-app.ts` via `backend/scripts/lib/deploy-sentry.ts`. Distinct from user-journey phases (deploys can run during active sessions). Lets you query "everything that happened during the last deploy" — including any pod boots that fired after a `sync-flux-app` finished. Requires `SENTRY_DSN` in `.env.local` for local CLI runs to ship to Sentry; no-op without it. |
 
-**Pod-side mechanism:** `flux-klein-server/sentry_init.py` exports a `phase()` context manager backed by `contextvars.ContextVar`. Set with `with sentry_init.phase("drawing"):` and the value propagates through `asyncio.create_task` and `asyncio.to_thread` into all logs emitted within (verified — Python 3.9+ copies the contextvars snapshot into spawned tasks/threads). The `before_send_log` hook injects the active value as a top-level `phase` log attribute. Logs outside any phase block have no `phase` attribute (filterable as `!has:phase`).
+**Mechanisms (all three layers shipped):**
+
+- **Pod-side:** `flux-klein-server/sentry_init.py` exports a `phase()` context manager backed by `contextvars.ContextVar`. Set with `with sentry_init.phase("drawing"):` — propagates through `asyncio.create_task` and `asyncio.to_thread` into all logs emitted within (Python 3.9+ copies contextvars snapshot into spawned tasks/threads).
+- **Backend (TS):** `backend/src/modules/observability/phase.ts` exports `withPhase('preparing', async () => {...})` backed by Node `AsyncLocalStorage`. Wrap the section of code; `beforeSendLog` in `index.ts` reads the active phase at log-emit time and injects as `phase` attribute.
+- **iOS:** `ios/Kiki/App/Phase.swift` exports `Phase.set(.drawing)` (imperative, thread-safe via `OSAllocatedUnfairLock`). Imperative rather than `@TaskLocal` because URLSession WS delegate callbacks fire off-Task and TaskLocal doesn't propagate. Single-active-stream guarantees the global is unambiguous. The `Log.X` facade reads `Phase.current` at emit time.
 
 **Don't introduce pod-internal sub-phases** like `video_generate` / `video_encode` as separate top-level values — fold those into the user-journey phase (`animating`) and rely on existing structured fields (`gen_ms`, `encode_ms`) and `code.function.name` (auto-attached) for sub-stage discrimination. If a real cross-stack debugging need requires finer granularity, add a `subphase` attribute alongside.
 
-**Backend (TS) and iOS (Swift) rollout — vocabulary above is shared, mechanisms when implemented:** Backend uses `AsyncLocalStorage` + a `withPhase("...", () => { ... })` helper, injecting via the `beforeSendLog` equivalent. iOS uses `@TaskLocal` on a static, same context-manager-ish pattern via Swift Concurrency.
+**Cross-stack user identity propagation.** All three layers tag every log + error event with `user_id`:
 
-**Cross-project search:** Sentry's UI page-filter handles "all projects" or any subset. To stitch a single user action across iOS → backend → pod: use trace_id propagation (auto over HTTP, manual over WS) plus `session_id` tagged on every event. Project boundary is *not* a data silo — it's just for permissions, alert routing, and quotas.
+- **iOS:** `SentrySDK.setUser(User(userId:))` after sign-in (cleared on sign-out). `Log.X` facade injects `stream_id` from `StreamContext`.
+- **Backend:** `Sentry.setUser({id})` per-request (via `fastifyIntegration` async-context isolation) in `auth/index.ts` preHandler + once more in `routes/stream.ts` for the long-lived WS scope. `pinoIntegration` auto-captures Pino logs; `beforeSendLog` in `index.ts` normalizes camelCase → snake_case (`userId`→`user_id`, `podId`→`pod_id`, `videoPodId`→`video_pod_id`, `kind`→`pod_kind`, etc.) so cross-stack queries don't fragment.
+- **Pod:** orchestrator's `bootEnvFor()` injects `KIKI_USER_ID` + `KIKI_STREAM_ID` into every freshly-provisioned pod's BOOT_ENV. `flux-klein-server/sentry_init.py` reads them once at startup, calls `sentry_sdk.set_user({id})` for errors/spans, and injects them as log attributes via `before_send_log`.
+
+**Pod `stream_id` is "boot stream_id," not "current stream_id."** When a user reconnects within the same pod's idle window (30 min), the pod's `stream_id` attribute reflects the *original* connection. iOS + backend will emit a fresh `stream_id` for the new connection but the pod's logs keep the old one. Cross-reference by `user_id` + timestamp when this matters.
+
+**Pod death tombstone.** Every pod termination/observed-death emits one `event:pod.death` log with `pod_id`, `pod_kind`, `user_id`, `dc`, `lifetime_ms`, `reason` — routed through the `markPodDead()` chokepoint in `orchestrator.ts`. Reasons: `idle_reaped`, `orphan_reconciled`, `replaced`, `provision_error`, `boot_stalled`, `manual`, `runpod_exited`, `unhealthy_timeout`. For `runpod_exited` / `boot_stalled` / `unhealthy_timeout`, `markPodDead` polls RunPod GraphQL for `desiredStatus` so we capture "EXITED" vs "RUNNING but unreachable." If pod was SIGKILLed (e.g., during model load — silent death), the tombstone is the only signal.
+
+**Pod-side `preparing` heartbeat.** While the pod is in `phase: preparing` (model load), `preparing_heartbeat.py` emits a `preparing heartbeat:` log line every 15s with `host_rss_gib`, `cuda_alloc_gib`, `cuda_reserved_gib`, `elapsed_sec`. Won't capture the SIGKILL itself (no log can — kernel doesn't give Python a final breath), but the trajectory tells "host RSS climbed past 65 GB then went silent" vs. "memory was fine, something else killed it." Threading-based (not asyncio) because pipeline.load() blocks the event loop for 60-90s.
+
+**Cross-project search:** Sentry's UI page-filter handles "all projects" or any subset. The cross-stack `user_id`/`pod_id`/`phase` attributes make project boundary effectively just permissions/alerts/quotas — not a data silo.
+
+**Trace-id-based correlation across WebSocket** is *not* yet wired (Sentry auto-propagates `trace_id` for HTTP but not WS). v1 relies on `user_id` + timestamp for joining iOS → backend → pod, which covers the common debugging queries. Add WS trace-id propagation as a follow-up if the user_id-based query proves insufficient.
+
+**Clock skew across layers.** When stitching cross-stack logs by timestamp, ±1s drift between iOS / backend (Railway) / pod (RunPod) is normal — all NTP-synced but not the same source. Don't over-interpret sub-second ordering.
+
+**Errors UI vs Logs UI.** Sentry has two separate datasets, both filterable by `user_id`. The Errors UI shows `captureException` / `captureMessage` events with stack traces and grouping. The Logs UI shows lifecycle log lines (Pino on backend, stdlib `logger` on pods, `SentrySDK.logger.X` on iOS). When debugging, check both — different perspectives on the same incident. The `pod.death` tombstone is in Logs (queryable as a record); `PodBootStallError` is in Errors (alerting + grouping); both fire for a stalled boot.
 
 **PostHog** stays in its lane: product analytics events only (per `feedback_single_observability.md`). Errors and stdout/stderr go to Sentry exclusively.
 
 **Querying logs programmatically** (e.g. for analysis without copy-pasting): use the Sentry MCP server (`https://mcp.sentry.dev/mcp`) — registered at user scope on Donald's Claude Code config, exposes `search_events` / `search_issues` / `search_spans`. Avoids the manual "paste logs into chat" workflow.
+
+### How to debug a user session
+
+Standard query patterns. Sentry → Logs UI, "all projects" page filter unless noted.
+
+| Question | Query |
+|---|---|
+| Full timeline of one user's session (iOS + backend + pod, all 3 layers) | `user_id:<X>` sorted ascending by time |
+| What happened during the user's preparing phase | `user_id:<X> phase:preparing` |
+| Replay today's incident (user went through 2 video pods) | `user_id:<X> phase:preparing pod_kind:video` |
+| Specific pod (any kind) | `pod_id:<X> OR video_pod_id:<X>` *(disjunction needed: backend uses separate fields for image vs. video pods on the same line; pod-side always uses `pod_id`)* |
+| All pod deaths | `event:pod.death` (add `reason:<X>` to scope) |
+| Pods that died unexpectedly (RunPod-side or health-fail) | `event:pod.death reason:runpod_exited OR reason:unhealthy_timeout OR reason:boot_stalled` |
+| Logs we forgot to wrap in a phase | `user_id:<X> !has:phase` |
+| Verify deploy correlates with errors | `phase:deploying` (on Logs UI) +  Errors UI filtered by time around that deploy |
+
+When a user reports an issue, default workflow:
+1. Get `user_id` from PostHog or in-app context.
+2. `user_id:<X>` Logs query, sorted by time → see what happened.
+3. If phase-specific (e.g. "stuck on loading" → `phase:preparing`).
+4. If pod-specific death (`event:pod.death`).
+5. Cross-check Errors UI for stack traces around that timeframe.
 
 ## Key References
 
