@@ -37,6 +37,17 @@ def phase(name: str) -> Iterator[None]:
         _phase.reset(token)
 
 
+# Cosmetic: suppress the per-boot transformers warning
+# `Using a slow image processor as use_fast is unset and a slow processor
+# was saved with this model.` It fires once on every video pod boot from
+# transformers' image-processor loader and adds noise to Sentry Logs
+# without surfacing actionable signal. Set in module scope so it applies
+# regardless of whether SENTRY_DSN_POD is set (the noise exists locally
+# too). Lifting back to INFO would re-enable all transformers.utils.logging
+# output if needed.
+logging.getLogger("transformers.utils.logging").setLevel(logging.ERROR)
+
+
 def init(pod_kind: str) -> None:
     dsn = os.environ.get("SENTRY_DSN_POD")
     if not dsn:

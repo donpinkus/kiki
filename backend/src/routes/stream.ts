@@ -1,5 +1,4 @@
 import { randomBytes } from 'crypto';
-import * as Sentry from '@sentry/node';
 import type { FastifyPluginAsync } from 'fastify';
 
 import { config } from '../config/index.js';
@@ -290,11 +289,15 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       // Search by streamId for the whole user attempt; by connId for one
       // specific WS upgrade. null when an older client without streamId connects.
       streamId = extractQueryParam(request.url, 'streamId');
-      // WS connections live for minutes; tag the long-lived isolation scope
-      // with user.id so every log/error/span emitted on this connection
-      // carries user attribution. Per-request scope from fastifyIntegration
-      // covers the upgrade request itself; this call covers the WS lifetime.
-      Sentry.setUser({ id: userId });
+      // User attribution comes from the `userId` Pino field on every log line
+      // in this handler — promoted to `user_id` Sentry log attribute by
+      // `beforeSendLog` in `index.ts`. Don't `Sentry.setUser` here: the
+      // WS connection's lifetime outlives `fastifyIntegration`'s per-request
+      // isolation, and setUser leaks onto the global scope for the rest of
+      // the connection — distorting `user_id:X` queries by attaching this
+      // user to background-process logs (Cost tick, reaper, reconcile).
+      // Errors below pass `user: { id: userId }` to `captureException`
+      // explicitly so error-event attribution stays correct.
       request.log.info({ userId, source, connId, streamId, event: 'ws_open' }, 'Stream client connected');
 
       // Entitlement check — only applies when authenticated via JWT. Legacy

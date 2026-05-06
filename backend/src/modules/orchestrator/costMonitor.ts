@@ -14,6 +14,7 @@ import { timingSafeEqual } from 'node:crypto';
 import type { FastifyBaseLogger } from 'fastify';
 
 import { config } from '../../config/index.js';
+import { inBackgroundScope } from '../observability/scope.js';
 import { listPodsWithCost, type PodCostInfo } from './runpodClient.js';
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -100,12 +101,21 @@ export function start(logger: FastifyBaseLogger): void {
   const intervalMs = config.COST_MONITOR_INTERVAL_MS;
   log.info({ intervalMs }, 'Cost monitor started');
 
-  // Run first tick immediately, then on interval
-  void tick();
-  tickTimer = setInterval(() => void tick(), intervalMs);
+  // Run each tick in its own Sentry isolation scope with no user attribution
+  // and a `background_task` tag — see `modules/observability/scope.ts` for
+  // why. Without this wrap, every tick log inherits whatever user.id was
+  // last `Sentry.setUser`'d in the process, distorting `user_id:X` queries.
+  void inBackgroundScope('cost_monitor', () => tick());
+  tickTimer = setInterval(
+    () => void inBackgroundScope('cost_monitor', () => tick()),
+    intervalMs,
+  );
 
   // Hourly digest to Discord
-  hourlyTimer = setInterval(() => void sendHourlyDigest(), 3_600_000);
+  hourlyTimer = setInterval(
+    () => void inBackgroundScope('cost_monitor_digest', () => sendHourlyDigest()),
+    3_600_000,
+  );
 }
 
 export function stop(): void {

@@ -125,6 +125,7 @@ import {
 import { getPolicy } from './policy.js';
 import { notifyPodCreated, notifyPodProgress, notifyPodTerminated } from './costMonitor.js';
 import { PodBootStallError, PodVanishedError, ProvisionAbortedError, classifyProvisionError, type FailureCategory } from './errorClassification.js';
+import { inBackgroundScope } from '../observability/scope.js';
 import {
   trackPodProvisionStarted,
   trackPodProvisionCompleted,
@@ -996,6 +997,7 @@ export async function replaceSession(
     } catch (err) {
       log.error({ sessionId, attempt, err }, 'Session replacement failed');
       Sentry.captureException(err, {
+        user: { id: sessionId },
         tags: { sessionId, attempt: String(attempt), phase: 'session_replacement' },
       });
       if (newPodId) {
@@ -1009,6 +1011,7 @@ export async function replaceSession(
         terminatePod(newPodId).catch((e) => {
           log.warn({ sessionId, newPodId, err: (e as Error).message }, 'Failed to clean up replacement pod');
           Sentry.captureException(e, {
+            user: { id: sessionId },
             tags: { sessionId, phase: 'replacement_pod_cleanup' },
           });
         });
@@ -1019,6 +1022,7 @@ export async function replaceSession(
           'Failed to delete session after replacement failure',
         );
         Sentry.captureException(delErr, {
+          user: { id: sessionId },
           tags: { sessionId, phase: 'replacement_session_cleanup' },
         });
       });
@@ -1052,12 +1056,19 @@ export async function start(logger: FastifyBaseLogger): Promise<void> {
   await ensureRedis();
   // Boot-time reconcile is aggressive (no age gate) — we just restarted so
   // anything not in Redis is genuinely orphaned.
-  await reconcileOrphanPods(0);
-  setInterval(() => void runReaper(), REAPER_INTERVAL_MS);
-  // Periodic reconcile with age gate to catch leaks between restarts without
-  // killing pods mid-provision.
+  await inBackgroundScope('reconcile_boot', () => reconcileOrphanPods(0));
+  // Wrap periodic timers in `inBackgroundScope` so their logs (a) don't
+  // inherit ambient `Sentry.setUser` state from any request scope and
+  // (b) carry `background_task: <name>` for filtering. See
+  // `modules/observability/scope.ts` for context.
   setInterval(
-    () => void reconcileOrphanPods(config.RECONCILE_MIN_AGE_SEC),
+    () => void inBackgroundScope('reaper', () => runReaper()),
+    REAPER_INTERVAL_MS,
+  );
+  setInterval(
+    () => void inBackgroundScope('reconcile', () =>
+      reconcileOrphanPods(config.RECONCILE_MIN_AGE_SEC),
+    ),
     config.RECONCILE_INTERVAL_MS,
   );
   log.info(
@@ -2433,6 +2444,7 @@ async function _runProvisionLoop(
       // Terminal: classify, fire analytics, propagate.
       const category = classifyProvisionError(err as Error);
       Sentry.captureException(err, {
+        user: { id: sessionId },
         tags: {
           dc: dc ?? 'unknown',
           podType: podType ?? 'unknown',
