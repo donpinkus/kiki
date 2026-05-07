@@ -203,12 +203,12 @@ final class AppCoordinator {
     var streamSeed: Int? { didSet { syncStreamConfig() } }
 
     /// LTX-2.3 video override — square resolution (px). Session-only by design:
-    /// not @AppStorage, so each app launch resets to the perf baseline (320).
+    /// not @AppStorage, so each app launch resets to the perf baseline (512).
     /// Step 3.5 benchmark needs deterministic baselines per launch.
-    var videoResolution: Int = 320 { didSet { syncStreamConfig() } }
+    var videoResolution: Int = 512 { didSet { syncStreamConfig() } }
 
     /// LTX-2.3 video override — frame count. Session-only (see `videoResolution`).
-    var videoFrames: Int = 49 { didSet { syncStreamConfig() } }
+    var videoFrames: Int = 145 { didSet { syncStreamConfig() } }
 
     /// LTX-2.3 video override — cinematic prompt suffix. Session-only (see `videoResolution`).
     var videoPromptSuffix: String = AppCoordinator.defaultVideoPromptSuffix {

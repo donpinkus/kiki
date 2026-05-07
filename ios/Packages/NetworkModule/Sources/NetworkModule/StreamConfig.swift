@@ -30,9 +30,9 @@ public struct StreamConfig: Codable, Sendable, Equatable {
         steps: Int = 4,
         seed: Int? = nil,
         requestId: String? = nil,
-        videoWidth: Int = 320,
-        videoHeight: Int = 320,
-        videoFrames: Int = 49,
+        videoWidth: Int = 512,
+        videoHeight: Int = 512,
+        videoFrames: Int = 145,
         videoPromptSuffix: String = "",
         enableProfiling: Bool = false
     ) {

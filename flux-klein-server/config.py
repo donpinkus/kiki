@@ -87,14 +87,11 @@ LTX_QUANTIZATION = "fp8"
 #
 # 320x320 squares the aspect (matches FLUX 1:1 output, no pillarboxing in
 # the iPad's square pane) and keeps activation memory low: 22B FP8 + Gemma
-# + fp8_cast's transient bf16 upcast buffers OOMed H100 80GB at 512x512
-# (78 GiB allocated). ltx-pipelines forbids combining OffloadMode.CPU
-# with quantization, so the only knob to reduce VRAM pressure is making
-# activations smaller. 320 = 5x64 satisfies the two-stage divisor.
+# 512 = 8x64 satisfies the DistilledPipeline two-stage divisor.
 # Upscale to 768 happens iPad-side via AVPlayerLayer's resizeAspect.
-LTX_WIDTH = int(os.getenv("LTX_WIDTH", "320"))
-LTX_HEIGHT = int(os.getenv("LTX_HEIGHT", "320"))
-LTX_NUM_FRAMES = int(os.getenv("LTX_NUM_FRAMES", "49"))
+LTX_WIDTH = int(os.getenv("LTX_WIDTH", "512"))
+LTX_HEIGHT = int(os.getenv("LTX_HEIGHT", "512"))
+LTX_NUM_FRAMES = int(os.getenv("LTX_NUM_FRAMES", "145"))
 LTX_FPS = int(os.getenv("LTX_FPS", "24"))
 LTX_OUTPUT_JPEG_QUALITY = int(os.getenv("LTX_OUTPUT_QUALITY", "80"))
 # LTX generates audio latents during the same denoising pass as video. This

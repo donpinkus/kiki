@@ -21,8 +21,8 @@ struct SettingsPanel: View {
                         coordinator.streamSeed = nil
                         coordinator.streamCaptureFPS = 2
                         coordinator.drawingLayout = .splitScreen
-                        coordinator.videoResolution = 320
-                        coordinator.videoFrames = 49
+                        coordinator.videoResolution = 512
+                        coordinator.videoFrames = 145
                         coordinator.videoPromptSuffix = AppCoordinator.defaultVideoPromptSuffix
                         coordinator.enableProfiling = false
                     }
@@ -33,10 +33,6 @@ struct SettingsPanel: View {
         }
     }
 
-    // LTX-2.3 frame counts must satisfy (n-1) % 8 == 0; FPS is fixed at 24
-    // pod-side (config.LTX_FPS), so duration = (n-1) / 24 + ~0 (we display
-    // the simpler frames/24 since 49→2.0s reads cleanly).
-    private static let frameOptions: [Int] = [49, 81, 113, 145]
     private static let resolutionOptions: [Int] = [320, 384, 448, 512]
 
     // MARK: - Sections
@@ -60,13 +56,6 @@ struct SettingsPanel: View {
             Picker("Resolution", selection: $coordinator.videoResolution) {
                 ForEach(Self.resolutionOptions, id: \.self) { px in
                     Text("\(px) × \(px)").tag(px)
-                }
-            }
-
-            Picker("Frames", selection: $coordinator.videoFrames) {
-                ForEach(Self.frameOptions, id: \.self) { n in
-                    let seconds = Double(n) / 24.0
-                    Text(String(format: "%d frames (%.1fs)", n, seconds)).tag(n)
                 }
             }
 

@@ -420,7 +420,7 @@ async def websocket_video(ws: WebSocket):
                         seed = None
 
                 # Step 3.5 — Optional per-request shape overrides. None
-                # means "use config defaults" (today: 320x320, 49 frames).
+                # means "use config defaults" (today: 512x512, 145 frames).
                 # video_pipeline.generate() applies the defaults; we only
                 # type-coerce here.
                 req_width = data.get("videoWidth")
