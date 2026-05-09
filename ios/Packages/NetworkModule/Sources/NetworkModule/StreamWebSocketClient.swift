@@ -1,6 +1,17 @@
 import Foundation
 import Sentry
 
+/// Thrown by `StreamWebSocketClient.connect()` when the backend's first WS
+/// message is `{type:"error", message:"..."}` — i.e. a structured deny
+/// (auth, entitlement, rate-limit). Carries the verbatim `message` field so
+/// callers can render it without reaching for a hardcoded fallback string.
+public struct ServerRejectedError: Error, Sendable {
+    public let message: String
+    public init(message: String) {
+        self.message = message
+    }
+}
+
 /// WebSocket client for real-time streaming communication with the generation backend.
 /// Uses native `URLSessionWebSocketTask` — no third-party dependencies.
 public actor StreamWebSocketClient {
@@ -218,23 +229,24 @@ public actor StreamWebSocketClient {
                 "length": text.count,
                 "firstReceiveMs": firstReceiveMs,
             ])
-            // Check for error response (backend sends this if upstream is unavailable)
-            if text.contains("\"type\":\"error\"") {
-                let errorMsg = text  // Keep for error message
-                wsTask.cancel(with: .normalClosure, reason: nil)
-                self.task = nil
-                state = .disconnected
-                let err = URLError(.cannotConnectToHost, userInfo: [
-                    NSLocalizedDescriptionKey: "Server error: \(errorMsg)"
-                ])
-                SentrySDK.capture(error: err) { scope in
-                    scope.setTag(value: "ws.connect.server_error", key: "op")
-                    scope.setExtra(value: errorMsg, key: "serverMessage")
-                }
-                throw err
-            }
             if let data = text.data(using: .utf8),
                let status = try? JSONDecoder().decode(ServerStatus.self, from: data) {
+                if status.type == "error" {
+                    // Structured deny from the backend (auth / entitlement /
+                    // rate-limit). Throw a typed error carrying the verbatim
+                    // server message so StreamSession's reconnect loop can
+                    // short-circuit to .failed(message:) instead of retrying
+                    // until exhausted and falling back to a hardcoded string.
+                    wsTask.cancel(with: .normalClosure, reason: nil)
+                    self.task = nil
+                    state = .disconnected
+                    SentrySDK.capture(message: "stream.server_error") { scope in
+                        scope.setLevel(.error)
+                        scope.setTag(value: "ws.connect.server_error", key: "op")
+                        scope.setExtra(value: status.message ?? "(no message)", key: "serverMessage")
+                    }
+                    throw ServerRejectedError(message: status.message ?? "Server error")
+                }
                 statusContinuation.yield(status)
             }
         case .data(let data):

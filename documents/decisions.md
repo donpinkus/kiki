@@ -14,6 +14,29 @@ Record implementation decisions here as they are made. Newest first. This preven
 
 ---
 
+### 2026-05-09 — Removed `too_many_active_pods` quota check; surface raw deny reasons to iOS
+
+**Context:** During heavy iteration (Xcode rebuilds in tight succession), backend started rejecting WS connections with `too_many_active_pods` and the iOS toast read "Unable to connect. Please restart the app." with no indication of the actual cause. Two problems compounded:
+1. `rateLimiter.checkProvisionQuota` had a binary "any active session exists" guard before the hourly/daily windows. It read the same Redis row that `hasReadySession` had just consulted at `routes/stream.ts:348`, but ms apart and after one synchronous `checkEntitlement` call. Concurrent WS handlers (or a previous provision from the same user mid-flight) could race past `hasReadySession=false` and then see the row in `getActiveSessionCount` — false-positive `too_many_active_pods`.
+2. iOS's `StreamWebSocketClient.connect()` swallowed `{type:"error"}` JSON arriving during the WS handshake — wrapped the full text in a generic `URLError`, and after the reconnect loop exhausted, fell back to a hardcoded "Unable to connect. Please restart the app." string that discarded the server's `message` field. Backend's entitlement and quota paths additionally fabricated UX-friendly strings ("Subscription required to continue", "Too many sessions — try again shortly"), so even the wire-level message was a friendly placeholder rather than the raw enum reason.
+
+**Decision:**
+- Deleted the active-pod check (`getActiveSessionCount`, `MAX_ACTIVE_PODS_PER_USER`, `'too_many_active_pods'` reason) from `backend/src/modules/auth/rateLimiter.ts`. Hourly (20/h) + daily (100/d) sliding windows unchanged. Concurrent-pod protection was always redundant: `getOrProvisionPod` already serializes via `inFlightProvisions` and reuses existing rows via `getReusableFromRow`.
+- Backend now sends the raw enum reason as the `message` field for both entitlement (`message: entitlement.reason`) and quota (`message: quota.reason ?? 'rate_limited'`) denies. Auth deny was already raw.
+- iOS gained `ServerRejectedError` (public, in `NetworkModule`). `StreamWebSocketClient.connect()` now decodes the initial WS message as `ServerStatus` and throws `ServerRejectedError(message:)` for `type:"error"` — no more URLError-wrapping. `StreamSession.runReconnect` catches this, calls `setReadiness(.failed(message: serverError.message))`, and exits the loop. Generic transport errors still fall through to the existing back-off-and-retry path. Net: red toast renders the verbatim server message (e.g. literally `hourly_rate_exceeded` / `free_exhausted` / `invalid_token`).
+
+**Alternatives considered:**
+- **Keep the active-pod check, raise `MAX_ACTIVE_PODS_PER_USER` to 2.** Would reduce false-positive frequency but doesn't address the underlying redundancy or the read-read race. Removal is cleaner.
+- **Tighten the race window with a Redis lock or atomic SETNX.** Adds complexity for a guard that wasn't pulling weight.
+- **Map enum reasons to friendlier UX strings on iOS** ("hourly_rate_exceeded" → "You've hit the per-hour limit, try again at HH:MM"). Useful for production but premature: today these denies fire on us during dev, and the raw reason is more debug-friendly than any mapping. Layer this in when we have real users.
+
+**Consequences:**
+- The `'too_many_active_pods'` value disappears from the wire protocol's `code` field. Any old iOS build that hard-coded a UI mapping for it now falls through to the generic toast (which would render "Server error" since no `message` carries that string anymore — the value is just gone). Not a problem in dev; would be a wire-compat consideration if we shipped a broader release.
+- The hourly cap of 20 still bounds heavy retry-storm cost. At ~$0.55/hr per RTX 5090, the worst-case extra provisioning during a debug session is bounded.
+- `ACTIVE_STATES` set is gone from `rateLimiter.ts` — the "step (4) update rate limiter `ACTIVE_STATES`" reminder in the 2026-04-23 entry below no longer applies. Adding new states only requires updating the orchestrator's `State` union, iOS `ProvisionState`, iOS `displayText()`, and `ACTIVE_PROVISION_STATES` in `orchestrator.ts`.
+
+---
+
 ### 2026-04-24 — Idle-timeout reap: user-visible "Session Paused" UX with tap / draw to resume
 **Context:** The 30-min idle reaper (`orchestrator.ts:runReaper`) used to terminate a user's pod silently from the iPad's perspective: the Redis row was deleted, the upstream WS closed, the new always-recover path attempted `replaceSession`, which threw `"No session to replace"` and bounced the iPad with a generic 1011 close. User had no idea what happened.
 **Decision:** Reaper emits a `terminated` state through the broker with a new `failureCategory='idle_timeout'` BEFORE killing the pod. Stream.ts's broker subscriber closes the iPad WS cleanly with code 1000 on `state='terminated'`, setting the `clientDisconnected` flag so the upstream-close recovery path exits early (no fallback `replaceSession` attempt). iOS `StreamReadiness` gains an `.idleTimeout` case; `ResultState.idleTimeout(previousImage:)` renders a semi-transparent overlay on top of the last-generated image with an SF Symbol moon-zzz icon and "Session Paused - Draw to Resume" title in a teal→purple gradient with Apple-style layered drop shadows. Two resume paths — both wired to a new public `coordinator.resumeStream()`:
@@ -96,8 +119,8 @@ Extracted shared relay-wiring into a single `wireRelay(podUrl)` helper inside th
 - `replacementCount` stays incremented through a session's life (doesn't reset on successful replacement). Required for the `MAX_SESSION_REPLACEMENTS` cap to protect against flapping pods. Tradeoff: after one preemption, reconnect flows briefly flash "Replacing — ..." until the session fully retires. Acceptable at current scale.
 - `waitForReplacement` (polling helper) deleted — broker subscribers handle mid-replacement connects natively.
 - `PodVanishedError.phase` renamed to `.state`; `FailureCategory` renamed (`runtime_up_timeout` → `fetch_image_timeout`, `health_timeout` → `warm_model_timeout`) to match.
-- Rate limiter's `ACTIVE_SESSION_STATUSES` set moved to `ACTIVE_STATES` with new values — easy to forget when adding states; see `backend/src/modules/auth/rateLimiter.ts`.
-- Adding new states in the future: update (1) backend `State` union, (2) iOS `ProvisionState` enum, (3) iOS `displayText()`, (4) rate limiter `ACTIVE_STATES` if non-terminal, (5) `ACTIVE_PROVISION_STATES` in orchestrator.ts.
+- Rate limiter's `ACTIVE_SESSION_STATUSES` set moved to `ACTIVE_STATES` with new values — easy to forget when adding states; see `backend/src/modules/auth/rateLimiter.ts`. *(Superseded 2026-05-09: `ACTIVE_STATES` was removed from `rateLimiter.ts` along with the `too_many_active_pods` check. Adding new states no longer requires touching the rate limiter.)*
+- Adding new states in the future: update (1) backend `State` union, (2) iOS `ProvisionState` enum, (3) iOS `displayText()`, (4) `ACTIVE_PROVISION_STATES` in orchestrator.ts.
 - Wire protocol change: atomic swap across backend + iOS. Dev build only — single user rebuilds iOS and deploys backend in lockstep. TestFlight would require a dual-send compat layer.
 
 ---

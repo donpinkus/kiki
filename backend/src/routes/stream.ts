@@ -365,7 +365,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             JSON.stringify({
               type: 'error',
               code: entitlement.reason,
-              message: 'Subscription required to continue',
+              message: entitlement.reason ?? 'entitlement_denied',
             }),
           );
           socket.close(1008, entitlement.reason);
@@ -378,7 +378,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             JSON.stringify({
               type: 'error',
               code: quota.reason,
-              message: 'Too many sessions — try again shortly',
+              message: quota.reason ?? 'rate_limited',
               retryAfterSec: quota.retryAfterSec,
             }),
           );

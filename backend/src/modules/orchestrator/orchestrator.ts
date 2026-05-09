@@ -903,12 +903,13 @@ export function touch(sessionId: string): void {
 }
 
 /**
- * Check if a user already has an active pod — used to skip rate limiting on
+ * Check if a user already has an in-flight or ready pod — used to skip
+ * provision-frequency rate limiting + the fresh-provision codepath on
  * reconnect. "Active" includes all in-progress states (`queued` through
  * `warming_model`) plus `ready`: a user navigating away and back during cold
- * start is reconnecting to their existing in-flight pod, not creating a new
- * one. Treating this as a fresh provision triggers spurious
- * `too_many_active_pods` rejections.
+ * start is reconnecting to their existing in-flight pod, and the slow path
+ * would burn an entry against their hourly cap and try to provision a second
+ * pod we'd just have to throw away.
  */
 export async function hasReadySession(sessionId: string): Promise<boolean> {
   const session = await readSession(sessionId);

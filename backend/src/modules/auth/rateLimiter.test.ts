@@ -2,18 +2,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
  * Redis stub that implements just enough of ioredis to back the rate limiter:
- *   - hset/hget for session rows (used to derive active-pod count)
  *   - zadd / zcount / zcard / zremrangebyscore / zrangebyscore / zrange
  *   - multi() pipeline with exec()
  *
- * Keep it dumb — each method reads/writes the in-memory `store`/`zstore` maps.
+ * Keep it dumb — each method reads/writes the in-memory `zstore` map.
  */
 
-interface StoredSession {
-  [field: string]: string;
-}
-
-const hashStore = new Map<string, StoredSession>();
 // Sorted set: map<key, array<{ score, member }>> kept sorted by score ascending.
 const zStore = new Map<string, Array<{ score: number; member: string }>>();
 
@@ -35,16 +29,6 @@ function parseScoreBound(bound: number | string): number {
 
 class PipelineStub {
   private readonly ops: Array<() => unknown> = [];
-
-  hset(key: string, fields: Record<string, string>): this {
-    this.ops.push(() => {
-      const row = hashStore.get(key) ?? {};
-      Object.assign(row, fields);
-      hashStore.set(key, row);
-      return 1;
-    });
-    return this;
-  }
 
   expire(_key: string, _seconds: number): this {
     this.ops.push(() => 1);
@@ -125,7 +109,6 @@ class PipelineStub {
 
 vi.mock('../redis/client.js', () => ({
   getRedis: () => ({
-    hget: async (key: string, field: string) => hashStore.get(key)?.[field] ?? null,
     multi: () => new PipelineStub(),
   }),
   ensureRedis: async () => {},
@@ -134,41 +117,14 @@ vi.mock('../redis/client.js', () => ({
 
 import { checkProvisionQuota, recordProvision } from './rateLimiter.js';
 
-const SESSION_PREFIX = 'session:';
-
-function setSessionState(userId: string, state: string): void {
-  hashStore.set(`${SESSION_PREFIX}${userId}`, { sessionId: userId, state });
-}
-
 describe('checkProvisionQuota', () => {
   beforeEach(() => {
-    hashStore.clear();
     zStore.clear();
     vi.unstubAllEnvs();
   });
 
-  it('allows when the user has no active session and no history', async () => {
+  it('allows when the user has no history', async () => {
     const result = await checkProvisionQuota('user-1');
-    expect(result.allowed).toBe(true);
-  });
-
-  it('rejects with too_many_active_pods when a ready session exists', async () => {
-    setSessionState('user-2', 'ready');
-    const result = await checkProvisionQuota('user-2');
-    expect(result.allowed).toBe(false);
-    expect(result.reason).toBe('too_many_active_pods');
-  });
-
-  it('rejects with too_many_active_pods when an active provisioning session exists', async () => {
-    setSessionState('user-3', 'fetching_image');
-    const result = await checkProvisionQuota('user-3');
-    expect(result.allowed).toBe(false);
-    expect(result.reason).toBe('too_many_active_pods');
-  });
-
-  it('allows when the session row exists but state is terminated', async () => {
-    setSessionState('user-4', 'terminated');
-    const result = await checkProvisionQuota('user-4');
     expect(result.allowed).toBe(true);
   });
 
@@ -215,7 +171,6 @@ describe('checkProvisionQuota', () => {
 
 describe('recordProvision', () => {
   beforeEach(() => {
-    hashStore.clear();
     zStore.clear();
   });
 

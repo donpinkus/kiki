@@ -9,7 +9,7 @@ This doc captures the bottlenecks and the work to clear them. Each workstream is
 As of WS7 completion (2026-04-18) — **all 7 workstreams shipped:**
 
 - Railway backend orchestrator provisions a dedicated RTX 5090 pod per user and terminates it after 30 min of inactivity. See `documents/references/provider-config.md` for ops.
-- **Authentication (WS1 done):** Apple Sign In → JWT. Session registry keyed by `userId`. Per-user rate limiter (1 active pod, 5/hr, 30/day).
+- **Authentication (WS1 done):** Apple Sign In → JWT. Session registry keyed by `userId`. Per-user provision-frequency rate limiter (20/hr, 100/day; concurrent-pod protection is the orchestrator's job via `inFlightProvisions` + `getReusableFromRow`, not a separate counter — see `documents/decisions.md` 2026-05-09 entry).
 - **On-demand fallback (WS2 done):** Spot first; if capacity exhausted, falls back to on-demand ($0.99/hr) in the same DC.
 - **Fast cold start (WS3 done, then revised 2026-04-23):** Pods boot from stock `runpod/pytorch` and read app code + venv off pre-populated network volumes in 5 DCs (FLUX weights also on the volume). ~96s avg cold start (p95 ~157s). DC-aware placement probes spot stock across all volume-DCs. The original WS3 design used a slim custom GHCR image; that was cut over to volume-entrypoint after ~38% of pulls were stalling on specific RunPod hosts (see `documents/decisions.md` 2026-04-23).
 - In-memory session registry (`Map<userId, Session>`) on a single Railway instance.

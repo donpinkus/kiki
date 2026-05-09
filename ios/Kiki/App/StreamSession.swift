@@ -412,6 +412,16 @@ final class StreamSession {
             do {
                 try await connectAndRunOnce()
                 return  // success — drop out of loop
+            } catch let serverError as ServerRejectedError {
+                // Backend rejected this connection with a structured reason
+                // (auth, entitlement, rate-limit). Show its verbatim message
+                // and stop retrying — these are deterministic denies, not
+                // transient transport failures, and the next attempt would
+                // fail identically. setReadiness(.failed) also makes
+                // attemptReconnect a no-op (line 348 guard).
+                await client.disconnect()
+                setReadiness(.failed(message: serverError.message))
+                return
             } catch {
                 // Tear down the partially-set-up client so its receive loop
                 // and WS task don't linger. If `connect()` succeeded but
