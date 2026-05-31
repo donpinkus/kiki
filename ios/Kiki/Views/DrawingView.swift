@@ -6,7 +6,6 @@ import ResultModule
 struct DrawingView: View {
     @Environment(AppCoordinator.self) private var coordinator
     @State private var panelReturnTask: Task<Void, Never>?
-    @State private var errorDismissTask: Task<Void, Never>?
     @State private var quickShapeTooltipDismissTask: Task<Void, Never>?
     /// Persistent flag — once the user has seen the QuickShape tooltip on
     /// any device session, never show it again on this device.
@@ -38,14 +37,6 @@ struct DrawingView: View {
                 .padding(.vertical, 10)
                 .background(Color.red.opacity(0.85))
                 .transition(.move(edge: .top).combined(with: .opacity))
-                .onAppear {
-                    errorDismissTask?.cancel()
-                    errorDismissTask = Task {
-                        try? await Task.sleep(for: .seconds(8))
-                        guard !Task.isCancelled else { return }
-                        coordinator.generationError = nil
-                    }
-                }
             }
 
             GeometryReader { geometry in
