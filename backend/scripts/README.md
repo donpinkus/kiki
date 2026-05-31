@@ -52,6 +52,16 @@ or APIs.
   DC fails. Exposed as `npm run sync-all`. ~5–10 min total (slowest DC
   dominates).
 
+- **`add-dc-volume.ts`** — Provision a new image-pod network volume in a DC
+  not already in `NETWORK_VOLUMES_BY_DC`. Creates the volume via the
+  `createNetworkVolume` GraphQL mutation, then runs `populate-volume.ts` +
+  `sync-flux-app.ts` against it, then prints the JSON fragment to paste into
+  the env var. `--dc <DC>` for an explicit single DC, or no args to
+  auto-discover every 5090-stocked DC we don't already cover. Sequential,
+  ~15 min per DC. Currently image-only (5090, 50 GB). Exposed as
+  `npm run add-dc-volume`. After it succeeds, operator must update
+  `.env.local` + Railway env then `npm run deploy`.
+
 ### Deploy orchestration (`deploy*`)
 
 - **`deploy.ts`** — Single-command deploy. Reads `backend/.flux-app-version`,
