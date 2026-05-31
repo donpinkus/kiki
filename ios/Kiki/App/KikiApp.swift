@@ -15,9 +15,7 @@ struct KikiApp: App {
             options.enableAutoSessionTracking = true
             options.attachStacktrace = true
             options.enableAutoPerformanceTracing = true
-            // Temporarily true while diagnosing why session replays aren't
-            // appearing in Sentry. Flip back to false once that's working.
-            options.debug = true
+            options.debug = false
 
             // Phase 1: capture full sessions, including sketch + prompt +
             // result image, to understand what users actually do. Revisit
@@ -65,6 +63,22 @@ struct KikiApp: App {
         // useless. Disable and emit explicit screen events from
         // AppCoordinator's `currentScreen` didSet.
         posthogConfig.captureScreenViews = false
+
+        // Phase 1: capture full sessions (sketch + prompt + result image) to
+        // understand what users actually do. screenshotMode is required for
+        // SwiftUI App-lifecycle apps — PostHog's wireframe mode bails early
+        // on any UIHostingController root VC (see PostHogReplayIntegration
+        // snapshot() — `SwiftUI snapshot not supported, enable screenshotMode`).
+        // Revisit masking before any TestFlight build.
+        posthogConfig.sessionReplay = true
+        posthogConfig.sessionReplayConfig.screenshotMode = true
+        posthogConfig.sessionReplayConfig.maskAllTextInputs = false
+        posthogConfig.sessionReplayConfig.maskAllImages = false
+        // Temporarily true to confirm capture is working. Watch for
+        // `Session replay recording started.` in the Xcode console after a
+        // cold launch, then flip back to false.
+        posthogConfig.debug = true
+
         PostHogSDK.shared.setup(posthogConfig)
 
         // First user-journey log of every cold launch. Carries `app_version`
