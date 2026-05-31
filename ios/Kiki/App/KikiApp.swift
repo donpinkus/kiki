@@ -15,9 +15,7 @@ struct KikiApp: App {
             options.enableAutoSessionTracking = true
             options.attachStacktrace = true
             options.enableAutoPerformanceTracing = true
-            // Temporarily true while diagnosing why session replays aren't
-            // appearing in Sentry. Flip back to false once that's working.
-            options.debug = true
+            options.debug = false
 
             // Phase 1: capture full sessions, including sketch + prompt +
             // result image, to understand what users actually do. Revisit
