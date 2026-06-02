@@ -14,7 +14,7 @@ on:
   push:
     branches: [main]
     paths:
-      - 'flux-klein-server/**'
+      - 'model-servers/**'
       - '.github/workflows/build-flux-image.yml'
   workflow_dispatch:
 
@@ -43,8 +43,8 @@ jobs:
       - name: Build & push
         uses: docker/build-push-action@v6
         with:
-          context: ./flux-klein-server
-          file: ./flux-klein-server/Dockerfile
+          context: ./model-servers
+          file: ./model-servers/Dockerfile
           push: true
           tags: |
             ghcr.io/${{ github.repository_owner }}/kiki-flux-klein:latest

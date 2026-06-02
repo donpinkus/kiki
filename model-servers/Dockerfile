@@ -1,7 +1,7 @@
 # INACTIVE — retained for rollback only.
 #
 # As of the 2026-04-23 cutover (see documents/decisions.md), live pods boot
-# from stock runpod/pytorch and read /workspace/app/server.py + /workspace/venv/
+# from stock runpod/pytorch and read /workspace/app/image/server.py + /workspace/venv/
 # off a network volume populated by backend/scripts/sync-flux-app.ts. This
 # Dockerfile and its publishing workflow (.github/workflows/build-flux-image.yml)
 # are no longer in the provision path. They are kept around so the rollback
@@ -42,7 +42,9 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt \
 
 # ─── Layer 3: server code ───────────────────────────────────────────────
 WORKDIR /app
-COPY server.py pipeline.py config.py /app/
+# Image pod = the image.server module plus the shared package it imports.
+COPY image /app/image
+COPY shared /app/shared
 
 # Offline mode — weights are on the network volume; refuse network lookups so
 # a transient DNS issue doesn't trigger a silent re-download.
@@ -55,4 +57,4 @@ ENV FLUX_USE_NVFP4=1
 EXPOSE 8766
 
 # Exec form so SIGTERM reaches python directly (uvicorn handles shutdown).
-CMD ["python", "-u", "/app/server.py"]
+CMD ["python", "-u", "-m", "image.server"]

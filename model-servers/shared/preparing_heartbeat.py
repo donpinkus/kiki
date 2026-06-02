@@ -11,8 +11,8 @@ breath — but the trajectory is the most diagnostic-positive signal we get
 when the pod goes silent mid-Step-2 transformer load.
 
 Implemented with `threading.Thread` (daemon=True) rather than
-`asyncio.create_task` because the load functions on both server.py
-(FluxKleinPipeline.load) and video_server.py (video_pipeline.load) are
+`asyncio.create_task` because the load functions on both image/server.py
+(FluxKleinPipeline.load) and video/server.py (video/pipeline.py) are
 synchronous and block the asyncio event loop for 60-90s. An asyncio task
 wouldn't get a chance to run until load completed — defeating the purpose.
 

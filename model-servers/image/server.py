@@ -41,10 +41,10 @@ import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from PIL import Image
 
-import config
-import preparing_heartbeat
-import sentry_init
-from pipeline import FluxKleinPipeline
+from shared import config
+from shared import preparing_heartbeat
+from shared import sentry_init
+from image.pipeline import FluxKleinPipeline
 
 logging.basicConfig(
     level=logging.INFO,
@@ -373,7 +373,7 @@ def _process_frame(jpeg_data: bytes, cfg: dict) -> bytes:
 
 if __name__ == "__main__":
     uvicorn.run(
-        "server:app",
+        "image.server:app",
         host=config.HOST,
         port=config.PORT,
         log_level="info",

@@ -1,4 +1,4 @@
-"""Sentry init shared between server.py (image pod) and video_server.py.
+"""Sentry init shared between image/server.py (image pod) and video/server.py.
 
 No-op when SENTRY_DSN_POD is unset, so local runs and dev pods stay quiet.
 RUNPOD_POD_ID is auto-injected by RunPod into every pod's environment.

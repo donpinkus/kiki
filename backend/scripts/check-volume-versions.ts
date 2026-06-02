@@ -1,10 +1,10 @@
 /**
- * Read-only status check: report the deployed flux-klein-server version on
+ * Read-only status check: report the deployed model-servers version on
  * each network volume by querying PostHog for the most recent
  * `pod.provision.completed` event per DC.
  *
  * Drift signal is `app_flux_app_version` — the git tree-hash of
- * `flux-klein-server/` at sync time. This only changes when files in that
+ * `model-servers/` at sync time. This only changes when files in that
  * subtree change, so commits to docs / iOS / backend code don't false-flag
  * drift. `app_git_sha` is shown for forensic context only ("what commit was
  * this synced from") but isn't used for the drift comparison.
@@ -78,7 +78,7 @@ const VOLUMES: Record<string, string> = {
 interface DcVersion {
   dc: string;
   volumeId: string;
-  fluxAppVersion: string | null;  // git tree-hash of flux-klein-server/ — drift signal
+  fluxAppVersion: string | null;  // git tree-hash of model-servers/ — drift signal
   gitSha: string | null;          // commit SHA at sync time — forensic context only
   gitDirty: boolean | null;
   syncedAtUtc: string | null;
@@ -90,7 +90,7 @@ async function queryDcVersions(): Promise<DcVersion[]> {
   // Window is wide (30d) so we catch even slow-rolling DCs. Pick the most
   // recent stamp per DC — that's what the latest cold start saw on the volume.
   // Drift is derived from app_flux_app_version (subtree hash, only changes when
-  // flux-klein-server/ files change). app_git_sha is shown for context only.
+  // model-servers/ files change). app_git_sha is shown for context only.
   const query = `
     SELECT
       properties.dc AS dc,
@@ -158,10 +158,10 @@ async function queryDcVersions(): Promise<DcVersion[]> {
 
 // ─── Local git lookup ─────────────────────────────────────────────────────
 
-/** Tree-hash of flux-klein-server/ at HEAD. Matches what the deploy writes. */
+/** Tree-hash of model-servers/ at HEAD. Matches what the deploy writes. */
 function localFluxAppVersion(): string {
   try {
-    return execSync('git rev-parse HEAD:flux-klein-server', { cwd: REPO_ROOT }).toString().trim();
+    return execSync('git rev-parse HEAD:model-servers', { cwd: REPO_ROOT }).toString().trim();
   } catch {
     return 'unknown';
   }
@@ -203,7 +203,7 @@ function renderTable(rows: DcVersion[], localFlux: string, localGit: string): vo
     } else if (r.fluxAppVersion === localFlux) {
       drift = r.gitDirty ? 'current (dirty sync)' : 'current';
     } else {
-      drift = 'flux-klein-server differs';
+      drift = 'model-servers differs';
     }
     console.log(
       [

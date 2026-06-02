@@ -30,7 +30,7 @@ struct KikiApp: App {
             // log entries in Sentry's Logs UI. Cross-stack queries like
             // `user_id:X phase:preparing` need iOS to populate the same
             // attribute schema the backend + pod do. See
-            // `flux-klein-server/sentry_init.py` for the pod-side mirror.
+            // `model-servers/shared/sentry_init.py` for the pod-side mirror.
             options.enableLogs = true
 
             // Belt-and-suspenders attribute injection: the `Log` facade

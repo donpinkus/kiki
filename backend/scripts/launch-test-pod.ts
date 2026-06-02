@@ -174,7 +174,7 @@ const BASE_BOOT_ENV: Array<{ key: string; value: string }> = [
   { key: 'LTX_TORCH_COMPILE', value: '0' },
 ];
 
-// SSH_BOOTSTRAP + SERVER_LAUNCH for video_server.py with PUBLIC_KEY-aware
+// SSH_BOOTSTRAP + SERVER_LAUNCH for the video.server module with PUBLIC_KEY-aware
 // dev-mode respawn loop. VERBATIM from orchestrator.ts BOOT_DOCKER_ARGS_VIDEO
 // (lines 224-267). Keep in lockstep — divergence here means test pods boot
 // differently from production pods, which defeats the point of the test pod
@@ -195,15 +195,15 @@ const SSH_BOOTSTRAP =
   '} > /tmp/ssh-bootstrap.log 2>&1 || true; ' +
   'fi';
 
-const SERVER_LAUNCH = (script: string): string =>
+const SERVER_LAUNCH = (module: string): string =>
   'if [ -n "$PUBLIC_KEY" ]; then ' +
-  `while true; do python3 -u ${script}; sleep 2; done; ` +
+  `while true; do python3 -u -m ${module}; sleep 2; done; ` +
   'else ' +
-  `exec python3 -u ${script}; ` +
+  `exec python3 -u -m ${module}; ` +
   'fi';
 
 const BOOT_DOCKER_ARGS_VIDEO =
-  `bash -lc '${SSH_BOOTSTRAP}; source /workspace/venv/bin/activate && cd /workspace/app && ${SERVER_LAUNCH('video_server.py')}'`;
+  `bash -lc '${SSH_BOOTSTRAP}; source /workspace/venv/bin/activate && cd /workspace/app && ${SERVER_LAUNCH('video.server')}'`;
 
 // ─── Main ─────────────────────────────────────────────────────────────────
 
@@ -297,22 +297,22 @@ async function main(): Promise<void> {
   console.log(`  ssh root@${sshIp} -p ${sshPort} -i ~/.ssh/id_ed25519`);
   console.log('');
   if (httpIp && httpPort) {
-    console.log('HTTP service (video_server is loading; takes ~60–120s):');
+    console.log('HTTP service (video server is loading; takes ~60–120s):');
     console.log(`  curl https://${result.id}-8766.proxy.runpod.net/health`);
     console.log(`  (or direct: curl http://${httpIp}:${httpPort}/health)`);
     console.log('');
   }
   console.log('SCP a file change to iterate fast (no full deploy needed):');
   console.log(`  scp -P ${sshPort} -i ~/.ssh/id_ed25519 \\`);
-  console.log('       ../flux-klein-server/video_pipeline.py \\');
-  console.log(`       root@${sshIp}:/workspace/app/`);
-  console.log('  Then SSH in and: pkill -f video_server.py');
+  console.log('       ../model-servers/video/pipeline.py \\');
+  console.log(`       root@${sshIp}:/workspace/app/video/`);
+  console.log('  Then SSH in and: pkill -f video.server');
   console.log('  (bash respawn loop will restart with the new code in ~30s)');
   console.log('');
   console.log('Tail live python stdout over SSH (works through bash respawn loop):');
   console.log(
     `  ssh root@${sshIp} -p ${sshPort} -i ~/.ssh/id_ed25519 ` +
-      `'tail -f /proc/$(pgrep -f video_server | head -1)/fd/1'`,
+      `'tail -f /proc/$(pgrep -f video.server | head -1)/fd/1'`,
   );
   console.log('');
   console.log('Terminate when done:');

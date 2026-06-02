@@ -1,7 +1,7 @@
 /**
  * Cross-stack `phase` log attribute — TS-side mechanism.
  *
- * Same vocabulary as the pod's `flux-klein-server/sentry_init.py` and iOS's
+ * Same vocabulary as the pod's `model-servers/shared/sentry_init.py` and iOS's
  * `Phase.swift` — `preparing | drawing | animating | reconnecting | session_ending`.
  * The active phase is read at log-emit time by the `beforeSendLog` hook in
  * `index.ts` and attached to every Sentry log entry as `phase: <value>`.

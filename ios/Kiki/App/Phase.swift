@@ -6,7 +6,7 @@ import Sentry
 // MARK: - Phase
 
 /// Cross-stack `phase` log attribute — iOS side. Same vocabulary as
-/// `flux-klein-server/sentry_init.py` (Python ContextVar) and
+/// `model-servers/shared/sentry_init.py` (Python ContextVar) and
 /// `backend/src/modules/observability/phase.ts` (Node AsyncLocalStorage).
 ///
 /// Every Sentry log emitted via `Log.X(...)` (the `Log` facade below)

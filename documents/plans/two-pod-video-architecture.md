@@ -82,10 +82,10 @@ The orchestrator header (`backend/src/modules/orchestrator/orchestrator.ts`) has
 
 | What | Path |
 |------|------|
-| FLUX pod server | `flux-klein-server/server.py` |
-| FLUX pod pipeline | `flux-klein-server/pipeline.py` |
-| Video pipeline (to be moved) | `flux-klein-server/video_pipeline.py` |
-| FLUX pod Dockerfile | `flux-klein-server/Dockerfile` *(inactive post-2026-04-23 — rollback only)* |
+| FLUX pod server | `model-servers/image/server.py` |
+| FLUX pod pipeline | `model-servers/image/pipeline.py` |
+| Video pipeline (to be moved) | `model-servers/video/pipeline.py` |
+| FLUX pod Dockerfile | `model-servers/Dockerfile` *(inactive post-2026-04-23 — rollback only)* |
 | FLUX image workflow | `.github/workflows/build-flux-image.yml` *(inactive post-2026-04-23 — rollback only)* |
 | FLUX app-code sync | `backend/scripts/sync-flux-app.ts` |
 | Backend stream route | `backend/src/routes/stream.ts` |

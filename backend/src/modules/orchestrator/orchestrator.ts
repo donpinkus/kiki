@@ -253,19 +253,21 @@ const SSH_BOOTSTRAP =
 // Built as separate constants to keep the prod path bit-identical to the
 // previous BOOT_DOCKER_ARGS — a leaked PUBLIC_KEY env still flips to dev mode
 // but anything else is unchanged.
-const SERVER_LAUNCH = (script: string): string =>
+// `module` is a Python package path (e.g. 'image.server') launched with -m from
+// /workspace/app, so 'image', 'video', and 'shared' resolve as packages.
+const SERVER_LAUNCH = (module: string): string =>
   'if [ -n "$PUBLIC_KEY" ]; then ' +
-  `while true; do python3 -u ${script}; sleep 2; done; ` +
+  `while true; do python3 -u -m ${module}; sleep 2; done; ` +
   'else ' +
-  `exec python3 -u ${script}; ` +
+  `exec python3 -u -m ${module}; ` +
   'fi';
 
 const BOOT_DOCKER_ARGS =
-  `bash -lc '${SSH_BOOTSTRAP}; source /workspace/venv/bin/activate && cd /workspace/app && ${SERVER_LAUNCH('server.py')}'`;
-// Video pod runs LTXV i2v on a separate pod (see flux-klein-server/video_server.py).
-// Same volume / venv / port as the image pod — only the entry script differs.
+  `bash -lc '${SSH_BOOTSTRAP}; source /workspace/venv/bin/activate && cd /workspace/app && ${SERVER_LAUNCH('image.server')}'`;
+// Video pod runs LTXV i2v on a separate pod (see model-servers/video/server.py).
+// Same volume / venv / port as the image pod — only the entry module differs.
 const BOOT_DOCKER_ARGS_VIDEO =
-  `bash -lc '${SSH_BOOTSTRAP}; source /workspace/venv/bin/activate && cd /workspace/app && ${SERVER_LAUNCH('video_server.py')}'`;
+  `bash -lc '${SSH_BOOTSTRAP}; source /workspace/venv/bin/activate && cd /workspace/app && ${SERVER_LAUNCH('video.server')}'`;
 // Pod name prefix for video pods. Distinct from POD_PREFIX so reconcile
 // can list them separately and so RunPod console / Discord alerts are
 // unambiguous about which kind died.
@@ -285,7 +287,7 @@ const BOOT_ENV: Array<{ key: string; value: string }> = [
   { key: 'PYTORCH_CUDA_ALLOC_CONF', value: 'expandable_segments:True' },
   // Step P2 (perf plan, post-first-trace) — torch.compile experiment.
   // DISABLED 2026-04-30 after pods crashlooped: the wrap call's
-  // try/except in video_pipeline.py:load() only catches errors from
+  // try/except in video/pipeline.py:load() only catches errors from
   // torch.compile() itself, but the actual graph tracing/lowering is
   // LAZY and fires on the first transformer(...) call inside warmup's
   // _run_inference(). When that lowering raised, the exception bubbled
@@ -313,7 +315,7 @@ if (process.env['SENTRY_DSN_POD']) {
 /**
  * Build the per-pod env, appending KIKI_USER_ID + KIKI_STREAM_ID to BOOT_ENV.
  *
- * The pod's `flux-klein-server/sentry_init.py` reads these once at startup
+ * The pod's `model-servers/shared/sentry_init.py` reads these once at startup
  * and attaches them as Sentry log attributes (`user_id`, `stream_id`) on
  * every log entry, plus tags errors with `set_user({id})`. This is what
  * makes `user_id:X` cross-stack queries return both pod's logs alongside
@@ -338,11 +340,11 @@ const IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 const REAPER_INTERVAL_MS = 60 * 1000;
 const MAX_CONCURRENT_PROVISIONS = Number(process.env['MAX_CONCURRENT_PROVISIONS'] ?? 5);
 
-// Drift check uses the git tree-hash of `flux-klein-server/` — the subtree
+// Drift check uses the git tree-hash of `model-servers/` — the subtree
 // that sync-flux-app actually rsyncs to volumes. This changes only when files
 // in that path change, so doc/iOS/backend commits don't false-trigger drift
 // (which was the problem with the prior commit-SHA-based check). Written by
-// `npm run deploy` (`git rev-parse HEAD:flux-klein-server > .flux-app-version`)
+// `npm run deploy` (`git rev-parse HEAD:model-servers > .flux-app-version`)
 // and baked into the Docker image via the Dockerfile's `COPY . .`. Empty
 // string = file missing; drift check no-ops.
 const BACKEND_FLUX_APP_VERSION = (() => {
@@ -1437,7 +1439,7 @@ interface ProvisionResult {
 /**
  * Drift status the volume's flux_app_version reflects relative to the backend's
  * expected version:
- *   - 'current'        — volume is on the same flux-klein-server tree as backend
+ *   - 'current'        — volume is on the same model-servers tree as backend
  *   - 'drift'          — volume has a different flux_app_version than backend
  *   - 'missing_stamp'  — volume predates flux_app_version stamping (pre-2026-04-26)
  *   - 'unknown'        — backend has no expected version (local dev / no .flux-app-version)
@@ -1451,7 +1453,7 @@ type VolumeStatus = 'current' | 'drift' | 'missing_stamp' | 'unknown';
  * Compare the FLUX pod's reported flux_app_version (from /health, originally
  * written into /workspace/app/.version.json by sync-flux-app.ts) against the
  * backend's expected flux_app_version. Both are git tree-hashes of the
- * `flux-klein-server/` subtree at the respective deploy times, so they only
+ * `model-servers/` subtree at the respective deploy times, so they only
  * change when files that actually get rsynced to volumes change. Doc/iOS/
  * backend commits don't false-trigger.
  *
@@ -2070,7 +2072,7 @@ const POD_CONFIGS: Record<PodKind, PodKindConfig> = {
   image: {
     namePrefix: POD_PREFIX,
     bootDockerArgs: BOOT_DOCKER_ARGS,
-    // Both image (server.py) and video (video_server.py) bind to 8766 via
+    // Both image (image/server.py) and video (video/server.py) bind to 8766 via
     // BOOT_ENV.FLUX_PORT — same Python server framework, different scripts.
     // Kept parametric in case a future pod kind diverges.
     port: 8766,
@@ -2384,7 +2386,7 @@ async function _runProvisionLoop(
         // observability, not a gate.
         //
         // Both kinds: sync-flux-app stamps one .version.json into the volume
-        // for the whole flux-klein-server/ tree (server.py + video_server.py),
+        // for the whole model-servers/ tree (image/server.py + video/server.py),
         // so a stale volume affects both pod kinds equally and we want
         // drift detection on both.
         const volumeStatus = checkVersionDrift(

@@ -185,7 +185,7 @@ try:
     from ltx_pipelines.distilled import DistilledPipeline
     print('  DistilledPipeline OK')
     print('importing video_pipeline...')
-    from video_pipeline import Ltx23VideoPipeline
+    from video.pipeline import Ltx23VideoPipeline
     print('  Ltx23VideoPipeline OK')
 except Exception as e:
     import traceback; traceback.print_exc()
@@ -195,7 +195,7 @@ echo "=== TEST LOAD ==="
 python3 -u -c "
 import sys, traceback
 try:
-    from video_pipeline import Ltx23VideoPipeline
+    from video.pipeline import Ltx23VideoPipeline
     p = Ltx23VideoPipeline()
     print('calling load()...')
     p.load()

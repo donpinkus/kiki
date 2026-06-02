@@ -7,7 +7,7 @@ Read [`../CLAUDE.md`](../CLAUDE.md) first. It is the primary source of truth for
 Kiki is an iPad sketch-to-image app:
 - SwiftUI iPad client in `ios/`
 - Fastify backend and RunPod orchestrator in `backend/`
-- Python FLUX.2-klein pod server in `flux-klein-server/`
+- Python FLUX.2-klein pod server in `model-servers/`
 
 ## Working Priorities
 

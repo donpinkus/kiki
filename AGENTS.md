@@ -3,7 +3,7 @@
 Kiki is an iPad-native sketch-to-image app with:
 - `ios/`: SwiftUI client
 - `backend/`: Fastify relay and RunPod orchestrator
-- `flux-klein-server/`: Python pod-side FLUX.2-klein server
+- `model-servers/`: Python pod-side FLUX.2-klein server
 
 ## Source Of Truth
 

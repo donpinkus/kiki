@@ -39,7 +39,7 @@ or APIs.
   provisioning time. Pass `--kind image` or `--kind video`. Image: ~15 min,
   ~$0.20. Video: ~30 min, ~$1 (also requires `HF_TOKEN` for Gemma).
 
-- **`sync-flux-app.ts`** — Push updates to `flux-klein-server/*.py` and
+- **`sync-flux-app.ts`** — Push updates to `model-servers/*.py` and
   `requirements.txt`. Spawns a cheap pod, rsyncs files into `/workspace/app/`,
   pip-installs into `/workspace/venv/`, writes `/workspace/app/.version.json`
   with the local git SHA, terminates. Run per DC after every code change to
@@ -65,7 +65,7 @@ or APIs.
 ### Deploy orchestration (`deploy*`)
 
 - **`deploy.ts`** — Single-command deploy. Reads `backend/.flux-app-version`,
-  diffs against the current `flux-klein-server/` tree hash, runs `sync-all-dcs`
+  diffs against the current `model-servers/` tree hash, runs `sync-all-dcs`
   if changed, then runs `railway up`. Exposed as `npm run deploy`. This is the
   canonical deploy path; use it instead of running sync + railway separately.
 

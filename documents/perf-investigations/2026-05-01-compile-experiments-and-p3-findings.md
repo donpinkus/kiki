@@ -32,7 +32,7 @@ All three experiments ran on isolated test pods provisioned via the new `npm run
 
 ### Setup
 
-`flux-klein-server/video_pipeline.py` already supports the wrap behind `LTX_TORCH_COMPILE` env (added 2026-04-29, disabled in production after the orchestrator-level crashloop). Launched a test pod with `--env LTX_TORCH_COMPILE=1`.
+`model-servers/video/pipeline.py` already supports the wrap behind `LTX_TORCH_COMPILE` env (added 2026-04-29, disabled in production after the orchestrator-level crashloop). Launched a test pod with `--env LTX_TORCH_COMPILE=1`.
 
 ### Boot timeline
 

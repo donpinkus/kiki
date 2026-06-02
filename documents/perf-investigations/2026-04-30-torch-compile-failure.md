@@ -15,7 +15,7 @@ We rolled back by flipping `LTX_TORCH_COMPILE` from `'1'` to `'0'` in the orches
 
 ## What we shipped
 
-### Pod side: `flux-klein-server/video_pipeline.py`
+### Pod side: `model-servers/video/pipeline.py`
 
 Added immediately after the persistent transformer build succeeds, *before* warmup:
 
@@ -157,7 +157,7 @@ That tracing/lowering pipeline is where the failure happened. It's **inside the 
 
 ## Why this looked like a crashloop
 
-`flux-klein-server/video_server.py` runs the pipeline load inside FastAPI's `lifespan` async context manager. When `video_pipeline.load()` raises during startup, the exception is caught by the lifespan handler — which captures the traceback into `_load_error_traceback` and lets the app continue serving (so `/health` can return diagnostic info instead of refusing connections).
+`model-servers/video/server.py` runs the pipeline load inside FastAPI's `lifespan` async context manager. When `video_pipeline.load()` raises during startup, the exception is caught by the lifespan handler — which captures the traceback into `_load_error_traceback` and lets the app continue serving (so `/health` can return diagnostic info instead of refusing connections).
 
 But the pod marks itself not-ready (`video_pipeline.ready == False`). The orchestrator's reconcile loop runs every 60 seconds and terminates pods that are running but not healthy. Once the pod is terminated, the orchestrator's session-aware logic detects there's still an active iPad session that needs a video pod, so it provisions a new one. New pod boots from the same network volume, reads the same `LTX_TORCH_COMPILE=1` env, hits the same lowering failure, dies the same way. **Loop.**
 
@@ -171,7 +171,7 @@ Edited `backend/src/modules/orchestrator/orchestrator.ts`, changed `'1'` to `'0'
 { key: 'LTX_TORCH_COMPILE', value: '0' },
 ```
 
-Committed (`a69ca7a`), pushed, ran `railway up` (backend-only — no pod code changed; pod-side env-flag gate was already present and defaulted off, so this flip alone was sufficient with no flux-klein-server resync needed). Backend redeploy SUCCESS at 01:18:22. Next iPad session caused the orchestrator to provision a new pod with `LTX_TORCH_COMPILE=0`. That pod warmed up cleanly, served at the prior eager baseline.
+Committed (`a69ca7a`), pushed, ran `railway up` (backend-only — no pod code changed; pod-side env-flag gate was already present and defaulted off, so this flip alone was sufficient with no model-servers resync needed). Backend redeploy SUCCESS at 01:18:22. Next iPad session caused the orchestrator to provision a new pod with `LTX_TORCH_COMPILE=0`. That pod warmed up cleanly, served at the prior eager baseline.
 
 The wrap code itself is still in `video_pipeline.py` — we just don't trigger the path. Reverting the env flag back to `'1'` would re-trigger the same failure.
 

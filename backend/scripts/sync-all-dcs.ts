@@ -2,7 +2,7 @@
  * Fan out sync-flux-app.ts to every configured network volume in parallel.
  *
  * Used by `npm run deploy` to keep all DC volumes current with the latest
- * flux-klein-server/ before shipping the backend that expects it. Also
+ * model-servers/ before shipping the backend that expects it. Also
  * runnable on its own for ad-hoc syncs (e.g., recovering after a DC was
  * skipped due to capacity exhaustion, without redeploying backend).
  *
@@ -92,7 +92,7 @@ function parseMap(name: string, required: boolean): Record<string, string> {
 }
 
 // Sync runs against both volume sets — image and video both need the
-// flux-klein-server tree (server.py + video_server.py share a venv) up to
+// model-servers tree (image/server.py + video/server.py share a venv) up to
 // date. Image volumes are required; video are optional (empty if the
 // LTX-2.3 migration's video volumes haven't been provisioned yet).
 const IMAGE_VOLUMES = parseMap('NETWORK_VOLUMES_BY_DC', true);

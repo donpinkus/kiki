@@ -8,7 +8,7 @@ Current status: Phase 1 prototype.
 
 - `ios/` contains the SwiftUI app and local Swift packages for canvas, networking, and result display.
 - `backend/` contains the Fastify API, WebSocket relay, and per-session pod orchestrator.
-- `flux-klein-server/` contains the Python WebSocket server that runs inside the provisioned GPU pod.
+- `model-servers/` contains the Python WebSocket server that runs inside the provisioned GPU pod.
 - `documents/` contains implementation decisions, provider references, safety requirements, and roadmap material.
 
 For the detailed working guide, read [`CLAUDE.md`](./CLAUDE.md). For agent-oriented onboarding, read [`AGENTS.md`](./AGENTS.md).
@@ -64,14 +64,14 @@ swift test --package-path ios/Packages/ResultModule
 ### Pod-Side Server Utilities
 
 ```bash
-python3 flux-klein-server/test_client.py --help
+python3 model-servers/dev/image_client.py --help
 ```
 
 ## Repository Layout
 
 - `ios/`: iPad app, SwiftUI views, app coordinator, local Swift packages
 - `backend/`: Fastify server, relay route, RunPod orchestration
-- `flux-klein-server/`: Python image generation server for the pod
+- `model-servers/`: Python image generation server for the pod
 - `documents/`: decisions, plans, content safety, provider references
 - `backend/scripts/`: operational one-off scripts (network volume population, capacity probes)
 

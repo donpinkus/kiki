@@ -34,11 +34,10 @@ import torch
 from PIL import Image
 from torch.profiler import record_function
 
-import config
-# Reuse the image pipeline's helper so both pods stamp the same
-# /workspace/app/.version.json onto /health for drift detection by the
-# orchestrator.
-from pipeline import _load_app_version
+from shared import config
+# Shared helper so both pods stamp the same /workspace/app/.version.json onto
+# /health for drift detection by the orchestrator.
+from shared.app_version import load_app_version
 
 logger = logging.getLogger(__name__)
 
@@ -174,7 +173,7 @@ class Ltx23VideoPipeline:
         self._ready = False
         self._lock = threading.Lock()
         self._load_ms: int = 0
-        # Per-substage warmup timings + flux-klein-server tree-hash version
+        # Per-substage warmup timings + model-servers tree-hash version
         # exposed via /health. Mirrors the image pipeline so the orchestrator's
         # drift detection and substage observability work identically for
         # both pod kinds.
@@ -230,7 +229,7 @@ class Ltx23VideoPipeline:
         # baseline so per-request leaks become invisible. Captured at the
         # top of each _run_inference call.
         self._resident_alloc_gb_at_request_start: float = 0.0
-        self._app_version = _load_app_version()
+        self._app_version = load_app_version()
 
     @property
     def ready(self) -> bool:

@@ -10,8 +10,8 @@
 
 Two pod kinds, different GPUs, same network volumes + same orchestrator:
 
-- **Image pod** — RTX 5090, runs `flux-klein-server/server.py` (FLUX.2-klein, the live img2img path). Name prefix `kiki-session-*`.
-- **Video pod** — H100 SXM 80 GB, runs `flux-klein-server/video_server.py` (LTX-2.3 22B distilled FP8, the idle-state animation). Name prefix `kiki-vsession-*`.
+- **Image pod** — RTX 5090, runs `model-servers/image/server.py` (FLUX.2-klein, the live img2img path). Name prefix `kiki-session-*`.
+- **Video pod** — H100 SXM 80 GB, runs `model-servers/video/server.py` (LTX-2.3 22B distilled FP8, the idle-state animation). Name prefix `kiki-vsession-*`.
 
 Pods boot from stock `runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404` (hardcoded as `BASE_IMAGE` in `backend/src/modules/orchestrator/orchestrator.ts`) and read app code + venv off attached network volumes (one volume per DC, populated via `backend/scripts/sync-flux-app.ts`).
 
@@ -82,7 +82,7 @@ If all four pass, every task in this doc should work.
 
 ## Task 1: Ship a pod-side code change to all users (permanent)
 
-When you've edited a file in `flux-klein-server/` and want every newly-booted pod (and eventually all running ones, after they get reaped + re-provisioned) to use the new code.
+When you've edited a file in `model-servers/` and want every newly-booted pod (and eventually all running ones, after they get reaped + re-provisioned) to use the new code.
 
 ### Command
 
@@ -95,7 +95,7 @@ cd backend && npm run deploy
 The script (`backend/scripts/deploy.ts`) prints `[deploy]` log lines as it works. Roughly:
 
 ```
-[deploy] flux-klein-server changed since last deploy: <oldHash> → <newHash>
+[deploy] model-servers changed since last deploy: <oldHash> → <newHash>
 [deploy] running sync-all-dcs first...
 [sync-all] launching N parallel syncs: EU-CZ-1, EU-NL-1, ...
 [sync-all] per-DC logs: /tmp/sync-all-<DC>.log
@@ -133,7 +133,7 @@ Then a Railway build runs (~50s). Watch the build logs URL or `railway status --
 
 ### What's happening
 
-`scripts/deploy.ts` reads `backend/.flux-app-version` (the flux-klein-server tree-hash from the last successful deploy). If it differs from `git rev-parse HEAD:flux-klein-server`, the script fans out `sync-flux-app.ts` to each DC in `NETWORK_VOLUMES_BY_DC` + `NETWORK_VOLUMES_BY_DC_VIDEO`. Each sync briefly creates a tiny GPU pod with the volume attached, rsyncs `flux-klein-server/*.py` to `/workspace/app/`, ensures `/workspace/venv/` is current with `requirements.txt`, then terminates that sync pod. After all syncs succeed, the script stamps the new hash into `.flux-app-version` + `.git-sha` and runs `railway up`. The orchestrator's drift check at pod boot reads `.flux-app-version` to detect cases where someone bypassed the script.
+`scripts/deploy.ts` reads `backend/.flux-app-version` (the model-servers tree-hash from the last successful deploy). If it differs from `git rev-parse HEAD:model-servers`, the script fans out `sync-flux-app.ts` to each DC in `NETWORK_VOLUMES_BY_DC` + `NETWORK_VOLUMES_BY_DC_VIDEO`. Each sync briefly creates a tiny GPU pod with the volume attached, rsyncs `model-servers/**/*.py` to `/workspace/app/`, ensures `/workspace/venv/` is current with `requirements.txt`, then terminates that sync pod. After all syncs succeed, the script stamps the new hash into `.flux-app-version` + `.git-sha` and runs `railway up`. The orchestrator's drift check at pod boot reads `.flux-app-version` to detect cases where someone bypassed the script.
 
 For more on the pod boot model, see CLAUDE.md "Deploy Process".
 
@@ -141,7 +141,7 @@ For more on the pod boot model, see CLAUDE.md "Deploy Process".
 
 ## Task 2: Ship a backend-only change (no pod code modified)
 
-When you've only touched files in `backend/src/` (orchestrator, routes, env vars, cost monitor, etc.) and `flux-klein-server/` is unchanged.
+When you've only touched files in `backend/src/` (orchestrator, routes, env vars, cost monitor, etc.) and `model-servers/` is unchanged.
 
 ### Command
 
@@ -174,13 +174,13 @@ railway status --json | python3 -c "import sys, json; d=json.loads(sys.stdin.rea
 
 ### What's happening
 
-Bypasses the auto-sync gate in `npm run deploy`. Uploads the current `backend/` tree directly to Railway via their CLI; Railway builds from `backend/Dockerfile`. Skips DC volume work entirely — appropriate when no pod-side file changed. **Don't use this when you've edited `flux-klein-server/` files**: the orchestrator will report drift in Sentry but pods will keep running the old code.
+Bypasses the auto-sync gate in `npm run deploy`. Uploads the current `backend/` tree directly to Railway via their CLI; Railway builds from `backend/Dockerfile`. Skips DC volume work entirely — appropriate when no pod-side file changed. **Don't use this when you've edited `model-servers/` files**: the orchestrator will report drift in Sentry but pods will keep running the old code.
 
 ---
 
 ## Task 3: Iterate on pod-side code without re-deploying (fast loop)
 
-When you're actively debugging or experimenting on `flux-klein-server/*.py` and `npm run deploy`'s ~10 min cycle is too slow. Use a test pod for a ~30s iteration loop.
+When you're actively debugging or experimenting on `model-servers/**/*.py` and `npm run deploy`'s ~10 min cycle is too slow. Use a test pod for a ~30s iteration loop.
 
 ### Setup (once per session)
 
@@ -216,21 +216,21 @@ Substitute your own `<port>` and `<ip>` from launch output:
 ```bash
 # 1. From repo root, scp the modified file to the pod
 scp -P <port> -i ~/.ssh/id_ed25519 \
-    flux-klein-server/video_pipeline.py \
+    model-servers/video/pipeline.py \
     root@<ip>:/workspace/app/
 
 # 2. Restart python — bash respawn loop catches the exit
-ssh -p <port> -i ~/.ssh/id_ed25519 root@<ip> 'pkill -f video_server.py'
+ssh -p <port> -i ~/.ssh/id_ed25519 root@<ip> 'pkill -f video.server'
 
 # 3. Tail the new python's live stdout (works through respawn)
 ssh -p <port> -i ~/.ssh/id_ed25519 root@<ip> \
-    'tail -f /proc/$(pgrep -f video_server | head -1)/fd/1'
+    'tail -f /proc/$(pgrep -f video.server | head -1)/fd/1'
 ```
 
 Step 2's SSH connection may drop with `Connection closed by remote host` — that's normal during pkill. Just reconnect; bash already respawned python.
 
 Step 3's tail will show:
-- `Loading LTX-2.3 ...` (or the equivalent for image-pod's `server.py`)
+- `Loading LTX-2.3 ...` (or the equivalent for image-pod's `image/server.py`)
 - `LTX-2.3 pipeline loaded in ...`
 - Persistent transformer / Gemma builds (~10s + ~6s)
 - `LTX-2.3 warmup...` then `warmup done (~9s)`
@@ -252,7 +252,7 @@ Step 3's tail will show:
 
 ### CRITICAL: don't do this on a production pod
 
-If you SSH into a `kiki-vsession-*` (production video) or `kiki-session-*` (production image) pod and run `pkill -f video_server.py`:
+If you SSH into a `kiki-vsession-*` (production video) or `kiki-session-*` (production image) pod and run `pkill -f video.server`:
 
 1. The bash respawn loop restarts python with the SAME env (so any LOCAL env override you set won't apply).
 2. During the ~30s python restart, `/health` returns 502.
@@ -263,7 +263,7 @@ This is exactly the failure mode we hit on 2026-04-30. The test pod workflow exi
 
 ### What's happening
 
-Test pods are provisioned with the name prefix `kiki-vtest-*` which the orchestrator's `listPodsByPrefix` filter doesn't match — they're invisible to the reaper. The launch script always passes `PUBLIC_KEY` (your `~/.ssh/id_ed25519.pub`), which triggers the dev-mode branch of `BOOT_DOCKER_ARGS`: `while true; do python3 -u video_server.py; sleep 2; done` instead of `exec python3 -u video_server.py`. Bash stays as PID 1 and respawns python on each exit. So `pkill` ends a python process; bash starts a new one with the new code.
+Test pods are provisioned with the name prefix `kiki-vtest-*` which the orchestrator's `listPodsByPrefix` filter doesn't match — they're invisible to the reaper. The launch script always passes `PUBLIC_KEY` (your `~/.ssh/id_ed25519.pub`), which triggers the dev-mode branch of `BOOT_DOCKER_ARGS`: `while true; do python3 -u -m video.server; sleep 2; done` instead of `exec python3 -u -m video.server`. Bash stays as PID 1 and respawns python on each exit. So `pkill` ends a python process; bash starts a new one with the new code.
 
 ### When NOT to use a test pod
 
@@ -275,17 +275,17 @@ For everything else (any pod-side code change, any profiler capture, any model e
 
 ### Alternative log capture (when bash respawn loop interferes with native crashes)
 
-The default tail (`tail -f /proc/$(pgrep -f video_server | head -1)/fd/1`) reads the live python's stdout. If python crashes natively (segfault, OOM-kill — not a Python exception), bash respawns it within 2s and the new python's stdout has a different fd descriptor; you'd lose the crash output.
+The default tail (`tail -f /proc/$(pgrep -f video.server | head -1)/fd/1`) reads the live python's stdout. If python crashes natively (segfault, OOM-kill — not a Python exception), bash respawns it within 2s and the new python's stdout has a different fd descriptor; you'd lose the crash output.
 
 For experiments where native crashes are likely (e.g., new compile modes, FP8 paths), kill the bash respawn loop and run python directly with persistent logging:
 
 ```
 # SSH in
 pgrep -f 'while true' | xargs -r kill   # stop the respawn loop
-pkill -f video_server.py                 # kill the current python
+pkill -f video.server                 # kill the current python
 sleep 2
 cd /workspace/app && source /workspace/venv/bin/activate
-LTX_TORCH_COMPILE=1 nohup python3 -u video_server.py > /tmp/canary.log 2>&1 & disown
+LTX_TORCH_COMPILE=1 nohup python3 -u -m video.server > /tmp/canary.log 2>&1 & disown
 tail -f /tmp/canary.log
 ```
 
@@ -399,7 +399,7 @@ The exact JSON shape differs slightly between image and video pods (different fi
 ```json
 {
   "status": "error",
-  "load_error": "Traceback (most recent call last):\n  File \"/workspace/app/video_server.py\", line 81, in lifespan\n    video_pipeline.load()\n  ..."
+  "load_error": "Traceback (most recent call last):\n  File \"/workspace/app/video/server.py\", line 81, in lifespan\n    video_pipeline.load()\n  ..."
 }
 ```
 
@@ -415,7 +415,7 @@ Instant once the pod's HTTP service is up. During pod boot, this returns 502 ins
 
 ### What's happening
 
-RunPod's HTTPS proxy at `https://<pod-id>-<port>.proxy.runpod.net` forwards to the pod's container port. The video_server's `/health` endpoint (`flux-klein-server/video_server.py`) returns the cached `_load_error_traceback` if pipeline load failed, otherwise the in-memory pipeline state from `Ltx23VideoPipeline.get_info()`.
+RunPod's HTTPS proxy at `https://<pod-id>-<port>.proxy.runpod.net` forwards to the pod's container port. The video_server's `/health` endpoint (`model-servers/video/server.py`) returns the cached `_load_error_traceback` if pipeline load failed, otherwise the in-memory pipeline state from `Ltx23VideoPipeline.get_info()`.
 
 `provider-config.md` has a related GraphQL snippet for listing pod IDs directly via the RunPod API — useful when you don't have the web console handy.
 
@@ -531,7 +531,7 @@ ssh root@<ip> -p <port> -i ~/.ssh/id_ed25519
 
 - **Tail live python stdout:**
   ```
-  tail -f /proc/$(pgrep -f video_server | head -1)/fd/1
+  tail -f /proc/$(pgrep -f video.server | head -1)/fd/1
   ```
 - **Inspect GPU state:** `nvidia-smi`, `nvidia-smi -q | head -50`
 - **Check files:** `ls /workspace/app/`, `cat /tmp/ssh-bootstrap.log`, `df -h /workspace`
@@ -540,7 +540,7 @@ ssh root@<ip> -p <port> -i ~/.ssh/id_ed25519
 
 ### What you must NOT do
 
-- **Do not `pkill -f video_server.py`.** The orchestrator's reaper will detect /health unresponsive within 60s and terminate the pod, breaking the user's session. To iterate on code changes, use Task 3 (test pod workflow).
+- **Do not `pkill -f video.server`.** The orchestrator's reaper will detect /health unresponsive within 60s and terminate the pod, breaking the user's session. To iterate on code changes, use Task 3 (test pod workflow).
 - **Do not `rm` or modify files in `/workspace/app/`.** That state is per-pod-instance and gets clobbered by the next pod boot, but it might be sticky enough during the session to cause a regression.
 - **Do not install packages with `pip install`.** Same reason.
 
@@ -579,12 +579,12 @@ NOT a one-line change. The base image's Python/CUDA ABI must match the venv at `
 2. **For each DC volume** (image DCs in `.env.local` `NETWORK_VOLUMES_BY_DC` and video DCs in `NETWORK_VOLUMES_BY_DC_VIDEO`):
    - Manually launch a one-off pod via the RunPod web console with the NEW base image attached to that DC's volume.
    - SSH in, `rm -rf /workspace/venv`.
-   - From your local machine: `cd backend && RUNPOD_API_KEY=... RUNPOD_SSH_PRIVATE_KEY="$(cat ~/.ssh/id_ed25519)" npx tsx scripts/sync-flux-app.ts --dc <DC> --volume-id <id>`. This rebuilds the venv from `flux-klein-server/requirements.txt` against the new base.
+   - From your local machine: `cd backend && RUNPOD_API_KEY=... RUNPOD_SSH_PRIVATE_KEY="$(cat ~/.ssh/id_ed25519)" npx tsx scripts/sync-flux-app.ts --dc <DC> --volume-id <id>`. This rebuilds the venv from `model-servers/requirements.txt` against the new base.
    - Terminate the manual pod.
 
 3. **Verify a test pod boots cleanly with the new image.** Run `cd backend && npm run launch-test-pod` (which now uses the bumped `BASE_IMAGE` from launch-test-pod.ts). Watch warmup complete, run one inference (Task 4 + your own WS trigger or curl the `/health` endpoint).
 
-4. **`cd backend && npm run deploy`.** Backend deploys, sync-all-dcs sees no flux-klein-server change (skips), `railway up` ships the orchestrator with the new `BASE_IMAGE`. Newly-provisioned pods now use the new base.
+4. **`cd backend && npm run deploy`.** Backend deploys, sync-all-dcs sees no model-servers change (skips), `railway up` ships the orchestrator with the new `BASE_IMAGE`. Newly-provisioned pods now use the new base.
 
 5. **Old running pods** keep running with the old base until reaped.
 

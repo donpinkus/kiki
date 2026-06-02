@@ -1,12 +1,12 @@
 /**
  * Smart deploy entrypoint. Auto-syncs network volumes only when
- * flux-klein-server/ has changed since the last successful deploy, then
+ * model-servers/ has changed since the last successful deploy, then
  * runs `railway up`.
  *
  * Reuses backend/.flux-app-version (already maintained for the
  * orchestrator's drift check) as state — no new state files. Compares the
  * file's previous value (= last-deployed flux subtree hash) against the
- * current `git rev-parse HEAD:flux-klein-server`:
+ * current `git rev-parse HEAD:model-servers`:
  *   - same  → skip sync, fast deploy (backend-only iteration)
  *   - differ → fan out sync-all-dcs.ts; abort if any DC fails
  * After a successful sync (or when sync wasn't needed), write the new
@@ -57,7 +57,7 @@ function runInherit(cmd: string, args: string[]): number {
 
 async function main(): Promise<void> {
   const prevFlux = readTrimmed(FLUX_VERSION_FILE);
-  const newFlux = git('rev-parse HEAD:flux-klein-server');
+  const newFlux = git('rev-parse HEAD:model-servers');
   const newGit = git('rev-parse HEAD');
   const startedAt = Date.now();
 
@@ -66,12 +66,12 @@ async function main(): Promise<void> {
   );
 
   if (prevFlux === newFlux) {
-    console.log(`[deploy] flux-klein-server unchanged (${newFlux.slice(0, 8)}); skipping sync`);
+    console.log(`[deploy] model-servers unchanged (${newFlux.slice(0, 8)}); skipping sync`);
   } else {
     const detail = prevFlux
       ? `${prevFlux.slice(0, 8)} → ${newFlux.slice(0, 8)}`
       : `(none) → ${newFlux.slice(0, 8)}`;
-    console.log(`[deploy] flux-klein-server changed since last deploy: ${detail}`);
+    console.log(`[deploy] model-servers changed since last deploy: ${detail}`);
     console.log('[deploy] running sync-all-dcs first...');
     const syncCode = runInherit('npx', ['tsx', 'scripts/sync-all-dcs.ts']);
     if (syncCode !== 0) {

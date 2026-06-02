@@ -4,8 +4,8 @@
 
 **Each user session can use up to two pods, both managed by the same Railway-hosted orchestrator (`backend/`):**
 
-- **Image pod (always)** — RTX 5090, runs `flux-klein-server/server.py` (FLUX.2-klein-4B + NVFP4 transformer). The live img2img path. Name prefix `kiki-session-*`. ~1 FPS at 768×768 (reference mode, 4 steps).
-- **Video pod (idle-state animation)** — H100 SXM 80GB, runs `flux-klein-server/video_server.py` (LTX-2.3 22B distilled FP8 + Gemma-3-12B). Provisioned when `frame_meta.queueEmpty` fires (user paused drawing). Name prefix `kiki-vsession-*`.
+- **Image pod (always)** — RTX 5090, runs `model-servers/image/server.py` (FLUX.2-klein-4B + NVFP4 transformer). The live img2img path. Name prefix `kiki-session-*`. ~1 FPS at 768×768 (reference mode, 4 steps).
+- **Video pod (idle-state animation)** — H100 SXM 80GB, runs `model-servers/video/server.py` (LTX-2.3 22B distilled FP8 + Gemma-3-12B). Provisioned when `frame_meta.queueEmpty` fires (user paused drawing). Name prefix `kiki-vsession-*`.
 
 The orchestrator provisions on demand when a client WebSocket opens (and is JWT-authenticated), relays frames, and terminates pods after 30 min idle. Both pod kinds run a custom FastAPI + WebSocket server.
 
@@ -13,7 +13,7 @@ The orchestrator provisions on demand when a client WebSocket opens (and is JWT-
 - ~$0.53–0.58/hr spot bid for image pod (secure cloud); ~$2.99/hr on-demand for video pod (no spot for H100 SXM).
 - 30-min idle timeout preserves pods across brief disconnects (reconnect = instant, no cold start)
 
-**Pod boot model (volume-entrypoint, since 2026-04-23):** Pods launch from stock `runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404` (hardcoded as `BASE_IMAGE` in `orchestrator.ts`). The attached network volume holds both the FLUX weights (`/workspace/huggingface`) and the FastAPI server code + Python deps (`/workspace/app/`, `/workspace/venv/`). Boot command activates the venv and execs `python3 -u server.py`. No custom image, no registry pull, no GHCR auth. The pre-2026-04-23 GHCR custom-image flow is retained as inactive code in `flux-klein-server/Dockerfile` + `.github/workflows/build-flux-image.yml` for emergency rollback only — see `documents/decisions.md` 2026-04-23 entry for the rollback procedure.
+**Pod boot model (volume-entrypoint, since 2026-04-23):** Pods launch from stock `runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404` (hardcoded as `BASE_IMAGE` in `orchestrator.ts`). The attached network volume holds both the FLUX weights (`/workspace/huggingface`) and the FastAPI server code + Python deps (`/workspace/app/`, `/workspace/venv/`). Boot command activates the venv and execs `python3 -u -m image.server` (or `-m video.server`). No custom image, no registry pull, no GHCR auth. The pre-2026-04-23 GHCR custom-image flow is retained as inactive code in `model-servers/Dockerfile` + `.github/workflows/build-flux-image.yml` for emergency rollback only — see `documents/decisions.md` 2026-04-23 entry for the rollback procedure.
 
 ## How pod provisioning works
 
@@ -201,12 +201,12 @@ curl -sS "https://api.runpod.io/graphql?api_key=$RUNPOD_API_KEY" \
 | `backend/src/routes/stream.ts` | WebSocket endpoint: extract Bearer JWT, provision, relay |
 | `backend/src/routes/auth.ts` | `/v1/auth/apple` and `/v1/auth/refresh` endpoints |
 | `backend/scripts/populate-volume.ts` | One-shot network volume populate script (weights) |
-| `backend/scripts/sync-flux-app.ts` | Per-DC sync of `flux-klein-server/*.py` + venv to network volume |
+| `backend/scripts/sync-flux-app.ts` | Per-DC sync of `model-servers/**/*.py` + venv to network volume |
 | `backend/Dockerfile` | Railway image — Node 22 slim |
-| `flux-klein-server/server.py` | WebSocket server entry point on the pod |
-| `flux-klein-server/pipeline.py` | FLUX.2-klein pipeline wrapper (loads BF16 base + NVFP4 transformer) |
-| `flux-klein-server/config.py` | Env-var-backed runtime config on the pod |
-| `flux-klein-server/Dockerfile` | **INACTIVE** — retained for GHCR rollback only |
+| `model-servers/image/server.py` | WebSocket server entry point on the pod |
+| `model-servers/image/pipeline.py` | FLUX.2-klein pipeline wrapper (loads BF16 base + NVFP4 transformer) |
+| `model-servers/shared/config.py` | Env-var-backed runtime config on the pod |
+| `model-servers/Dockerfile` | **INACTIVE** — retained for GHCR rollback only |
 | `.github/workflows/build-flux-image.yml` | **INACTIVE** — retained for GHCR rollback only |
 | `.github/workflows/stop-pods.yml` | Manual "kill everything" button |
 

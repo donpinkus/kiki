@@ -474,7 +474,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             // queueEmpty:true, so this JPEG is the just-completed
             // generation that the user is now idle on. Forward it to
             // the video pod for animation. Pod-side queueEmpty is the
-            // authoritative idle signal — see flux-klein-server/server.py.
+            // authoritative idle signal — see model-servers/image/server.py.
             if (nextImageBinaryQueueEmpty) {
               if (!videoSessionEnabled) {
                 request.log.info(

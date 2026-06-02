@@ -29,8 +29,9 @@ backend/.env
 # Local secrets
 .env.local
 
-# FLUX test-client debug output
-flux-klein-server/output.jpg
+# Dev test-client debug output (model-servers/dev/{image,video}_client.py)
+model-servers/dev/*.jpg
+model-servers/dev/*.mp4
 
 # Python
 __pycache__/

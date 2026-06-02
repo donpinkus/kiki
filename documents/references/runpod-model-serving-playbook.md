@@ -378,7 +378,7 @@ Cost per iteration regime, summarized:
 |---|---:|---|
 | `npm run deploy` (full) | 8–10 min | Committed perf changes, anything risky |
 | `npm run deploy` (backend-only, flux unchanged) | ~30s | Backend-only changes (orchestrator, etc.) |
-| Test pod (`npm run launch-test-pod` + scp + `pkill -f video_server.py`) | ~30s per scp+restart | Pod-side experiments — never on a serving pod (orchestrator's reaper will terminate it) |
+| Test pod (`npm run launch-test-pod` + scp + `pkill -f video.server`) | ~30s per scp+restart | Pod-side experiments — never on a serving pod (orchestrator's reaper will terminate it) |
 
 The full deploy goes through `sync-all-dcs` (parallelizes across all DCs but slowest DC dominates) then `railway up`. The backend-only fast path is detected automatically by `deploy.ts` reading `.flux-app-version`. The test-pod path uses the `kiki-vtest-*` prefix which the reaper filters out, plus the dev-mode bash respawn loop that catches python exits.
 
@@ -389,7 +389,7 @@ The full deploy goes through `sync-all-dcs` (parallelizes across all DCs but slo
 curl -s "https://<pod-id>-8766.proxy.runpod.net/health" | jq
 
 # Live python stdout (over SSH on a test or SSH-enabled production pod)
-tail -f /proc/$(pgrep -f video_server | head -1)/fd/1
+tail -f /proc/$(pgrep -f video.server | head -1)/fd/1
 ```
 
 ---
@@ -505,5 +505,5 @@ Documented for future reference. Order is rough priority for any future model:
 - `documents/references/pod-operations.md` — canonical decision tree for deploy / iterate / SSH / experiment / terminate. Read first if you're doing operations.
 - `documents/references/provider-config.md` — orchestration architecture, pod lifecycle, network volume topology, costs
 - `documents/decisions.md` — decision log; 2026-04-23 entry covers the GHCR → volume-entrypoint migration
-- `flux-klein-server/video_pipeline.py` — reference implementation of the persistent-model pattern (Steps 0–3 landed)
+- `model-servers/video/pipeline.py` — reference implementation of the persistent-model pattern (Steps 0–3 landed)
 - `backend/src/modules/orchestrator/orchestrator.ts` — pod lifecycle + cancellation, with the SSH bootstrap in `BOOT_DOCKER_ARGS`

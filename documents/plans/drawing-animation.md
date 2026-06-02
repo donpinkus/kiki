@@ -53,14 +53,14 @@ Trigger flow:
 
 ## Pod side
 
-### `flux-klein-server/server.py` (image pod — minimal change)
+### `model-servers/image/server.py` (image pod — minimal change)
 - Extend `frame_meta` preamble to include `queueEmpty: latest_frame is None`
   evaluated at frame-completion time. Single-line change in the existing
   `frame_meta` JSON construction (~line 191 on origin/main).
 - Send `frame_meta` for *every* generated frame (currently only when
   `requestId` is set). Backend needs the flag on every frame.
 
-### `flux-klein-server/video_server.py` (NEW)
+### `model-servers/video/server.py` (NEW)
 - FastAPI WS server, mirrors the structure of `server.py`.
 - Lifespan: load `LTXImageToVideoPipeline` (BF16, CUDA) once.
 - `/health` returns `{video_ready, model_id, vram_free_gb}`.
@@ -75,11 +75,11 @@ Trigger flow:
   - On `{type:"video_cancel"}`: set `cancel_event`. Loop emits
     `{type:"video_cancelled"}` and resets state.
 
-### `flux-klein-server/video_pipeline.py` (NEW)
+### `model-servers/video/pipeline.py` (NEW)
 - `LtxvVideoPipeline` class: `load()`, `generate(image, prompt, seed,
   cancel_event) -> Iterator[PIL.Image]`. Mirrors `FluxKleinPipeline` shape.
 
-### `flux-klein-server/requirements.txt`
+### `model-servers/requirements.txt`
 - `imageio[ffmpeg]`, `numpy`. Diffusers from git already pulled in.
 
 ### Network volume / setup script
@@ -176,10 +176,10 @@ Trigger flow:
 
 | File | Change |
 |------|--------|
-| `flux-klein-server/server.py` | add `queueEmpty` to `frame_meta`; emit on every frame |
-| `flux-klein-server/video_server.py` | NEW — LTXV WebSocket server |
-| `flux-klein-server/video_pipeline.py` | NEW — LTXV pipeline wrapper |
-| `flux-klein-server/requirements.txt` | + `imageio[ffmpeg]`, `numpy` |
+| `model-servers/image/server.py` | add `queueEmpty` to `frame_meta`; emit on every frame |
+| `model-servers/video/server.py` | NEW — LTXV WebSocket server |
+| `model-servers/video/pipeline.py` | NEW — LTXV pipeline wrapper |
+| `model-servers/requirements.txt` | + `imageio[ffmpeg]`, `numpy` |
 | `backend/scripts/populate-volume.ts` (or equiv.) | + LTXV weights |
 | Volume setup script | + `apt install ffmpeg` |
 | `backend/src/modules/orchestrator/orchestrator.ts` | `BOOT_DOCKER_ARGS_VIDEO`, `provisionVideoPod`, `getOrProvisionSession`, dual-key reaper/reconcile |
@@ -193,7 +193,7 @@ Trigger flow:
 ## Existing utilities to reuse
 
 - `SketchSnapshot.strokeCount` (`ios/Packages/CanvasModule/.../SketchSnapshot.swift`) — dirty signal.
-- `latest_frame` single-slot buffer (`flux-klein-server/server.py`) — exact "no new sketch" signal.
+- `latest_frame` single-slot buffer (`model-servers/image/server.py`) — exact "no new sketch" signal.
 - `StreamRelay` (`backend/src/modules/relay/streamRelay.ts`) — second relay reuses it as-is.
 - `provision()` and provisioning machinery (`orchestrator.ts`) — `provisionVideoPod` parallels it.
 - `pipeline.get_info()` health pattern — mirror for LTXV.

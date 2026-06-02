@@ -43,7 +43,7 @@ Sentry.init({
   // attributes per the cross-stack convention. Also injects the active
   // `phase` from AsyncLocalStorage if any `withPhase(...)` block is on the
   // stack at log-emit time. Mirrors `before_send_log` in
-  // `flux-klein-server/sentry_init.py` (which does the same for the pod).
+  // `model-servers/shared/sentry_init.py` (which does the same for the pod).
   beforeSendLog: (log) => {
     log.attributes ??= {};
     // Rebuild attributes once with snake_case keys mapped over. Building a

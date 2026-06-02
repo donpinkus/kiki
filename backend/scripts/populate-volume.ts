@@ -86,7 +86,7 @@ const NVFP4_REPO = 'black-forest-labs/FLUX.2-klein-4b-nvfp4';
 const NVFP4_FILENAME = 'flux-2-klein-4b-nvfp4.safetensors';
 
 // Video-pod weights (LTX-2.3, Gemma encoder, spatial upscaler).
-// Must match config.LTX_* in flux-klein-server/config.py.
+// Must match config.LTX_* in model-servers/shared/config.py.
 //
 // BF16 distilled (v1.1) — pairs with QuantizationPolicy.fp8_cast() per
 // Lightricks' README. The pre-quantized FP8 checkpoint (Lightricks/LTX-2.3-fp8

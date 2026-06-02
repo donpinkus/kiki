@@ -43,10 +43,10 @@ import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from PIL import Image
 
-import config
-import preparing_heartbeat
-import sentry_init
-from video_pipeline import GeneratedAudio, Ltx23VideoPipeline
+from shared import config
+from shared import preparing_heartbeat
+from shared import sentry_init
+from video.pipeline import GeneratedAudio, Ltx23VideoPipeline
 
 logging.basicConfig(
     level=logging.INFO,
@@ -679,7 +679,7 @@ def _pcm_for_video_duration(audio: GeneratedAudio, frame_count: int, fps: int) -
 
 if __name__ == "__main__":
     uvicorn.run(
-        "video_server:app",
+        "video.server:app",
         host=config.HOST,
         port=config.PORT,
         log_level="info",

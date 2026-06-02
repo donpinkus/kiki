@@ -41,7 +41,7 @@ Why priority at 100 users:
 
 **Dominant costs:** HF download (90–180s) + pip install (25–40s). Both deterministic and bakeable. Platform time (60s pod pull + 20s sshd) is unavoidable; but we *add* pull time with our bigger image while *removing* sshd wait entirely.
 
-`backend/runtime-assets/` is committed copy of `flux-klein-server/` + `setup-flux-klein.sh`, SCP'd at provision time. All goes away with baked image.
+`backend/runtime-assets/` is committed copy of `model-servers/` + `setup-flux-klein.sh`, SCP'd at provision time. All goes away with baked image.
 
 ## 3. Detailed design
 
@@ -62,8 +62,8 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends git \
  && rm -rf /var/lib/apt/lists/*
 
-# Layer 2: pinned Python deps — flux-klein-server/requirements.txt is NEW
-COPY flux-klein-server/requirements.txt /tmp/requirements.txt
+# Layer 2: pinned Python deps — model-servers/requirements.txt is NEW
+COPY model-servers/requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt \
  && rm /tmp/requirements.txt
 
@@ -84,7 +84,7 @@ hf_hub_download('black-forest-labs/FLUX.2-klein-4b-nvfp4', 'flux-2-klein-4b-nvfp
 
 # Layer 5: server code (thin, changes frequently — keep at top for fast rebuilds)
 WORKDIR /app
-COPY flux-klein-server/*.py /app/
+COPY model-servers/**/*.py /app/
 
 # Runtime
 ENV FLUX_HOST=0.0.0.0
@@ -103,7 +103,7 @@ Key rationale:
 
 ### 3.3 `requirements.txt`
 
-New file `flux-klein-server/requirements.txt`:
+New file `model-servers/requirements.txt`:
 
 ```
 # Torch inherited from base image (2.9.1 + cu128). Do NOT list it.
@@ -184,7 +184,7 @@ on:
   push:
     branches: [main]
     paths:
-      - 'flux-klein-server/**'
+      - 'model-servers/**'
       - '.github/workflows/build-flux-image.yml'
   workflow_dispatch:
     inputs:
@@ -217,7 +217,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: flux-klein-server/Dockerfile
+          file: model-servers/Dockerfile
           push: true
           tags: |
             ghcr.io/${{ github.repository_owner }}/kiki-flux-klein:latest
@@ -303,7 +303,7 @@ Future levers if needed: prewarm CUDA context via `TORCHINDUCTOR_CACHE_DIR` bake
 ## 7. Test plan
 
 Local:
-1. `docker buildx build --platform linux/amd64 -f flux-klein-server/Dockerfile -t kiki-flux-klein:local .` on machine with ≥60 GB free. Inspect final size.
+1. `docker buildx build --platform linux/amd64 -f model-servers/Dockerfile -t kiki-flux-klein:local .` on machine with ≥60 GB free. Inspect final size.
 2. `docker run --rm -it --network=none kiki-flux-klein:local python -c "from diffusers import Flux2KleinPipeline; p=Flux2KleinPipeline.from_pretrained('black-forest-labs/FLUX.2-klein-4B')"` — verify loads from baked HF_HOME without network.
 
 Staging on RunPod:
@@ -350,8 +350,8 @@ Touches one constant (`IMAGE_NAME`) and removes one code path (SSH provisioning)
 
 ## Critical files
 
-- `/Users/donald/Desktop/kiki_root/flux-klein-server/Dockerfile` (new)
-- `/Users/donald/Desktop/kiki_root/flux-klein-server/requirements.txt` (new)
+- `/Users/donald/Desktop/kiki_root/model-servers/Dockerfile` (new)
+- `/Users/donald/Desktop/kiki_root/model-servers/requirements.txt` (new)
 - `/Users/donald/Desktop/kiki_root/.github/workflows/build-flux-image.yml` (new)
 - `/Users/donald/Desktop/kiki_root/backend/src/modules/orchestrator/orchestrator.ts`
 - `/Users/donald/Desktop/kiki_root/backend/src/config/index.ts`

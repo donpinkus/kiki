@@ -6,7 +6,7 @@ dist/
 
 # .git-sha and .flux-app-version are intentionally NOT ignored.
 # `npm run deploy` writes both (git rev-parse HEAD > .git-sha and
-# git rev-parse HEAD:flux-klein-server > .flux-app-version), and the
+# git rev-parse HEAD:model-servers > .flux-app-version), and the
 # orchestrator reads .flux-app-version at startup for the volume drift
 # check (.git-sha is forensic context only, since RAILWAY_GIT_COMMIT_SHA
 # is empty under `railway up` CLI deploys). Railway CLI honors .gitignore

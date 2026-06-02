@@ -100,9 +100,9 @@ const IMAGE_NAME = 'runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404';
 const POD_NAME = `kiki-sync-${DC.toLowerCase()}-${Date.now()}`;
 const SSH_KEY_PATH = '/tmp/kiki-sync-key';
 
-// Resolve flux-klein-server/ relative to this script (backend/scripts/ → ../../flux-klein-server).
+// Resolve model-servers/ relative to this script (backend/scripts/ → ../../model-servers).
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const FLUX_SRC_DIR = resolve(__dirname, '..', '..', 'flux-klein-server');
+const MODEL_SRC_DIR = resolve(__dirname, '..', '..', 'model-servers');
 
 // ─── GraphQL helper ───────────────────────────────────────────────────────
 
@@ -349,9 +349,9 @@ function runRsync(ssh: SshInfo, localPath: string, remotePath: string, timeoutMs
   // RunPod NFS volumes deny chown → `-a` always fails with exit 23 even though
   // file contents transfer successfully.
   //
-  // --exclude list: only ship what the runtime pod needs. Dockerfile/test_client
-  // /output.jpg live in flux-klein-server/ for dev use but don't belong on the
-  // volume.
+  // --exclude list: only ship what the runtime pod needs. Dockerfile and the
+  // dev/ test clients live in model-servers/ for dev use but don't belong on
+  // the volume.
   //
   // --delete keeps remote exactly in sync with local — on a source rename or
   // deletion, the stale file goes away rather than lingering on the volume.
@@ -360,8 +360,7 @@ function runRsync(ssh: SshInfo, localPath: string, remotePath: string, timeoutMs
     '-rlptDvz',
     '--delete',
     '--exclude', 'Dockerfile',
-    '--exclude', 'test_client.py',
-    '--exclude', 'output.jpg',
+    '--exclude', 'dev',
     '--exclude', '*.pyc',
     '--exclude', '__pycache__',
     '-e', sshCmd,
@@ -390,7 +389,7 @@ function runRsync(ssh: SshInfo, localPath: string, remotePath: string, timeoutMs
  * PostHog records per-DC version skew on every cold start. See
  * `documents/references/provider-config.md` "Volume version tracking".
  *
- * `flux_app_version` is the git tree-hash of `flux-klein-server/`. It only
+ * `flux_app_version` is the git tree-hash of `model-servers/`. It only
  * changes when files in that subtree change — committing CLAUDE.md, iOS
  * code, or backend code does NOT bump it. This is the field the drift
  * check compares against. `git_sha` is retained as forensic context only.
@@ -404,11 +403,11 @@ function buildVersionStamp(): Record<string, string | boolean> {
     gitSha = execSync('git rev-parse HEAD', { cwd: REPO_ROOT }).toString().trim();
     const dirty = execSync('git status --porcelain', { cwd: REPO_ROOT }).toString().trim();
     gitDirty = dirty.length > 0;
-    // Tree-hash of the flux-klein-server/ subtree at HEAD. Reflects committed
+    // Tree-hash of the model-servers/ subtree at HEAD. Reflects committed
     // state only — uncommitted edits don't change this. Pair with git_dirty
     // to spot deploys-with-uncommitted-changes (where two volumes could
     // share a version but actually differ).
-    fluxAppVersion = execSync('git rev-parse HEAD:flux-klein-server', { cwd: REPO_ROOT }).toString().trim();
+    fluxAppVersion = execSync('git rev-parse HEAD:model-servers', { cwd: REPO_ROOT }).toString().trim();
   } catch (e) {
     console.warn('[sync] git lookup failed; version stamp will be partial:', (e as Error).message);
   }
@@ -427,7 +426,7 @@ function buildVersionStamp(): Record<string, string | boolean> {
 
 async function main(): Promise<void> {
   console.log(`[sync] DC=${DC} volume=${VOLUME_ID}`);
-  console.log(`[sync] source dir: ${FLUX_SRC_DIR}`);
+  console.log(`[sync] source dir: ${MODEL_SRC_DIR}`);
   ensureSshKey();
 
   console.log(`[sync] creating on-demand pod in ${DC}...`);
@@ -475,12 +474,12 @@ async function main(): Promise<void> {
     console.log('[sync] creating /workspace/app ...');
     await runSsh(ssh, 'mkdir -p /workspace/app');
 
-    console.log('[sync] rsyncing flux-klein-server sources -> /workspace/app/ ...');
-    // Only copy the files the runtime pod needs. server.py/pipeline.py/config.py/requirements.txt.
+    console.log('[sync] rsyncing model-servers sources -> /workspace/app/ ...');
+    // Only copy what the runtime pod needs: the image/, video/, shared/ packages + requirements.txt.
     // Not test_client.py, not Dockerfile, not *.jpg, etc.
     await runRsync(
       ssh,
-      `${FLUX_SRC_DIR}`,
+      `${MODEL_SRC_DIR}`,
       '/workspace/app',
       5 * 60 * 1000,
     );
