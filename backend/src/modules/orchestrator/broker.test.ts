@@ -51,7 +51,7 @@ vi.mock('./runpodClient.js', async () => {
   return { ...actual, terminatePod: async () => {} };
 });
 
-import { subscribe, type StateEvent } from './orchestrator.js';
+import { subscribe, type StateEvent } from './broker.js';
 
 describe('broker', () => {
   beforeEach(() => {
