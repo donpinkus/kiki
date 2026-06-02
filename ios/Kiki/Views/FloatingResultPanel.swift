@@ -49,7 +49,14 @@ struct FloatingResultPanel: View {
             .padding(.vertical, 6)
             .contentShape(Rectangle())
             .gesture(
-                DragGesture()
+                // `.global` for the same reason as the resize handle below: this
+                // panel is moved by `.offset(position + dragOffset)`, so a default
+                // `.local` DragGesture measures translation relative to the panel
+                // it's itself moving — each frame's offset feeds back into the next
+                // translation, producing a diverging oscillation (confirmed via
+                // instrumentation: two interleaved translation tracks that widen as
+                // the drag progresses). `.global` measures the raw finger delta.
+                DragGesture(coordinateSpace: .global)
                     .onChanged { value in
                         onInteraction?()
                         dragOffset = value.translation
@@ -223,7 +230,15 @@ struct FloatingResultPanel: View {
                 .frame(width: 20, height: 20)
                 .contentShape(Rectangle())
                 .gesture(
-                    DragGesture()
+                    // `.global` coordinate space is load-bearing: the resize handle
+                    // sits at the panel's bottom-right and moves downward as the panel
+                    // grows in height. A default `.local` DragGesture measures
+                    // translation relative to that moving handle, so each height
+                    // increment shifts the origin and the next translation feeds back —
+                    // producing a vertical oscillation (confirmed via instrumentation:
+                    // clean width, two-track wobbling height). `.global` measures the
+                    // raw finger delta, immune to the panel's own size changes.
+                    DragGesture(coordinateSpace: .global)
                         .onChanged { value in
                             onInteraction?()
                             resizeOffset = value.translation
