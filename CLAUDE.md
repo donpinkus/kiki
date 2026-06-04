@@ -103,6 +103,15 @@ When diagnosing a failure, separate observations from inferences. Do not collaps
 - **Label claim strength.** Distinguish between "proven by event X", "consistent with but not proven", and "inferred from behavior Y". Weak and strong evidence must not share the same confident voice.
 - **A punchy one-liner root cause is a warning sign.** If you catch yourself writing "everything is X" or "the whole thing is broken because Y", reopen the evidence — don't close it. The clean story usually dropped something that matters.
 
+## Explaining how something works
+
+When asked how a system behaves, trace the flow from its entrypoint (WS handler, request route, scheduled tick) — don't start from the data model or type definitions and reason outward. Half the answers live in how the entrypoint invokes shared code, and that's invisible from the schema.
+
+- **Schema, types, and comments describe intent; call sites describe behavior.** When they disagree, the call site wins. Quoting a doc comment without reading the implementation it describes is the most common way to confidently mislead. The comment may have been right when written and gone stale since.
+- **Cite the source of each claim.** "Per the comment at file:line, …" vs. "the code at file:line does …" — if a reader can't tell which one a claim came from, they can't weight it. Pattern-matching on field names (e.g. inferring meaning from `podUrl` containing `wss://`) is the same hazard: state that you're inferring from naming, not verifying.
+- **Hedge inferred claims; don't share voice with verified ones.** "Haven't verified," "based on the architecture doc," "consistent with but not proven." A summary table or bulleted answer that mixes verified and inferred claims in the same authoritative voice is worse than a shorter answer that only includes the verified parts.
+- **For "how does X work" questions specifically:** read the entrypoint first, then follow it through one happy path end-to-end before generalizing or summarizing. Jumping to a summary table from the data model alone is the failure mode.
+
 ## Observability
 
 **Three Sentry projects, one per platform:**
@@ -113,9 +122,9 @@ When diagnosing a failure, separate observations from inferences. Do not collaps
 | `kiki-backend` | Node/Fastify on Railway | `SENTRY_DSN` (Railway) | Backend orchestrator errors + structured logs |
 | `kiki-pod` | Python image+video pods | `SENTRY_DSN_POD` (Railway → forwarded to pod env by orchestrator) | Forwarded by `orchestrator.ts` BOOT_ENV when set |
 
-Pods log via stdlib `logging` → `LoggingIntegration` ships `INFO+` lines into Sentry's Logs product. Init lives in `flux-klein-server/sentry_init.py`, called from `server.py` (image) and `video_server.py` (video). `pod_kind:image|video` and `pod_id:<RUNPOD_POD_ID>` are attached **two ways**: as scope tags (covers errors/spans/transactions) and as log attributes via a `before_send_log` hook (covers the Logs product — scope tags don't propagate there, found out the hard way). No-op when `SENTRY_DSN_POD` is unset (local runs stay quiet).
+Pods log via stdlib `logging` → `LoggingIntegration` ships `INFO+` lines into Sentry's Logs product. Init lives in `model-servers/shared/sentry_init.py`, called from `image/server.py` (image) and `video/server.py` (video). `pod_kind:image|video` and `pod_id:<RUNPOD_POD_ID>` are attached **two ways**: as scope tags (covers errors/spans/transactions) and as log attributes via a `before_send_log` hook (covers the Logs product — scope tags don't propagate there, found out the hard way). No-op when `SENTRY_DSN_POD` is unset (local runs stay quiet).
 
-**Pod logging conventions** — apply to every new `logger.X(...)` call in `flux-klein-server/`:
+**Pod logging conventions** — apply to every new `logger.X(...)` call in `model-servers/`:
 
 - **Use f-string body + `extra={...}`. Never positional `%s`/`%d`.** Positional args become opaque `message.parameter.0..N` indices in Sentry's Logs UI. f-strings render the body literally so the expanded view is human-readable, and `extra` keys auto-promote to top-level queryable attributes (Sentry SDK's `_extra_from_record` does this — same path used by `code.*` / `thread.*` / `process.*`).
 - **Use `extra={}` for fields you'd want to filter or aggregate on** (e.g. `gen_ms`, `frames`, `client_id`). Skip it for throwaway diagnostics — no value in indexing every transient string.
@@ -137,7 +146,7 @@ Pods log via stdlib `logging` → `LoggingIntegration` ships `INFO+` lines into 
 
 **Mechanisms (all three layers shipped):**
 
-- **Pod-side:** `flux-klein-server/sentry_init.py` exports a `phase()` context manager backed by `contextvars.ContextVar`. Set with `with sentry_init.phase("drawing"):` — propagates through `asyncio.create_task` and `asyncio.to_thread` into all logs emitted within (Python 3.9+ copies contextvars snapshot into spawned tasks/threads).
+- **Pod-side:** `model-servers/shared/sentry_init.py` exports a `phase()` context manager backed by `contextvars.ContextVar`. Set with `with sentry_init.phase("drawing"):` — propagates through `asyncio.create_task` and `asyncio.to_thread` into all logs emitted within (Python 3.9+ copies contextvars snapshot into spawned tasks/threads).
 - **Backend (TS):** `backend/src/modules/observability/phase.ts` exports `withPhase('preparing', async () => {...})` backed by Node `AsyncLocalStorage`. Wrap the section of code; `beforeSendLog` in `index.ts` reads the active phase at log-emit time and injects as `phase` attribute.
 - **iOS:** `ios/Kiki/App/Phase.swift` exports `Phase.set(.drawing)` (imperative, thread-safe via `OSAllocatedUnfairLock`). Imperative rather than `@TaskLocal` because URLSession WS delegate callbacks fire off-Task and TaskLocal doesn't propagate. Single-active-stream guarantees the global is unambiguous. The `Log.X` facade reads `Phase.current` at emit time.
 
@@ -147,7 +156,7 @@ Pods log via stdlib `logging` → `LoggingIntegration` ships `INFO+` lines into 
 
 - **iOS:** `SentrySDK.setUser(User(userId:))` after sign-in (cleared on sign-out). `Log.X` facade injects `stream_id` from `StreamContext`.
 - **Backend:** `Sentry.setUser({id})` per-request (via `fastifyIntegration` async-context isolation) in `auth/index.ts` preHandler. `pinoIntegration` auto-captures Pino logs; `beforeSendLog` in `index.ts` normalizes camelCase → snake_case (`userId`→`user_id`, `podId`→`pod_id`, `videoPodId`→`video_pod_id`, `kind`→`pod_kind`, etc.) so cross-stack queries don't fragment. **Filter by `user_id:<X>` (the snake_case attribute), not `user.id:<X>` (the Sentry user model)** — the attribute is set deterministically per-log; the user model relies on ambient scope and can be wrong.
-- **Pod:** orchestrator's `bootEnvFor()` injects `KIKI_USER_ID` + `KIKI_STREAM_ID` into every freshly-provisioned pod's BOOT_ENV. `flux-klein-server/sentry_init.py` reads them once at startup, calls `sentry_sdk.set_user({id})` for errors/spans, and injects them as log attributes via `before_send_log`.
+- **Pod:** orchestrator's `bootEnvFor()` injects `KIKI_USER_ID` + `KIKI_STREAM_ID` into every freshly-provisioned pod's BOOT_ENV. `model-servers/shared/sentry_init.py` reads them once at startup, calls `sentry_sdk.set_user({id})` for errors/spans, and injects them as log attributes via `before_send_log`.
 
 **Don't `Sentry.setUser` in long-lived contexts** (WS handlers, background timers, schedulers). The SDK's scope cleanup is aligned with HTTP request lifecycles via `fastifyIntegration`, not with WS-connection lifetimes. Setting user from a WS handler leaks onto the global scope and contaminates background-process logs (Cost tick, reaper, reconcile) with the most recent user's id — distorting `user_id:<X>` queries with rows that have nothing to do with that user. Backend WS-handler user attribution comes from the `userId` Pino structured field on every log call (see `routes/stream.ts` — every `request.log.X({userId, ...}, ...)` already carries it). For errors that need user attribution from inside the WS scope, pass `{ user: { id: userId } }` explicitly to `Sentry.captureException`.
 
@@ -242,8 +251,8 @@ For the full decision tree of pod operations (deploy / iterate / SSH / experimen
 
 **`cd backend && npm run deploy`** — single command. The script (`scripts/deploy.ts`) handles both pod app code and backend together:
 
-1. Reads `backend/.flux-app-version` (= flux-klein-server tree hash from the last successful deploy).
-2. Compares to current `git rev-parse HEAD:flux-klein-server`.
+1. Reads `backend/.flux-app-version` (= model-servers tree hash from the last successful deploy).
+2. Compares to current `git rev-parse HEAD:model-servers`.
 3. **If they differ** → fans out `sync-flux-app.ts` to all configured DCs in parallel (`npm run sync-all`). Aborts deploy if any DC fails — fix and re-run.
 4. **If same** → skips the sync step (backend-only iteration; ~1 min total).
 5. Writes `backend/.flux-app-version` and `backend/.git-sha` (baked into the image so the orchestrator's drift check has its expected version), then runs `railway up`.
@@ -252,9 +261,9 @@ The two `.git-sha` / `.flux-app-version` files appear as untracked in `git statu
 
 `npm run sync-all` is also exposed for ad-hoc syncs (e.g., recovering after a DC was skipped due to capacity exhaustion, without redeploying backend).
 
-Plain `railway up` still works but bypasses the auto-sync — drift can occur if `flux-klein-server/` changed. The orchestrator's drift check (Sentry warning + PostHog `volume_status`) catches this on the next pod boot, so it's not silent — but `npm run deploy` is the canonical path.
+Plain `railway up` still works but bypasses the auto-sync — drift can occur if `model-servers/` changed. The orchestrator's drift check (Sentry warning + PostHog `volume_status`) catches this on the next pod boot, so it's not silent — but `npm run deploy` is the canonical path.
 
-**Pod boot model:** Pods launch from stock `runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404` (hardcoded as `BASE_IMAGE` in `orchestrator.ts`) and read `/workspace/app/server.py` plus `/workspace/venv/` off the attached network volume. Existing running pods keep the old in-memory copy after a sync; new pods pick up changes on next provision. To force a user onto the new code, terminate their pod and let the orchestrator reprovision.
+**Pod boot model:** Pods launch from stock `runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404` (hardcoded as `BASE_IMAGE` in `orchestrator.ts`) and read `/workspace/app/image/server.py` (or `video/server.py`) plus `/workspace/venv/` off the attached network volume. Existing running pods keep the old in-memory copy after a sync; new pods pick up changes on next provision. To force a user onto the new code, terminate their pod and let the orchestrator reprovision.
 
 Bumping `BASE_IMAGE` (e.g. CUDA / PyTorch upgrade) is not just a constant flip — the new image's Python/CUDA ABI must match `/workspace/venv/`, so the venv has to be rebuilt by deleting it and re-running `sync-flux-app.ts`.
 
@@ -291,8 +300,8 @@ Format:
 
 - **Code state:** one of — `uncommitted` (working tree only) / `committed on main (local)` / `pushed to origin/main`.
 - **Ready to test?** `yes` or `no`. If `no`, list every step that remains before Donald can exercise the change. Common gates in this repo:
-  - **Backend (Railway) redeploy** — `cd backend && npm run deploy`. Required for any change under `backend/src/**`. If `flux-klein-server/` also changed, this same command fans out `sync-flux-app.ts` to all DCs; call that out.
-  - **Pod sync only** — `cd backend && npm run sync-all`. Required for `flux-klein-server/` or `ltx-server/` changes when backend itself didn't change.
+  - **Backend (Railway) redeploy** — `cd backend && npm run deploy`. Required for any change under `backend/src/**`. If `model-servers/` also changed, this same command fans out `sync-flux-app.ts` to all DCs; call that out.
+  - **Pod sync only** — `cd backend && npm run sync-all`. Required for `model-servers/` or `ltx-server/` changes when backend itself didn't change.
   - **Existing pods keep the old code in memory after a sync.** If Donald is mid-session, his pod must be terminated (or he must start a fresh session) to pick up the change. Say so when relevant.
   - **iOS rebuild + reinstall** — Swift changes don't hot-reload. Note simulator vs. device. Flag if SwiftData schema changed (state reset needed).
   - **Env var / secret / third-party config** — name it explicitly (e.g. "set `PUBLIC_KEY` in Railway", "accept Gemma terms on HF").
