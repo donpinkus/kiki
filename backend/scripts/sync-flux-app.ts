@@ -77,21 +77,12 @@ if (!SSH_KEY) {
 // were in the old list, so syncs there exhausted all candidates and bailed.
 // Discovery reflects whatever RunPod has stocked today.
 //
-// Filtered out at discovery time:
-//   - 4090: verified bug. Hosts in EUR-NO-1, US-IL-1, US-NC-1, US-TX-3
-//     boot the container but `startSsh:true` never opens port 22. The
-//     createPod returns success, the pod sits in RUNNING with no SSH
-//     info, and the next-candidate fallback never triggers — sync hangs
-//     until waitForSsh's 15-min timeout.
-//   - "Blackwell Server Edition": observed 2026-05-05 on US-NC-1 with
-//     RTX PRO 6000 Blackwell Server Edition. Same RUNNING/no-runtime
-//     symptom as 4090; pod creates cleanly but no port 22 ever appears.
-//     "Server Edition" is the headless variant of the workstation card,
-//     and RunPod's startSsh handshake apparently doesn't run on it.
-//     Workstation Blackwell SKUs (e.g. RTX PRO 4500 Blackwell) are NOT
-//     blocked — those work fine.
-// Do NOT re-enable any of these without confirming RunPod has fixed the
-// startSsh handshake on the SKU.
+// NOTE (2026-06): these skips were originally needed because RunPod's
+// `startSsh:true` never opened port 22 on 4090 / Blackwell-Server-Edition hosts.
+// We no longer use startSsh — the pod now starts sshd itself via SSH_BOOTSTRAP
+// (see below), which we verified works on SKUs startSsh failed on. The skips are
+// retained defensively (harmless) but are likely no longer necessary; can be
+// removed if these SKUs prove fine under the inline bootstrap.
 const SKIP_GPU_PATTERNS = ['4090', 'Blackwell Server Edition'];
 const PINNED_GPU_TYPE = process.env['SYNC_GPU_TYPE_ID'];
 // Must match the pinned base used by runtime pods (orchestrator.ts / runpodClient.ts).
@@ -99,6 +90,40 @@ const PINNED_GPU_TYPE = process.env['SYNC_GPU_TYPE_ID'];
 const IMAGE_NAME = 'runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404';
 const POD_NAME = `kiki-sync-${DC.toLowerCase()}-${Date.now()}`;
 const SSH_KEY_PATH = '/tmp/kiki-sync-key';
+
+// Inline SSH bootstrap — we start sshd ourselves instead of relying on RunPod's
+// `startSsh: true`. As of 2026-06, startSsh is failing to open port 22 across
+// mainstream SKUs (verified: H100, A100-SXM4, H200, RTX 3090, RTX PRO 4500
+// Blackwell all booted to RUNNING/runtime then "sshd never came up"). The
+// runtime serving pods avoid this by starting sshd in-container via this exact
+// bootstrap (orchestrator BOOT_DOCKER_ARGS / src/.../podBoot.ts SSH_BOOTSTRAP),
+// which works reliably on the same hosts. `$PUBLIC_KEY` is injected via the
+// pod's env (the public half of RUNPOD_SSH_PRIVATE_KEY) so the bootstrap can
+// authorize our key. Validated 2026-06-03 on RTX 2000 Ada in EU-RO-1.
+const SSH_BOOTSTRAP =
+  'if [ -n "$PUBLIC_KEY" ]; then { ' +
+  'echo "ssh bootstrap start"; ' +
+  'mkdir -p /root/.ssh && echo "$PUBLIC_KEY" > /root/.ssh/authorized_keys && ' +
+  'chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys && echo "wrote authorized_keys"; ' +
+  'ssh-keygen -A && echo "host keys generated"; ' +
+  'if service ssh start; then echo "service ssh start ok"; ' +
+  'else echo "service ssh start failed; trying /usr/sbin/sshd"; /usr/sbin/sshd && echo "/usr/sbin/sshd ok"; fi; ' +
+  'echo "ssh bootstrap done"; ' +
+  '} > /tmp/ssh-bootstrap.log 2>&1 || true; fi';
+// `sleep infinity` keeps the pod alive for the rsync once sshd is up (no server
+// to run here, unlike runtime pods).
+const SYNC_DOCKER_ARGS = `bash -lc '${SSH_BOOTSTRAP}; sleep infinity'`;
+
+// Public half of the sync's SSH key, injected into the pod's PUBLIC_KEY env so
+// the bootstrap above can authorize our connection. Memoized; writes the private
+// key to SSH_KEY_PATH first (ensureSshKey is idempotent).
+let _syncPubKey: string | null = null;
+function syncPodPublicKey(): string {
+  if (_syncPubKey) return _syncPubKey;
+  ensureSshKey();
+  _syncPubKey = execSync(`ssh-keygen -y -f ${SSH_KEY_PATH}`).toString().trim();
+  return _syncPubKey;
+}
 
 // Resolve model-servers/ relative to this script (backend/scripts/ → ../../model-servers).
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -225,10 +250,11 @@ async function createPod(): Promise<{ id: string; costPerHr: number; gpuType: st
         minMemoryInGb: 16,
         minVcpuCount: 4,
         ports: "22/tcp",
-        startSsh: true,
         dataCenterId: "${DC}",
         networkVolumeId: "${VOLUME_ID}",
-        volumeMountPath: "/workspace"${authField}
+        volumeMountPath: "/workspace",
+        env: [{ key: "PUBLIC_KEY", value: ${JSON.stringify(syncPodPublicKey())} }],
+        dockerArgs: ${JSON.stringify(SYNC_DOCKER_ARGS)}${authField}
       }) { id desiredStatus costPerHr }
     }`;
     try {
