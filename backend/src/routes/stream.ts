@@ -21,6 +21,7 @@ import {
   markPodDead,
 } from '../modules/orchestrator/orchestrator.js';
 import { StreamRelay, WireRelayError, type WireRelayPhaseTimings, type RelevantHttpHeaders } from '../modules/relay/streamRelay.js';
+import { FalImageRelay, type ImageRelay } from '../modules/fal/falImageRelay.js';
 import { getPod } from '../modules/orchestrator/runpodClient.js';
 import {
   checkProvisionQuota,
@@ -98,7 +99,10 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       let userId: string | null = null;
       let source: 'jwt' | 'legacy_session' | null = null;
       let streamId: string | null = null;
-      let relay: StreamRelay | null = null;
+      // Image relay: a RunPod StreamRelay or a fal FalImageRelay depending on
+      // config.IMAGE_PROVIDER. Both satisfy ImageRelay, so the wiring below is
+      // provider-agnostic. (Video always uses StreamRelay → RunPod.)
+      let relay: ImageRelay | null = null;
       let currentPodUrl: string | null = null;
       // Mirror of currentPodUrl as a structured field. Logs that today only
       // carry currentPodUrl (e.g. upstream_closed, wire_relay_*) need pod_id
@@ -460,7 +464,13 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         );
         relay?.close();
         relay = null;
-        const newRelay = new StreamRelay(podUrl);
+        const newRelay: ImageRelay =
+          config.IMAGE_PROVIDER === 'fal'
+            ? new FalImageRelay(config.FAL_KEY, {
+                logger: request.log,
+                ctx: { userId, connId, streamId, role: 'image' },
+              })
+            : new StreamRelay(podUrl);
         newRelay.setLogContext({ userId, connId, streamId, role: 'image' });
         newRelay.onMessage((data, isBinary) => {
           if (socket.readyState !== socket.OPEN) return;
@@ -904,7 +914,10 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         // Record this provision in the sliding-window history for hourly/daily
         // rate limiting. Active-pod enforcement is derived from the session
         // row in Redis, so there's no counter to roll back on failure.
-        if (source === 'jwt' && !isReconnect) {
+        // Skipped on the fal image path: there's no RunPod image pod to
+        // rate-limit (video still provisions a pod, but that's best-effort and
+        // not gated by the image provision window).
+        if (source === 'jwt' && !isReconnect && config.IMAGE_PROVIDER !== 'fal') {
           await recordProvision(userId);
         }
 
@@ -976,89 +989,103 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
           videoSessionEnabled = false;
         }
 
-        const getOrProvisionStart = Date.now();
-        const { podId, podUrl } = await getOrProvisionPod(userId, streamId);
-        getOrProvisionMs = Date.now() - getOrProvisionStart;
-        request.log.info(
-          {
-            userId,
-            connId,
-            streamId,
-            podId,
-            podUrl,
-            isReconnect,
-            elapsedMs: getOrProvisionMs,
-            // Fast (<1s) on a reused-from-Redis pod; >>1s implies the
-            // RunPod probe in getReusableFromRow ran or fresh provision.
-            looksLikeReuse: getOrProvisionMs < 1000,
-            event: 'get_or_provision_done',
-          },
-          'get_or_provision_done',
-        );
-
-        if (socket.readyState !== socket.OPEN) {
-          request.log.info({ userId, connId, streamId, podId }, 'Client disconnected during provisioning');
-          return;
-        }
-
-        // Pod is serving; transition to 'connecting' while we wire up the relay.
-        await emitState(userId, 'connecting');
-        // Retry initial relay connect once. Occasionally RunPod's proxy
-        // fails to upgrade the first WS to a freshly-ready pod: /health
-        // returns ok but the /ws upgrade on the same pod 10 s later hangs
-        // (observed 2026-04-25 02:30 UTC — pod was healthy, connect
-        // timed out). A brief second attempt usually succeeds; if it
-        // doesn't, the outer catch aborts the session cleanly.
-        try {
-          await wireRelay(podUrl, podId);
-        } catch (firstErr) {
-          if (clientDisconnected || socket.readyState !== socket.OPEN) throw firstErr;
-          // Mid-failure dual-probe — captures the pod's external state at
-          // the moment the first attempt failed, so the structured failure
-          // log can show whether the pod was alive (RunPod RUNNING + /health
-          // 200), wedged (RUNNING but /health hangs), or gone (EXITED). Run
-          // in parallel; both are best-effort with bounded timeouts. The
-          // pair discriminates proxy-level vs pod-process vs route-level
-          // failures — single-source observation can't tell those apart.
-          const probeStart = Date.now();
-          const healthUrl = podId
-            ? `https://${podId}-8766.proxy.runpod.net/health`
-            : null;
-          const [runpodRes, healthRes] = await Promise.all([
-            podId ? getPod(podId).catch((): null => null) : Promise.resolve(null),
-            healthUrl
-              ? fetch(healthUrl, { signal: AbortSignal.timeout(3000) })
-                  .then(async (r) => ({ status: r.status as number | 'timeout' | 'error', ms: Date.now() - probeStart, errCode: undefined as string | undefined }))
-                  .catch((e: Error & { name?: string; code?: string }) => ({
-                    status: (e.name === 'TimeoutError' || e.name === 'AbortError') ? ('timeout' as const) : ('error' as const),
-                    ms: Date.now() - probeStart,
-                    errCode: e.code ?? e.name,
-                  }))
-              : Promise.resolve({ status: 'error' as const, ms: 0, errCode: 'no_pod_id' }),
-          ]);
-          wireRelayMidProbe = {
-            runpod_desired_status: runpodRes?.desiredStatus ?? null,
-            runpod_has_runtime: runpodRes?.runtime !== null && runpodRes?.runtime !== undefined,
-            runpod_uptime_seconds: runpodRes?.runtime?.uptimeInSeconds ?? null,
-            health_probe_status: healthRes.status,
-            health_probe_ms: healthRes.ms,
-            health_probe_error_code: healthRes.errCode,
-          };
-          request.log.warn(
+        if (config.IMAGE_PROVIDER === 'fal') {
+          // fal hosted image path: no RunPod image pod. Wire the fal relay
+          // directly — it connects in ~0.5s (vs ~96s pod cold start). The video
+          // pod still provisions above (best-effort, RunPod H100); the synthetic
+          // frame_meta/queueEmpty emitted by FalImageRelay drives the idle-state
+          // video trigger exactly as the image pod's frame_meta did.
+          request.log.info(
+            { userId, connId, streamId, event: 'image_provider_fal' },
+            'IMAGE_PROVIDER=fal — skipping RunPod image pod, relaying to fal hosted klein',
+          );
+          await emitState(userId, 'connecting');
+          await wireRelay('fal://flux-2-klein-realtime', null);
+        } else {
+          const getOrProvisionStart = Date.now();
+          const { podId, podUrl } = await getOrProvisionPod(userId, streamId);
+          getOrProvisionMs = Date.now() - getOrProvisionStart;
+          request.log.info(
             {
               userId,
               connId,
               streamId,
               podId,
               podUrl,
-              err: (firstErr as Error).message,
-              ...wireRelayMidProbe,
-              event: 'initial_wire_retry',
+              isReconnect,
+              elapsedMs: getOrProvisionMs,
+              // Fast (<1s) on a reused-from-Redis pod; >>1s implies the
+              // RunPod probe in getReusableFromRow ran or fresh provision.
+              looksLikeReuse: getOrProvisionMs < 1000,
+              event: 'get_or_provision_done',
             },
-            'Initial relay connect failed, mid-probed pod state, retrying in 2s',
+            'get_or_provision_done',
           );
-          await new Promise((r) => setTimeout(r, 2000));
-          await wireRelay(podUrl, podId);
+
+          if (socket.readyState !== socket.OPEN) {
+            request.log.info({ userId, connId, streamId, podId }, 'Client disconnected during provisioning');
+            return;
+          }
+
+          // Pod is serving; transition to 'connecting' while we wire up the relay.
+          await emitState(userId, 'connecting');
+          // Retry initial relay connect once. Occasionally RunPod's proxy
+          // fails to upgrade the first WS to a freshly-ready pod: /health
+          // returns ok but the /ws upgrade on the same pod 10 s later hangs
+          // (observed 2026-04-25 02:30 UTC — pod was healthy, connect
+          // timed out). A brief second attempt usually succeeds; if it
+          // doesn't, the outer catch aborts the session cleanly.
+          try {
+            await wireRelay(podUrl, podId);
+          } catch (firstErr) {
+            if (clientDisconnected || socket.readyState !== socket.OPEN) throw firstErr;
+            // Mid-failure dual-probe — captures the pod's external state at
+            // the moment the first attempt failed, so the structured failure
+            // log can show whether the pod was alive (RunPod RUNNING + /health
+            // 200), wedged (RUNNING but /health hangs), or gone (EXITED). Run
+            // in parallel; both are best-effort with bounded timeouts. The
+            // pair discriminates proxy-level vs pod-process vs route-level
+            // failures — single-source observation can't tell those apart.
+            const probeStart = Date.now();
+            const healthUrl = podId
+              ? `https://${podId}-8766.proxy.runpod.net/health`
+              : null;
+            const [runpodRes, healthRes] = await Promise.all([
+              podId ? getPod(podId).catch((): null => null) : Promise.resolve(null),
+              healthUrl
+                ? fetch(healthUrl, { signal: AbortSignal.timeout(3000) })
+                    .then(async (r) => ({ status: r.status as number | 'timeout' | 'error', ms: Date.now() - probeStart, errCode: undefined as string | undefined }))
+                    .catch((e: Error & { name?: string; code?: string }) => ({
+                      status: (e.name === 'TimeoutError' || e.name === 'AbortError') ? ('timeout' as const) : ('error' as const),
+                      ms: Date.now() - probeStart,
+                      errCode: e.code ?? e.name,
+                    }))
+                : Promise.resolve({ status: 'error' as const, ms: 0, errCode: 'no_pod_id' }),
+            ]);
+            wireRelayMidProbe = {
+              runpod_desired_status: runpodRes?.desiredStatus ?? null,
+              runpod_has_runtime: runpodRes?.runtime !== null && runpodRes?.runtime !== undefined,
+              runpod_uptime_seconds: runpodRes?.runtime?.uptimeInSeconds ?? null,
+              health_probe_status: healthRes.status,
+              health_probe_ms: healthRes.ms,
+              health_probe_error_code: healthRes.errCode,
+            };
+            request.log.warn(
+              {
+                userId,
+                connId,
+                streamId,
+                podId,
+                podUrl,
+                err: (firstErr as Error).message,
+                ...wireRelayMidProbe,
+                event: 'initial_wire_retry',
+              },
+              'Initial relay connect failed, mid-probed pod state, retrying in 2s',
+            );
+            await new Promise((r) => setTimeout(r, 2000));
+            await wireRelay(podUrl, podId);
+          }
         }
         request.log.info({ userId, connId, streamId, event: 'relay_connected' }, 'Upstream connected, relaying');
 
@@ -1067,11 +1094,11 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         // pod sees the right prompt before the first frame), then the
         // latest pending frame.
         if (pendingConfig && relay) {
-          (relay as StreamRelay).sendConfig(pendingConfig);
+          relay.sendConfig(pendingConfig);
           pendingConfig = null;
         }
         if (pendingFrame && relay) {
-          (relay as StreamRelay).sendFrame(pendingFrame);
+          relay.sendFrame(pendingFrame);
           pendingFrame = null;
         }
 

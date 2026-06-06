@@ -42,6 +42,18 @@ export interface AppConfig {
    * the pod-side code reaching every network volume. Default false. */
   readonly VIDEO_POD_ENABLED: boolean;
 
+  // ─── Image provider (fal.ai hosted realtime vs RunPod) ────────────────
+  /** Which backend serves the live img2img path. `runpod` (default) provisions
+   * per-session FLUX.2-klein pods. `fal` relays each frame to fal's hosted
+   * `fal-ai/flux-2/klein/realtime` model instead (no pod, ~1.5s first frame).
+   * The VIDEO idle-state path stays on RunPod regardless. Revert = set back to
+   * `runpod` + redeploy; the RunPod image path is dormant, not removed. */
+  readonly IMAGE_PROVIDER: 'runpod' | 'fal';
+  /** fal.ai API key — server-side only (CLAUDE.md #3: no secrets on client).
+   * Used as `Authorization: Key <FAL_KEY>` on the fal realtime WS upgrade.
+   * Required when `IMAGE_PROVIDER=fal`; ignored otherwise. */
+  readonly FAL_KEY: string;
+
   // ─── Network volumes (pre-populated with weights, venv, app code) ────
   /** Map of RunPod datacenter ID → network volume ID for IMAGE pods (FLUX
    * BF16 + NVFP4, ~20 GB). Volumes live in 5090-stocked DCs. Pre-populated
@@ -197,6 +209,15 @@ function validateConfig(): AppConfig {
     );
   }
 
+  const imageProvider = (process.env['IMAGE_PROVIDER'] ?? 'runpod') as AppConfig['IMAGE_PROVIDER'];
+  if (!['runpod', 'fal'].includes(imageProvider)) {
+    throw new Error(`Invalid IMAGE_PROVIDER: ${imageProvider} (expected 'runpod' or 'fal')`);
+  }
+  const falKey = process.env['FAL_KEY'] ?? '';
+  if (imageProvider === 'fal' && !falKey) {
+    throw new Error("IMAGE_PROVIDER=fal requires FAL_KEY (fal.ai API key) to be set");
+  }
+
   return {
     PORT: port,
     HOST: process.env['HOST'] ?? '0.0.0.0',
@@ -209,6 +230,8 @@ function validateConfig(): AppConfig {
     FREE_TIER_SECONDS: Number(process.env['FREE_TIER_SECONDS'] ?? 3600),
     ONDEMAND_FALLBACK_ENABLED: process.env['ONDEMAND_FALLBACK_ENABLED'] === 'true',
     VIDEO_POD_ENABLED: process.env['VIDEO_POD_ENABLED'] === 'true',
+    IMAGE_PROVIDER: imageProvider,
+    FAL_KEY: falKey,
     ONDEMAND_ONLY_MODE: process.env['ONDEMAND_ONLY_MODE'] === 'true',
     NETWORK_VOLUMES_BY_DC: parseVolumesMap(process.env['NETWORK_VOLUMES_BY_DC'], 'NETWORK_VOLUMES_BY_DC'),
     NETWORK_VOLUMES_BY_DC_VIDEO: parseVolumesMap(
