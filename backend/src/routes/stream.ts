@@ -382,23 +382,34 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       // Exempt users (test accounts, active subscribers) pass and skip
       // mid-session metering. Only applies when the image path is fal.
       if (config.IMAGE_PROVIDER === 'fal' && source === 'jwt') {
-        const budget = await checkFalBudget(userId);
-        if (!budget.allowed) {
-          request.log.info(
-            { userId, connId, streamId, spendUsd: budget.spendUsd, capUsd: budget.capUsd, event: 'free_limit_reached' },
-            'fal spend cap reached at session start — denying',
+        try {
+          const budget = await checkFalBudget(userId);
+          if (!budget.allowed) {
+            request.log.info(
+              { userId, connId, streamId, spendUsd: budget.spendUsd, capUsd: budget.capUsd, event: 'free_limit_reached' },
+              'fal spend cap reached at session start — denying',
+            );
+            socket.send(
+              JSON.stringify({
+                type: 'error',
+                code: 'free_limit_reached',
+                message: "You're out of free drawing time this month — subscribe to keep drawing.",
+              }),
+            );
+            socket.close(1008, 'free_limit_reached');
+            return;
+          }
+          falMeteringEnabled = !budget.exempt;
+        } catch (err) {
+          // Fail-open: if the budget DB is unreachable, let the user draw rather
+          // than hang or hard-deny. Enable metering so spend resumes capping
+          // once the DB recovers (mid-session metering is itself fail-open).
+          request.log.warn(
+            { userId, connId, streamId, err: (err as Error).message, event: 'fal_budget_check_failed' },
+            'fal_budget_check_failed — failing open (allowing session)',
           );
-          socket.send(
-            JSON.stringify({
-              type: 'error',
-              code: 'free_limit_reached',
-              message: "You're out of free drawing time this month — subscribe to keep drawing.",
-            }),
-          );
-          socket.close(1008, 'free_limit_reached');
-          return;
+          falMeteringEnabled = true;
         }
-        falMeteringEnabled = !budget.exempt;
       }
 
       if (source === 'jwt' && !isReconnect) {
