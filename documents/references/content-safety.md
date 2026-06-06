@@ -34,4 +34,5 @@ Content safety is infrastructure, not a feature. Must be operational before any 
 2. Our server forwards them to fal.ai's hosted FLUX.2-klein model for image generation (the inference provider to disclose under guideline 5.1.2(i); video idle-state animation runs on RunPod)
 3. Sketch data is deleted after processing — not stored or used for training
 4. Generated images cached for up to 7 days for re-download
-5. Link to full privacy policy
+5. Your Apple sign-in identifier and email (or an Apple private-relay address, if you choose Hide My Email) are stored to manage your account. (Sign in requests the `.email` scope as of 2026-06-06; Apple returns it only on first authorization.)
+6. Link to full privacy policy

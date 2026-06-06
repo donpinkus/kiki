@@ -27,7 +27,12 @@ struct SignInView: View {
 
             VStack(spacing: 12) {
                 SignInWithAppleButton(.signIn) { request in
-                    request.requestedScopes = []  // we don't need email/name for v1
+                    // Request email so we can attach an address to the account (receipts,
+                    // support, recovery). Apple only returns it on the FIRST authorization
+                    // for this Apple ID + app, and only embeds it in the identity token
+                    // (which the backend verifies) when this scope is requested. May be a
+                    // private relay (@privaterelay.appleid.com) if the user picks Hide My Email.
+                    request.requestedScopes = [.email]
                 } onCompletion: { result in
                     handleCompletion(result)
                 }
