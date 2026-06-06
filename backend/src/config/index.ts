@@ -53,6 +53,12 @@ export interface AppConfig {
    * Used as `Authorization: Key <FAL_KEY>` on the fal realtime WS upgrade.
    * Required when `IMAGE_PROVIDER=fal`; ignored otherwise. */
   readonly FAL_KEY: string;
+  /** Cost lever: proactively close the fal realtime WS after this many ms with
+   * no new frame (then lazily reconnect on the next stroke), instead of paying
+   * for the runner until fal's ~30s idle timeout. 0 = disabled (default).
+   * Only beneficial if fal bills actual connection duration (verify first).
+   * A few seconds (e.g. 2000-4000) balances savings vs reconnect churn. */
+  readonly FAL_IDLE_CLOSE_MS: number;
 
   // ─── Network volumes (pre-populated with weights, venv, app code) ────
   /** Map of RunPod datacenter ID → network volume ID for IMAGE pods (FLUX
@@ -232,6 +238,7 @@ function validateConfig(): AppConfig {
     VIDEO_POD_ENABLED: process.env['VIDEO_POD_ENABLED'] === 'true',
     IMAGE_PROVIDER: imageProvider,
     FAL_KEY: falKey,
+    FAL_IDLE_CLOSE_MS: Number(process.env['FAL_IDLE_CLOSE_MS'] ?? 0),
     ONDEMAND_ONLY_MODE: process.env['ONDEMAND_ONLY_MODE'] === 'true',
     NETWORK_VOLUMES_BY_DC: parseVolumesMap(process.env['NETWORK_VOLUMES_BY_DC'], 'NETWORK_VOLUMES_BY_DC'),
     NETWORK_VOLUMES_BY_DC_VIDEO: parseVolumesMap(

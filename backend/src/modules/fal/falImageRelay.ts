@@ -66,6 +66,10 @@ interface RelayLogger {
 interface FalImageRelayOpts {
   logger?: RelayLogger;
   ctx?: Record<string, unknown>;
+  /** Proactively close the fal WS after this many ms with no new frame (then
+   * lazily reconnect on the next stroke). 0 = disabled (let fal's ~30s idle
+   * timeout close it). Cost lever; see FAL_IDLE_CLOSE_MS. */
+  idleCloseMs?: number;
 }
 
 export class FalImageRelay implements ImageRelay {
@@ -73,6 +77,16 @@ export class FalImageRelay implements ImageRelay {
   private opened = false;
   private closedByUs = false;
   private reconnecting = false;
+  /** True once any socket has opened — distinguishes the first (lazy) open from
+   * later reconnects for log labeling. */
+  private everOpened = false;
+  /** Set right before WE close an idle socket so handleUpstreamClose logs it as
+   * an idle-close, NOT a transient drop, and does NOT block reconnect (unlike
+   * closedByUs). */
+  private idleClosed = false;
+  /** Proactive idle-close timer (Lever B). */
+  private idleTimer: NodeJS.Timeout | null = null;
+  private readonly idleCloseMs: number;
 
   private readonly falKey: string;
   private readonly logger?: RelayLogger;
@@ -110,6 +124,7 @@ export class FalImageRelay implements ImageRelay {
     this.falKey = falKey;
     this.logger = opts?.logger;
     this.logContext = opts?.ctx ?? {};
+    this.idleCloseMs = opts?.idleCloseMs ?? 0;
   }
 
   setLogContext(ctx: Record<string, unknown>): void {
@@ -126,10 +141,14 @@ export class FalImageRelay implements ImageRelay {
     Sentry.addBreadcrumb({ category: 'fal_relay', level: 'info', message: event, data: obj });
   }
 
-  /** Open the upstream fal WS. Resolves on 'open'; rejects (plain Error) on
-   * pre-open error/close/timeout so `wireRelay`'s catch aborts the session. */
+  /** Lever A — LAZY CONNECT. Don't open the fal WS at wire time (drawing-open).
+   * Opening a connection is what fal bills (~$0.06/~30s), so a user who opens a
+   * drawing but never draws would pay for nothing. Instead we "arm": resolve
+   * immediately without a socket; the first `sendFrame` opens it via the
+   * existing lazy path in `flush()`. Result: open-but-don't-draw costs $0. */
   connect(): Promise<void> {
-    return this.openSocket({ isReconnect: false });
+    this.log('info', 'fal.armed', {});
+    return Promise.resolve();
   }
 
   private openSocket(args: { isReconnect: boolean }): Promise<void> {
@@ -158,9 +177,15 @@ export class FalImageRelay implements ImageRelay {
         // A fresh connection has no carried-over in-flight work; old seqs from
         // a dropped socket will never return, so don't let them skew queueEmpty.
         this.inFlightSeqs = [];
-        this.log('info', args.isReconnect ? 'fal.reconnected' : 'fal.connected', {
-          connectMs: this.connectMs,
-        });
+        // First-ever open is the lazy first-frame open (Lever A); later ones are
+        // reconnects after idle-close / drop. Label by everOpened, not the arg.
+        const event = !this.everOpened
+          ? 'fal.lazy_first_open'
+          : args.isReconnect
+            ? 'fal.reconnected'
+            : 'fal.connected';
+        this.everOpened = true;
+        this.log('info', event, { connectMs: this.connectMs });
         resolve();
       });
 
@@ -251,16 +276,55 @@ export class FalImageRelay implements ImageRelay {
   private handleUpstreamClose(code: number, reason: string): void {
     this.opened = false;
     this.ws = null;
+    this.clearIdleTimer();
     if (this.closedByUs) return;
     // Never call closeHandler: there's no pod to replace, and stream.ts's
     // handleUpstreamClose would kick a RunPod replaceSession. fal closes are
-    // expected (idle) or transient — recover by reconnecting on the next frame.
-    this.log('info', 'fal.upstream_closed', { code, reason });
+    // expected (our idle-close, fal's ~30s timeout, or a transient drop) —
+    // recover by reconnecting on the next frame.
+    const wasIdleClose = this.idleClosed;
+    this.idleClosed = false;
+    this.log('info', wasIdleClose ? 'fal.idle_closed' : 'fal.upstream_closed', { code, reason });
     if (this.pendingFrame) {
       // A stroke is already waiting (user kept drawing through the drop) —
-      // reconnect now rather than waiting for the next sendFrame.
+      // reconnect now rather than waiting for the next sendFrame. (Won't happen
+      // on an idle-close: we only idle-close when pendingFrame is null.)
       void this.reconnectAndFlush();
     }
+  }
+
+  // ─── Lever B: proactive idle-close ──────────────────────────────────────
+  // Arm a timer after each frame is sent; if no new frame arrives within
+  // idleCloseMs, close the fal WS ourselves (instead of paying for the runner
+  // until fal's ~30s idle timeout). The next stroke reopens via the lazy path.
+  private armIdleTimer(): void {
+    this.clearIdleTimer();
+    if (this.idleCloseMs <= 0) return;
+    this.idleTimer = setTimeout(() => this.idleClose(), this.idleCloseMs);
+    this.idleTimer.unref?.();
+  }
+
+  private clearIdleTimer(): void {
+    if (this.idleTimer) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = null;
+    }
+  }
+
+  private idleClose(): void {
+    this.idleTimer = null;
+    if (!this.opened || !this.ws) return;
+    // Never close mid-generation: a result is still expected (and it carries the
+    // queueEmpty:true frame_meta that fires the video idle-state animation).
+    // Re-arm and wait for the queue to drain.
+    if (this.inFlightSeqs.length > 0 || this.pendingFrame) {
+      this.armIdleTimer();
+      return;
+    }
+    // Mark as our idle-close (NOT closedByUs — that would block reconnect).
+    // handleUpstreamClose logs it and leaves the relay reconnectable.
+    this.idleClosed = true;
+    try { this.ws.close(); } catch { /* swallow */ }
   }
 
   private async reconnectAndFlush(): Promise<void> {
@@ -321,6 +385,7 @@ export class FalImageRelay implements ImageRelay {
     const msg = { ...this.params, image_url: dataUri, sync_mode: true };
     try {
       this.ws.send(this.packr.pack(msg));
+      this.armIdleTimer(); // Lever B: (re)start the no-new-frame countdown
     } catch (err) {
       this.log('warn', 'fal.send_failed', { err: (err as Error).message });
       this.inFlightSeqs.pop();
@@ -346,6 +411,7 @@ export class FalImageRelay implements ImageRelay {
   close(): void {
     this.closedByUs = true;
     this.opened = false;
+    this.clearIdleTimer();
     if (this.ws) {
       try { this.ws.close(); } catch { /* swallow */ }
       this.ws = null;

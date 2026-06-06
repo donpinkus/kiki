@@ -469,6 +469,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             ? new FalImageRelay(config.FAL_KEY, {
                 logger: request.log,
                 ctx: { userId, connId, streamId, role: 'image' },
+                idleCloseMs: config.FAL_IDLE_CLOSE_MS,
               })
             : new StreamRelay(podUrl);
         newRelay.setLogContext({ userId, connId, streamId, role: 'image' });
