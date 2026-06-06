@@ -4,13 +4,16 @@
  * HS256 (symmetric) with two separate secrets for access vs refresh tokens —
  * rotating one doesn't invalidate the other. Access tokens are short-lived
  * (1h); refresh tokens are long-lived (30d) and rotate on use. Revocation is
- * by `jti` via an in-memory set for v1 (graduates to Redis in Workstream 5).
+ * by `jti`, persisted in Postgres (`revoked_refresh_tokens`) so it survives
+ * deploys — only `verifyRefresh` (the ~hourly refresh endpoint) touches the DB;
+ * the hot `verifyAccess` path stays pure-crypto.
  */
 
 import { randomUUID } from 'node:crypto';
 import { jwtVerify, SignJWT } from 'jose';
 
 import { config } from '../../config/index.js';
+import { query } from '../../postgres/client.js';
 
 const ACCESS_TTL_SECONDS = 60 * 60;          // 1 hour
 const REFRESH_TTL_SECONDS = 30 * 24 * 60 * 60; // 30 days
@@ -34,11 +37,6 @@ export interface RefreshClaims {
 
 const accessSecret = new TextEncoder().encode(config.JWT_ACCESS_SECRET);
 const refreshSecret = new TextEncoder().encode(config.JWT_REFRESH_SECRET);
-
-// In-memory revocation set for refresh-token rotation. Graduates to Redis
-// with Workstream 5. Bounded growth by refresh-token expiry (30d); ~N_users
-// entries in the steady state, which is negligible at 100 concurrent.
-const revokedRefreshJtis = new Set<string>();
 
 export async function signAccess(userId: string): Promise<string> {
   return new SignJWT({ typ: 'access' })
@@ -79,14 +77,27 @@ export async function verifyRefresh(token: string): Promise<RefreshClaims> {
   if (payload.typ !== 'refresh') {
     throw new Error(`Expected refresh token, got typ=${String(payload.typ)}`);
   }
-  if (payload.jti && revokedRefreshJtis.has(payload.jti)) {
-    throw new Error('Refresh token has been revoked');
+  if (typeof payload.jti === 'string') {
+    const r = await query('SELECT 1 FROM revoked_refresh_tokens WHERE jti = $1', [payload.jti]);
+    if ((r.rowCount ?? 0) > 0) {
+      throw new Error('Refresh token has been revoked');
+    }
   }
   return payload as unknown as RefreshClaims;
 }
 
-export function revokeRefresh(jti: string): void {
-  revokedRefreshJtis.add(jti);
+/** Revoke a refresh token by jti (durable). Pass the verified claims so we can
+ * store the user and expiry. Idempotent. */
+export async function revokeRefresh(claims: RefreshClaims): Promise<void> {
+  await query(
+    `INSERT INTO revoked_refresh_tokens (jti, user_id, expires_at)
+     VALUES ($1, $2, to_timestamp($3))
+     ON CONFLICT (jti) DO NOTHING`,
+    [claims.jti, claims.sub, claims.exp],
+  );
+  // Opportunistic, non-blocking prune of long-expired rows (they're rejected by
+  // jose anyway, so dropping them can't un-revoke anything usable).
+  void query('DELETE FROM revoked_refresh_tokens WHERE expires_at < now()', []).catch(() => {});
 }
 
 export { ACCESS_TTL_SECONDS, REFRESH_TTL_SECONDS };

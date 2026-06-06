@@ -118,8 +118,8 @@ export const authRoute: FastifyPluginAsync = async (fastify) => {
     async (request, reply) => {
       try {
         const claims = await verifyRefresh(request.body.refreshToken);
-        // Rotate: revoke old, issue new pair
-        revokeRefresh(claims.jti);
+        // Rotate: revoke old (durable, in Postgres), issue new pair
+        await revokeRefresh(claims);
         const accessToken = await signAccess(claims.sub);
         const refreshToken = await signRefresh(claims.sub);
         const email = await getUserEmail(claims.sub);

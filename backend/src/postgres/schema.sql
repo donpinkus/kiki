@@ -32,3 +32,17 @@ CREATE TABLE IF NOT EXISTS monthly_usage (
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (user_id, month)
 );
+
+-- Revoked refresh-token jtis (durable, survives deploys). A refresh token is
+-- revoked on rotation (each /v1/auth/refresh) and sign-out; verifyRefresh
+-- rejects any jti listed here. Was an in-memory Set that reset every deploy —
+-- which silently un-revoked tokens (replay window up to the 30d refresh TTL).
+-- `expires_at` mirrors the token's exp so rows can be pruned once the token
+-- can no longer be presented (jose rejects expired tokens regardless).
+CREATE TABLE IF NOT EXISTS revoked_refresh_tokens (
+  jti        TEXT PRIMARY KEY,
+  user_id    UUID,
+  expires_at TIMESTAMPTZ NOT NULL,
+  revoked_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS revoked_refresh_tokens_expires ON revoked_refresh_tokens (expires_at);
