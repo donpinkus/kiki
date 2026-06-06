@@ -14,6 +14,16 @@ Record implementation decisions here as they are made. Newest first. This preven
 
 ---
 
+### 2026-06-06 — Postgres durable accounts + per-user monthly fal-spend cap
+
+**Context:** Approaching launch, identity/subscription state needed a durable system-of-record (Redis is ephemeral), and an unsubscribed user had no cost ceiling on the now-fal image path. Done in two stages.
+
+**Decision (Stage 1 — Postgres + accounts):** Added a managed Postgres (Railway addon → `DATABASE_URL`), raw `pg` + idempotent `schema.sql` + `migrate.ts` run at boot, mirroring the `analytics/` service. New `users` table (`user_id` UUID PK, `apple_sub` UNIQUE, `email`, `is_test_account`, `subscription_status`, `subscription_expires_at`) is the durable account record. `routes/auth.ts` `upsertUserByAppleSub` (atomic `ON CONFLICT (apple_sub)`) + `getUserEmail` now hit Postgres; the Redis `user:`/`apple-sub:` keys are retired. Code: `backend/src/postgres/` (client/schema/migrate/users). Sign-in requests Apple's `.email` scope (`SignInView.swift`) so the email is captured (first-auth only; private-relay possible).
+
+**Decision (Stage 2 — fal-spend cap):** Unsubscribed users get `FREE_TIER_FAL_USD` ($10) of fal drawing spend per calendar month (UTC); test accounts (`is_test_account`) + active subscribers are exempt. Hard mid-session stop on crossing (~$0.20 overshoot tolerance). Spend metered PG-direct into `monthly_usage` (PK `user_id,month`) via atomic `INSERT … ON CONFLICT … RETURNING` — no Redis. `falImageRelay.cumulativeOpenMs()` + an `onUsage` hook (on close + ~10s throttle, no timer) report open-time; `routes/stream.ts` runs a per-connection `checkFalBudget` gate (incl. reconnects, so a 2nd device can't bypass) and a mid-session `enforceCut` (sends `{code:'free_limit_reached'}`, `abortSession` so reconnect re-denies, then closes). Fail-open if the budget DB errors (gate + mid-session). New `backend/src/modules/falBudget/`; the dead in-memory `entitlement` module + `FREE_TIER_SECONDS` removed. Backend-only — the existing failure UI shows the message. **Apple StoreKit/purchase + paywall UI + usage meter deferred** (testers stay unlimited via the test flag until then).
+
+**Consequences:** Postgres is now a required dependency (backend fail-fasts without `DATABASE_URL`). Test/owner accounts are flagged via `UPDATE users SET is_test_account=true`. Tune/disable the cap via `FREE_TIER_FAL_USD` (0 ≈ off). Verified in prod: mid-session cut, gate-deny-on-reconnect, owner-exempt, spend recorded.
+
 ### 2026-06-06 — Live image path moved from RunPod FLUX.2-klein to fal.ai hosted realtime
 
 **Context:** The live img2img path ran FLUX.2-klein-4B (NVFP4, reference-mode VAE-concat) on per-session RunPod RTX 5090 spot pods — ~96s cold start (p95 ~157s), recurring spot-capacity fragility across DCs, and full ownership of the serving stack. A spike (`fal-spike/`) measured fal.ai's hosted `fal-ai/flux-2/klein/realtime`: ~1.5s to first frame, ~250ms/frame at 3 steps, 0% drop at 2 FPS, no pod provisioning.
