@@ -5,7 +5,6 @@ import ResultModule
 
 struct DrawingView: View {
     @Environment(AppCoordinator.self) private var coordinator
-    @State private var panelReturnTask: Task<Void, Never>?
     @State private var quickShapeTooltipDismissTask: Task<Void, Never>?
     /// Persistent flag — once the user has seen the QuickShape tooltip on
     /// any device session, never show it again on this device.
@@ -61,7 +60,7 @@ struct DrawingView: View {
                             alignment: coordinator.drawingLayout == .splitScreen ? .trailing : .center
                         )
                         .ignoresSafeArea(.keyboard)
-                        .zIndex(coordinator.canvasOnTop ? 2 : 0)
+                        .zIndex(0)
 
                     CanvasSidebar()
                         .frame(maxHeight: .infinity, alignment: .leading)
@@ -112,19 +111,22 @@ struct DrawingView: View {
                     if coordinator.drawingLayout == .splitScreen {
                         splitScreenResultPane(geometry: geometry)
                             .zIndex(2)
-                    } else if coordinator.showFloatingPanel {
+                    } else {
+                        // Fullscreen: the result panel is always present and
+                        // never auto-hides. Plain SwiftUI overlay — a touch that
+                        // originates on the panel is routed by SwiftUI to its
+                        // drag/resize/eyedropper gestures, while touches on the
+                        // surrounding empty area fall through to the canvas. A
+                        // stroke already in progress (begun on the canvas) keeps
+                        // drawing straight through the panel, since UIKit fixes
+                        // touch ownership at touch-began and never re-hit-tests.
                         FloatingResultPanel(
                             resultState: coordinator.resultState,
                             canSwapStream: coordinator.canSwapStreamImageToCanvas,
                             containerSize: geometry.size,
                             currentBrushColor: coordinator.currentColor,
-                            onClose: { coordinator.showFloatingPanel = false },
                             onSwapStreamToCanvas: { coordinator.swapStreamImageToCanvas() },
-                            onColorPicked: { coordinator.currentColor = $0 },
-                            onInteraction: {
-                                panelReturnTask?.cancel()
-                                coordinator.canvasOnTop = false
-                            }
+                            onColorPicked: { coordinator.currentColor = $0 }
                         )
                         .overlay(alignment: .bottomLeading) {
                             if case .ready = coordinator.streamReadiness {
@@ -134,27 +136,10 @@ struct DrawingView: View {
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
                         .padding(16)
-                        .zIndex(coordinator.canvasOnTop ? 0 : 2)
-                        .opacity(coordinator.canvasOnTop ? 0 : 1)
+                        .zIndex(2)
                     }
                 }
                 .background(Color(.systemGray6))
-                .onChange(of: coordinator.canvasViewModel.isInteracting) { _, interacting in
-                    guard coordinator.drawingLayout == .fullscreen else { return }
-                    if interacting {
-                        panelReturnTask?.cancel()
-                        coordinator.canvasOnTop = true
-                    } else {
-                        panelReturnTask?.cancel()
-                        panelReturnTask = Task {
-                            try? await Task.sleep(for: .milliseconds(500))
-                            guard !Task.isCancelled else { return }
-                            withAnimation(.easeIn(duration: 0.25)) {
-                                coordinator.canvasOnTop = false
-                            }
-                        }
-                    }
-                }
             }
         }
         .animation(.easeInOut(duration: 0.3), value: coordinator.generationError != nil)

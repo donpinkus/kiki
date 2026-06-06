@@ -7,10 +7,8 @@ struct FloatingResultPanel: View {
     let canSwapStream: Bool
     let containerSize: CGSize
     let currentBrushColor: Color
-    let onClose: () -> Void
     let onSwapStreamToCanvas: () -> Void
     let onColorPicked: ((Color) -> Void)?
-    var onInteraction: (() -> Void)? = nil
 
     @State private var position: CGPoint = .zero
     @State private var size: CGSize?
@@ -31,19 +29,12 @@ struct FloatingResultPanel: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Header — drag handle + close button
+            // Header — drag handle (drag to move; the panel never closes)
             HStack {
                 Image(systemName: "line.3.horizontal")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
-                Button(action: onClose) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 24, height: 24)
-                        .background(.ultraThinMaterial, in: Circle())
-                }
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
@@ -58,7 +49,6 @@ struct FloatingResultPanel: View {
                 // the drag progresses). `.global` measures the raw finger delta.
                 DragGesture(coordinateSpace: .global)
                     .onChanged { value in
-                        onInteraction?()
                         dragOffset = value.translation
                     }
                     .onEnded { value in
@@ -240,7 +230,6 @@ struct FloatingResultPanel: View {
                     // raw finger delta, immune to the panel's own size changes.
                     DragGesture(coordinateSpace: .global)
                         .onChanged { value in
-                            onInteraction?()
                             resizeOffset = value.translation
                         }
                         .onEnded { value in

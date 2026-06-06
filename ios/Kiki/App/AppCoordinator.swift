@@ -146,8 +146,6 @@ final class AppCoordinator {
     var showLayerPanel = false
     var resultState: ResultState = .empty
     var dividerPosition: CGFloat = 0.5
-    var showFloatingPanel = false
-    var canvasOnTop = false
     var generationError: String?
 
     /// One-time NUX tooltip for QuickShape. Set true on first successful snap;
@@ -492,7 +490,6 @@ final class AppCoordinator {
         selectedStyle = .default
         streamSeed = seed
         lastSuccessfulImage = nil
-        showFloatingPanel = false
 
         canvasViewModel.setPendingState(nil)
 
@@ -527,7 +524,6 @@ final class AppCoordinator {
         } else {
             lastSuccessfulImage = nil
         }
-        showFloatingPanel = lastSuccessfulImage != nil
 
         // Prepare canvas state
         canvasViewModel.setPendingState(CanvasState(
@@ -771,9 +767,6 @@ final class AppCoordinator {
                 self.currentVideoMP4URL = nil
             }
             self.resultState = .streaming(image: image, frameCount: self.streamFrameCount)
-            if self.drawingLayout == .fullscreen {
-                self.showFloatingPanel = true
-            }
 
             let count = self.streamFrameCount
             if count == 1 {
