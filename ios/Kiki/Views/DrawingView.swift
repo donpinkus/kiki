@@ -39,10 +39,6 @@ struct DrawingView: View {
             }
 
             GeometryReader { geometry in
-                let canvasSide = min(
-                    geometry.size.width * coordinator.dividerPosition,
-                    geometry.size.height
-                )
                 // The gesture container fills the full drawing pane so pan/zoom/
                 // rotate aren't clipped by the drawing surface's square footprint.
                 // The drawing surface itself stays a centered `canvasSide` square
@@ -50,6 +46,11 @@ struct DrawingView: View {
                 let canvasPaneWidth = coordinator.drawingLayout == .splitScreen
                     ? geometry.size.width * coordinator.dividerPosition
                     : geometry.size.width
+                // Largest square that fits the available pane (full width in
+                // fullscreen, the left half in split screen) and the height
+                // below the top toolbar — so the canvas fills the space instead
+                // of sitting as a small centered square.
+                let canvasSide = min(canvasPaneWidth, geometry.size.height)
 
                 ZStack(alignment: .topLeading) {
                     CanvasView(
