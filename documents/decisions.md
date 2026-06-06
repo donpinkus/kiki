@@ -24,6 +24,8 @@ Record implementation decisions here as they are made. Newest first. This preven
 
 **Consequences:** Postgres is now a required dependency (backend fail-fasts without `DATABASE_URL`). Test/owner accounts are flagged via `UPDATE users SET is_test_account=true`. Tune/disable the cap via `FREE_TIER_FAL_USD` (0 ≈ off). Verified in prod: mid-session cut, gate-deny-on-reconnect, owner-exempt, spend recorded.
 
+**Follow-up (same day):** with Postgres now available, moved **refresh-token revocation** from an in-memory Set (which reset every deploy → silently un-revoked tokens, a replay window up to the 30d refresh TTL) to a durable `revoked_refresh_tokens` table (`backend/src/modules/auth/jwt.ts`). Only the refresh endpoint hits the DB; the hot `verifyAccess` path stays pure-crypto. A doc sweep updated `.env.example` (added `DATABASE_URL`/`FAL_KEY`/`IMAGE_PROVIDER`/`FREE_TIER_FAL_USD`/`FAL_IDLE_CLOSE_MS`), `CLAUDE.md` (accounts/billing section), `README.md`, the WS1/5/8 + scale-to-100 plan banners, and the SignInView caption (removed a false "1 free hour, then $5/month").
+
 ### 2026-06-06 — Live image path moved from RunPod FLUX.2-klein to fal.ai hosted realtime
 
 **Context:** The live img2img path ran FLUX.2-klein-4B (NVFP4, reference-mode VAE-concat) on per-session RunPod RTX 5090 spot pods — ~96s cold start (p95 ~157s), recurring spot-capacity fragility across DCs, and full ownership of the serving stack. A spike (`fal-spike/`) measured fal.ai's hosted `fal-ai/flux-2/klein/realtime`: ~1.5s to first frame, ~250ms/frame at 3 steps, 0% drop at 2 FPS, no pod provisioning.
