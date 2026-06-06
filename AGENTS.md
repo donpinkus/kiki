@@ -2,8 +2,8 @@
 
 Kiki is an iPad-native sketch-to-image app with:
 - `ios/`: SwiftUI client
-- `backend/`: Fastify relay and RunPod orchestrator
-- `model-servers/`: Python pod-side FLUX.2-klein server
+- `backend/`: Fastify relay — live image path relays to fal.ai hosted FLUX.2-klein (`modules/fal/`); also a RunPod orchestrator for the video pod + dormant image fallback
+- `model-servers/`: Python pod-side servers for RunPod (video idle-state; dormant image fallback)
 
 ## Source Of Truth
 

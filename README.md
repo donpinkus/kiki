@@ -1,6 +1,6 @@
 # Kiki
 
-Kiki is an iPad-native sketch-to-image prototype. The user draws on the left side of the canvas and receives a live AI interpretation on the right via a Fastify backend that provisions and relays to a dedicated RunPod FLUX.2-klein server.
+Kiki is an iPad-native sketch-to-image prototype. The user draws on the left side of the canvas and receives a live AI interpretation on the right via a Fastify backend that relays canvas frames to fal.ai's hosted FLUX.2-klein realtime model. (A per-session RunPod FLUX.2-klein path remains as a dormant, revertable fallback via `IMAGE_PROVIDER=runpod`; the LTX video idle-state animation still runs on RunPod.)
 
 Current status: Phase 1 prototype.
 
@@ -70,8 +70,8 @@ python3 model-servers/dev/image_client.py --help
 ## Repository Layout
 
 - `ios/`: iPad app, SwiftUI views, app coordinator, local Swift packages
-- `backend/`: Fastify server, relay route, RunPod orchestration
-- `model-servers/`: Python image generation server for the pod
+- `backend/`: Fastify server, fal.ai image relay (`modules/fal/`) + RunPod orchestration (video + dormant image fallback)
+- `model-servers/`: Python WebSocket servers for RunPod pods — video idle-state (live) and the dormant image fallback
 - `documents/`: decisions, plans, content safety, provider references
 - `backend/scripts/`: operational one-off scripts (network volume population, capacity probes)
 
@@ -86,6 +86,6 @@ python3 model-servers/dev/image_client.py --help
 ## Known Limitations
 
 - Backend authentication is still mock-only.
-- Fresh sessions can take several minutes to cold start because pod setup and model warmup happen during provisioning.
+- The live (fal.ai) image path reaches its first frame in ~1.5s. The dormant RunPod image fallback and the RunPod video idle-state pod still cold-start in ~1–3 min (pod setup + model warmup during provisioning).
 - Safety/compliance items called out in `CLAUDE.md` and `documents/references/content-safety.md` are not fully implemented yet.
 - Some planning docs remain useful context but are partially stale; trust the code and `CLAUDE.md` first.

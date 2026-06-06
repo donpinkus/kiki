@@ -8,10 +8,12 @@
 
 ## Quick orientation
 
-Two pod kinds, different GPUs, same network volumes + same orchestrator:
+> **⚠️ The live image path is no longer a RunPod pod (2026-06-06).** Live img2img runs on fal.ai's hosted `fal-ai/flux-2/klein/realtime` (`IMAGE_PROVIDER=fal`, relayed by `backend/src/modules/fal/falImageRelay.ts` — no pod, no SSH, no sync). This runbook covers the **video pod (live)** and the **dormant RunPod image pod** (only provisioned when reverted to `IMAGE_PROVIDER=runpod`). In normal operation only `kiki-vsession-*` (video) pods exist.
 
-- **Image pod** — RTX 5090, runs `model-servers/image/server.py` (FLUX.2-klein, the live img2img path). Name prefix `kiki-session-*`.
-- **Video pod** — H100 SXM 80 GB, runs `model-servers/video/server.py` (LTX-2.3 22B distilled FP8, the idle-state animation). Name prefix `kiki-vsession-*`.
+Two RunPod pod kinds, different GPUs, same network volumes + same orchestrator:
+
+- **Image pod (DORMANT fallback)** — RTX 5090, runs `model-servers/image/server.py` (FLUX.2-klein). Only provisioned under `IMAGE_PROVIDER=runpod`; the live image path is fal.ai. Name prefix `kiki-session-*`.
+- **Video pod (live)** — H100 SXM 80 GB, runs `model-servers/video/server.py` (LTX-2.3 22B distilled FP8, the idle-state animation). Name prefix `kiki-vsession-*`.
 
 Pods boot from stock `runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404` (hardcoded as `BASE_IMAGE` in `backend/src/modules/orchestrator/orchestrator.ts`) and read app code + venv off attached network volumes (one volume per DC, populated via `backend/scripts/sync-flux-app.ts`).
 

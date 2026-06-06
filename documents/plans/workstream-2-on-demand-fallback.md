@@ -2,6 +2,8 @@
 
 Part of the [scale-to-100-users roadmap](./scale-to-100-users.md).
 
+> **⚠️ UPDATE (2026-06-06): largely moot for IMAGE.** This workstream targets RunPod **5090 spot** capacity for the image pod. The live image path moved to fal.ai (`IMAGE_PROVIDER=fal`, no pod), so 5090 spot capacity is no longer on the live path. The remaining RunPod pod (video, H100 SXM) already runs **on-demand** (no spot for H100 SXM), so the spot→on-demand fallback below doesn't apply to it either. Keep only as reference for the dormant RunPod image fallback (`IMAGE_PROVIDER=runpod`). See `documents/decisions.md` (2026-06-06).
+
 ## 1. Context
 
 At 50+ concurrent active users, RunPod 5090 spot capacity in secure cloud is no longer reliable. The current orchestrator fails fast when `stockStatus` is `None` or `Low`, and users see a raw error and quit. This is the cheapest blocker to clear on the roadmap (~half day) and the one most likely to cause visible outages during a beta push — spot stock for a single GPU SKU on secure cloud fluctuates on a minutes-to-hours cadence, and we have no headroom to absorb that.

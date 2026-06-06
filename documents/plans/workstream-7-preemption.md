@@ -2,6 +2,8 @@
 
 Part of the [scale-to-100-users roadmap](./scale-to-100-users.md).
 
+> **⚠️ UPDATE (2026-06-06):** Preemption recovery applies to **RunPod pods**. The live **image** path is now fal.ai hosted (no pod, no spot preemption), so the recovery logic + cold-start latency figures below now pertain to the **video** pod (LTX on H100, on-demand) and the dormant image fallback — not the live image path. The mechanism shipped (`PREEMPTION_REPLACEMENT_ENABLED`, same-pod reconnect → replaceSession) is intact and used by the video relay.
+
 ## 1. Context
 
 At today's scale (5–20 concurrent users) spot preemptions are rare enough that the "client sees error → retries → backend provisions fresh pod" loop is tolerable for the affected user. The roadmap target of 100 concurrent users changes this in two ways:

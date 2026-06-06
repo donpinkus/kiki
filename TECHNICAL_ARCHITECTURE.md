@@ -1,6 +1,6 @@
 # Technical Architecture & Engineering Plan — iPad Sketch-to-Image Application
 
-> **⚠️ PARTIALLY STALE.** Written before the switch from fal.ai to ComfyUI/Qwen-Image and before modules were consolidated (5 → 3 packages). Treat as historical context for original design intent. For current architecture, read the code and `CLAUDE.md`.
+> **⚠️ PARTIALLY STALE.** Provider/latency/cost details and the original module layout (since consolidated 5 → 3 packages) are outdated. The inference provider changed several times since; the live image path is now fal.ai's hosted FLUX.2-klein realtime (RunPod image dormant; video idle-state on RunPod) — see `CLAUDE.md` and `documents/decisions.md` (2026-06-06). Treat as historical context for original design intent. For current architecture, read the code and `CLAUDE.md`.
 
 > **Companion to PRD v2.0 — March 2026** | Confidential — Engineering Team Only
 

@@ -22,16 +22,16 @@ Content safety is infrastructure, not a feature. Must be operational before any 
 
 ## Design Decisions
 
-- **Two-layer input filtering**: regex blocklist (JSON config, hot-deployable) + text classifier for evasion
-- **Output filtering**: NSFW classifier on every generated image, server-side, <50ms budget
+- **Two-layer input filtering**: regex blocklist (JSON config, hot-deployable) + text classifier for evasion. **This is the required pre-TestFlight content-safety gate.**
+- **Output filtering (DROPPED 2026-06-06)**: an NSFW classifier on every generated image is *not* required. Decision made by Donald; removed from the pre-external-testing gate.
 - **Filtered responses**: return 200 with `status: "filtered"` — do NOT count against quota
-- **ComfyUI has no built-in content filter** — our server filter is the primary safety layer
+- **The hosted model (fal.ai FLUX.2-klein) has no content filter we control** — our backend input filter is the primary safety layer
 - **User reporting**: "Report this image" button on every output → Slack channel (v1), proper moderation tool (v2)
 
 ## Privacy Commitments (must be in consent screen)
 
 1. Sketches and prompts are sent to our server for AI processing
-2. Our server forwards them to ComfyUI (on RunPod) for image generation
+2. Our server forwards them to fal.ai's hosted FLUX.2-klein model for image generation (the inference provider to disclose under guideline 5.1.2(i); video idle-state animation runs on RunPod)
 3. Sketch data is deleted after processing — not stored or used for training
 4. Generated images cached for up to 7 days for re-download
 5. Link to full privacy policy

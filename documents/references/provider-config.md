@@ -2,16 +2,28 @@
 
 ## Current Stack
 
-**Each user session can use up to two pods, both managed by the same Railway-hosted orchestrator (`backend/`):**
+> **⚠️ Image path moved to fal.ai (2026-06-06).** The live img2img path is now fal.ai's hosted `fal-ai/flux-2/klein/realtime` (`IMAGE_PROVIDER=fal`), relayed by `backend/src/modules/fal/falImageRelay.ts` — **no RunPod image pod is provisioned in normal operation.** The RunPod image pod described below is a **dormant, revertable fallback** (`IMAGE_PROVIDER=runpod`, the config default). The **video pod is unchanged and still live on RunPod.** Everything in this doc about RunPod provisioning/placement/volumes applies to the **video pod + dormant image fallback**, not the live image path. See "fal.ai image path" below and `documents/decisions.md` (2026-06-06).
 
-- **Image pod (always)** — RTX 5090, runs `model-servers/image/server.py` (FLUX.2-klein-4B + NVFP4 transformer). The live img2img path. Name prefix `kiki-session-*`. ~1 FPS at 768×768 (reference mode, 4 steps).
-- **Video pod (idle-state animation)** — H100 SXM 80GB, runs `model-servers/video/server.py` (LTX-2.3 22B distilled FP8 + Gemma-3-12B). Provisioned when `frame_meta.queueEmpty` fires (user paused drawing). Name prefix `kiki-vsession-*`.
+**Each user session uses the fal.ai image relay plus (when the user pauses) one RunPod video pod, all managed by the same Railway-hosted orchestrator (`backend/`):**
 
-The orchestrator provisions on demand when a client WebSocket opens (and is JWT-authenticated), relays frames, and terminates pods after 30 min idle. Both pod kinds run a custom FastAPI + WebSocket server.
+- **Image relay (live)** — fal.ai hosted `fal-ai/flux-2/klein/realtime` over a per-session msgpack WebSocket (server-side `Authorization: Key $FAL_KEY`). ~1.5s to first frame, ~250ms/frame at 3 steps. No pod. See "fal.ai image path" below.
+- **Image pod (DORMANT fallback)** — RTX 5090, runs `model-servers/image/server.py` (FLUX.2-klein-4B + NVFP4). Only provisioned when reverted to `IMAGE_PROVIDER=runpod`. Name prefix `kiki-session-*`. ~1 FPS at 768×768 (reference mode, 4 steps).
+- **Video pod (idle-state animation, live)** — H100 SXM 80GB, runs `model-servers/video/server.py` (LTX-2.3 22B distilled FP8 + Gemma-3-12B). Provisioned when `frame_meta.queueEmpty` fires (user paused drawing). Name prefix `kiki-vsession-*`.
 
-- ~96s avg image-pod cold start (p95 ~157s), dominated by `warming_model` (~62s FLUX weights to GPU + warmup). Video cold start is similar.
-- ~$0.53–0.58/hr spot bid for image pod (secure cloud); ~$2.99/hr on-demand for video pod (no spot for H100 SXM).
+The orchestrator provisions the video pod (and, when reverted, the image pod) on demand when a client WebSocket opens (JWT-authenticated), relays frames, and terminates pods after 30 min idle. RunPod pods run a custom FastAPI + WebSocket server.
+
+- ~96s avg cold start (p95 ~157s) for the **dormant image pod** and the **video pod**, dominated by `warming_model` (weights to GPU + warmup). The **live fal image path has no pod cold start** (~1.5s to first frame).
+- ~$0.53–0.58/hr spot bid for the dormant image pod (secure cloud); ~$2.99/hr on-demand for the video pod (no spot for H100 SXM). The live fal image path is billed by **connection duration** (see "fal.ai image path").
 - 30-min idle timeout preserves pods across brief disconnects (reconnect = instant, no cold start)
+
+### fal.ai image path (live)
+
+- Endpoint `wss://fal.run/fal-ai/flux-2/klein/realtime`, msgpack messages, server-side `Authorization: Key $FAL_KEY` (no secret on the client — CLAUDE.md #3). Code: `backend/src/modules/fal/falImageRelay.ts` (a drop-in for `StreamRelay`) + the `IMAGE_PROVIDER==='fal'` branch in `routes/stream.ts`.
+- Input msg: `{image_url:"data:image/jpeg;base64,…", prompt, num_inference_steps, schedule_mu, output_feedback_strength, image_size, seed, sync_mode:true}`. Output: `{images:[{content:<jpeg bytes>, content_type, …}], seed}`.
+- fal emits no `queueEmpty`; the relay synthesizes a `frame_meta{queueEmpty}` (mirroring `model-servers/image/server.py`) so the **video idle-state trigger keeps working unchanged**.
+- fal force-closes an idle realtime socket after **~30s** of no input ("reconnect when needed"); the relay reconnects lazily on the next stroke.
+- **Billing: by connection DURATION** — `ceil(open_seconds) × $0.00194`, ~2s floor, **no fixed 30s minimum** (verified empirically). Charged per connection-open. Shows on the fal dashboard under base model `fal-ai/flux-2/klein`.
+- **Cost levers** (in `falImageRelay.ts`): **lazy-connect** — no socket until the first stroke, so opening a drawing without drawing costs $0; **`FAL_IDLE_CLOSE_MS`** (Railway env, set to `2000`) — close the WS N ms after the last frame and reopen on the next stroke, so idle bills ~N seconds instead of ~30. Set `0` to disable.
 
 **Pod boot model (volume-entrypoint, since 2026-04-23):** Pods launch from stock `runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404` (hardcoded as `BASE_IMAGE` in `orchestrator.ts`). The attached network volume holds both the FLUX weights (`/workspace/huggingface`) and the FastAPI server code + Python deps (`/workspace/app/`, `/workspace/venv/`). Boot command activates the venv and execs `python3 -u -m image.server` (or `-m video.server`). No custom image, no registry pull, no GHCR auth. The pre-2026-04-23 GHCR custom-image flow is retained as inactive code in `model-servers/Dockerfile` + `.github/workflows/build-flux-image.yml` for emergency rollback only — see `documents/decisions.md` 2026-04-23 entry for the rollback procedure.
 

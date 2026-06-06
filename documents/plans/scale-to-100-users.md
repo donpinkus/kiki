@@ -1,5 +1,7 @@
 # Scale to 100 concurrent users
 
+> **⚠️ UPDATE (2026-06-06): the live image path moved to fal.ai.** This roadmap was written when image generation ran on per-session RunPod RTX 5090 pods. The **image** path is now fal.ai hosted (`IMAGE_PROVIDER=fal`, no pod) — so the image-side scaling bottlenecks here (cold start, 5090 spot capacity, on-demand fallback, preemption) **no longer apply to image**; fal manages that scaling. They **still apply to the VIDEO pod** (LTX on RunPod H100), which is unchanged, and the WS1–7 orchestration/cost/observability work was not wasted — the video path reuses it. Where this doc says "per-user RTX 5090 pod / image cold start," read it as the dormant image fallback or substitute the video pod. A new fal cost-cap workstream (per-user fal spend ceiling + fal usage in the cost monitor) replaces the image-pod capacity concerns. See `documents/decisions.md` (2026-06-06).
+
 Roadmap for going from today's "per-session orchestration, safe for ~20–50 users" state to **100 concurrent active users** with good UX, cost control, and operational visibility.
 
 This doc captures the bottlenecks and the work to clear them. Each workstream is sized for a single focused PR (or small stack of PRs). Sequenced by impact — do them in order unless something upstream deprioritizes it.

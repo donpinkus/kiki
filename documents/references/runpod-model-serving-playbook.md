@@ -1,5 +1,7 @@
 # RunPod Model Serving Playbook
 
+> **Scope note (2026-06-06):** The live **image** path no longer runs on RunPod — it's fal.ai hosted (see `documents/references/provider-config.md`). On RunPod today we run the **video** pod (LTX-2.3) plus the **dormant image fallback**. This playbook still fully applies to those; just don't read it as describing the live image path.
+
 A reference for getting a new model performant on RunPod, distilled from the LTX-2.3 perf work (April 2026). Read this when:
 - Onboarding a new model — image, video, audio, anything heavy
 - A pod is slower than expected and you don't know why

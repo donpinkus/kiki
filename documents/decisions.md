@@ -14,6 +14,21 @@ Record implementation decisions here as they are made. Newest first. This preven
 
 ---
 
+### 2026-06-06 — Live image path moved from RunPod FLUX.2-klein to fal.ai hosted realtime
+
+**Context:** The live img2img path ran FLUX.2-klein-4B (NVFP4, reference-mode VAE-concat) on per-session RunPod RTX 5090 spot pods — ~96s cold start (p95 ~157s), recurring spot-capacity fragility across DCs, and full ownership of the serving stack. A spike (`fal-spike/`) measured fal.ai's hosted `fal-ai/flux-2/klein/realtime`: ~1.5s to first frame, ~250ms/frame at 3 steps, 0% drop at 2 FPS, no pod provisioning.
+
+**Decision:** Default the live image path to fal via `IMAGE_PROVIDER=fal` (set on Railway). The backend relays each canvas JPEG over a per-session fal realtime WebSocket — msgpack frames, server-side `Authorization: Key $FAL_KEY` (no secret on the client) — in `backend/src/modules/fal/falImageRelay.ts`, a drop-in for the RunPod `StreamRelay`. fal emits no `queueEmpty`, so the relay synthesizes a `frame_meta{queueEmpty}` (mirroring `model-servers/image/server.py`) to keep the video idle-state trigger working unchanged.
+
+**Alternatives considered:** Deploy our own klein pipeline on fal Serverless (blocked on serverless access; more ops). Stay on RunPod (cold start + capacity). Direct iPad→fal (breaks the backend-computed video trigger and "no secrets on client" — needs the relay anyway).
+
+**Consequences:**
+- RunPod image pods (5090, klein NVFP4) are **DORMANT but intact** — config default is `IMAGE_PROVIDER=runpod`, so flipping the Railway var (or unsetting it) reverts instantly. Not deleted.
+- **VIDEO idle-state animation (LTX-2.3 on RunPod H100 SXM) is UNCHANGED** — still RunPod. The orchestrator / provisioner / reaper / cost-monitor now serve video (+ the dormant image fallback) only; they are NOT on the live image path.
+- fal's conditioning is its img2img feedback loop (`output_feedback_strength` / `schedule_mu`), not our reference-mode VAE-concat — different look, tuned via params (optionally surfaced in the iPad SettingsPanel).
+- **Billing is by connection DURATION** (`ceil(open_seconds) × $0.00194`, ~2s floor, no fixed 30s minimum), charged per connection-open. Two cost levers shipped (commit f6f89793): **lazy-connect** (no socket until the first stroke → opening a drawing without drawing costs $0) and **`FAL_IDLE_CLOSE_MS`** (close the WS N ms after the last frame; reopen lazily on the next stroke). Measured billing details in `documents/references/provider-config.md`.
+- NSFW *output* filter requirement dropped (see `content-safety.md`); prompt *input* filter still gates external TestFlight.
+
 ### 2026-05-09 — Removed `too_many_active_pods` quota check; surface raw deny reasons to iOS
 
 **Context:** During heavy iteration (Xcode rebuilds in tight succession), backend started rejecting WS connections with `too_many_active_pods` and the iOS toast read "Unable to connect. Please restart the app." with no indication of the actual cause. Two problems compounded:

@@ -1,5 +1,7 @@
 # Two-Pod Video Architecture — Implementation Context
 
+> **Note (2026-06-06):** "Two-pod" framing predates the image→fal.ai migration. The image path is now fal.ai hosted (no RunPod image pod); the **video** pod (LTX on RunPod H100) is unchanged and remains the subject of this doc. So in current terms a session is "fal image relay + one RunPod video pod," and the "blocked on the single-pod FLUX flow" status below is obsolete — the FLUX/image flow is no longer a pod.
+>
 > GitHub Issue: #25
 > Status: Blocked on stabilizing single-pod FLUX flow first
 >

@@ -2,14 +2,20 @@
 
 Running notebook of things FLUX.2-klein-4B can do that Kiki isn't currently using, and how each could map to a Kiki feature. **Not a plan, not a decision log.** Each entry is a potential direction that may or may not turn into work. Add entries as we learn; do not remove entries when they're superseded — mark them as closed instead.
 
-## Current stack (as of 2026-04-24)
+## Current stack (as of 2026-06-06)
 
-- Model: `black-forest-labs/FLUX.2-klein-4B` (step-wise distilled, 4-step, ignores `guidance_scale`)
+- Service: **fal.ai hosted `fal-ai/flux-2/klein/realtime`** (WebSocket realtime relay; backend `modules/fal/`). We no longer run our own klein pipeline for the live path.
+- Model: `black-forest-labs/FLUX.2-klein-4B` (fal-managed; step-wise distilled, ignores `guidance_scale`)
+- Conditioning: fal's img2img **feedback loop** (`output_feedback_strength` / `schedule_mu`) — **NOT** our old reference-mode VAE-concat. Many capability notes below assume the diffusers pipeline / reference-mode and may not map 1:1 to the hosted endpoint's exposed params; check what fal's realtime API actually accepts before planning a feature on them.
+- Cost: billed by connection duration (see `documents/references/provider-config.md`).
+
+### Previous stack (dormant RunPod fallback, as of 2026-04-24)
+
 - Quantization: BFL's NVFP4 transformer on top of BF16 pipeline
 - Pipeline: diffusers `Flux2KleinPipeline`
 - Mode in use: single-reference img2img (sketch VAE-encoded, concatenated as reference tokens)
 - LoRAs: none
-- Hardware: RTX 5090 spot (Blackwell, SM 10+)
+- Hardware: RTX 5090 spot (Blackwell, SM 10+). Revertable via `IMAGE_PROVIDER=runpod`.
 
 ## Architectural facts about klein (shared between 4B and 9B)
 
