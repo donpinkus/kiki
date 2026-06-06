@@ -78,6 +78,12 @@ export interface AppConfig {
   /** Redis connection URL. Required for session registry persistence. */
   readonly REDIS_URL: string;
 
+  // ─── Postgres (durable accounts; usage ledger) ─────────────────────────
+  /** Postgres connection string — the durable store for user accounts (and,
+   * later, the per-user usage ledger). Required; the backend fails to boot
+   * without it. Railway injects this from the Postgres addon. */
+  readonly DATABASE_URL: string;
+
   // ─── Cost monitoring (Workstream 4) ────────────────────────────────────
   /** Shared secret for /v1/ops/* endpoints. Unset → ops routes reject all. */
   readonly OPS_API_KEY: string;
@@ -215,6 +221,11 @@ function validateConfig(): AppConfig {
     );
   }
 
+  const databaseUrl = process.env['DATABASE_URL'] ?? '';
+  if (!databaseUrl) {
+    throw new Error('DATABASE_URL is required (Postgres connection string for the durable user/account store)');
+  }
+
   const imageProvider = (process.env['IMAGE_PROVIDER'] ?? 'runpod') as AppConfig['IMAGE_PROVIDER'];
   if (!['runpod', 'fal'].includes(imageProvider)) {
     throw new Error(`Invalid IMAGE_PROVIDER: ${imageProvider} (expected 'runpod' or 'fal')`);
@@ -246,6 +257,7 @@ function validateConfig(): AppConfig {
       'NETWORK_VOLUMES_BY_DC_VIDEO',
     ),
     REDIS_URL: process.env['REDIS_URL'] ?? '',
+    DATABASE_URL: databaseUrl,
     PREEMPTION_REPLACEMENT_ENABLED: process.env['PREEMPTION_REPLACEMENT_ENABLED'] === 'true',
     MAX_SESSION_REPLACEMENTS: Number(process.env['MAX_SESSION_REPLACEMENTS'] ?? 2),
     RECONCILE_INTERVAL_MS: Number(process.env['RECONCILE_INTERVAL_MS'] ?? 30 * 60 * 1000),

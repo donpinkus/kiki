@@ -85,6 +85,8 @@ import { authPlugin } from './modules/auth/index.js';
 import { start as startOrchestrator } from './modules/orchestrator/orchestrator.js';
 import { start as startCostMonitor } from './modules/orchestrator/costMonitor.js';
 import { shutdownAnalytics } from './modules/analytics/index.js';
+import { ensureDb, pool as pgPool } from './postgres/client.js';
+import { migrate } from './postgres/migrate.js';
 
 const app = Fastify({
   bodyLimit: 10 * 1024 * 1024, // 10 MB — composited lineart snapshots are larger than plain sketches
@@ -164,6 +166,12 @@ app.setErrorHandler((error, request, reply) => {
 // --- Start ---
 const start = async () => {
   try {
+    // Durable store first: connect to Postgres and apply the (idempotent)
+    // schema before anything serves traffic or provisions pods.
+    await ensureDb();
+    await migrate();
+    app.log.info('Postgres connected and schema applied');
+
     // Orchestrator boots before the server accepts connections: reconciles any
     // orphan pods from a prior run and arms the idle reaper.
     await startOrchestrator(app.log);
@@ -187,6 +195,11 @@ async function gracefulShutdown(signal: string): Promise<void> {
     await shutdownAnalytics();
   } catch (err) {
     app.log.warn({ err }, 'Failed to flush analytics during shutdown');
+  }
+  try {
+    await pgPool.end();
+  } catch (err) {
+    app.log.warn({ err }, 'Failed to close Postgres pool during shutdown');
   }
   process.exit(0);
 }

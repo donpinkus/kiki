@@ -11,7 +11,6 @@
  *      → new pair, old refresh token revoked.
  */
 
-import { randomUUID } from 'node:crypto';
 import type { FastifyPluginAsync } from 'fastify';
 
 import { extractBearer } from '../modules/auth/index.js';
@@ -25,7 +24,7 @@ import {
   verifyAccess,
 } from '../modules/auth/jwt.js';
 import { abortSession } from '../modules/orchestrator/orchestrator.js';
-import { getRedis } from '../modules/redis/client.js';
+import { upsertUserByAppleSub, getUserEmail } from '../postgres/users.js';
 
 interface AppleLoginBody {
   identityToken: string;
@@ -36,52 +35,10 @@ interface RefreshBody {
   refreshToken: string;
 }
 
-// User store backed by Redis so identity survives backend redeploys. Two keys:
-//   apple-sub:{appleSub} → userId        (looked up at sign-in to reuse)
-//   user:{userId}        → HSET fields    (email is the only field consumed
-//                                          today, by /v1/auth/refresh)
-// Pre-Round-6 this lived in two in-memory Maps that reset every redeploy,
-// causing the same Apple ID to mint a fresh userId after each deploy and
-// orphaning whatever pods/sessions belonged to the old userId.
-interface UserRecord {
-  userId: string;
-  appleSub: string;
-  email?: string;
-  createdAt: number;
-}
-
-async function upsertUser(appleSub: string, email?: string): Promise<UserRecord> {
-  const redis = getRedis();
-  const subKey = `apple-sub:${appleSub}`;
-  const existingId = await redis.get(subKey);
-  if (existingId) {
-    const stored = await redis.hgetall(`user:${existingId}`);
-    return {
-      userId: existingId,
-      appleSub,
-      email: stored['email'] || email,
-      createdAt: Number(stored['createdAt'] ?? 0),
-    };
-  }
-  const userId = randomUUID();
-  const createdAt = Date.now();
-  const fields: Record<string, string> = {
-    appleSub,
-    createdAt: String(createdAt),
-  };
-  if (email) fields['email'] = email;
-  await redis.multi()
-    .set(subKey, userId)
-    .hset(`user:${userId}`, fields)
-    .exec();
-  return { userId, appleSub, email, createdAt };
-}
-
-async function getUserEmail(userId: string): Promise<string | undefined> {
-  const stored = await getRedis().hget(`user:${userId}`, 'email');
-  return stored ?? undefined;
-}
-
+// User identity is the durable Postgres `users` table (see postgres/users.ts).
+// `upsertUserByAppleSub` find-or-creates by Apple `sub` (UNIQUE), so the same
+// Apple ID keeps its `userId` across deploys without re-minting. This replaced
+// the former Redis `user:{userId}` / `apple-sub:{sub}` hash.
 export const authRoute: FastifyPluginAsync = async (fastify) => {
   fastify.post<{ Body: AppleLoginBody }>(
     '/v1/auth/apple',
@@ -100,12 +57,12 @@ export const authRoute: FastifyPluginAsync = async (fastify) => {
     async (request, reply) => {
       try {
         const { appleSub, email } = await verifyAppleIdentityToken(request.body.identityToken);
-        const user = await upsertUser(appleSub, email);
+        const user = await upsertUserByAppleSub(appleSub, email);
         const accessToken = await signAccess(user.userId);
         const refreshToken = await signRefresh(user.userId);
 
         request.log.info(
-          { userId: user.userId, appleSub: appleSub.slice(0, 8) + '...', newUser: !email || user.createdAt > Date.now() - 5000 },
+          { userId: user.userId, appleSub: appleSub.slice(0, 8) + '...', newUser: user.isNew },
           'Apple sign-in success',
         );
 
