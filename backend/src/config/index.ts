@@ -20,9 +20,11 @@ export interface AppConfig {
    * for the rollout window. */
   readonly AUTH_REQUIRED: boolean;
 
-  // ─── Entitlement (Workstream 1 stub, finished in Workstream 8) ────────
-  /** Free GPU-seconds granted per user before they must subscribe. */
-  readonly FREE_TIER_SECONDS: number;
+  // ─── Entitlement / fal budget ─────────────────────────────────────────
+  /** Free fal image-generation spend (USD) per unsubscribed user per calendar
+   * month before they must subscribe. Test accounts + active subscribers are
+   * exempt. Default 10. */
+  readonly FREE_TIER_FAL_USD: number;
 
   // ─── On-demand fallback (Workstream 2) ────────────────────────────────
   /** When true, orchestrator falls back to on-demand pods when spot capacity
@@ -244,7 +246,7 @@ function validateConfig(): AppConfig {
     JWT_REFRESH_SECRET: jwtRefreshSecret,
     APPLE_BUNDLE_ID: appleBundleId,
     AUTH_REQUIRED: process.env['AUTH_REQUIRED'] === 'true',
-    FREE_TIER_SECONDS: Number(process.env['FREE_TIER_SECONDS'] ?? 3600),
+    FREE_TIER_FAL_USD: Number(process.env['FREE_TIER_FAL_USD'] ?? 10),
     ONDEMAND_FALLBACK_ENABLED: process.env['ONDEMAND_FALLBACK_ENABLED'] === 'true',
     VIDEO_POD_ENABLED: process.env['VIDEO_POD_ENABLED'] === 'true',
     IMAGE_PROVIDER: imageProvider,

@@ -50,11 +50,21 @@ export interface ImageRelay {
   onClose(cb: (code: number, reason: string) => void): void;
   onError(cb: (err: Error) => void): void;
   close(): void;
+  /** Optional usage hooks (fal only — RunPod billing is per-pod). `onUsage`
+   * fires when accrued open-time may have advanced (on connection close + a
+   * throttle during continuous drawing); the handler reads `cumulativeOpenMs`
+   * and reconciles spend. */
+  onUsage?(cb: () => void): void;
+  cumulativeOpenMs?(): number;
 }
 
 const FAL_REALTIME_URL =
   process.env['FAL_REALTIME_URL'] ?? 'wss://fal.run/fal-ai/flux-2/klein/realtime';
 const CONNECT_TIMEOUT_MS = 15_000;
+/** Max wall-time between usage reports during a continuously-open socket, so a
+ * long unbroken drawing session can't overshoot the spend cap by more than
+ * ~this window of spend. Rides the per-frame flush path (no separate timer). */
+const USAGE_REPORT_THROTTLE_MS = 10_000;
 
 /** Minimal logger shape — accepts a Fastify/pino logger or any structured
  * logger. Optional; falls back to Sentry breadcrumbs only. */
@@ -120,6 +130,18 @@ export class FalImageRelay implements ImageRelay {
 
   private connectMs = 0;
 
+  // ─── Usage accounting (for the fal-spend cap) ──────────────────────────
+  /** Sum of fully-closed connection spans (ms). Excludes idle gaps between
+   * reconnects — only time the socket was actually open, matching fal billing. */
+  private cumulativeClosedMs = 0;
+  /** Wall time the current socket opened, or null when closed. */
+  private openedAt: number | null = null;
+  /** Fired when accrued open-time may have advanced; the consumer reads
+   * cumulativeOpenMs() and reconciles spend. */
+  private usageHandler: (() => void) | null = null;
+  /** Wall time of the last usageHandler fire (for the throttle). */
+  private lastUsageAt = 0;
+
   constructor(falKey: string, opts?: FalImageRelayOpts) {
     this.falKey = falKey;
     this.logger = opts?.logger;
@@ -173,6 +195,7 @@ export class FalImageRelay implements ImageRelay {
         clearTimeout(timeout);
         this.ws = ws;
         this.opened = true;
+        this.openedAt = Date.now();
         this.connectMs = Date.now() - start;
         // A fresh connection has no carried-over in-flight work; old seqs from
         // a dropped socket will never return, so don't let them skew queueEmpty.
@@ -277,7 +300,14 @@ export class FalImageRelay implements ImageRelay {
     this.opened = false;
     this.ws = null;
     this.clearIdleTimer();
-    if (this.closedByUs) return;
+    // Finalize this connection's open span into the cumulative total (on every
+    // close path — idle-close, drop, or our own close()). Uses openedAt, not
+    // `opened`, so it's correct even when close() already flipped `opened`.
+    if (this.openedAt !== null) {
+      this.cumulativeClosedMs += Date.now() - this.openedAt;
+      this.openedAt = null;
+    }
+    if (this.closedByUs) return; // session teardown — stream.ts cleanup does the final spend flush
     // Never call closeHandler: there's no pod to replace, and stream.ts's
     // handleUpstreamClose would kick a RunPod replaceSession. fal closes are
     // expected (our idle-close, fal's ~30s timeout, or a transient drop) —
@@ -285,6 +315,7 @@ export class FalImageRelay implements ImageRelay {
     const wasIdleClose = this.idleClosed;
     this.idleClosed = false;
     this.log('info', wasIdleClose ? 'fal.idle_closed' : 'fal.upstream_closed', { code, reason });
+    this.emitUsage(); // a span just closed — let the consumer persist it
     if (this.pendingFrame) {
       // A stroke is already waiting (user kept drawing through the drop) —
       // reconnect now rather than waiting for the next sendFrame. (Won't happen
@@ -386,6 +417,9 @@ export class FalImageRelay implements ImageRelay {
     try {
       this.ws.send(this.packr.pack(msg));
       this.armIdleTimer(); // Lever B: (re)start the no-new-frame countdown
+      // Bound continuous-draw spend overshoot: report usage at most every
+      // USAGE_REPORT_THROTTLE_MS of open time, riding this per-frame path.
+      if (Date.now() - this.lastUsageAt >= USAGE_REPORT_THROTTLE_MS) this.emitUsage();
     } catch (err) {
       this.log('warn', 'fal.send_failed', { err: (err as Error).message });
       this.inFlightSeqs.pop();
@@ -395,6 +429,21 @@ export class FalImageRelay implements ImageRelay {
 
   onMessage(cb: (data: Buffer | string, isBinary: boolean) => void): void {
     this.messageHandler = cb;
+  }
+
+  onUsage(cb: () => void): void {
+    this.usageHandler = cb;
+  }
+
+  /** Total time the socket has actually been open (ms), across reconnects —
+   * the basis for fal spend (≈ openSeconds × $0.00194). Excludes idle gaps. */
+  cumulativeOpenMs(): number {
+    return this.cumulativeClosedMs + (this.openedAt !== null ? Date.now() - this.openedAt : 0);
+  }
+
+  private emitUsage(): void {
+    this.lastUsageAt = Date.now();
+    this.usageHandler?.();
   }
 
   onClose(_cb: (code: number, reason: string) => void): void {

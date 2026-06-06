@@ -27,7 +27,7 @@ import {
   checkProvisionQuota,
   recordProvision,
 } from '../modules/auth/rateLimiter.js';
-import { checkEntitlement } from '../modules/entitlement/index.js';
+import { checkFalBudget, addMonthlySpendUsd, RATE_USD_PER_SEC } from '../modules/falBudget/index.js';
 import { trackPodPreempted, trackPodRelayFailed, trackSessionClosed } from '../modules/analytics/index.js';
 
 /**
@@ -109,6 +109,12 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       // queryable in Sentry, not buried in a `wss://<id>-...` substring.
       let currentPodId: string | null = null;
       let lastConfig: Record<string, unknown> | null = null;
+      // fal-spend cap (Stage 2): metering runs for non-exempt users on the fal
+      // image path. `lastBilledMs` tracks how much of relay.cumulativeOpenMs()
+      // has already been persisted to the monthly_usage ledger (advanced only
+      // on a successful DB write, so a failed write is retried, not lost).
+      let falMeteringEnabled = false;
+      let lastBilledMs = 0;
       let unsubscribeState: (() => void) | null = null;
       let clientDisconnected = false;
       const sessionStartMs = Date.now();
@@ -204,6 +210,15 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         clientDisconnected = true;
         unsubscribeState?.();
         unsubscribeState = null;
+        // Final fal spend flush: persist the last partial open span BEFORE
+        // closing the relay (close() would finalize it out of reach). Read the
+        // delta synchronously; fire-and-forget the DB write (low-stakes ~cents).
+        if (falMeteringEnabled && userId && relay?.cumulativeOpenMs) {
+          const deltaMs = relay.cumulativeOpenMs() - lastBilledMs;
+          if (deltaMs > 0) {
+            void addMonthlySpendUsd(userId, (deltaMs / 1000) * RATE_USD_PER_SEC).catch(() => {});
+          }
+        }
         relay?.close();
         relay = null;
         videoRelay?.close();
@@ -362,20 +377,31 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         'has_ready_session',
       );
 
-      if (source === 'jwt' && !isReconnect) {
-        const entitlement = checkEntitlement(userId);
-        if (!entitlement.allowed) {
+      // fal spend cap — gate on EVERY connection (incl. reconnects / a 2nd
+      // device) so the monthly free budget can't be bypassed by reconnecting.
+      // Exempt users (test accounts, active subscribers) pass and skip
+      // mid-session metering. Only applies when the image path is fal.
+      if (config.IMAGE_PROVIDER === 'fal' && source === 'jwt') {
+        const budget = await checkFalBudget(userId);
+        if (!budget.allowed) {
+          request.log.info(
+            { userId, connId, streamId, spendUsd: budget.spendUsd, capUsd: budget.capUsd, event: 'free_limit_reached' },
+            'fal spend cap reached at session start — denying',
+          );
           socket.send(
             JSON.stringify({
               type: 'error',
-              code: entitlement.reason,
-              message: entitlement.reason ?? 'entitlement_denied',
+              code: 'free_limit_reached',
+              message: "You're out of free drawing time this month — subscribe to keep drawing.",
             }),
           );
-          socket.close(1008, entitlement.reason);
+          socket.close(1008, 'free_limit_reached');
           return;
         }
+        falMeteringEnabled = !budget.exempt;
+      }
 
+      if (source === 'jwt' && !isReconnect) {
         const quota = await checkProvisionQuota(userId);
         if (!quota.allowed) {
           socket.send(
@@ -1002,6 +1028,49 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
           );
           await emitState(userId, 'connecting');
           await wireRelay('fal://flux-2-klein-realtime', null);
+
+          // Mid-session spend metering (non-exempt users only). The relay fires
+          // onUsage when open-time may have advanced (on each connection close +
+          // a ~10s throttle); we persist the delta and hard-stop if over cap.
+          if (falMeteringEnabled) {
+            const enforceCut = (spendUsd: number): void => {
+              if (clientDisconnected || socket.readyState !== socket.OPEN) return;
+              request.log.info(
+                { userId, connId, streamId, spendUsd, capUsd: config.FREE_TIER_FAL_USD, event: 'free_limit_reached' },
+                'fal spend cap reached mid-session — cutting stream',
+              );
+              socket.send(
+                JSON.stringify({
+                  type: 'error',
+                  code: 'free_limit_reached',
+                  message: "You're out of free drawing time this month — subscribe to keep drawing.",
+                }),
+              );
+              // Clear the session row so any reconnect re-hits the start gate and
+              // is denied cleanly (no cut→reconnect loop).
+              void abortSession(uid, 'manual');
+              socket.close(1008, 'free_limit_reached');
+            };
+            const meterFalUsage = async (): Promise<void> => {
+              if (!relay?.cumulativeOpenMs) return;
+              const ms = relay.cumulativeOpenMs();
+              const deltaMs = ms - lastBilledMs;
+              if (deltaMs <= 0) return;
+              try {
+                const total = await addMonthlySpendUsd(uid, (deltaMs / 1000) * RATE_USD_PER_SEC);
+                lastBilledMs = ms; // advance only on success → a failed write retries next fire
+                if (total >= config.FREE_TIER_FAL_USD) enforceCut(total);
+              } catch (err) {
+                // Fail-open: don't advance lastBilledMs; the delta is retried on
+                // the next onUsage fire. Never throw out of the relay callback.
+                request.log.warn(
+                  { userId, connId, streamId, err: (err as Error).message, event: 'fal_spend_record_failed' },
+                  'fal_spend_record_failed',
+                );
+              }
+            };
+            relay?.onUsage?.(() => void meterFalUsage());
+          }
         } else {
           const getOrProvisionStart = Date.now();
           const { podId, podUrl } = await getOrProvisionPod(userId, streamId);

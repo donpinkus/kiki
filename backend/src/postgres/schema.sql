@@ -18,3 +18,17 @@ CREATE TABLE IF NOT EXISTS users (
   created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at              TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Per-user, per-month fal image-generation spend (USD), for the free-tier cap.
+-- One row per (user, calendar month UTC); a new month is a fresh row reading 0,
+-- so the monthly reset is implicit. Incremented atomically as the relay reports
+-- connection-open time (~$0.00194/sec). Test accounts + subscribers are exempt
+-- from the cap but spend is still recorded for them only if a session runs the
+-- metering (exempt sessions skip it).
+CREATE TABLE IF NOT EXISTS monthly_usage (
+  user_id       UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+  month         TEXT NOT NULL,                       -- 'YYYY-MM' (UTC)
+  fal_spend_usd NUMERIC NOT NULL DEFAULT 0,
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, month)
+);
