@@ -45,23 +45,60 @@ enum PanelLayout {
     }
 }
 
+/// The moving "transparency hole" punched into the panel around the pencil
+/// while drawing. `center`/`radius` are in the panel's UNSCALED base coordinate
+/// space (the `.scaleEffect` is applied on top by SwiftUI). `isActive` false
+/// means no contact — the hole animates closed.
+struct PanelHole {
+    var center: CGPoint = .zero
+    var radius: CGFloat = 0
+    var isActive: Bool = false
+}
+
 /// Visual-only floating preview of the generated image. It never intercepts
 /// touches (`allowsHitTesting(false)` is applied at the call site) — a single
 /// finger / pencil draws straight through to the canvas, and two fingers over
 /// it are handled by the canvas container, which moves/scales it via
 /// `AppCoordinator.panelOffset` / `panelScale`. Renders the image only, with
 /// rounded corners + a drop shadow so it reads as floating above the canvas.
+///
+/// While drawing, a soft radial transparency hole follows the pencil so the
+/// user can see the canvas underneath. The hole state is read from the
+/// coordinator HERE (not in `DrawingView`), so the 120 Hz contact updates only
+/// re-render this leaf — never the whole drawing view.
 struct FloatingResultPanel: View {
+    @Environment(AppCoordinator.self) private var coordinator
     let image: UIImage
     let baseSize: CGSize
 
     var body: some View {
-        Image(uiImage: image)
+        let hole = coordinator.panelHole
+        let radius = hole.isActive ? hole.radius : 0
+        return Image(uiImage: image)
             .resizable()
             .interpolation(.high)
             .aspectRatio(contentMode: .fit)
             .frame(width: baseSize.width, height: baseSize.height)
             .clipShape(RoundedRectangle(cornerRadius: PanelLayout.cornerRadius, style: .continuous))
+            .mask(holeMask(center: hole.center, radius: radius))
+            // Shadow is outside the mask so the floating drop shadow is preserved.
             .shadow(color: .black.opacity(0.28), radius: 14, y: 6)
+    }
+
+    /// Opaque everywhere except a soft-edged circle at `center` (base coords),
+    /// which is punched out via `.destinationOut`. The blur gives the feathered
+    /// falloff. Radius 0 → no hole (fully opaque), so the panel is intact when
+    /// not drawing and during the fade-closed.
+    private func holeMask(center: CGPoint, radius: CGFloat) -> some View {
+        ZStack {
+            Rectangle().fill(Color.black)
+            Circle()
+                .fill(Color.black)
+                .frame(width: radius * 2, height: radius * 2)
+                .blur(radius: max(radius * 0.5, 0.5))
+                .position(center)
+                .blendMode(.destinationOut)
+        }
+        .compositingGroup()
     }
 }

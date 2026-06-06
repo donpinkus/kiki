@@ -166,6 +166,30 @@ final class AppCoordinator {
         panelScale = min(max(panelScale * scaleDelta, Self.minPanelScale), Self.maxPanelScale)
     }
 
+    /// The "transparency hole" punched into the fullscreen result panel around
+    /// the pencil while drawing. Center/radius are in the panel's UNSCALED base
+    /// coordinate space (the `.scaleEffect` is applied on top in SwiftUI). Only a
+    /// small leaf view reads this, so 120 Hz updates don't re-render DrawingView.
+    var panelHole = PanelHole()
+
+    /// Map a live pane-space contact point + brush diameter into the panel's
+    /// base coordinate space and open the hole. No-op (and closes the hole) when
+    /// the panel isn't shown.
+    func updatePanelHole(paneContact: CGPoint, diameter: CGFloat, paneSize: CGSize) {
+        guard drawingLayout == .fullscreen, let image = resultState.displayImage else {
+            panelHole.isActive = false
+            return
+        }
+        let rect = PanelLayout.rect(for: image, in: paneSize, offset: panelOffset, scale: panelScale)
+        let safeScale = max(panelScale, 0.01)
+        panelHole.center = CGPoint(
+            x: (paneContact.x - rect.minX) / safeScale,
+            y: (paneContact.y - rect.minY) / safeScale
+        )
+        panelHole.radius = (50 + diameter / 2) / safeScale
+        panelHole.isActive = true
+    }
+
     /// One-time NUX tooltip for QuickShape. Set true on first successful snap;
     /// DrawingView observes this and auto-clears it after 5s. AppStorage flag
     /// in DrawingView ensures we only show it once per device, ever.
@@ -174,7 +198,12 @@ final class AppCoordinator {
     // MARK: - Layout
 
     var drawingLayout: DrawingLayout = .splitScreen {
-        didSet { UserDefaults.standard.set(drawingLayout.rawValue, forKey: "drawingLayout") }
+        didSet {
+            UserDefaults.standard.set(drawingLayout.rawValue, forKey: "drawingLayout")
+            // Clear any in-flight panel hole so it can't linger across a layout
+            // switch (the panel only exists in fullscreen).
+            panelHole = PanelHole()
+        }
     }
 
     // MARK: - Modules
@@ -510,6 +539,7 @@ final class AppCoordinator {
         lastSuccessfulImage = nil
         panelOffset = .zero
         panelScale = 1.0
+        panelHole = PanelHole()
 
         canvasViewModel.setPendingState(nil)
 
@@ -546,6 +576,7 @@ final class AppCoordinator {
         }
         panelOffset = .zero
         panelScale = 1.0
+        panelHole = PanelHole()
 
         // Prepare canvas state
         canvasViewModel.setPendingState(CanvasState(

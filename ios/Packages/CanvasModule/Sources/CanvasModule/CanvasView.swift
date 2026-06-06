@@ -5,17 +5,20 @@ public struct CanvasView: UIViewRepresentable {
     private let drawingSurfaceSide: CGFloat
     private let externalTransformRegionProvider: (() -> CGRect?)?
     private let onExternalTransform: ((CGPoint, CGFloat) -> Void)?
+    private let onContactPointChanged: ((CGPoint?, CGFloat) -> Void)?
 
     public init(
         viewModel: CanvasViewModel,
         drawingSurfaceSide: CGFloat = 0,
         externalTransformRegionProvider: (() -> CGRect?)? = nil,
-        onExternalTransform: ((CGPoint, CGFloat) -> Void)? = nil
+        onExternalTransform: ((CGPoint, CGFloat) -> Void)? = nil,
+        onContactPointChanged: ((CGPoint?, CGFloat) -> Void)? = nil
     ) {
         self.viewModel = viewModel
         self.drawingSurfaceSide = drawingSurfaceSide
         self.externalTransformRegionProvider = externalTransformRegionProvider
         self.onExternalTransform = onExternalTransform
+        self.onContactPointChanged = onContactPointChanged
     }
 
     public func makeUIView(context: Context) -> RotatableCanvasContainer {
@@ -23,6 +26,7 @@ public struct CanvasView: UIViewRepresentable {
         container.drawingSurfaceSide = drawingSurfaceSide
         container.externalTransformRegionProvider = externalTransformRegionProvider
         container.onExternalTransform = onExternalTransform
+        container.onContactPointChanged = onContactPointChanged
         let canvasView = container.canvasView
         viewModel.attach(canvasView, container: container)
 
@@ -77,5 +81,6 @@ public struct CanvasView: UIViewRepresentable {
         // state on every SwiftUI update (makeUIView only runs once).
         uiView.externalTransformRegionProvider = externalTransformRegionProvider
         uiView.onExternalTransform = onExternalTransform
+        uiView.onContactPointChanged = onContactPointChanged
     }
 }

@@ -75,6 +75,22 @@ struct DrawingView: View {
                                 translationDelta: translationDelta,
                                 scaleDelta: scaleDelta
                             )
+                        },
+                        onContactPointChanged: { [weak coordinator] paneContact, diameter in
+                            // Drives the result-panel transparency hole. Immediate
+                            // while drawing; animated fade-closed on lift (nil).
+                            guard let coordinator else { return }
+                            if let paneContact {
+                                coordinator.updatePanelHole(
+                                    paneContact: paneContact,
+                                    diameter: diameter,
+                                    paneSize: geometry.size
+                                )
+                            } else {
+                                withAnimation(.easeOut(duration: 0.2)) {
+                                    coordinator.panelHole.isActive = false
+                                }
+                            }
                         }
                     )
                         .frame(width: canvasPaneWidth, height: geometry.size.height)

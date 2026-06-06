@@ -39,6 +39,15 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
     /// forwarded — the external overlay does not rotate.
     public var onExternalTransform: ((_ translationDelta: CGPoint, _ scaleDelta: CGFloat) -> Void)?
 
+    /// Reports the live single-touch drawing contact point (in this container's
+    /// coordinate space = pane/screen space, unaffected by canvas zoom/pan/rotate)
+    /// plus the current pressure-scaled brush diameter, every move. `paneLocation`
+    /// is `nil` when there is no active single-touch contact (lift / cancel /
+    /// multi-finger gesture) — the signal for the result-panel "transparency hole"
+    /// to fade closed. Piggybacks on the existing touch tracker; adds no work to
+    /// the Metal draw path.
+    public var onContactPointChanged: ((_ paneLocation: CGPoint?, _ brushDiameter: CGFloat) -> Void)?
+
     // MARK: - Private
 
     /// Intermediate view that receives the combined scale + rotation transform.
@@ -224,8 +233,18 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
             let diameter = cursorBaseWidth * pressureFactor * tiltFactor
             cursorView.bounds = CGRect(x: 0, y: 0, width: diameter, height: diameter)
             cursorView.setNeedsDisplay()
+
+            // Surface the live contact point to the result-panel hole effect, in
+            // container (pane/screen) space — independent of the canvas transform.
+            // Single-touch only: a two-finger transform should not open a hole.
+            if gesture.activeTouchCount <= 1 {
+                onContactPointChanged?(gesture.location(in: self), diameter)
+            } else {
+                onContactPointChanged?(nil, 0)
+            }
         case .ended, .cancelled:
             cursorView.isHidden = true
+            onContactPointChanged?(nil, 0)
         default:
             break
         }
