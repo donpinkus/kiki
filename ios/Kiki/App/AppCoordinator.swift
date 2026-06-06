@@ -82,10 +82,18 @@ final class AppCoordinator {
             applyTool()
         }
     }
+    /// Per-stamp deposit rate ("Flow"). Separate from opacity: flow controls
+    /// within-stroke build-up, opacity caps the whole stroke. See pro-brush-roadmap Phase 0.
+    var toolFlow: CGFloat = 1.0 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
 
     // MARK: - Per-tool stored settings
 
-    /// While true, toolSize / toolOpacity didSet should skip applyTool()
+    /// While true, toolSize / toolOpacity / toolFlow didSet should skip applyTool()
     /// (used when swapping values on a tool change).
     private var isSwappingToolValues = false
     private var storedToolSizes: [DrawingTool: CGFloat] = [
@@ -98,14 +106,21 @@ final class AppCoordinator {
         .eraser: 1.0,
         .lasso: 1.0
     ]
+    private var storedToolFlows: [DrawingTool: CGFloat] = [
+        .brush: 1.0,
+        .eraser: 1.0,
+        .lasso: 1.0
+    ]
 
     private func swapToolValues(from oldTool: DrawingTool, to newTool: DrawingTool) {
         guard oldTool != newTool else { return }
         storedToolSizes[oldTool] = toolSize
         storedToolOpacities[oldTool] = toolOpacity
+        storedToolFlows[oldTool] = toolFlow
         isSwappingToolValues = true
         toolSize = storedToolSizes[newTool] ?? toolSize
         toolOpacity = storedToolOpacities[newTool] ?? toolOpacity
+        toolFlow = storedToolFlows[newTool] ?? toolFlow
         isSwappingToolValues = false
     }
     var currentColor: Color = .black {
@@ -1182,6 +1197,7 @@ final class AppCoordinator {
                 color: currentColor.codable,
                 baseWidth: toolSize,
                 opacity: toolOpacity,
+                flow: toolFlow,
                 pressureGamma: 0.35,
                 tiltSensitivity: 1.0
             )

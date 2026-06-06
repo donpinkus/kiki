@@ -62,6 +62,15 @@ public final class CanvasRenderer {
     /// from stamp instances; conceptually memoryless between frames.
     private(set) var scratchTexture: MTLTexture?
 
+    /// Per-stroke opacity ceiling for the live render path — the on-screen preview
+    /// (`compositeToDrawable`) and the stroke-end flatten (`flattenScratchIntoCanvas`).
+    /// `MetalCanvasView` sets this immediately before each of those calls, so it's never
+    /// read stale (and only read at all when `stampCount > 0`). Stamp alpha carries the
+    /// brush's flow; this caps the whole stroke. Snapshot/export paths take an explicit
+    /// `strokeOpacity` parameter instead of reading this, so they don't depend on render
+    /// ordering. Layers and the lasso selection always composite at 1.0.
+    var activeStrokeOpacity: Float = 1.0
+
     /// Soft-circle brush mask (single-channel, R8Unorm). Quadratic falloff:
     /// α(r) = (1 − (r/R)²)², matching the plan's 5-stop gradient.
     private let brushMaskTexture: MTLTexture
@@ -331,7 +340,7 @@ public final class CanvasRenderer {
 
         enc.setRenderPipelineState(compositorPSO)
         enc.setFragmentTexture(scratch, index: 0)
-        var opacity: Float = 1.0
+        var opacity: Float = activeStrokeOpacity
         enc.setFragmentBytes(&opacity, length: MemoryLayout<Float>.size, index: 0)
         enc.setVertexBuffer(quadVertexBuffer, offset: 0, index: 0)
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
@@ -379,8 +388,9 @@ public final class CanvasRenderer {
 
     /// Render a batch of brush stamps directly into the canvas texture (source-over).
     /// Used for stroke replay during persistence restore — each saved stroke is
-    /// regenerated as stamps and committed in one pass.
-    func commitStampsToCanvas(_ stamps: [StampInstance]) {
+    /// regenerated as stamps and committed in one pass. `strokeOpacity` is the
+    /// per-stroke ceiling applied at flatten (stamp alpha carries the brush's flow).
+    func commitStampsToCanvas(_ stamps: [StampInstance], strokeOpacity: Float = 1.0) {
         guard let canvas = activeLayerTexture, !stamps.isEmpty else { return }
         guard let scratch = scratchTexture else { return }
         guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
@@ -418,7 +428,7 @@ public final class CanvasRenderer {
         if let enc = cmdBuf.makeRenderCommandEncoder(descriptor: flattenRPD) {
             enc.setRenderPipelineState(compositorPSO)
             enc.setFragmentTexture(scratch, index: 0)
-            var opacity: Float = 1.0
+            var opacity: Float = strokeOpacity
             enc.setFragmentBytes(&opacity, length: MemoryLayout<Float>.size, index: 0)
             enc.setVertexBuffer(quadVertexBuffer, offset: 0, index: 0)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
@@ -484,7 +494,9 @@ public final class CanvasRenderer {
     /// Read the flattened (all visible layers composited) canvas into a CGImage
     /// for stream capture, thumbnails, and single-image export. Includes the
     /// active stroke (scratch texture) so in-progress drawing is captured.
-    func flattenedCGImage() -> CGImage? {
+    /// `strokeOpacity` is the per-stroke ceiling applied to the in-progress scratch
+    /// (passed explicitly so the snapshot doesn't depend on mutable renderer state).
+    func flattenedCGImage(strokeOpacity: Float = 1.0) -> CGImage? {
         guard !layers.isEmpty else { return nil }
 
         // Render all visible layers into a temporary texture, interleaving
@@ -511,10 +523,11 @@ public final class CanvasRenderer {
             enc.setFragmentBytes(&opacity, length: MemoryLayout<Float>.size, index: 0)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
 
-            // Include in-progress stroke on the active layer.
+            // Include in-progress stroke on the active layer (capped at stroke opacity).
             if i == activeLayerIndex, stampCount > 0, let scratch = scratchTexture {
                 enc.setFragmentTexture(scratch, index: 0)
-                enc.setFragmentBytes(&opacity, length: MemoryLayout<Float>.size, index: 0)
+                var scratchOpacity: Float = strokeOpacity
+                enc.setFragmentBytes(&scratchOpacity, length: MemoryLayout<Float>.size, index: 0)
                 enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
             }
         }
@@ -539,7 +552,8 @@ public final class CanvasRenderer {
     /// Read the flattened canvas composited over an opaque background. This is
     /// used for gallery thumbnails and stream snapshots, where matching the
     /// Metal canvas' linear source-over blend matters more than preserving alpha.
-    func flattenedOpaqueCGImage(backgroundImage: CGImage?, maxPixelDimension: Int? = nil) -> CGImage? {
+    func flattenedOpaqueCGImage(backgroundImage: CGImage?, maxPixelDimension: Int? = nil,
+                                strokeOpacity: Float = 1.0) -> CGImage? {
         guard !layers.isEmpty else { return nil }
         guard let targetSize = snapshotTextureSize(maxPixelDimension: maxPixelDimension) else { return nil }
         guard let tempTexture = makeSnapshotTexture(width: targetSize.width, height: targetSize.height) else {
@@ -583,7 +597,8 @@ public final class CanvasRenderer {
 
             if i == activeLayerIndex, stampCount > 0, let scratch = scratchTexture {
                 enc.setFragmentTexture(scratch, index: 0)
-                enc.setFragmentBytes(&opacity, length: MemoryLayout<Float>.size, index: 0)
+                var scratchOpacity: Float = strokeOpacity
+                enc.setFragmentBytes(&scratchOpacity, length: MemoryLayout<Float>.size, index: 0)
                 enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
             }
         }
@@ -962,10 +977,12 @@ public final class CanvasRenderer {
             enc.setFragmentBytes(&opacity, length: MemoryLayout<Float>.size, index: 0)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
 
-            // Draw scratch (active stroke) on top of the active layer.
+            // Draw scratch (active stroke) on top of the active layer, capped at the
+            // per-stroke opacity ceiling (stamp alpha carries flow).
             if i == activeLayerIndex && stampCount > 0 {
                 enc.setFragmentTexture(scratch, index: 0)
-                enc.setFragmentBytes(&opacity, length: MemoryLayout<Float>.size, index: 0)
+                var scratchOpacity: Float = activeStrokeOpacity
+                enc.setFragmentBytes(&scratchOpacity, length: MemoryLayout<Float>.size, index: 0)
                 enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
             }
         }

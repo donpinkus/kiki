@@ -5,6 +5,7 @@ struct CanvasSidebar: View {
     @Environment(AppCoordinator.self) private var coordinator
     @State private var isDraggingSize = false
     @State private var isDraggingOpacity = false
+    @State private var isDraggingFlow = false
 
     private let widthRange = BrushConfig.widthRange
 
@@ -46,6 +47,29 @@ struct CanvasSidebar: View {
             .overlay(alignment: .trailing) {
                 if isDraggingOpacity {
                     Text("\(Int(coordinator.toolOpacity * 100))%")
+                        .font(.caption2.weight(.medium).monospacedDigit())
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 6))
+                        .offset(x: 50)
+                }
+            }
+            .disabled(coordinator.currentTool == .eraser)
+            .opacity(coordinator.currentTool == .eraser ? 0.3 : 1)
+
+            Divider().frame(width: 24)
+
+            // Flow slider (brush only) — per-stamp deposit; builds up within a
+            // stroke, capped by opacity. See pro-brush-roadmap Phase 0.
+            Slider(value: $coordinator.toolFlow, in: 0.05...1.0) { editing in
+                isDraggingFlow = editing
+            }
+            .frame(width: 100)
+            .rotationEffect(.degrees(-90))
+            .frame(width: 30, height: 100)
+            .overlay(alignment: .trailing) {
+                if isDraggingFlow {
+                    Text("\(Int(coordinator.toolFlow * 100))%")
                         .font(.caption2.weight(.medium).monospacedDigit())
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)

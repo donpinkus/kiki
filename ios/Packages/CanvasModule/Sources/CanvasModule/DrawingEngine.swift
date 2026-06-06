@@ -63,7 +63,14 @@ public struct CodableColor: Codable, Sendable, Equatable {
 public struct BrushConfig: Codable, Sendable {
     public var color: CodableColor
     public var baseWidth: CGFloat
+    /// Per-stroke opacity ceiling [0,1]. Applied once when the finished stroke is
+    /// composited onto the canvas — overlapping stamps within a single stroke never
+    /// exceed this. This is the "Glaze" rendering behavior (cf. `flow`).
     public var opacity: CGFloat
+    /// Per-stamp deposit rate [0,1] ("Flow"). Baked into each stamp's alpha, so
+    /// overlapping stamps within one stroke build up toward solid coverage. Distinct
+    /// from `opacity`: flow controls within-stroke build-up, opacity caps the stroke.
+    public var flow: CGFloat
     /// Pressure-to-width gamma curve. <1 = heavy feel (wider early), >1 = light feel (narrow early).
     public var pressureGamma: CGFloat
     /// How much Apple Pencil tilt widens the stroke (0 = none, 1 = dramatic).
@@ -73,12 +80,14 @@ public struct BrushConfig: Codable, Sendable {
         color: CodableColor,
         baseWidth: CGFloat,
         opacity: CGFloat = 1.0,
+        flow: CGFloat = 1.0,
         pressureGamma: CGFloat = 0.7,
         tiltSensitivity: CGFloat = 0.0
     ) {
         self.color = color
         self.baseWidth = baseWidth
         self.opacity = opacity
+        self.flow = flow
         self.pressureGamma = pressureGamma
         self.tiltSensitivity = tiltSensitivity
     }
@@ -101,7 +110,7 @@ public struct BrushConfig: Codable, Sendable {
     // MARK: - Backward-compatible Codable
 
     enum CodingKeys: String, CodingKey {
-        case color, baseWidth, opacity, pressureGamma, pressureOpacity
+        case color, baseWidth, opacity, flow, pressureGamma, pressureOpacity
         case streamline, taperIn, taperOut, tiltSensitivity
     }
 
@@ -111,6 +120,9 @@ public struct BrushConfig: Codable, Sendable {
         baseWidth = try container.decode(CGFloat.self, forKey: .baseWidth)
         pressureGamma = try container.decode(CGFloat.self, forKey: .pressureGamma)
         opacity = try container.decodeIfPresent(CGFloat.self, forKey: .opacity) ?? 1.0
+        // Default flow to 1.0 so configs saved before flow/opacity were split decode
+        // unchanged (old "opacity" was baked per-stamp ≈ flow=1.0 with the value as ceiling).
+        flow = try container.decodeIfPresent(CGFloat.self, forKey: .flow) ?? 1.0
         tiltSensitivity = try container.decodeIfPresent(CGFloat.self, forKey: .tiltSensitivity) ?? 0.0
         // Removed fields — decoded for backward compat with saved configs, not stored.
         _ = try container.decodeIfPresent(CGFloat.self, forKey: .pressureOpacity)
@@ -124,6 +136,7 @@ public struct BrushConfig: Codable, Sendable {
         try container.encode(color, forKey: .color)
         try container.encode(baseWidth, forKey: .baseWidth)
         try container.encode(opacity, forKey: .opacity)
+        try container.encode(flow, forKey: .flow)
         try container.encode(pressureGamma, forKey: .pressureGamma)
         try container.encode(tiltSensitivity, forKey: .tiltSensitivity)
     }

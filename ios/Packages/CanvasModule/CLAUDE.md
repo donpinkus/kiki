@@ -107,9 +107,9 @@ MetalCanvasView (UIView, CAMetalLayer)
 ### Brush rendering flow
 1. Touch points → `StrokePoint` array (pressure, altitude, position)
 2. Arc-length resample with **adaptive spacing** (`max(effectiveWidth × 0.3, 0.5)`)
-3. Per-stamp: `StampInstance` (center, radius, rotation, premultiplied color)
-4. All stamps → shared `MTLBuffer` → single instanced draw call into scratch texture
-5. On touchesEnded: flatten scratch into active layer (source-over)
+3. Per-stamp: `StampInstance` (center, radius, rotation, premultiplied color). **Stamp alpha = the brush's `flow`** (per-stamp deposit), NOT opacity — so overlapping stamps build up *within* a stroke.
+4. All stamps → shared `MTLBuffer` → single instanced draw call into scratch texture (premultiplied source-over; the scratch holds the whole stroke in isolation, saturating toward alpha 1)
+5. On touchesEnded: flatten scratch into active layer, scaling the whole scratch by the brush's **per-stroke `opacity` ceiling** (`compositorFragment` `color * opacity`). This two-stage flow/opacity split ("Glaze") is why a sub-100% stroke that crosses itself stays flat instead of stacking. Live preview (`compositeToDrawable`) and snapshot/export paths apply the same ceiling — the former via `CanvasRenderer.activeStrokeOpacity`, the latter via an explicit `strokeOpacity:` parameter. See `documents/plans/pro-brush-roadmap.md` Phase 0.
 
 ### Eraser flow (different from brush)
 - Stamps applied **directly to active layer texture** per touchesMoved (not via scratch)

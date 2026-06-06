@@ -349,6 +349,7 @@ public final class MetalCanvasView: UIView {
         let isErasing: Bool
         if case .eraser = currentTool { isErasing = true } else { isErasing = false }
 
+        renderer.activeStrokeOpacity = currentStrokeOpacity()
         renderer.renderFrame(drawable: drawable, isErasing: isErasing)
     }
 
@@ -884,6 +885,7 @@ public final class MetalCanvasView: UIView {
         for stamp in activeStrokeStamps {
             renderer.appendStamp(stamp)
         }
+        renderer.activeStrokeOpacity = Float(stroke.brush.opacity)
         renderer.flattenScratchIntoCanvas()
 
         strokeCount += 1
@@ -907,6 +909,7 @@ public final class MetalCanvasView: UIView {
         for stamp in activeStrokeStamps {
             renderer.appendStamp(stamp)
         }
+        renderer.activeStrokeOpacity = currentStrokeOpacity()
         renderer.flattenScratchIntoCanvas()
         strokeCount += 1
         onDrawingChanged?()
@@ -2064,7 +2067,7 @@ public final class MetalCanvasView: UIView {
     /// Export the canvas as a single flattened PNG (used by stream capture).
     public func exportStrokeData() -> Data? {
         guard strokeCount > 0 else { return nil }
-        guard let cgImage = renderer.flattenedCGImage() else { return nil }
+        guard let cgImage = renderer.flattenedCGImage(strokeOpacity: currentStrokeOpacity()) else { return nil }
         return UIImage(cgImage: cgImage).pngData()
     }
 
@@ -2109,7 +2112,7 @@ public final class MetalCanvasView: UIView {
             for stroke in savedStrokes {
                 let stamps = generateStampsForStroke(stroke, scale: scale)
                 if !stamps.isEmpty {
-                    renderer.commitStampsToCanvas(stamps)
+                    renderer.commitStampsToCanvas(stamps, strokeOpacity: Float(stroke.brush.opacity))
                 }
             }
             strokeCount = savedStrokes.count
@@ -2256,7 +2259,7 @@ public final class MetalCanvasView: UIView {
     /// Read-only access to the flattened canvas (all visible layers) as a CGImage
     /// for snapshots, thumbnails, and stream capture.
     public var persistentImageSnapshot: CGImage? {
-        renderer.flattenedCGImage()
+        renderer.flattenedCGImage(strokeOpacity: currentStrokeOpacity())
     }
 
     /// Read-only access to the canvas composited over an opaque background using
@@ -2264,7 +2267,8 @@ public final class MetalCanvasView: UIView {
     public func opaqueImageSnapshot(backgroundImage: UIImage?, maxPixelDimension: Int? = nil) -> UIImage? {
         let cgImage = renderer.flattenedOpaqueCGImage(
             backgroundImage: backgroundImage?.cgImage,
-            maxPixelDimension: maxPixelDimension
+            maxPixelDimension: maxPixelDimension,
+            strokeOpacity: currentStrokeOpacity()
         )
         guard let cgImage else { return nil }
         return UIImage(cgImage: cgImage, scale: canvasScale, orientation: .up)
@@ -2292,12 +2296,27 @@ public final class MetalCanvasView: UIView {
         window?.screen.scale ?? UIScreen.main.scale
     }
 
+    /// Premultiplied stamp color. Alpha is the brush's **flow** (per-stamp deposit) —
+    /// NOT opacity. The per-stroke opacity ceiling is applied separately when the
+    /// scratch (active stroke) is composited onto the canvas (see `currentStrokeOpacity`
+    /// + `CanvasRenderer.activeStrokeOpacity`). This split is what lets a 30%-opacity
+    /// stroke that crosses itself stay 30% instead of stacking to opaque.
     private func premultipliedColor(_ brush: BrushConfig) -> SIMD4<Float> {
         let r = Float(brush.color.red)
         let g = Float(brush.color.green)
         let b = Float(brush.color.blue)
-        let a = Float(brush.opacity)
+        let a = Float(brush.flow)
         return SIMD4<Float>(r * a, g * a, b * a, a)
+    }
+
+    /// Per-stroke opacity ceiling for the stroke currently being drawn/committed,
+    /// applied when the scratch is composited onto the canvas. For the eraser this is
+    /// effectively unused: the eraser writes directly to the canvas and leaves the
+    /// scratch empty (`stampCount == 0`), and its brush opacity defaults to 1.0 anyway.
+    private func currentStrokeOpacity() -> Float {
+        if let brush = activeStroke?.brush { return Float(brush.opacity) }
+        if case .brush(let config) = currentTool { return Float(config.opacity) }
+        return 1.0
     }
 
     private func makeStrokePoint(from touch: UITouch) -> StrokePoint {
