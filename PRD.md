@@ -1,6 +1,6 @@
 # Product Requirements Document — iPad Sketch-to-Image Application
 
-> **⚠️ PARTIALLY STALE.** Provider references, latency numbers, and cost models are outdated — the inference provider changed several times since this was written, and the live image path is now fal.ai's hosted FLUX.2-klein realtime (RunPod image is a dormant fallback; video idle-state stays on RunPod). See `CLAUDE.md` and `documents/decisions.md` (2026-06-06). Product vision, UX spec, and App Store requirements remain valid. For current implementation, read the code and `CLAUDE.md`.
+> **⚠️ PARTIALLY STALE.** Provider references, latency numbers, and cost models are outdated — the inference provider changed several times since this was written, and the live image path is now fal.ai's hosted FLUX.2-klein realtime (RunPod image is a dormant fallback; video idle-state stays on RunPod). See `CLAUDE.md` and `documents/decisions.md` (2026-06-06). **The pricing/business model (the $9.99 Plus / $19.99 Pro tiers, daily generation limits) is also superseded:** the current model is a per-user **$10/month fal drawing-spend cap** for unsubscribed users (test accounts exempt), and the Apple subscription purchase flow isn't built yet. Product vision, UX spec, and App Store requirements remain valid. For current implementation, read the code and `CLAUDE.md`.
 
 > **Version 2.0 — March 2026** | Status: Final Draft for Engineering Review | Confidential — Internal Use Only
 

@@ -7,7 +7,7 @@ Current status: Phase 1 prototype.
 ## Architecture
 
 - `ios/` contains the SwiftUI app and local Swift packages for canvas, networking, and result display.
-- `backend/` contains the Fastify API, WebSocket relay, and per-session pod orchestrator.
+- `backend/` contains the Fastify API, WebSocket relay, per-session pod orchestrator, and a Postgres-backed account store (user accounts + monthly fal-spend ledger).
 - `model-servers/` contains the Python WebSocket server that runs inside the provisioned GPU pod.
 - `documents/` contains implementation decisions, provider references, safety requirements, and roadmap material.
 
@@ -85,7 +85,7 @@ python3 model-servers/dev/image_client.py --help
 
 ## Known Limitations
 
-- Backend authentication is still mock-only.
+- Auth is Sign in with Apple → JWT, with durable accounts in Postgres. The Apple in-app *subscription purchase* (StoreKit) isn't built yet — unsubscribed users hit a $10/month fal-spend cap and are blocked with a "subscribe" message; flagged test accounts are unlimited.
 - The live (fal.ai) image path reaches its first frame in ~1.5s. The dormant RunPod image fallback and the RunPod video idle-state pod still cold-start in ~1–3 min (pod setup + model warmup during provisioning).
 - Safety/compliance items called out in `CLAUDE.md` and `documents/references/content-safety.md` are not fully implemented yet.
 - Some planning docs remain useful context but are partially stale; trust the code and `CLAUDE.md` first.

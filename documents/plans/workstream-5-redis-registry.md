@@ -2,6 +2,8 @@
 
 Part of the [scale-to-100-users roadmap](./scale-to-100-users.md). Replace the in-memory `Map<sessionId, Session>` with Redis so backend deploys no longer drop active sessions and we can horizontally scale later.
 
+> **Note (2026-06-06):** The session registry is still Redis, as designed here. Separately, **user accounts** moved to **Postgres** (the `users` table) — so any reference below to the user store "graduating to Redis" is superseded; only the per-session pod state lives in Redis. See `documents/decisions.md` (2026-06-06).
+
 ## 1. Context
 
 Today's orchestrator keeps the entire session registry in a single `Map<string, Session>` in `backend/src/modules/orchestrator/orchestrator.ts`. Fine for ~20–50 users on one Railway instance, but two concrete failure modes at 100 concurrent users:

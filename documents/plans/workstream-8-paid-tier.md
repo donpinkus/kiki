@@ -2,6 +2,8 @@
 
 Part of the [scale-to-100-users roadmap](./scale-to-100-users.md). **Stub plan** — surfaced during the open-questions pass on the other seven workstreams. Full plan to be drafted when this workstream is prioritized for implementation.
 
+> **⚠️ UPDATE (2026-06-06): partially landed.** The cost guardrail shipped as a per-user **$10/month fal-spend cap** (`FREE_TIER_FAL_USD`; Postgres `monthly_usage`; test accounts + active subscribers exempt) on top of the new Postgres `users` table (which already has `subscription_status` / `subscription_expires_at`). **Still to do for this workstream:** the actual Apple **StoreKit/IAP purchase flow + paywall UI + App Store Server Notification webhooks** to flip `subscription_status='active'`. The "GPU-seconds ledger → Redis" design below is obsolete (the ledger is fal-spend in Postgres). See `documents/decisions.md` (2026-06-06).
+
 ## 1. Context
 
 Product decision made during scale-to-100 planning: **users get 1 free hour of GPU time, then must subscribe to `Kiki+` at $5/month** to continue generating. This closes the uncapped-free-usage threat that made Workstream 1's per-user quotas critical, and provides the revenue stream that funds the $5k/mo GPU budget.

@@ -2,6 +2,8 @@
 
 Part of the [scale-to-100-users roadmap](./scale-to-100-users.md).
 
+> **⚠️ UPDATE (2026-06-06):** Shipped, but the storage + entitlement design below is superseded. User accounts now live in **Postgres** (`users` table via `routes/auth.ts` → `postgres/users.ts`), not an in-memory map; sign-in requests the Apple `.email` scope. The "free GPU-seconds" entitlement (`checkEntitlement` / `FREE_TIER_SECONDS`) was **removed** and replaced by a per-user **$10/month fal-spend cap** (`falBudget` + the `monthly_usage` table) — test accounts + active subscribers exempt. See `documents/decisions.md` (2026-06-06).
+
 ## 1. Context
 
 Kiki today ships a `?session=<uuid>` query-param "session identity" generated on first launch in `UserDefaults` and stored unauthenticated. Anyone who observes or guesses a UUID can open a WebSocket to `/v1/stream` and cause the backend to rent a ~$0.55/hr RTX 5090 pod for up to 10 minutes after the last frame. The roadmap names this as blocker #1 for scaling to 100 concurrent users: it is both a cost-containment problem (unauthenticated GPU vouchers) and a TestFlight gating problem (the App Store age gate per guideline 1.2.1(a) and AI-disclosure consent per 5.1.2(i) called out in `CLAUDE.md` both presuppose a stable user identity, not a per-install UUID). Authentication is sequenced first because every other workstream (cost monitoring, rate limits, Redis registry, per-user quotas) needs a `userId` that the backend trusts.

@@ -54,7 +54,7 @@ struct SignInView: View {
                         .padding(.horizontal, 40)
                 }
 
-                Text("Sign in to start drawing. You get 1 free hour, then $5/month.")
+                Text("Sign in to start drawing.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
