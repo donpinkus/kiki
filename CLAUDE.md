@@ -241,6 +241,7 @@ Reading the patterns — *interpretation guide, not proof of cause*. A given que
 | Cost monitoring, Discord alerts, pod lifecycle threads | `backend/src/modules/orchestrator/costMonitor.ts` |
 | Scale-to-100-users roadmap + workstream status | `documents/plans/scale-to-100-users.md` |
 | Metal canvas architecture plan (layers, smudge, etc.) | `documents/plans/metal-canvas-rewrite.md` |
+| Pro-brush roadmap (flow/opacity → stabilization → stamps → wet/oil paint; Procreate parity) | `documents/plans/pro-brush-roadmap.md` |
 | FLUX.2-klein capability notebook (potential features, not committed) | `documents/ideas/flux-klein-capabilities.md` |
 | Implementation decisions log | `documents/decisions.md` |
 | Removed features (ComfyUI, StreamDiffusion) | `documents/removed-features.md` |
