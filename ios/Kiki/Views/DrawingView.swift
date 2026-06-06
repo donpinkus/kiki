@@ -128,12 +128,6 @@ struct DrawingView: View {
                             onSwapStreamToCanvas: { coordinator.swapStreamImageToCanvas() },
                             onColorPicked: { coordinator.currentColor = $0 }
                         )
-                        .overlay(alignment: .bottomLeading) {
-                            if case .ready = coordinator.streamReadiness {
-                                connectionStatusIndicator
-                                    .padding(8)
-                            }
-                        }
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
                         .padding(16)
                         .zIndex(2)
@@ -189,12 +183,6 @@ struct DrawingView: View {
             .overlay(alignment: .top) {
                 PromptTitleBar()
             }
-            .overlay(alignment: .bottomLeading) {
-                if case .ready = coordinator.streamReadiness {
-                    connectionStatusIndicator
-                        .padding(12)
-                }
-            }
             .overlay(alignment: .bottomTrailing) {
                 if coordinator.canSwapStreamImageToCanvas {
                     streamSwapBar
@@ -214,22 +202,6 @@ struct DrawingView: View {
     }
 
     // MARK: - Private
-
-    /// Bottom-left badge shown only while connected (`.ready`). Every other
-    /// readiness state surfaces through the result-pane overlay instead.
-    private var connectionStatusIndicator: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(.green)
-                .frame(width: 7, height: 7)
-            Text("Streaming · frame \(coordinator.streamFrameCount)")
-                .font(.caption.weight(.medium))
-        }
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        .background(.ultraThinMaterial, in: Capsule())
-    }
 
     private var streamSwapBar: some View {
         Button {
