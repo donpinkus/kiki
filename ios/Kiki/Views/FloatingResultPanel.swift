@@ -2,261 +2,66 @@ import SwiftUI
 import UIKit
 import ResultModule
 
-struct FloatingResultPanel: View {
-    let resultState: ResultState
-    let canSwapStream: Bool
-    let containerSize: CGSize
-    let currentBrushColor: Color
-    let onSwapStreamToCanvas: () -> Void
-    let onColorPicked: ((Color) -> Void)?
+/// Geometry for the fullscreen floating result panel. Shared between the
+/// visual rendering (in `DrawingView`) and the canvas container's hit-region
+/// test, so the rect the canvas treats as "the panel" always matches what the
+/// user sees. The panel sits at the top-trailing corner of the drawing pane
+/// (inset by `edgeInset`), sized to the image's aspect ratio, then translated
+/// by `offset` and uniformly scaled by `scale` about its center.
+enum PanelLayout {
+    /// Inset from the pane edges for the panel's default position. Must match
+    /// the `.padding(...)` applied to the panel view in `DrawingView`.
+    static let edgeInset: CGFloat = 16
+    static let cornerRadius: CGFloat = 12
 
-    @State private var position: CGPoint = .zero
-    @State private var size: CGSize?
-    @State private var dragOffset: CGSize = .zero
-    @State private var resizeOffset: CGSize = .zero
-
-    @State private var isPickingColor = false
-    @State private var pickLocation: CGPoint = .zero
-    @State private var sampledColor: Color = .white
-    @State private var holdTimer: Task<Void, Never>?
-    @State private var dragStart: CGPoint = .zero
-
-    private let minSize = CGSize(width: 200, height: 160)
-
-    private var resolvedSize: CGSize {
-        size ?? CGSize(width: containerSize.width * 0.45, height: containerSize.height * 0.55)
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            // Header — drag handle (drag to move; the panel never closes)
-            HStack {
-                Image(systemName: "line.3.horizontal")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .contentShape(Rectangle())
-            .gesture(
-                // `.global` for the same reason as the resize handle below: this
-                // panel is moved by `.offset(position + dragOffset)`, so a default
-                // `.local` DragGesture measures translation relative to the panel
-                // it's itself moving — each frame's offset feeds back into the next
-                // translation, producing a diverging oscillation (confirmed via
-                // instrumentation: two interleaved translation tracks that widen as
-                // the drag progresses). `.global` measures the raw finger delta.
-                DragGesture(coordinateSpace: .global)
-                    .onChanged { value in
-                        dragOffset = value.translation
-                    }
-                    .onEnded { value in
-                        position.x += value.translation.width
-                        position.y += value.translation.height
-                        dragOffset = .zero
-                    }
-            )
-
-            // Image
-            imageContent
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .clipped()
-
-            // Footer
-            footer
+    /// The panel's unscaled size: the image fitted (aspect-preserved) into a
+    /// fraction of the pane.
+    static func baseSize(for image: UIImage, in pane: CGSize) -> CGSize {
+        let maxW = pane.width * 0.42
+        let maxH = pane.height * 0.55
+        let aspect = image.size.width / max(image.size.height, 1)
+        var w = maxW
+        var h = w / max(aspect, 0.01)
+        if h > maxH {
+            h = maxH
+            w = h * aspect
         }
-        .frame(width: effectiveSize.width, height: effectiveSize.height)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
-        .shadow(color: .black.opacity(0.2), radius: 12, y: 4)
-        .offset(x: position.x + dragOffset.width, y: position.y + dragOffset.height)
+        return CGSize(width: max(w, 1), height: max(h, 1))
     }
 
-    // MARK: - Image Content
-
-    @ViewBuilder
-    private var imageContent: some View {
-        switch resultState {
-        case .preview(let image), .streaming(let image, _):
-            pickableImage(image).padding(4)
-
-        case .generating(_, let previousImage):
-            ZStack {
-                if let prev = previousImage {
-                    pickableImage(prev).opacity(0.5)
-                }
-                ProgressView()
-                    .controlSize(.regular)
-            }
-            .padding(4)
-
-        case .provisioning:
-            ZStack {
-                Color(.systemGray6)
-                ProgressView()
-                    .controlSize(.regular)
-            }
-
-        case .idleTimeout:
-            // Floating panel mirrors split-screen "Session paused" treatment
-            // but in a simpler form — the larger right-pane overlay is the
-            // primary affordance for resume; this is just a status hint.
-            ZStack {
-                Color(.systemGray6)
-                VStack(spacing: 8) {
-                    Image(systemName: "moon.zzz.fill")
-                        .font(.system(size: 28))
-                        .foregroundStyle(.secondary)
-                    Text("Session paused")
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-        case .error(_, let previousImage):
-            if let prev = previousImage {
-                pickableImage(prev).padding(4)
-            } else {
-                Color(.systemGray6)
-            }
-
-        case .videoStreaming(let latestFrame, _):
-            // Floating panel stays a still — no AVPlayerLayer here. The
-            // streamed frame already shows motion progress; falling back
-            // to the fallback if anything fails is handled by the right-pane
-            // ResultView.
-            pickableImage(latestFrame).padding(4)
-
-        case .videoLooping(_, let fallback):
-            pickableImage(fallback).padding(4)
-
-        case .empty:
-            Color(.systemGray6)
-        }
-    }
-
-    private func pickableImage(_ image: UIImage) -> some View {
-        Image(uiImage: image)
-            .resizable()
-            .aspectRatio(contentMode: .fit)
-            .overlay(
-                GeometryReader { proxy in
-                    ZStack {
-                        Color.clear
-                            .contentShape(Rectangle())
-                            .gesture(eyedropperGesture(image: image, size: proxy.size))
-
-                        if isPickingColor {
-                            EyedropperRing(sampledColor: sampledColor, brushColor: currentBrushColor)
-                                .position(x: pickLocation.x, y: pickLocation.y - EyedropperRing.offset)
-                        }
-                    }
-                }
-            )
-    }
-
-    // MARK: - Eyedropper
-
-    private func eyedropperGesture(image: UIImage, size: CGSize) -> some Gesture {
-        DragGesture(minimumDistance: 0, coordinateSpace: .local)
-            .onChanged { drag in
-                if !isPickingColor {
-                    if holdTimer == nil {
-                        dragStart = drag.location
-                        holdTimer = Task { @MainActor in
-                            try? await Task.sleep(for: .milliseconds(300))
-                            guard !Task.isCancelled else { return }
-                            isPickingColor = true
-                            updateSample(at: dragStart, image: image, size: size)
-                        }
-                    }
-                    let dx = drag.location.x - dragStart.x
-                    let dy = drag.location.y - dragStart.y
-                    if dx * dx + dy * dy > 100 {
-                        holdTimer?.cancel()
-                        holdTimer = nil
-                    }
-                } else {
-                    updateSample(at: drag.location, image: image, size: size)
-                }
-            }
-            .onEnded { _ in
-                holdTimer?.cancel()
-                holdTimer = nil
-                if isPickingColor {
-                    onColorPicked?(sampledColor)
-                    isPickingColor = false
-                }
-            }
-    }
-
-    private func updateSample(at location: CGPoint, image: UIImage, size: CGSize) {
-        pickLocation = location
-        let samplePoint = CGPoint(x: location.x, y: location.y - EyedropperRing.offset)
-        if let color = EyedropperRing.sampleColor(from: image, at: samplePoint, in: size) {
-            sampledColor = color
-        }
-    }
-
-    // MARK: - Footer
-
-    private var footer: some View {
-        HStack(spacing: 8) {
-            if canSwapStream {
-                Button(action: onSwapStreamToCanvas) {
-                    Text("Send to canvas")
-                        .font(.caption)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.mini)
-            }
-
-            Spacer()
-
-            // Resize handle
-            Image(systemName: "arrow.up.left.and.arrow.down.right")
-                .font(.system(size: 10))
-                .foregroundStyle(.secondary)
-                .frame(width: 20, height: 20)
-                .contentShape(Rectangle())
-                .gesture(
-                    // `.global` coordinate space is load-bearing: the resize handle
-                    // sits at the panel's bottom-right and moves downward as the panel
-                    // grows in height. A default `.local` DragGesture measures
-                    // translation relative to that moving handle, so each height
-                    // increment shifts the origin and the next translation feeds back —
-                    // producing a vertical oscillation (confirmed via instrumentation:
-                    // clean width, two-track wobbling height). `.global` measures the
-                    // raw finger delta, immune to the panel's own size changes.
-                    DragGesture(coordinateSpace: .global)
-                        .onChanged { value in
-                            resizeOffset = value.translation
-                        }
-                        .onEnded { value in
-                            let base = resolvedSize
-                            size = CGSize(
-                                width: max(minSize.width, base.width + value.translation.width),
-                                height: max(minSize.height, base.height + value.translation.height)
-                            )
-                            resizeOffset = .zero
-                        }
-                )
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-    }
-
-    // MARK: - Computed
-
-    private var effectiveSize: CGSize {
-        let maxWidth = containerSize.width * 0.8
-        let maxHeight = containerSize.height * 0.8
-        let base = resolvedSize
-        return CGSize(
-            width: min(maxWidth, max(minSize.width, base.width + resizeOffset.width)),
-            height: min(maxHeight, max(minSize.height, base.height + resizeOffset.height))
-        )
+    /// The panel's current on-screen rect in pane coordinates, accounting for
+    /// the user's accumulated translation and scale. Mirrors the SwiftUI layout
+    /// (`.scaleEffect` about center + `.offset`, positioned top-trailing inside
+    /// the `edgeInset` padding).
+    static func rect(for image: UIImage, in pane: CGSize, offset: CGSize, scale: CGFloat) -> CGRect {
+        let base = baseSize(for: image, in: pane)
+        let baseCenterX = pane.width - edgeInset - base.width / 2
+        let baseCenterY = edgeInset + base.height / 2
+        let centerX = baseCenterX + offset.width
+        let centerY = baseCenterY + offset.height
+        let w = base.width * scale
+        let h = base.height * scale
+        return CGRect(x: centerX - w / 2, y: centerY - h / 2, width: w, height: h)
     }
 }
 
-// MARK: - Color Picker Ring
+/// Visual-only floating preview of the generated image. It never intercepts
+/// touches (`allowsHitTesting(false)` is applied at the call site) — a single
+/// finger / pencil draws straight through to the canvas, and two fingers over
+/// it are handled by the canvas container, which moves/scales it via
+/// `AppCoordinator.panelOffset` / `panelScale`. Renders the image only, with
+/// rounded corners + a drop shadow so it reads as floating above the canvas.
+struct FloatingResultPanel: View {
+    let image: UIImage
+    let baseSize: CGSize
+
+    var body: some View {
+        Image(uiImage: image)
+            .resizable()
+            .interpolation(.high)
+            .aspectRatio(contentMode: .fit)
+            .frame(width: baseSize.width, height: baseSize.height)
+            .clipShape(RoundedRectangle(cornerRadius: PanelLayout.cornerRadius, style: .continuous))
+            .shadow(color: .black.opacity(0.28), radius: 14, y: 6)
+    }
+}

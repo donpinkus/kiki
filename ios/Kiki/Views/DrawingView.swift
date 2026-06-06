@@ -52,7 +52,30 @@ struct DrawingView: View {
                     : geometry.size.width
 
                 ZStack(alignment: .topLeading) {
-                    CanvasView(viewModel: coordinator.canvasViewModel, drawingSurfaceSide: canvasSide)
+                    CanvasView(
+                        viewModel: coordinator.canvasViewModel,
+                        drawingSurfaceSide: canvasSide,
+                        externalTransformRegionProvider: { [weak coordinator] in
+                            // Two-finger gestures over the floating panel's rect
+                            // move/scale it instead of the canvas. nil = no panel
+                            // (split screen, or no image yet) → canvas behaves normally.
+                            guard let coordinator,
+                                  coordinator.drawingLayout == .fullscreen,
+                                  let image = coordinator.resultState.displayImage else { return nil }
+                            return PanelLayout.rect(
+                                for: image,
+                                in: geometry.size,
+                                offset: coordinator.panelOffset,
+                                scale: coordinator.panelScale
+                            )
+                        },
+                        onExternalTransform: { [weak coordinator] translationDelta, scaleDelta in
+                            coordinator?.applyPanelTransform(
+                                translationDelta: translationDelta,
+                                scaleDelta: scaleDelta
+                            )
+                        }
+                    )
                         .frame(width: canvasPaneWidth, height: geometry.size.height)
                         .frame(
                             maxWidth: .infinity,
@@ -111,25 +134,22 @@ struct DrawingView: View {
                     if coordinator.drawingLayout == .splitScreen {
                         splitScreenResultPane(geometry: geometry)
                             .zIndex(2)
-                    } else {
-                        // Fullscreen: the result panel is always present and
-                        // never auto-hides. Plain SwiftUI overlay — a touch that
-                        // originates on the panel is routed by SwiftUI to its
-                        // drag/resize/eyedropper gestures, while touches on the
-                        // surrounding empty area fall through to the canvas. A
-                        // stroke already in progress (begun on the canvas) keeps
-                        // drawing straight through the panel, since UIKit fixes
-                        // touch ownership at touch-began and never re-hit-tests.
+                    } else if let image = coordinator.resultState.displayImage {
+                        // Fullscreen: image-only floating preview, sized to the
+                        // image's aspect ratio. Visual-only (allowsHitTesting
+                        // false) — a single finger / pencil draws straight through
+                        // it onto the canvas; two fingers over it move/scale it
+                        // (handled by the canvas container, which drives
+                        // panelOffset/panelScale). No buttons, no glass chrome.
                         FloatingResultPanel(
-                            resultState: coordinator.resultState,
-                            canSwapStream: coordinator.canSwapStreamImageToCanvas,
-                            containerSize: geometry.size,
-                            currentBrushColor: coordinator.currentColor,
-                            onSwapStreamToCanvas: { coordinator.swapStreamImageToCanvas() },
-                            onColorPicked: { coordinator.currentColor = $0 }
+                            image: image,
+                            baseSize: PanelLayout.baseSize(for: image, in: geometry.size)
                         )
+                        .scaleEffect(coordinator.panelScale)
+                        .offset(coordinator.panelOffset)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-                        .padding(16)
+                        .padding(PanelLayout.edgeInset)
+                        .allowsHitTesting(false)
                         .zIndex(2)
                     }
                 }

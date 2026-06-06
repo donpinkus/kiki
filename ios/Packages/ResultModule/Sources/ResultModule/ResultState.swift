@@ -80,4 +80,30 @@ public enum ResultState {
         default: return false
         }
     }
+
+    /// The still image to display for this state, if any. Used by the
+    /// fullscreen floating panel, which renders image-only (no progress
+    /// chrome) and therefore shows nothing when this is `nil`.
+    public var displayImage: UIImage? {
+        switch self {
+        case .empty:
+            return nil
+        case .provisioning(_, _, let previousImage):
+            return previousImage
+        case .generating(_, let previousImage):
+            return previousImage
+        case .preview(let image):
+            return image
+        case .streaming(let image, _):
+            return image
+        case .error(_, let previousImage):
+            return previousImage
+        case .idleTimeout(let previousImage):
+            return previousImage
+        case .videoStreaming(let latestFrame, _):
+            return latestFrame
+        case .videoLooping(_, let fallback):
+            return fallback
+        }
+    }
 }

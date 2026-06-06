@@ -3,15 +3,26 @@ import SwiftUI
 public struct CanvasView: UIViewRepresentable {
     private let viewModel: CanvasViewModel
     private let drawingSurfaceSide: CGFloat
+    private let externalTransformRegionProvider: (() -> CGRect?)?
+    private let onExternalTransform: ((CGPoint, CGFloat) -> Void)?
 
-    public init(viewModel: CanvasViewModel, drawingSurfaceSide: CGFloat = 0) {
+    public init(
+        viewModel: CanvasViewModel,
+        drawingSurfaceSide: CGFloat = 0,
+        externalTransformRegionProvider: (() -> CGRect?)? = nil,
+        onExternalTransform: ((CGPoint, CGFloat) -> Void)? = nil
+    ) {
         self.viewModel = viewModel
         self.drawingSurfaceSide = drawingSurfaceSide
+        self.externalTransformRegionProvider = externalTransformRegionProvider
+        self.onExternalTransform = onExternalTransform
     }
 
     public func makeUIView(context: Context) -> RotatableCanvasContainer {
         let container = RotatableCanvasContainer()
         container.drawingSurfaceSide = drawingSurfaceSide
+        container.externalTransformRegionProvider = externalTransformRegionProvider
+        container.onExternalTransform = onExternalTransform
         let canvasView = container.canvasView
         viewModel.attach(canvasView, container: container)
 
@@ -62,5 +73,9 @@ public struct CanvasView: UIViewRepresentable {
 
     public func updateUIView(_ uiView: RotatableCanvasContainer, context: Context) {
         uiView.drawingSurfaceSide = drawingSurfaceSide
+        // Re-apply closures so they capture the latest geometry / coordinator
+        // state on every SwiftUI update (makeUIView only runs once).
+        uiView.externalTransformRegionProvider = externalTransformRegionProvider
+        uiView.onExternalTransform = onExternalTransform
     }
 }

@@ -25,6 +25,20 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
     /// Callback to supply the current brush color as the "previous" color on the ring.
     public var currentBrushColorProvider: (() -> UIColor)?
 
+    /// Optional rect (in this container's coordinate space) of an external
+    /// floating overlay (e.g. the result panel) that should receive two-finger
+    /// pan/pinch instead of the canvas. When a two-finger gesture's centroid
+    /// falls inside this rect, the canvas's own transform gestures stand down
+    /// and the deltas are forwarded via `onExternalTransform`. Single-finger /
+    /// pencil touches are never affected — they always fall through to drawing.
+    /// Returns `nil` when there is no such overlay (canvas behaves normally).
+    public var externalTransformRegionProvider: (() -> CGRect?)?
+    /// Receives incremental two-finger transform deltas when a gesture begins
+    /// over the external region. `translationDelta` is in container points;
+    /// `scaleDelta` is multiplicative (1.0 = no change). Rotation is never
+    /// forwarded — the external overlay does not rotate.
+    public var onExternalTransform: ((_ translationDelta: CGPoint, _ scaleDelta: CGFloat) -> Void)?
+
     // MARK: - Private
 
     /// Intermediate view that receives the combined scale + rotation transform.
@@ -42,6 +56,18 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
     private static let snapThreshold: CGFloat = 0.15 // ~8.6 degrees
     private static let minScale: CGFloat = 0.5
     private static let maxScale: CGFloat = 5.0
+
+    // Canvas transform recognizers — referenced in gestureRecognizerShouldBegin
+    // so they can stand down when a two-finger gesture starts over the external
+    // (result-panel) region.
+    private var canvasPanGesture: UIPanGestureRecognizer!
+    private var canvasPinchGesture: UIPinchGestureRecognizer!
+    private var canvasRotationGesture: UIRotationGestureRecognizer!
+    private var undoTapGesture: UITapGestureRecognizer!
+    // Panel transform recognizers — fire only when the two-finger centroid is
+    // inside the external region, forwarding deltas via `onExternalTransform`.
+    private var panelPanGesture: UIPanGestureRecognizer!
+    private var panelPinchGesture: UIPinchGestureRecognizer!
 
     // MARK: - Init
 
@@ -101,21 +127,41 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
         let rotationGesture = UIRotationGestureRecognizer(target: self, action: #selector(handleRotation(_:)))
         rotationGesture.delegate = self
         addGestureRecognizer(rotationGesture)
+        canvasRotationGesture = rotationGesture
 
         let pinchGesture = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
         pinchGesture.delegate = self
         addGestureRecognizer(pinchGesture)
+        canvasPinchGesture = pinchGesture
 
         let panGesture = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
         panGesture.minimumNumberOfTouches = 2
         panGesture.maximumNumberOfTouches = 2
         panGesture.delegate = self
         addGestureRecognizer(panGesture)
+        canvasPanGesture = panGesture
+
+        // Panel transform recognizers — same two-finger pan + pinch as the
+        // canvas, but they only begin when the gesture starts over the external
+        // region (see gestureRecognizerShouldBegin) and forward their deltas to
+        // onExternalTransform instead of transforming the canvas. No rotation.
+        let panelPinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePanelPinch(_:)))
+        panelPinch.delegate = self
+        addGestureRecognizer(panelPinch)
+        panelPinchGesture = panelPinch
+
+        let panelPan = UIPanGestureRecognizer(target: self, action: #selector(handlePanelPan(_:)))
+        panelPan.minimumNumberOfTouches = 2
+        panelPan.maximumNumberOfTouches = 2
+        panelPan.delegate = self
+        addGestureRecognizer(panelPan)
+        panelPanGesture = panelPan
 
         let undoTap = UITapGestureRecognizer(target: self, action: #selector(handleUndoTap(_:)))
         undoTap.numberOfTouchesRequired = 2
         undoTap.delegate = self
         addGestureRecognizer(undoTap)
+        undoTapGesture = undoTap
 
         let redoTap = UITapGestureRecognizer(target: self, action: #selector(handleRedoTap(_:)))
         redoTap.numberOfTouchesRequired = 3
@@ -262,6 +308,30 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
         }
     }
 
+    // MARK: - External (panel) two-finger transform
+
+    @objc private func handlePanelPan(_ gesture: UIPanGestureRecognizer) {
+        switch gesture.state {
+        case .changed, .ended:
+            let delta = gesture.translation(in: self)
+            gesture.setTranslation(.zero, in: self)
+            onExternalTransform?(delta, 1.0)
+        default:
+            break
+        }
+    }
+
+    @objc private func handlePanelPinch(_ gesture: UIPinchGestureRecognizer) {
+        switch gesture.state {
+        case .changed, .ended:
+            let scaleDelta = gesture.scale
+            gesture.scale = 1.0
+            onExternalTransform?(.zero, scaleDelta)
+        default:
+            break
+        }
+    }
+
     @objc private func handleUndoTap(_ gesture: UITapGestureRecognizer) {
         if gesture.state == .ended { onUndoRequested?() }
     }
@@ -351,6 +421,34 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
         // Eyedropper long-press: finger only, not Apple Pencil
         if gestureRecognizer is UILongPressGestureRecognizer {
             return touch.type != .pencil
+        }
+        // Panel manipulation is finger-only — a pencil must always draw.
+        if gestureRecognizer === panelPanGesture || gestureRecognizer === panelPinchGesture {
+            return touch.type != .pencil
+        }
+        return true
+    }
+
+    /// True when a gesture's current centroid lies inside the external (panel)
+    /// region. Used to route two-finger gestures to the panel vs. the canvas.
+    private func gestureIsOverExternalRegion(_ gesture: UIGestureRecognizer) -> Bool {
+        guard let region = externalTransformRegionProvider?() else { return false }
+        return region.contains(gesture.location(in: self))
+    }
+
+    public override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        let overPanel = gestureIsOverExternalRegion(gestureRecognizer)
+        // Panel recognizers begin only over the panel region.
+        if gestureRecognizer === panelPanGesture || gestureRecognizer === panelPinchGesture {
+            return overPanel
+        }
+        // Canvas transform / undo-tap stand down over the panel region so they
+        // don't move the canvas while the user is manipulating the panel.
+        if gestureRecognizer === canvasPanGesture
+            || gestureRecognizer === canvasPinchGesture
+            || gestureRecognizer === canvasRotationGesture
+            || gestureRecognizer === undoTapGesture {
+            return !overPanel
         }
         return true
     }

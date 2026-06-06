@@ -148,6 +148,24 @@ final class AppCoordinator {
     var dividerPosition: CGFloat = 0.5
     var generationError: String?
 
+    /// Fullscreen result-panel transform. `panelOffset` is the panel's
+    /// translation from its default top-trailing position (in pane points);
+    /// `panelScale` scales the image uniformly about its center. Driven by the
+    /// two-finger pan/pinch the canvas container forwards when a gesture starts
+    /// over the panel (see DrawingView ↔ CanvasView wiring).
+    var panelOffset: CGSize = .zero
+    var panelScale: CGFloat = 1.0
+    private static let minPanelScale: CGFloat = 0.4
+    private static let maxPanelScale: CGFloat = 3.0
+
+    /// Apply an incremental two-finger transform to the floating panel.
+    /// `translationDelta` is in pane points; `scaleDelta` is multiplicative.
+    func applyPanelTransform(translationDelta: CGPoint, scaleDelta: CGFloat) {
+        panelOffset.width += translationDelta.x
+        panelOffset.height += translationDelta.y
+        panelScale = min(max(panelScale * scaleDelta, Self.minPanelScale), Self.maxPanelScale)
+    }
+
     /// One-time NUX tooltip for QuickShape. Set true on first successful snap;
     /// DrawingView observes this and auto-clears it after 5s. AppStorage flag
     /// in DrawingView ensures we only show it once per device, ever.
@@ -490,6 +508,8 @@ final class AppCoordinator {
         selectedStyle = .default
         streamSeed = seed
         lastSuccessfulImage = nil
+        panelOffset = .zero
+        panelScale = 1.0
 
         canvasViewModel.setPendingState(nil)
 
@@ -524,6 +544,8 @@ final class AppCoordinator {
         } else {
             lastSuccessfulImage = nil
         }
+        panelOffset = .zero
+        panelScale = 1.0
 
         // Prepare canvas state
         canvasViewModel.setPendingState(CanvasState(
