@@ -27,12 +27,20 @@ struct CanvasSidebar: View {
                     // preview matches the actual stamp diameter the user will get.
                     let displaySize = max(coordinator.toolSize, 4)
                     let containerSize = max(displaySize + 16, 32)
-                    Circle()
-                        .stroke(.primary, lineWidth: 1)
-                        .frame(width: displaySize, height: displaySize)
-                        .frame(width: containerSize, height: containerSize)
-                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
-                        .offset(x: containerSize / 2 + 20)
+                    VStack(spacing: 4) {
+                        Text("Size \(Int(coordinator.toolSize))")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .fixedSize()
+                        Circle()
+                            .stroke(.primary, lineWidth: 1)
+                            .frame(width: displaySize, height: displaySize)
+                            .frame(width: containerSize, height: containerSize)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+                    .offset(x: containerSize / 2 + 28)
                 }
             }
 
@@ -47,12 +55,7 @@ struct CanvasSidebar: View {
             .frame(width: 30, height: 100)
             .overlay(alignment: .trailing) {
                 if isDraggingOpacity {
-                    Text("\(Int(coordinator.toolOpacity * 100))%")
-                        .font(.caption2.weight(.medium).monospacedDigit())
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 6))
-                        .offset(x: 50)
+                    sliderTooltip("Opacity", "\(Int(coordinator.toolOpacity * 100))%")
                 }
             }
             .disabled(coordinator.currentTool == .eraser)
@@ -70,12 +73,7 @@ struct CanvasSidebar: View {
             .frame(width: 30, height: 100)
             .overlay(alignment: .trailing) {
                 if isDraggingFlow {
-                    Text("\(Int(coordinator.toolFlow * 100))%")
-                        .font(.caption2.weight(.medium).monospacedDigit())
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 6))
-                        .offset(x: 50)
+                    sliderTooltip("Flow", "\(Int(coordinator.toolFlow * 100))%")
                 }
             }
             .disabled(coordinator.currentTool == .eraser)
@@ -93,12 +91,7 @@ struct CanvasSidebar: View {
             .frame(width: 30, height: 100)
             .overlay(alignment: .trailing) {
                 if isDraggingStreamline {
-                    Text("\(Int(coordinator.toolStreamline * 100))%")
-                        .font(.caption2.weight(.medium).monospacedDigit())
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 6))
-                        .offset(x: 50)
+                    sliderTooltip("Stabilize", "\(Int(coordinator.toolStreamline * 100))%")
                 }
             }
             .disabled(coordinator.currentTool == .eraser)
@@ -129,6 +122,22 @@ struct CanvasSidebar: View {
     }
 
     // MARK: - Helpers
+
+    /// Drag tooltip showing what the slider controls (title) plus its current value.
+    private func sliderTooltip(_ title: String, _ value: String) -> some View {
+        VStack(spacing: 1) {
+            Text(title)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.caption2.weight(.semibold).monospacedDigit())
+        }
+        .fixedSize()
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 6))
+        .offset(x: 50)
+    }
 
     private func actionButton(icon: String, action: @escaping () -> Void, disabled: Bool) -> some View {
         Button {
