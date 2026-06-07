@@ -85,6 +85,19 @@ public final class MetalCanvasView: UIView {
     /// Spacing from the last eraser stamp, carried across batches.
     private var lastEraserSpacing: CGFloat = 0.5
 
+    // Wet brush (pro-brush Phase 4) — same incremental, cross-batch bookkeeping as the
+    // eraser, since wet also writes directly to the layer per touchesMoved.
+    private var lastWetPointIndex: Int = 0
+    private var lastWetStampPos: CGPoint = .zero
+    private var lastWetSpacing: CGFloat = 0.5
+
+    /// Debug: route wet stamps as per-stamp draws (serialized) vs one instanced draw.
+    /// Forwarded to the renderer for the Phase-4 draw-order A/B experiment.
+    public var wetOrderingPerStamp: Bool {
+        get { renderer.wetOrderingPerStamp }
+        set { renderer.wetOrderingPerStamp = newValue }
+    }
+
     // MARK: - Undo
 
     /// Each undo entry records which layer was affected and a snapshot of that
@@ -484,9 +497,19 @@ public final class MetalCanvasView: UIView {
             activeStrokeStamps = []
             // Seed the StreamLine cursor at the true start so the first point isn't lagged.
             streamlineCursor = touch.location(in: self)
-            appendStampsForLatestPoints(touch: touch, event: nil)
-            // QuickShape: reset recognizer state for the new stroke.
-            if isQuickShapeEnabled {
+            if config.wetEnabled {
+                // Wet brush writes directly to the layer (eraser-style): snapshot for undo
+                // BEFORE any paint lands, and init cross-batch stamp bookkeeping.
+                lastWetPointIndex = 0
+                lastWetStampPos = touch.location(in: self)
+                lastWetSpacing = max(config.baseWidth * config.spacing, 0.5)
+                pushUndoSnapshot()
+                applyNewWetStamps()
+            } else {
+                appendStampsForLatestPoints(touch: touch, event: nil)
+            }
+            // QuickShape: reset recognizer state for the new stroke (dry brush only).
+            if isQuickShapeEnabled && !config.wetEnabled {
                 ensureRecognizer().reset()
                 snapState = .drawing
                 qsLogTickCounter = 0
@@ -584,7 +607,7 @@ public final class MetalCanvasView: UIView {
         }
 
         switch currentTool {
-        case .brush:
+        case .brush(let config):
             // Append coalesced points (StreamLine-smoothed) and rebuild all stamps
             // for live preview. Smoothing is baked into the stored points.
             let coalesced = event?.coalescedTouches(for: touch) ?? [touch]
@@ -592,13 +615,18 @@ public final class MetalCanvasView: UIView {
             for ct in coalesced {
                 activeStroke?.points.append(smoothedStrokePoint(from: ct, streamline: streamline))
             }
-            appendStampsForLatestPoints(touch: touch, event: event)
-            // QuickShape: feed recognizer + drive snap state machine. Only
-            // active in `.drawing` and `.preview`; once a snap commits, the
-            // touch handler at the top of touchesMoved owns the lifecycle.
-            if isQuickShapeEnabled {
-                feedRecognizer(touch: touch, event: event)
-                updateSnapState()
+            if config.wetEnabled {
+                // Wet: apply only NEW stamps directly to the layer (no scratch).
+                applyNewWetStamps()
+            } else {
+                appendStampsForLatestPoints(touch: touch, event: event)
+                // QuickShape: feed recognizer + drive snap state machine. Only
+                // active in `.drawing` and `.preview`; once a snap commits, the
+                // touch handler at the top of touchesMoved owns the lifecycle.
+                if isQuickShapeEnabled {
+                    feedRecognizer(touch: touch, event: event)
+                    updateSnapState()
+                }
             }
 
         case .eraser:
@@ -778,9 +806,16 @@ public final class MetalCanvasView: UIView {
             return
         }
 
+        var wetCancel = false
+        if case .brush(let config) = currentTool, config.wetEnabled { wetCancel = true }
         if case .eraser = currentTool {
             // Eraser stamps were applied directly to canvas — revert by restoring
             // the undo snapshot that was pushed at touchesBegan.
+            if let entry = undoSnapshots.popLast() {
+                renderer.restoreLayer(at: entry.layerIndex, from: entry.snapshotData)
+            }
+        } else if wetCancel {
+            // Wet brush also wrote directly to the layer — same revert path.
             if let entry = undoSnapshots.popLast() {
                 renderer.restoreLayer(at: entry.layerIndex, from: entry.snapshotData)
             }
@@ -794,6 +829,7 @@ public final class MetalCanvasView: UIView {
         activeStrokeStamps = []
         drawingTouch = nil
         lastEraserPointIndex = 0
+        lastWetPointIndex = 0
         lassoPoints.removeAll()
         lassoPath = nil
         hideLassoPreview()
@@ -881,6 +917,80 @@ public final class MetalCanvasView: UIView {
         renderer.applyEraserStamps(newStamps)
     }
 
+    /// Wet brush (pro-brush Phase 4, Step 1): apply only the new stamps directly to the
+    /// layer via the wet RMW path. Mirrors `applyNewEraserStamps` (incremental, cross-batch
+    /// spacing) but packs a wet stamp: STRAIGHT brush color converted to LINEAR (dst arrives
+    /// linear via framebuffer fetch) in rgb, and the per-stamp deposit weight in alpha.
+    private func applyNewWetStamps() {
+        guard let stroke = activeStroke, stroke.points.count > lastWetPointIndex else { return }
+
+        let brush = stroke.brush
+        let scale = canvasScale
+        let clipPath = lassoClipPath
+        func s2l(_ c: CGFloat) -> Float { let x = Float(c); return x <= 0.04045 ? x/12.92 : pow((x+0.055)/1.055, 2.4) }
+        let dep = Float(max(0, min(1, brush.wetStrength)))
+        let color = SIMD4<Float>(s2l(brush.color.red), s2l(brush.color.green), s2l(brush.color.blue), dep)
+        let hardness = Float(brush.hardness)
+        let spacingFrac = max(brush.spacing, 0.02)
+
+        var newStamps: [CanvasRenderer.StampInstance] = []
+        var stampPos = lastWetStampPos
+        var spacing = lastWetSpacing
+
+        // First dab of the stroke (so a tap/dot deposits paint), placed once.
+        if lastWetPointIndex == 0 {
+            let p0 = stroke.points[0]
+            let w0 = brush.effectiveWidth(force: p0.force, altitude: p0.altitude)
+            if clipPath.map({ $0.contains(p0.position) }) ?? true {
+                newStamps.append(CanvasRenderer.StampInstance(
+                    center: SIMD2<Float>(Float(p0.position.x * scale), Float(p0.position.y * scale)),
+                    radius: Float(w0 * 0.5 * scale), rotation: 0, color: color, hardness: hardness))
+            }
+            stampPos = p0.position
+            spacing = max(w0 * spacingFrac, 0.5)
+        }
+
+        let startIdx = max(lastWetPointIndex, 1)
+        for i in startIdx..<stroke.points.count {
+            let prev = stroke.points[i - 1]
+            let curr = stroke.points[i]
+            let dx = curr.position.x - prev.position.x
+            let dy = curr.position.y - prev.position.y
+            let segDist = hypot(dx, dy)
+            guard segDist > 0 else { continue }
+
+            let distFromLastStamp = hypot(prev.position.x - stampPos.x, prev.position.y - stampPos.y)
+            var traveled = max(0, spacing - distFromLastStamp)
+
+            while traveled <= segDist {
+                let t = traveled / segDist
+                let x = prev.position.x + dx * t
+                let y = prev.position.y + dy * t
+                let force = prev.force + (curr.force - prev.force) * t
+                let altitude = prev.altitude + (curr.altitude - prev.altitude) * t
+                let width = brush.effectiveWidth(force: force, altitude: altitude)
+
+                let pos = CGPoint(x: x, y: y)
+                if clipPath.map({ $0.contains(pos) }) ?? true {
+                    newStamps.append(CanvasRenderer.StampInstance(
+                        center: SIMD2<Float>(Float(x * scale), Float(y * scale)),
+                        radius: Float(width * 0.5 * scale), rotation: 0, color: color, hardness: hardness))
+                }
+
+                stampPos = CGPoint(x: x, y: y)
+                spacing = max(width * spacingFrac, 0.5)
+                traveled += spacing
+            }
+        }
+
+        lastWetPointIndex = stroke.points.count
+        lastWetStampPos = stampPos
+        lastWetSpacing = spacing
+
+        guard !newStamps.isEmpty else { return }
+        renderer.applyWetStamps(newStamps)
+    }
+
     // MARK: - Stroke Completion
 
     private func finishStroke() {
@@ -894,6 +1004,9 @@ public final class MetalCanvasView: UIView {
             lastEraserPointIndex = 0
             lastEraserStampPos = .zero
             lastEraserSpacing = 0.5
+            lastWetPointIndex = 0
+            lastWetStampPos = .zero
+            lastWetSpacing = 0.5
             onInteractionEnded?()
         }
 
@@ -902,6 +1015,17 @@ public final class MetalCanvasView: UIView {
         if case .eraser = currentTool {
             // Eraser stamps were already applied directly to canvas during touchesMoved.
             // Undo snapshot was pushed at touchesBegan. Nothing to flatten.
+            strokeCount += 1
+            onDrawingChanged?()
+            isDirty = true
+            return
+        }
+
+        if case .brush(let config) = currentTool, config.wetEnabled {
+            // Wet brush wrote directly to the layer during the stroke (like the eraser),
+            // with the undo snapshot taken at touchesBegan. Flush any trailing points
+            // (e.g. the StreamLine endpoint), then finish — nothing to flatten.
+            applyNewWetStamps()
             strokeCount += 1
             onDrawingChanged?()
             isDirty = true

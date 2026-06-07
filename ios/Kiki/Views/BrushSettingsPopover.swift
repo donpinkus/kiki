@@ -17,6 +17,18 @@ struct BrushSettingsPopover: View {
             sliderRow("Hardness", value: $coordinator.toolHardness, range: 0.0...1.0)
             sliderRow("Spacing", value: $coordinator.toolSpacing, range: 0.02...1.0)
             sliderRow("Taper", value: $coordinator.toolTaper, range: 0.0...1.0)
+
+            Divider()
+            Toggle(isOn: $coordinator.toolWetEnabled) {
+                Text("Wet paint").font(.subheadline.weight(.medium))
+                + Text("  (experimental)").font(.caption).foregroundColor(.secondary)
+            }
+            if coordinator.toolWetEnabled {
+                Toggle(isOn: $coordinator.wetOrderingPerStamp) {
+                    Text("Per-stamp draw").font(.caption)
+                    + Text("  (debug: draw-order A/B)").font(.caption2).foregroundColor(.secondary)
+                }
+            }
         }
         .padding(20)
         .frame(width: 300)

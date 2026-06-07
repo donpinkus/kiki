@@ -25,7 +25,17 @@ public final class CanvasRenderer {
 
     private let brushStampPSO: MTLRenderPipelineState
     private let eraserStampPSO: MTLRenderPipelineState
+    /// Wet-mix brush: programmable framebuffer-read RMW into the layer (pro-brush
+    /// Phase 4). nil if pipeline creation failed (e.g. on the Simulator, which doesn't
+    /// support framebuffer fetch) — callers must guard on it.
+    private let wetStampPSO: MTLRenderPipelineState?
     private let compositorPSO: MTLRenderPipelineState
+
+    /// Debug toggle for the Phase-4 draw-order experiment: when true, wet stamps are
+    /// issued as N separate single-instance draws (serialized by submission order)
+    /// instead of one instanced draw, to A/B whether overlapping wet stamps need
+    /// explicit ordering. Default false (one instanced draw — the cheap path).
+    var wetOrderingPerStamp = false
 
     /// Cached CIContext for texture→CGImage conversion. CIImage handles sRGB
     /// conversion and premultiplied alpha correctly, avoiding the color artifacts
@@ -151,6 +161,9 @@ public final class CanvasRenderer {
         self.brushStampPSO = brushPSO
         self.eraserStampPSO = erasePSO
         self.compositorPSO = compPSO
+        // Wet PSO uses framebuffer fetch — unsupported on the Simulator, so this may
+        // be nil there; the wet tool guards on it and no-ops if unavailable.
+        self.wetStampPSO = Self.makeWetStampPSO(device: device, library: lib)
         self.maskedCopyPSO = Self.makeMaskedCopyPSO(device: device, library: lib)
         self.maskedClearPSO = Self.makeMaskedClearPSO(device: device, library: lib)
 
@@ -375,6 +388,54 @@ public final class CanvasRenderer {
         enc.setVertexBytes(&canvasSize, length: MemoryLayout<SIMD2<Float>>.size, index: 2)
         enc.setFragmentTexture(brushMaskTexture, index: 0)
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: stamps.count)
+        enc.endEncoding()
+
+        cmdBuf.commit()
+    }
+
+    /// Wet-mix brush (pro-brush Phase 4, Step 1). Writes stamps DIRECTLY into the active
+    /// layer texture per touchesMoved, eraser-style: programmable framebuffer read of the
+    /// pixels under each stamp, mixed toward the stamp's color in-shader, written back.
+    /// Async commit, no waitUntilCompleted, no CPU readback. Each `StampInstance.color`
+    /// carries the brush's STRAIGHT (un-premultiplied) color in rgb and the per-stamp
+    /// deposit weight in alpha. No-op if the wet PSO is unavailable (e.g. Simulator).
+    ///
+    /// `wetOrderingPerStamp` toggles the draw-order experiment: one instanced draw (cheap)
+    /// vs. N single-instance draws (serialized by submission order). If overlapping wet
+    /// stamps mix wrong in the instanced path, the per-stamp path will look correct — that
+    /// tells us whether framebuffer-fetch RMW needs explicit ordering here.
+    func applyWetStamps(_ stamps: [StampInstance]) {
+        guard let wetPSO = wetStampPSO, let canvas = activeLayerTexture, !stamps.isEmpty else { return }
+
+        let byteCount = stamps.count * MemoryLayout<StampInstance>.stride
+        guard let stampBuf = stamps.withUnsafeBytes({ ptr -> MTLBuffer? in
+            guard let base = ptr.baseAddress else { return nil }
+            return device.makeBuffer(bytes: base, length: byteCount, options: .storageModeShared)
+        }) else { return }
+
+        guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
+
+        let rpd = MTLRenderPassDescriptor()
+        rpd.colorAttachments[0].texture = canvas
+        rpd.colorAttachments[0].loadAction = .load
+        rpd.colorAttachments[0].storeAction = .store
+
+        guard let enc = cmdBuf.makeRenderCommandEncoder(descriptor: rpd) else { return }
+        enc.setRenderPipelineState(wetPSO)
+        enc.setVertexBuffer(quadVertexBuffer, offset: 0, index: 0)
+        enc.setVertexBuffer(stampBuf, offset: 0, index: 1)
+        var canvasSize = SIMD2<Float>(Float(canvasWidth), Float(canvasHeight))
+        enc.setVertexBytes(&canvasSize, length: MemoryLayout<SIMD2<Float>>.size, index: 2)
+        let stride = MemoryLayout<StampInstance>.stride
+        if wetOrderingPerStamp {
+            // N serialized single-instance draws (submission-ordered RMW).
+            for i in 0..<stamps.count {
+                enc.setVertexBufferOffset(i * stride, index: 1)
+                enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: 1)
+            }
+        } else {
+            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: stamps.count)
+        }
         enc.endEncoding()
 
         cmdBuf.commit()
@@ -1040,6 +1101,18 @@ public final class CanvasRenderer {
         return try? device.makeRenderPipelineState(descriptor: desc)
     }
 
+    /// Wet-mix PSO: programmable framebuffer read (wetStampFragment reads [[color(0)]],
+    /// mixes, returns the final pixel). Fixed-function blending off. Returns nil where
+    /// framebuffer fetch is unsupported (Simulator) so the wet tool can degrade gracefully.
+    private static func makeWetStampPSO(device: MTLDevice, library: MTLLibrary) -> MTLRenderPipelineState? {
+        let desc = MTLRenderPipelineDescriptor()
+        desc.vertexFunction = library.makeFunction(name: "brushStampVertex")
+        desc.fragmentFunction = library.makeFunction(name: "wetStampFragment")
+        desc.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
+        desc.colorAttachments[0].isBlendingEnabled = false
+        return try? device.makeRenderPipelineState(descriptor: desc)
+    }
+
     private static func makeCompositorPSO(device: MTLDevice, library: MTLLibrary) -> MTLRenderPipelineState? {
         let desc = MTLRenderPipelineDescriptor()
         desc.vertexFunction = library.makeFunction(name: "compositorVertex")
@@ -1221,6 +1294,30 @@ public final class CanvasRenderer {
         mask = smoothstep(0.0, 0.02, mask);
         float4 result = dst * (1.0 - mask);
         return result.a < (4.0 / 255.0) ? float4(0.0) : result;
+    }
+
+    // Wet-mix brush (pro-brush Phase 4, Step 1). Reads the canvas pixel under the stamp
+    // via framebuffer fetch and mixes it toward the stamp's color — wet-on-wet build-up,
+    // not opaque coverage. in.color carries the STRAIGHT brush color in rgb and the
+    // per-stamp deposit weight in alpha. Coverage uses the same procedural-hardness
+    // falloff as the dry brush. Mixing is a LINEAR lerp for Step 1 (Kubelka-Munk pigment
+    // mixing slots in here later). dst is premultiplied+linear (sRGB texture); we
+    // un-premultiply, mix straight colors, then re-premultiply.
+    fragment float4 wetStampFragment(
+        StampVaryings in [[stage_in]],
+        float4 dst [[color(0)]]
+    ) {
+        float d = length(in.texCoord - 0.5) * 2.0;
+        float aa = max(fwidth(d), 1e-4);
+        float soft = 1.0 - in.hardness;
+        float start = min(in.hardness, 1.0 - aa) - soft * soft * 0.85;
+        float cov = 1.0 - smoothstep(start, 1.0, d);
+        float w = cov * in.color.a;                 // deposit weight this stamp
+        if (w <= 0.0) { return dst; }
+        float3 dstStraight = dst.a > 1e-4 ? dst.rgb / dst.a : in.color.rgb;
+        float3 mixed = mix(dstStraight, in.color.rgb, w);   // ← Kubelka-Munk goes here later
+        float outA = dst.a + w * (1.0 - dst.a);     // coverage builds toward opaque
+        return float4(mixed * outA, outA);
     }
 
     // ── Compositor (full-screen quad) ────────────────────────────────────

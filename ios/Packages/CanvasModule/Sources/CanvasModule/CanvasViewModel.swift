@@ -126,6 +126,11 @@ public final class CanvasViewModel {
         applySelectedToolToAttachedViews()
     }
 
+    /// Debug toggle for the Phase-4 wet-paint draw-order experiment.
+    public func setWetOrderingPerStamp(_ on: Bool) {
+        canvasView?.wetOrderingPerStamp = on
+    }
+
     // MARK: - Lasso Selection
 
     func handleLassoSelectionStarted(path: CGPath, bounds: CGRect) {

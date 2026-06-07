@@ -121,6 +121,18 @@ final class AppCoordinator {
         }
     }
 
+    /// Wet-paint mode (pro-brush Phase 4, experimental). Brush only.
+    var toolWetEnabled = false {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    /// Debug: A/B the wet draw-order experiment (per-stamp vs instanced draws).
+    var wetOrderingPerStamp = false {
+        didSet { canvasViewModel.setWetOrderingPerStamp(wetOrderingPerStamp) }
+    }
+
     /// Whether the brush-settings popover (secondary sliders) is shown.
     var showBrushSettings = false
 
@@ -1567,7 +1579,8 @@ final class AppCoordinator {
                 streamline: toolStreamline,
                 hardness: toolHardness,
                 spacing: toolSpacing,
-                taper: toolTaper
+                taper: toolTaper,
+                wetEnabled: toolWetEnabled
             )
             canvasViewModel.selectBrush(config)
         case .eraser:
