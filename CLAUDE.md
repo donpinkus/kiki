@@ -49,7 +49,7 @@ State-based navigation via `AppCoordinator.currentScreen` (`.gallery` | `.drawin
 
 - **Gallery view** (`GalleryView`) — root screen when drawings exist. 2-column grid of tiles. Uses `@Query` to observe SwiftData directly.
 - **Drawing view** (`DrawingView`) — canvas + result split pane. Gallery button top-left navigates back. Stream starts automatically when entering a drawing.
-- **Style picker** — `PromptStyle` model defines available styles. Selected style's `promptSuffix` is appended to the user's prompt client-side before sending to backend.
+- **Style picker** — `PromptStyle` (`PromptStyle.allStyles`) defines available styles; the selected style's `promptSuffix` is appended to the user's prompt client-side before sending to backend. The picker is a `.fullScreenCover` (hides the status bar to match `RootView`). Each style has a static `1024²` thumbnail at `Assets.xcassets/style_thumbnail_<id>.imageset`, with a procedural `StyleThumbnailSpec` fallback in `StylePickerView.swift`. **Adding a style** (3 edits + 1 command): (1) add the `PromptStyle` to the front of `allStyles` in `PromptStyle.swift`; (2) generate its thumbnail with `backend/scripts/gen-style-thumbnail.sh <id> "<promptSuffix>"` — renders the shared courier reference scene via fal.ai **`fal-ai/flux-2`** text-to-image (note: klein is img2img-only on fal, so thumbnails use full flux-2; needs `FAL_KEY` in `backend/.env.local`); (3) add a matching `StyleThumbnailSpec` case. No `.pbxproj` edit needed (asset catalog is folder-referenced).
 - **Drawing model** (`Drawing.swift`) — SwiftData `@Model` with `@Attribute(.externalStorage)` for image blobs (drawing data, background image, generated image, canvas thumbnail). Settings: prompt, style ID.
 - **Auto-save** — debounced 1s on stroke/prompt changes.
 - **Pending-state pattern** — `CanvasViewModel.setPendingState()` queues canvas data before navigation; `attach()` applies it when the canvas view is created.
@@ -61,6 +61,7 @@ The drawing canvas uses a custom Metal-based rendering engine (`MetalCanvasView`
 
 - **Display**: `CAMetalLayer` (double-buffered, `.bgra8Unorm_srgb`) driven by `CADisplayLink`. Only renders when dirty.
 - **Canvas texture**: `.shared` storage — GPU and CPU access the same unified memory. No CPU↔GPU copies per frame.
+- **Document resolution (fixed, decoupled from view size)**: layer/scratch textures are allocated **once** at a fixed `2048²` (`MetalCanvasView.documentSide`) by `CanvasRenderer.configureDocument` — they are **NOT** sized to the view. `layoutSubviews` updates only `CAMetalLayer.drawableSize` (which tracks the view); the compositor scales the fixed document onto the drawable. So a view/layout change (style-picker `fullScreenCover`, fullscreen↔split-screen toggle, rotation) only restrides the *display* — the document is **never reallocated or resampled**, so resolution is preserved and strokes are never wiped on resize. Touch→texture mapping funnels through `canvasScale` = document÷view ratio (refreshed every `layoutSubviews`), so on-screen brush size is view-size-invariant. **Do not** re-tie the texture size to `bounds` — that's the exact regression fixed on 2026-06-06 (the style picker's transient bounds wobble was wiping/blurring the canvas; see commit `4f99ea7`).
 - **Brush rendering**: instanced stamp quads. Touch points → arc-length resampled positions → `StampInstance` buffer → single instanced draw call per frame. Adaptive spacing (stamp gap = 30% of pressure-modulated width) keeps strokes dense at all pressures.
 - **Eraser**: stamps applied directly to canvas texture with destination-out blend, per touchesMoved. Undo snapshot taken at touchesBegan.
 - **Active stroke**: rendered into a scratch texture (ephemeral), composited onto the canvas each frame. Flattened into the canvas texture on touchesEnded.
@@ -72,7 +73,7 @@ The drawing canvas uses a custom Metal-based rendering engine (`MetalCanvasView`
 ### Performance invariants
 - `applyEraserStamps` creates a temporary `MTLBuffer` per batch (no shared-buffer races) and commits **without** `waitUntilCompleted`.
 - `flattenScratchIntoCanvas` is the only `waitUntilCompleted` on the drawing hot path — runs once per stroke end, not per frame.
-- `clearTexture` uses `waitUntilCompleted` but only runs during canvas resize (not interactive).
+- `clearTexture` uses `waitUntilCompleted` but only runs at initial document allocation (`configureDocument`) — not interactive, and not on resize (the document is fixed-size and never resized; see Document resolution above).
 
 ## Module Dependencies
 
