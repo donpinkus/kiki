@@ -17,8 +17,6 @@
 import type { FastifyPluginAsync } from 'fastify';
 
 import { config } from '../config/index.js';
-import { extractBearer } from '../modules/auth/index.js';
-import { verifyAccess } from '../modules/auth/jwt.js';
 import { verifyTransaction, KIKI_SUBSCRIPTION_PRODUCT_ID } from '../modules/appstore/verifier.js';
 import { applyTransaction, findUserByOriginalTransactionId } from '../modules/appstore/subscriptions.js';
 
@@ -39,18 +37,10 @@ export const subscriptionRoute: FastifyPluginAsync = async (fastify) => {
       },
     },
     async (request, reply) => {
-      // Self-authenticate: the global authPlugin preHandler is encapsulated and
-      // does NOT run for sibling routes, so `request.userId` is never set here.
-      // Verify the Bearer token directly (same pattern as /v1/auth/signout).
-      const token = extractBearer(request.headers.authorization);
-      if (!token) {
+      // Authed by the global gate (this route is not `config.public`).
+      const userId = request.userId;
+      if (!userId) {
         return reply.code(401).send({ error: 'authentication_required' });
-      }
-      let userId: string;
-      try {
-        userId = (await verifyAccess(token)).sub;
-      } catch {
-        return reply.code(401).send({ error: 'invalid_token' });
       }
 
       let tx;

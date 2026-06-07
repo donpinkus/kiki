@@ -25,6 +25,9 @@ export const appStoreNotifyRoute: FastifyPluginAsync = async (fastify) => {
   fastify.post<{ Body: NotifyBody }>(
     '/v1/app-store/notify',
     {
+      // Apple calls this with no Bearer token; the JWS signature on the payload
+      // is the authentication (verified in-handler).
+      config: { public: true },
       schema: {
         body: {
           type: 'object',

@@ -31,7 +31,9 @@ export async function opsRoute(app: FastifyInstance): Promise<void> {
     }
   });
 
-  app.get('/v1/ops/cost', async (_request, reply) => {
+  // `config.public` opts these out of the GLOBAL JWT gate; the ops-local
+  // `X-Ops-Key` preHandler above still authenticates them.
+  app.get('/v1/ops/cost', { config: { public: true } }, async (_request, reply) => {
     const snapshot = getSnapshot();
     if (!snapshot) {
       return reply.status(503).send({
@@ -42,7 +44,7 @@ export async function opsRoute(app: FastifyInstance): Promise<void> {
     return reply.send(snapshot);
   });
 
-  app.get('/v1/ops/cost/history', async (_request, reply) => {
+  app.get('/v1/ops/cost/history', { config: { public: true } }, async (_request, reply) => {
     return reply.send(getHistory());
   });
 
@@ -56,6 +58,7 @@ export async function opsRoute(app: FastifyInstance): Promise<void> {
   // UX and broker plumbing.
   app.post<{ Params: { userId: string } }>(
     '/v1/ops/test/idle-timeout/:userId',
+    { config: { public: true } },
     async (request, reply) => {
       const { userId } = request.params;
       await emitState(userId, 'terminated', 'idle_timeout');

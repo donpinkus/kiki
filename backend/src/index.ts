@@ -84,7 +84,7 @@ import { subscriptionRoute } from './routes/subscription.js';
 import { appStoreNotifyRoute } from './routes/appStoreNotify.js';
 import { usageRoute } from './routes/usage.js';
 import { opsRoute } from './routes/ops.js';
-import { authPlugin } from './modules/auth/index.js';
+import { installAuth } from './modules/auth/index.js';
 import { start as startOrchestrator } from './modules/orchestrator/orchestrator.js';
 import { start as startCostMonitor } from './modules/orchestrator/costMonitor.js';
 import { shutdownAnalytics } from './modules/analytics/index.js';
@@ -114,7 +114,9 @@ await app.register(cors, {
 await app.register(websocket);
 
 // --- Application modules ---
-await app.register(authPlugin);
+// Global, fail-closed auth gate on the root app (see modules/auth/index.ts).
+// Must precede route registration.
+installAuth(app);
 
 // --- Routes ---
 await app.register(healthRoute);

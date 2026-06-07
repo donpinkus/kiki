@@ -13,7 +13,6 @@
 
 import type { FastifyPluginAsync } from 'fastify';
 
-import { extractBearer } from '../modules/auth/index.js';
 import { verifyAppleIdentityToken } from '../modules/auth/appleVerifier.js';
 import {
   signAccess,
@@ -21,7 +20,6 @@ import {
   verifyRefresh,
   revokeRefresh,
   ACCESS_TTL_SECONDS,
-  verifyAccess,
 } from '../modules/auth/jwt.js';
 import { abortSession } from '../modules/orchestrator/orchestrator.js';
 import { upsertUserByAppleSub, getUserEmail } from '../postgres/users.js';
@@ -43,6 +41,7 @@ export const authRoute: FastifyPluginAsync = async (fastify) => {
   fastify.post<{ Body: AppleLoginBody }>(
     '/v1/auth/apple',
     {
+      config: { public: true },
       schema: {
         body: {
           type: 'object',
@@ -88,16 +87,10 @@ export const authRoute: FastifyPluginAsync = async (fastify) => {
   // valid (no server-side revocation today) so the caller can sign back in
   // freely. Idempotent: safe to call when there's no active session.
   fastify.post('/v1/auth/signout', async (request, reply) => {
-    const token = extractBearer(request.headers.authorization);
-    if (!token) {
+    // Authed by the global gate (not public) — `request.userId` is set.
+    const userId = request.userId;
+    if (!userId) {
       return reply.code(401).send({ error: 'authentication_required' });
-    }
-    let userId: string;
-    try {
-      const claims = await verifyAccess(token);
-      userId = claims.sub;
-    } catch {
-      return reply.code(401).send({ error: 'invalid_token' });
     }
     await abortSession(userId, 'manual');
     request.log.info({ userId }, 'Signout: session aborted');
@@ -107,6 +100,7 @@ export const authRoute: FastifyPluginAsync = async (fastify) => {
   fastify.post<{ Body: RefreshBody }>(
     '/v1/auth/refresh',
     {
+      config: { public: true },
       schema: {
         body: {
           type: 'object',

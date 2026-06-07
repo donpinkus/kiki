@@ -88,7 +88,10 @@ async function resolveIdentity(
 }
 
 export const streamRoute: FastifyPluginAsync = async (fastify) => {
-  fastify.get('/v1/stream', { websocket: true }, (socket, request) => {
+  // `config.public` opts out of the global JWT gate (the WS handshake does its
+  // own auth so it can send an error frame before closing). Also guarded by the
+  // url-prefix check in authHook.
+  fastify.get('/v1/stream', { websocket: true, config: { public: true } }, (socket, request) => {
     void (async () => {
       // ─── Hoisted state ────────────────────────────────────────────────
       // All state referenced by close/error/message handlers must be
