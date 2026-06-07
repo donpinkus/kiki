@@ -110,7 +110,7 @@ public struct BrushConfig: Codable, Sendable {
         spacing: CGFloat = 0.3,
         taper: CGFloat = 0.0,
         wetEnabled: Bool = false,
-        wetStrength: CGFloat = 0.25
+        wetStrength: CGFloat = 0.4
     ) {
         self.color = color
         self.baseWidth = baseWidth
@@ -168,7 +168,7 @@ public struct BrushConfig: Codable, Sendable {
         spacing = try container.decodeIfPresent(CGFloat.self, forKey: .spacing) ?? 0.3
         taper = try container.decodeIfPresent(CGFloat.self, forKey: .taper) ?? 0.0
         wetEnabled = try container.decodeIfPresent(Bool.self, forKey: .wetEnabled) ?? false
-        wetStrength = try container.decodeIfPresent(CGFloat.self, forKey: .wetStrength) ?? 0.25
+        wetStrength = try container.decodeIfPresent(CGFloat.self, forKey: .wetStrength) ?? 0.4
         // Removed fields — decoded for backward compat with saved configs, not stored.
         _ = try container.decodeIfPresent(CGFloat.self, forKey: .pressureOpacity)
         _ = try container.decodeIfPresent(CGFloat.self, forKey: .taperIn)

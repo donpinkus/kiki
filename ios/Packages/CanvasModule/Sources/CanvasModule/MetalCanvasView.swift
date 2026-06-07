@@ -990,7 +990,7 @@ public final class MetalCanvasView: UIView {
         lastWetSpacing = spacing
 
         guard !newStamps.isEmpty else { return }
-        renderer.applyWetStamps(newStamps)
+        renderer.applyWetStamps(newStamps, brushLinear: SIMD3<Float>(color.x, color.y, color.z))
     }
 
     // MARK: - Stroke Completion

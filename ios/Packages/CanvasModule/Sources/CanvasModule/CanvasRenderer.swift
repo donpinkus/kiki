@@ -37,6 +37,18 @@ public final class CanvasRenderer {
     /// explicit ordering. Default false (one instanced draw — the cheap path).
     var wetOrderingPerStamp = false
 
+    // MARK: - Wet Kubelka-Munk tables (pro-brush Phase 4 Step 2)
+    // Spectral pigment-mixing model (tuned in km_tune_final spike). Mixing happens in a
+    // 36-band reflectance spectrum: RGB→spectrum (Mallett-Yuksel 7-basis), KM-mix per
+    // band, integrate back to linear RGB, with endpoint-exact residual correction.
+    static let wetNB = 36
+    /// 7 basis reflectance spectra × 36 bands, k-major (basis k, band i → [k*36+i]).
+    private var wetBasisBuffer: MTLBuffer?
+    /// 36 bands × 3 (linear-RGB contribution per unit reflectance), band-major ([i*3+c]).
+    private var wetMatBuffer: MTLBuffer?
+    private var wetBasisD: [[Double]] = []          // CPU copy for brush-color upsampling
+    private var wetMat: [SIMD3<Double>] = []        // CPU copy: spectrum band → linear RGB
+
     /// Cached CIContext for texture→CGImage conversion. CIImage handles sRGB
     /// conversion and premultiplied alpha correctly, avoiding the color artifacts
     /// from manual getBytes + CGDataProvider construction.
@@ -188,6 +200,9 @@ public final class CanvasRenderer {
         // Brush mask texture (64×64 soft circle).
         guard let mask = Self.generateBrushMask(device: device, size: 64) else { return nil }
         self.brushMaskTexture = mask
+
+        // All stored properties initialized — build the wet KM spectral tables.
+        setupWetKMTables()
     }
 
     // MARK: - Texture Management
@@ -404,14 +419,19 @@ public final class CanvasRenderer {
     /// vs. N single-instance draws (serialized by submission order). If overlapping wet
     /// stamps mix wrong in the instanced path, the per-stamp path will look correct — that
     /// tells us whether framebuffer-fetch RMW needs explicit ordering here.
-    func applyWetStamps(_ stamps: [StampInstance]) {
-        guard let wetPSO = wetStampPSO, let canvas = activeLayerTexture, !stamps.isEmpty else { return }
+    func applyWetStamps(_ stamps: [StampInstance], brushLinear: SIMD3<Float>) {
+        guard let wetPSO = wetStampPSO, let canvas = activeLayerTexture, !stamps.isEmpty,
+              let basisBuf = wetBasisBuffer, let matBuf = wetMatBuffer else { return }
 
         let byteCount = stamps.count * MemoryLayout<StampInstance>.stride
         guard let stampBuf = stamps.withUnsafeBytes({ ptr -> MTLBuffer? in
             guard let base = ptr.baseAddress else { return nil }
             return device.makeBuffer(bytes: base, length: byteCount, options: .storageModeShared)
         }) else { return }
+
+        // Per-stroke KM brush data: the brush color's K/S spectrum + endpoint residual.
+        let brushData = wetBrushData(linear: brushLinear)
+        var residual = brushData.residual
 
         guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
 
@@ -426,6 +446,13 @@ public final class CanvasRenderer {
         enc.setVertexBuffer(stampBuf, offset: 0, index: 1)
         var canvasSize = SIMD2<Float>(Float(canvasWidth), Float(canvasHeight))
         enc.setVertexBytes(&canvasSize, length: MemoryLayout<SIMD2<Float>>.size, index: 2)
+        // Fragment KM tables + per-stroke brush data.
+        enc.setFragmentBuffer(basisBuf, offset: 0, index: 0)
+        enc.setFragmentBuffer(matBuf, offset: 0, index: 1)
+        brushData.ks.withUnsafeBytes { raw in
+            enc.setFragmentBytes(raw.baseAddress!, length: raw.count, index: 2)
+        }
+        enc.setFragmentBytes(&residual, length: MemoryLayout<SIMD3<Float>>.size, index: 3)
         let stride = MemoryLayout<StampInstance>.stride
         if wetOrderingPerStamp {
             // N serialized single-instance draws (submission-ordered RMW).
@@ -439,6 +466,94 @@ public final class CanvasRenderer {
         enc.endEncoding()
 
         cmdBuf.commit()
+    }
+
+    // MARK: - Wet Kubelka-Munk setup + CPU helpers (pro-brush Phase 4 Step 2)
+
+    /// Build the spectral-mixing tables once: the 7 Mallett-Yuksel basis reflectance
+    /// spectra (locked tuning) and the per-band spectrum→linear-RGB matrix (Wyman CMF
+    /// approx + D65). Ported from the km_tune_final spike. CPU copies are kept for
+    /// per-stroke brush upsampling; Float buffers are uploaded for the fragment shader.
+    private func setupWetKMTables() {
+        let NB = Self.wetNB
+        let wl: [Double] = (0..<NB).map { 400.0 + Double($0) * (300.0 / Double(NB - 1)) }
+        func g(_ x: Double, _ mu: Double, _ s1: Double, _ s2: Double) -> Double {
+            let t = (x - mu) * (x < mu ? 1/s1 : 1/s2); return exp(-0.5 * t * t)
+        }
+        func xbar(_ l: Double) -> Double { 1.056*g(l,599.8,37.9,31.0) + 0.362*g(l,442.0,16.0,26.7) - 0.065*g(l,501.1,20.4,26.2) }
+        func ybar(_ l: Double) -> Double { 0.821*g(l,568.8,46.9,40.5) + 0.286*g(l,530.9,16.3,31.1) }
+        func zbar(_ l: Double) -> Double { 1.217*g(l,437.0,11.8,36.0) + 0.681*g(l,459.0,26.0,13.8) }
+        func d65(_ l: Double) -> Double { 100.0*exp(-0.5*pow((l-470)/260,2)) + 12.0*exp(-0.5*pow((l-600)/90,2)) }
+        let ill = wl.map(d65), xb = wl.map(xbar), yb = wl.map(ybar), zb = wl.map(zbar)
+        var knorm = 0.0; for i in 0..<NB { knorm += ill[i]*yb[i] }
+
+        var mat = [SIMD3<Double>](repeating: .zero, count: NB)
+        for i in 0..<NB {
+            let e = ill[i] / knorm
+            let X = e*xb[i], Y = e*yb[i], Z = e*zb[i]
+            mat[i] = SIMD3<Double>(
+                 3.2406*X - 1.5372*Y - 0.4986*Z,
+                -0.9689*X + 1.8758*Y + 0.0415*Z,
+                 0.0557*X - 0.2040*Y + 1.0570*Z)
+        }
+
+        func clampS(_ v: Double) -> Double { max(0.004, min(1.0, v)) }
+        func sig(_ x: Double) -> Double { 1/(1+exp(-x)) }
+        func bump(_ l: Double, _ mu: Double, _ w: Double) -> Double { exp(-0.5*pow((l-mu)/w,2)) }
+        let aS = 0.32, wS = 26.0, aR = 0.32   // locked blue-basis tuning
+        func basis(_ k: Int, _ l: Double) -> Double {
+            switch k {
+            case 0: return clampS(0.985)                                              // white
+            case 1: return clampS(0.02 + 0.96*sig((555 - l)/20))                      // cyan
+            case 2: return clampS(0.02 + 0.96*(sig((465 - l)/18) + sig((l-595)/18)))  // magenta
+            case 3: return clampS(0.02 + 0.96*sig((l - 520)/16))                      // yellow
+            case 4: return clampS(0.02 + 0.96*sig((l - 595)/10))                      // red
+            case 5: return clampS(0.02 + 0.96*bump(l,540,42))                         // green
+            default: return clampS(0.02 + 0.96*(bump(l,458,32) + aS*bump(l,520,wS) + aR*bump(l,660,30)) * sig((l-415)/12)) // blue
+            }
+        }
+        var basisD = [[Double]]()
+        for k in 0..<7 { basisD.append(wl.map { basis(k, $0) }) }
+        wetBasisD = basisD
+        wetMat = mat
+
+        var basisF = [Float](repeating: 0, count: 7*NB)
+        for k in 0..<7 { for i in 0..<NB { basisF[k*NB+i] = Float(basisD[k][i]) } }
+        var matF = [Float](repeating: 0, count: NB*3)
+        for i in 0..<NB { matF[i*3+0] = Float(mat[i].x); matF[i*3+1] = Float(mat[i].y); matF[i*3+2] = Float(mat[i].z) }
+        wetBasisBuffer = device.makeBuffer(bytes: basisF, length: basisF.count * MemoryLayout<Float>.size, options: .storageModeShared)
+        wetMatBuffer = device.makeBuffer(bytes: matF, length: matF.count * MemoryLayout<Float>.size, options: .storageModeShared)
+    }
+
+    /// Mallett-Yuksel sorted-channel upsample: linear RGB → 36-band reflectance spectrum.
+    private func wetUpsample(_ lin: SIMD3<Double>) -> [Double] {
+        let NB = Self.wetNB
+        let r = max(0, lin.x), gc = max(0, lin.y), b = max(0, lin.z)
+        var w = [Double](repeating: 0, count: 7)   // white,cyan,magenta,yellow,red,green,blue
+        let mn = min(r, min(gc, b)); w[0] = mn
+        let rr = r - mn, gg = gc - mn, bb = b - mn
+        if rr <= gg && rr <= bb { w[1] = min(gg, bb); if gg > bb { w[5] = gg - bb } else { w[6] = bb - gg } }
+        else if gg <= rr && gg <= bb { w[2] = min(rr, bb); if rr > bb { w[4] = rr - bb } else { w[6] = bb - rr } }
+        else { w[3] = min(rr, gg); if rr > gg { w[4] = rr - gg } else { w[5] = gg - rr } }
+        var spec = [Double](repeating: 0, count: NB)
+        for k in 0..<7 where w[k] > 0 { let bs = wetBasisD[k]; for i in 0..<NB { spec[i] += w[k]*bs[i] } }
+        for i in 0..<NB { spec[i] = max(0.004, min(1.0, spec[i])) }
+        return spec
+    }
+
+    private static func ksD(_ R: Double) -> Double { let r = max(1e-4, min(1.0-1e-6, R)); return (1-r)*(1-r)/(2*r) }
+
+    /// Brush-color KM data for the wet shader: per-band K/S + endpoint residual (brushLin − roundtrip).
+    private func wetBrushData(linear: SIMD3<Float>) -> (ks: [Float], residual: SIMD3<Float>) {
+        let lin = SIMD3<Double>(Double(linear.x), Double(linear.y), Double(linear.z))
+        let spec = wetUpsample(lin)
+        let ks = spec.map { Float(Self.ksD($0)) }
+        var rt = SIMD3<Double>.zero
+        for i in 0..<Self.wetNB { rt += spec[i] * wetMat[i] }
+        // Clamp the round-trip to [0,1] before the residual (matches the shader + reference).
+        rt = SIMD3<Double>(max(0, min(1, rt.x)), max(0, min(1, rt.y)), max(0, min(1, rt.z)))
+        let residual = SIMD3<Float>(Float(lin.x - rt.x), Float(lin.y - rt.y), Float(lin.z - rt.z))
+        return (ks, residual)
     }
 
     /// Render a batch of brush stamps directly into the canvas texture (source-over).
@@ -1303,25 +1418,63 @@ public final class CanvasRenderer {
     // falloff as the dry brush. Mixing is a LINEAR lerp for Step 1 (Kubelka-Munk pigment
     // mixing slots in here later). dst is premultiplied+linear (sRGB texture); we
     // un-premultiply, mix straight colors, then re-premultiply.
+    // Wet-mix brush with spectral Kubelka-Munk pigment mixing (pro-brush Phase 4 Step 2).
+    // Reads the canvas pixel under the stamp (framebuffer fetch), upsamples it to a
+    // 36-band reflectance spectrum (Mallett-Yuksel 7-basis), KM-mixes per band toward the
+    // brush color's precomputed K/S spectrum by weight w, integrates back to linear RGB,
+    // and applies endpoint-exact residual correction so unmixed colors stay faithful.
+    // This makes overlaps chromatic (blue+yellow→green) instead of the muddy linear average.
+    // Tables: basis (7×36, k-major) buffer(0); spectrum→linRGB matrix (36×3) buffer(1);
+    // brush K/S spectrum (36) buffer(2); brush endpoint residual buffer(3).
     fragment float4 wetStampFragment(
         StampVaryings in [[stage_in]],
+        constant float* basis [[buffer(0)]],
+        constant float* mat [[buffer(1)]],
+        constant float* brushKS [[buffer(2)]],
+        constant float3& brushResidual [[buffer(3)]],
         float4 dst [[color(0)]]
     ) {
+        constexpr int NB = 36;
         float d = length(in.texCoord - 0.5) * 2.0;
         float aa = max(fwidth(d), 1e-4);
         float soft = 1.0 - in.hardness;
         float start = min(in.hardness, 1.0 - aa) - soft * soft * 0.85;
         float cov = 1.0 - smoothstep(start, 1.0, d);
         if (cov <= 0.0) { return dst; }
-        float w = cov * in.color.a;                 // COLOR deposit weight (how far to mix)
-        float3 dstStraight = dst.a > 1e-4 ? dst.rgb / dst.a : in.color.rgb;
-        float3 mixed = mix(dstStraight, in.color.rgb, w);   // ← Kubelka-Munk goes here later
-        // Alpha builds by COVERAGE, not the color-deposit weight: the brush fills the
-        // area it covers (opaque wet paint) so a partial-alpha underlayer (e.g. a soft
-        // ink edge) doesn't leave a translucent fringe that reveals the white background
-        // as a pale halo. `w`/opacity controls how much the COLOR shifts, not coverage.
+        float w = cov * in.color.a;                 // KM mix weight toward the brush color
+        float3 dstLin = dst.a > 1e-4 ? dst.rgb / dst.a : in.color.rgb;
+
+        // Mallett-Yuksel sorted-channel upsample weights for the canvas color.
+        float3 c = max(dstLin, 0.0);
+        float mn = min(c.r, min(c.g, c.b));
+        float wt[7] = { mn, 0, 0, 0, 0, 0, 0 };     // white,cyan,magenta,yellow,red,green,blue
+        float rr = c.r - mn, gg = c.g - mn, bb = c.b - mn;
+        if (rr <= gg && rr <= bb) { wt[1] = min(gg, bb); if (gg > bb) wt[5] = gg - bb; else wt[6] = bb - gg; }
+        else if (gg <= rr && gg <= bb) { wt[2] = min(rr, bb); if (rr > bb) wt[4] = rr - bb; else wt[6] = bb - rr; }
+        else { wt[3] = min(rr, gg); if (rr > gg) wt[4] = rr - gg; else wt[5] = gg - rr; }
+
+        float3 mixLin = float3(0.0), dstRT = float3(0.0);
+        for (int i = 0; i < NB; i++) {
+            float spec = 0.0;
+            for (int k = 0; k < 7; k++) spec += wt[k] * basis[k * NB + i];
+            spec = clamp(spec, 0.004, 1.0);
+            float3 A = float3(mat[i*3+0], mat[i*3+1], mat[i*3+2]);
+            dstRT += spec * A;
+            float ksd = (1.0 - spec) * (1.0 - spec) / (2.0 * spec);
+            float ksm = mix(ksd, brushKS[i], w);
+            float Rm = clamp(1.0 + ksm - sqrt(ksm * ksm + 2.0 * ksm), 0.0, 1.0);
+            mixLin += Rm * A;
+        }
+        // Clamp integrated linear RGB to [0,1] before the residual math (matches the
+        // tuned reference, which round-trips through sRGB and so clamps here).
+        mixLin = clamp(mixLin, 0.0, 1.0);
+        dstRT = clamp(dstRT, 0.0, 1.0);
+        // Endpoint-exact residual correction (linear): unmixed dst & full-deposit brush stay faithful.
+        float3 corrected = max(mixLin + (1.0 - w) * (dstLin - dstRT) + w * brushResidual, 0.0);
+
+        // Alpha builds by COVERAGE (opaque wet paint; no translucent fringe → no white halo).
         float outA = dst.a + cov * (1.0 - dst.a);
-        return float4(mixed * outA, outA);
+        return float4(corrected * outA, outA);
     }
 
     // ── Compositor (full-screen quad) ────────────────────────────────────
