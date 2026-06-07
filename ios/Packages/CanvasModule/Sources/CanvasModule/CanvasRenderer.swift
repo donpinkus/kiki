@@ -1312,11 +1312,15 @@ public final class CanvasRenderer {
         float soft = 1.0 - in.hardness;
         float start = min(in.hardness, 1.0 - aa) - soft * soft * 0.85;
         float cov = 1.0 - smoothstep(start, 1.0, d);
-        float w = cov * in.color.a;                 // deposit weight this stamp
-        if (w <= 0.0) { return dst; }
+        if (cov <= 0.0) { return dst; }
+        float w = cov * in.color.a;                 // COLOR deposit weight (how far to mix)
         float3 dstStraight = dst.a > 1e-4 ? dst.rgb / dst.a : in.color.rgb;
         float3 mixed = mix(dstStraight, in.color.rgb, w);   // ← Kubelka-Munk goes here later
-        float outA = dst.a + w * (1.0 - dst.a);     // coverage builds toward opaque
+        // Alpha builds by COVERAGE, not the color-deposit weight: the brush fills the
+        // area it covers (opaque wet paint) so a partial-alpha underlayer (e.g. a soft
+        // ink edge) doesn't leave a translucent fringe that reveals the white background
+        // as a pale halo. `w`/opacity controls how much the COLOR shifts, not coverage.
+        float outA = dst.a + cov * (1.0 - dst.a);
         return float4(mixed * outA, outA);
     }
 
