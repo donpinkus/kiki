@@ -1182,16 +1182,21 @@ public final class CanvasRenderer {
 
     // Procedural soft-circle with adjustable hardness. Distance is computed from the
     // quad texCoord (center 0.5, circle edge at d=1) rather than sampling a mask, so a
-    // single brush serves the full soft↔hard range. `inner` is the fully-opaque radius;
-    // alpha falls off from there to the edge. fwidth gives a ~1px screen-space AA rim so
-    // even hardness=1 stays anti-aliased.
+    // single brush serves the full soft↔hard range. The falloff runs from `start` to the
+    // edge (d=1). At hardness=1, start≈1 → a crisp edge with a ~1px fwidth AA rim. As
+    // hardness drops, `start` is pushed inward — and below 0 at very low hardness — so the
+    // feather begins near (or before) the center for a genuinely soft, airbrush-like dab
+    // rather than a solid core with a thin rim. The quadratic (soft²) term keeps the
+    // mid/high range close to a plain inner-radius falloff and concentrates the extra
+    // softening at the low end.
     fragment float4 brushStampFragment(
         StampVaryings in [[stage_in]]
     ) {
         float d = length(in.texCoord - 0.5) * 2.0;
         float aa = max(fwidth(d), 1e-4);
-        float inner = min(in.hardness, 1.0 - aa);
-        float alpha = 1.0 - smoothstep(inner, 1.0, d);
+        float soft = 1.0 - in.hardness;
+        float start = min(in.hardness, 1.0 - aa) - soft * soft * 0.85;
+        float alpha = 1.0 - smoothstep(start, 1.0, d);
         return in.color * alpha;
     }
 
