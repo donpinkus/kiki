@@ -3,6 +3,7 @@ import SwiftData
 import os
 import Sentry
 import CanvasModule
+import ExportModule
 import NetworkModule
 import ResultModule
 
@@ -617,6 +618,39 @@ final class AppCoordinator {
     /// True when a generated frame is available to send to the canvas.
     var canSwapStreamImageToCanvas: Bool {
         lastSuccessfulImage != nil
+    }
+
+    // MARK: - Sharing / Export
+
+    /// The current generated still available to share, if any. Reads through
+    /// `resultState` (the single source of truth for what's on the result pane)
+    /// so the private `lastSuccessfulImage` stays encapsulated.
+    var shareableImage: UIImage? { resultState.displayImage }
+
+    /// Whether there's a generated result to share — drives the Share button's
+    /// enabled state.
+    var canShare: Bool { shareableImage != nil }
+
+    /// Encode the current result to a temp file in `format` and return its URL
+    /// for the native share sheet. `nil` if there's nothing to share or encoding
+    /// fails. The file is named `Kiki.<ext>` so "Save to Files" shows a sensible
+    /// name.
+    func makeShareFile(_ format: ExportFormat) -> URL? {
+        guard let image = shareableImage else { return nil }
+        do {
+            let url = try ExportFileProducer().makeFile(
+                from: image,
+                format: format,
+                baseName: "Kiki",
+                in: FileManager.default.temporaryDirectory
+            )
+            Analytics.track(.imageShared, properties: ["format": format.id])
+            return url
+        } catch {
+            streamLog.error("Share export failed: \(error.localizedDescription)")
+            SentrySDK.capture(error: error)
+            return nil
+        }
     }
 
     // MARK: - Gallery / Persistence

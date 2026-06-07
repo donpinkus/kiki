@@ -1,10 +1,12 @@
 import SwiftUI
 import CanvasModule
+import ExportModule
 
 struct DrawingTopBar: View {
     @Environment(AppCoordinator.self) private var coordinator
     @State private var showSettings = false
     @State private var showColorPicker = false
+    @State private var shareItem: ShareItem?
 
     var body: some View {
         @Bindable var coordinator = coordinator
@@ -33,6 +35,28 @@ struct DrawingTopBar: View {
                     .foregroundStyle(Color.primary)
             }
             .tint(Color.primary)
+
+            // Share — exports the current generated result. The native iOS
+            // share sheet (presented below) provides Save to Files + the app
+            // carousel. The "Share image" section makes "Share video" an
+            // additive sibling later.
+            Menu {
+                Section("Share image") {
+                    ForEach(ExportFormat.imageFormats) { format in
+                        Button(format.displayName) {
+                            if let url = coordinator.makeShareFile(format) {
+                                shareItem = ShareItem(url: url)
+                            }
+                        }
+                    }
+                }
+            } label: {
+                Text("Share")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(Color.primary)
+            }
+            .tint(Color.primary)
+            .disabled(!coordinator.canShare)
 
             UsageMeterView()
 
@@ -101,6 +125,9 @@ struct DrawingTopBar: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
         .background(.bar)
+        .sheet(item: $shareItem) { item in
+            ShareSheet(activityItems: [item.url])
+        }
     }
 
     // MARK: - Color swatch
@@ -163,6 +190,13 @@ struct DrawingTopBar: View {
         }
         .disabled(disabled)
     }
+}
+
+/// Identifiable wrapper so `.sheet(item:)` re-presents when the exported file
+/// changes (e.g. user picks a different format).
+private struct ShareItem: Identifiable {
+    let id = UUID()
+    let url: URL
 }
 
 private extension Color {

@@ -63,6 +63,9 @@ enum AnalyticsEvent: String {
     case paywallShown = "paywall.shown"
     case subscriptionPurchased = "subscription.purchased"
     case subscriptionRestored = "subscription.restored"
+
+    // Share / export
+    case imageShared = "image.shared"
 }
 
 enum Analytics {

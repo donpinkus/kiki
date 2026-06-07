@@ -184,6 +184,8 @@ Pods log via stdlib `logging` → `LoggingIntegration` ships `INFO+` lines into 
 
 **PostHog** stays in its lane: product analytics events only (per `feedback_single_observability.md`). Errors and stdout/stderr go to Sentry exclusively.
 
+**Kiki Insights** (`analytics/`) is our own **internal per-user analytics dashboard** — a standalone Railway service (`kiki-insights` in the `kiki-backend` project) at `https://kiki-insights-production.up.railway.app` (admin-password gated; password in the `ADMIN_PASSWORD` Railway var). It answers "what has *this one user* done over their whole time in Kiki" — login/session timeline, full event stream, and a drawings gallery — which the aggregate-first PostHog/Sentry views don't. It **shares the backend's Postgres**: reads the backend-owned `users` (identity, `is_test_account`, subscription) + `monthly_usage` (fal spend) and owns its own `events`/`sessions`/`drawings` tables; blobs live on a Railway volume behind a swappable `BlobStore`. It does **not** replace PostHog/Sentry — it complements them (mirrors the same events into a store we own, plus drawings). Events arrive via dual-write: the backend mirrors every `analytics/index.ts` event (`modules/insights/client.ts`, gated by `INSIGHTS_URL`+`INSIGHTS_INGEST_KEY`), and iOS mirrors every `Analytics.track` (`InsightsSink.swift`, gated by `insightsURL` in `AppCoordinator.init`). Deploy with `cd analytics && railway up --ci --service kiki-insights --path-as-root .` (the `--path-as-root .` is **required** — without it `railway up` uploads the repo root and the build fails). Full details + schema + setup: `analytics/README.md`.
+
 **Querying logs programmatically** (e.g. for analysis without copy-pasting): use the Sentry MCP server (`https://mcp.sentry.dev/mcp`) — registered at user scope on Donald's Claude Code config, exposes `search_events` / `search_issues` / `search_spans`. Avoids the manual "paste logs into chat" workflow.
 
 ### How to debug a user session
@@ -247,6 +249,7 @@ Reading the patterns — *interpretation guide, not proof of cause*. A given que
 | Metal canvas architecture plan (layers, smudge, etc.) | `documents/plans/metal-canvas-rewrite.md` |
 | Pro-brush roadmap (flow/opacity → stabilization → stamps → wet/oil paint; Procreate parity) | `documents/plans/pro-brush-roadmap.md` |
 | FLUX.2-klein capability notebook (potential features, not committed) | `documents/ideas/flux-klein-capabilities.md` |
+| Internal per-user analytics dashboard (Kiki Insights) — setup, schema, ingest contract, deploy | `analytics/README.md` |
 | Implementation decisions log | `documents/decisions.md` |
 | Removed features (ComfyUI, StreamDiffusion) | `documents/removed-features.md` |
 | Product requirements | `PRD.md` |
