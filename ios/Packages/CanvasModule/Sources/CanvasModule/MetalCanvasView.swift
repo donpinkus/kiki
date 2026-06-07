@@ -2218,6 +2218,10 @@ public final class MetalCanvasView: UIView {
 
         let brush = stroke.brush
         let color = premultipliedColor(brush)
+        let hardness = Float(brush.hardness)
+        // Spacing as a fraction of stamp width; clamped so a tiny value can't generate
+        // a runaway number of stamps (the renderer also caps per-frame stamp count).
+        let spacingFraction = max(brush.spacing, 0.02)
         let clipPath = lassoClipPath
         var stamps: [CanvasRenderer.StampInstance] = []
 
@@ -2228,12 +2232,13 @@ public final class MetalCanvasView: UIView {
                 center: SIMD2<Float>(Float(first.position.x * scale), Float(first.position.y * scale)),
                 radius: Float(firstWidth * 0.5 * scale),
                 rotation: 0,
-                color: color
+                color: color,
+                hardness: hardness
             ))
         }
 
         var lastStampPos = first.position
-        var currentSpacing = max(firstWidth * 0.3, 0.5)
+        var currentSpacing = max(firstWidth * spacingFraction, 0.5)
 
         for i in 1..<stroke.points.count {
             let prev = stroke.points[i - 1]
@@ -2260,12 +2265,13 @@ public final class MetalCanvasView: UIView {
                         center: SIMD2<Float>(Float(x * scale), Float(y * scale)),
                         radius: Float(width * 0.5 * scale),
                         rotation: 0,
-                        color: color
+                        color: color,
+                        hardness: hardness
                     ))
                 }
 
                 lastStampPos = pos
-                currentSpacing = max(width * 0.3, 0.5)
+                currentSpacing = max(width * spacingFraction, 0.5)
                 traveled += currentSpacing
             }
         }
@@ -2278,12 +2284,37 @@ public final class MetalCanvasView: UIView {
                     center: SIMD2<Float>(Float(last.position.x * scale), Float(last.position.y * scale)),
                     radius: Float(width * 0.5 * scale),
                     rotation: 0,
-                    color: color
+                    color: color,
+                    hardness: hardness
                 ))
             }
         }
 
+        applyTaper(to: &stamps, taper: brush.taper)
         return stamps
+    }
+
+    /// Taper the stamp radii toward both ends of the stroke. `taper` [0,1] sets the
+    /// taper length as a fraction of the stroke's half-length; each stamp's radius is
+    /// scaled by how far it sits inside that taper zone (linear, → 0 at the very tips).
+    /// Operates on the final stamp centers (canvas px) so it's independent of how the
+    /// stamps were generated. No-op for taper == 0 or strokes too short to taper.
+    private func applyTaper(to stamps: inout [CanvasRenderer.StampInstance], taper: CGFloat) {
+        guard taper > 0, stamps.count > 2 else { return }
+        var arc = [CGFloat](repeating: 0, count: stamps.count)
+        for i in 1..<stamps.count {
+            let a = stamps[i - 1].center, b = stamps[i].center
+            arc[i] = arc[i - 1] + CGFloat(hypot(b.x - a.x, b.y - a.y))
+        }
+        let length = arc[stamps.count - 1]
+        let taperLen = taper * length * 0.5
+        guard taperLen > 0 else { return }
+        for i in 0..<stamps.count {
+            let s = arc[i]
+            let tIn = min(s / taperLen, 1)
+            let tOut = min((length - s) / taperLen, 1)
+            stamps[i].radius *= Float(min(tIn, tOut))
+        }
     }
 
     /// Read-only access to the flattened canvas (all visible layers) as a CGImage

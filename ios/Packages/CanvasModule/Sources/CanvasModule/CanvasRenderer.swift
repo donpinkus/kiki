@@ -118,6 +118,7 @@ public final class CanvasRenderer {
         var radius: Float           // pressure-modulated
         var rotation: Float         // pencil azimuth
         var color: SIMD4<Float>     // premultiplied RGBA
+        var hardness: Float = 1.0   // edge hardness [0,1]; 1 = crisp. Default hard for shapes/eraser.
     }
 
     /// Maximum stamps per frame. 240 Hz pencil × ~6 interpolated steps per touch
@@ -1134,12 +1135,14 @@ public final class CanvasRenderer {
         float  radius;
         float  rotation;
         float4 color;
+        float  hardness;
     };
 
     struct StampVaryings {
         float4 position [[position]];
         float2 texCoord;
         float4 color;
+        float  hardness;
     };
 
     vertex StampVaryings brushStampVertex(
@@ -1173,16 +1176,23 @@ public final class CanvasRenderer {
         out.position = float4(ndc, 0.0, 1.0);
         out.texCoord = q.texCoord;
         out.color = inst.color;
+        out.hardness = inst.hardness;
         return out;
     }
 
+    // Procedural soft-circle with adjustable hardness. Distance is computed from the
+    // quad texCoord (center 0.5, circle edge at d=1) rather than sampling a mask, so a
+    // single brush serves the full soft↔hard range. `inner` is the fully-opaque radius;
+    // alpha falls off from there to the edge. fwidth gives a ~1px screen-space AA rim so
+    // even hardness=1 stays anti-aliased.
     fragment float4 brushStampFragment(
-        StampVaryings in [[stage_in]],
-        texture2d<float> brushMask [[texture(0)]]
+        StampVaryings in [[stage_in]]
     ) {
-        constexpr sampler maskSampler(filter::linear, address::clamp_to_zero);
-        float mask = brushMask.sample(maskSampler, in.texCoord).r;
-        return in.color * mask;
+        float d = length(in.texCoord - 0.5) * 2.0;
+        float aa = max(fwidth(d), 1e-4);
+        float inner = min(in.hardness, 1.0 - aa);
+        float alpha = 1.0 - smoothstep(inner, 1.0, d);
+        return in.color * alpha;
     }
 
     // Programmable-blend eraser: reads current framebuffer value, applies

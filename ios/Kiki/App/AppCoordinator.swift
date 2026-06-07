@@ -99,6 +99,30 @@ final class AppCoordinator {
             applyTool()
         }
     }
+    /// Edge hardness ("Hardness"). 0 = soft/feathered; 1 = crisp. See pro-brush-roadmap Phase 2.
+    var toolHardness: CGFloat = 0.5 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    /// Stamp spacing as a fraction of width ("Spacing"). Lower = smoother. See Phase 2.
+    var toolSpacing: CGFloat = 0.3 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    /// Stroke-end taper ("Taper"). 0 = none; higher tapers the ends. See Phase 2.
+    var toolTaper: CGFloat = 0.0 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+
+    /// Whether the brush-settings popover (secondary sliders) is shown.
+    var showBrushSettings = false
 
     // MARK: - Per-tool stored settings
 
@@ -125,6 +149,21 @@ final class AppCoordinator {
         .eraser: 0.0,
         .lasso: 0.0
     ]
+    private var storedToolHardnesses: [DrawingTool: CGFloat] = [
+        .brush: 0.5,
+        .eraser: 1.0,
+        .lasso: 1.0
+    ]
+    private var storedToolSpacings: [DrawingTool: CGFloat] = [
+        .brush: 0.3,
+        .eraser: 0.3,
+        .lasso: 0.3
+    ]
+    private var storedToolTapers: [DrawingTool: CGFloat] = [
+        .brush: 0.0,
+        .eraser: 0.0,
+        .lasso: 0.0
+    ]
 
     private func swapToolValues(from oldTool: DrawingTool, to newTool: DrawingTool) {
         guard oldTool != newTool else { return }
@@ -132,11 +171,17 @@ final class AppCoordinator {
         storedToolOpacities[oldTool] = toolOpacity
         storedToolFlows[oldTool] = toolFlow
         storedToolStreamlines[oldTool] = toolStreamline
+        storedToolHardnesses[oldTool] = toolHardness
+        storedToolSpacings[oldTool] = toolSpacing
+        storedToolTapers[oldTool] = toolTaper
         isSwappingToolValues = true
         toolSize = storedToolSizes[newTool] ?? toolSize
         toolOpacity = storedToolOpacities[newTool] ?? toolOpacity
         toolFlow = storedToolFlows[newTool] ?? toolFlow
         toolStreamline = storedToolStreamlines[newTool] ?? toolStreamline
+        toolHardness = storedToolHardnesses[newTool] ?? toolHardness
+        toolSpacing = storedToolSpacings[newTool] ?? toolSpacing
+        toolTaper = storedToolTapers[newTool] ?? toolTaper
         isSwappingToolValues = false
     }
     var currentColor: Color = .black {
@@ -1411,7 +1456,10 @@ final class AppCoordinator {
                 flow: toolFlow,
                 pressureGamma: 0.35,
                 tiltSensitivity: 1.0,
-                streamline: toolStreamline
+                streamline: toolStreamline,
+                hardness: toolHardness,
+                spacing: toolSpacing,
+                taper: toolTaper
             )
             canvasViewModel.selectBrush(config)
         case .eraser:

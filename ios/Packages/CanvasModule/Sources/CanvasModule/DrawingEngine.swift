@@ -80,6 +80,15 @@ public struct BrushConfig: Codable, Sendable {
     /// steadier, more confident lines. Applied at input time and baked into the stored
     /// stroke points (see `MetalCanvasView.smoothedStrokePoint`). See pro-brush-roadmap Phase 1.
     public var streamline: CGFloat
+    /// Edge hardness [0,1]. 0 = soft, feathered edge; 1 = crisp edge (thin AA rim only).
+    /// Applied procedurally in the brush fragment shader from per-stamp distance.
+    public var hardness: CGFloat
+    /// Stamp spacing as a fraction of the (pressure-modulated) stamp width. Lower =
+    /// denser/smoother strokes; higher = spaced-out dabs. Default 0.3.
+    public var spacing: CGFloat
+    /// Stroke-end taper [0,1]. 0 = no taper; higher tapers the stamp radius toward the
+    /// start and end of the stroke (the taper length is this fraction of the half-stroke).
+    public var taper: CGFloat
 
     public init(
         color: CodableColor,
@@ -88,7 +97,10 @@ public struct BrushConfig: Codable, Sendable {
         flow: CGFloat = 1.0,
         pressureGamma: CGFloat = 0.7,
         tiltSensitivity: CGFloat = 0.0,
-        streamline: CGFloat = 0.0
+        streamline: CGFloat = 0.0,
+        hardness: CGFloat = 0.5,
+        spacing: CGFloat = 0.3,
+        taper: CGFloat = 0.0
     ) {
         self.color = color
         self.baseWidth = baseWidth
@@ -97,6 +109,9 @@ public struct BrushConfig: Codable, Sendable {
         self.pressureGamma = pressureGamma
         self.tiltSensitivity = tiltSensitivity
         self.streamline = streamline
+        self.hardness = hardness
+        self.spacing = spacing
+        self.taper = taper
     }
 
     public static let defaultPen = BrushConfig(color: .black, baseWidth: 5, pressureGamma: 0.7)
@@ -119,6 +134,7 @@ public struct BrushConfig: Codable, Sendable {
     enum CodingKeys: String, CodingKey {
         case color, baseWidth, opacity, flow, pressureGamma, pressureOpacity
         case streamline, taperIn, taperOut, tiltSensitivity
+        case hardness, spacing, taper
     }
 
     public init(from decoder: Decoder) throws {
@@ -134,6 +150,11 @@ public struct BrushConfig: Codable, Sendable {
         // Default streamline to 0.0 so configs saved without it decode to "no smoothing"
         // (matches pre-Phase-1 behavior). The key already existed as a legacy no-op.
         streamline = try container.decodeIfPresent(CGFloat.self, forKey: .streamline) ?? 0.0
+        // Phase 2 fields — default to the init defaults so configs saved before them
+        // decode unchanged.
+        hardness = try container.decodeIfPresent(CGFloat.self, forKey: .hardness) ?? 0.5
+        spacing = try container.decodeIfPresent(CGFloat.self, forKey: .spacing) ?? 0.3
+        taper = try container.decodeIfPresent(CGFloat.self, forKey: .taper) ?? 0.0
         // Removed fields — decoded for backward compat with saved configs, not stored.
         _ = try container.decodeIfPresent(CGFloat.self, forKey: .pressureOpacity)
         _ = try container.decodeIfPresent(CGFloat.self, forKey: .taperIn)
@@ -149,6 +170,9 @@ public struct BrushConfig: Codable, Sendable {
         try container.encode(pressureGamma, forKey: .pressureGamma)
         try container.encode(tiltSensitivity, forKey: .tiltSensitivity)
         try container.encode(streamline, forKey: .streamline)
+        try container.encode(hardness, forKey: .hardness)
+        try container.encode(spacing, forKey: .spacing)
+        try container.encode(taper, forKey: .taper)
     }
 }
 

@@ -4,9 +4,6 @@ import CanvasModule
 struct CanvasSidebar: View {
     @Environment(AppCoordinator.self) private var coordinator
     @State private var isDraggingSize = false
-    @State private var isDraggingOpacity = false
-    @State private var isDraggingFlow = false
-    @State private var isDraggingStreamline = false
 
     private let widthRange = BrushConfig.widthRange
 
@@ -46,56 +43,23 @@ struct CanvasSidebar: View {
 
             Divider().frame(width: 24)
 
-            // Opacity slider (brush only)
-            Slider(value: $coordinator.toolOpacity, in: 0.05...1.0) { editing in
-                isDraggingOpacity = editing
+            // Brush settings (Opacity / Flow / Stabilize / Hardness / Spacing / Taper)
+            // live in a popover; the sidebar stays compact. Brush tool only.
+            Button {
+                coordinator.showBrushSettings.toggle()
+            } label: {
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(coordinator.currentTool == .brush ? .primary : .tertiary)
+                    .frame(width: 36, height: 36)
             }
-            .frame(width: 100)
-            .rotationEffect(.degrees(-90))
-            .frame(width: 30, height: 100)
-            .overlay(alignment: .trailing) {
-                if isDraggingOpacity {
-                    sliderTooltip("Opacity", "\(Int(coordinator.toolOpacity * 100))%")
-                }
+            .tint(Color.primary)
+            .disabled(coordinator.currentTool != .brush)
+            .popover(isPresented: $coordinator.showBrushSettings) {
+                BrushSettingsPopover()
+                    .environment(coordinator)
+                    .presentationCompactAdaptation(.popover)
             }
-            .disabled(coordinator.currentTool == .eraser)
-            .opacity(coordinator.currentTool == .eraser ? 0.3 : 1)
-
-            Divider().frame(width: 24)
-
-            // Flow slider (brush only) — per-stamp deposit; builds up within a
-            // stroke, capped by opacity. See pro-brush-roadmap Phase 0.
-            Slider(value: $coordinator.toolFlow, in: 0.05...1.0) { editing in
-                isDraggingFlow = editing
-            }
-            .frame(width: 100)
-            .rotationEffect(.degrees(-90))
-            .frame(width: 30, height: 100)
-            .overlay(alignment: .trailing) {
-                if isDraggingFlow {
-                    sliderTooltip("Flow", "\(Int(coordinator.toolFlow * 100))%")
-                }
-            }
-            .disabled(coordinator.currentTool == .eraser)
-            .opacity(coordinator.currentTool == .eraser ? 0.3 : 1)
-
-            Divider().frame(width: 24)
-
-            // Stabilize slider (brush only) — StreamLine smoothing; steadier lines.
-            // See pro-brush-roadmap Phase 1.
-            Slider(value: $coordinator.toolStreamline, in: 0.0...1.0) { editing in
-                isDraggingStreamline = editing
-            }
-            .frame(width: 100)
-            .rotationEffect(.degrees(-90))
-            .frame(width: 30, height: 100)
-            .overlay(alignment: .trailing) {
-                if isDraggingStreamline {
-                    sliderTooltip("Stabilize", "\(Int(coordinator.toolStreamline * 100))%")
-                }
-            }
-            .disabled(coordinator.currentTool == .eraser)
-            .opacity(coordinator.currentTool == .eraser ? 0.3 : 1)
 
             Divider().frame(width: 24)
 
@@ -122,22 +86,6 @@ struct CanvasSidebar: View {
     }
 
     // MARK: - Helpers
-
-    /// Drag tooltip showing what the slider controls (title) plus its current value.
-    private func sliderTooltip(_ title: String, _ value: String) -> some View {
-        VStack(spacing: 1) {
-            Text(title)
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(.secondary)
-            Text(value)
-                .font(.caption2.weight(.semibold).monospacedDigit())
-        }
-        .fixedSize()
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 6))
-        .offset(x: 50)
-    }
 
     private func actionButton(icon: String, action: @escaping () -> Void, disabled: Bool) -> some View {
         Button {
