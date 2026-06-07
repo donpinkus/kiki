@@ -29,6 +29,13 @@ struct StylePickerView: View {
             }
             .navigationTitle("Choose Style")
             .navigationBarTitleDisplayMode(.large)
+            // Match RootView's hidden status bar. Without this, presenting the
+            // fullScreenCover hands status-bar-appearance ownership to the modal,
+            // toggling the presenting view's top safe-area inset (~32 pt). That
+            // wobble changes the canvas bounds and triggers a relayout on
+            // dismiss — harmless now that the document resolution is fixed, but
+            // this also avoids a visible canvas-frame jump during the transition.
+            .statusBarHidden(true)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { dismiss() } label: {
@@ -311,6 +318,10 @@ private struct StyleThumbnailSpec {
         switch id {
         case "none":
             return StyleThumbnailSpec(colors: [rgb(0.68, 0.70, 0.74), rgb(0.34, 0.36, 0.4)], symbolName: "slash.circle", motif: .diagonalStripes)
+        case "beautiful_paint":
+            return StyleThumbnailSpec(colors: [rgb(0.36, 0.52, 0.78), rgb(0.86, 0.66, 0.42)], symbolName: "paintbrush.pointed.fill", motif: .circles)
+        case "pixar_movie":
+            return StyleThumbnailSpec(colors: [rgb(0.3, 0.58, 0.9), rgb(0.96, 0.76, 0.32)], symbolName: "lightbulb.fill", motif: .circles)
         case "editorial_photo":
             return StyleThumbnailSpec(colors: [rgb(0.16, 0.18, 0.2), rgb(0.64, 0.55, 0.43)], symbolName: "camera.fill", motif: .circles)
         case "cinematic_live_action":

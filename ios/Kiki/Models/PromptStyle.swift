@@ -14,6 +14,18 @@ extension PromptStyle {
         promptSuffix: ""
     )
 
+    static let pixarMovie = PromptStyle(
+        id: "pixar_movie",
+        name: "Pixar Movie",
+        promptSuffix: " as a Pixar movie still, no text"
+    )
+
+    static let beautifulPaint = PromptStyle(
+        id: "beautiful_paint",
+        name: "Beautiful Paint",
+        promptSuffix: " as beautiful stylized concept art by a professional artist, no people"
+    )
+
     static let pastelAnimation = PromptStyle(
         id: "pastel_animation",
         name: "Pastel Animation",
@@ -190,6 +202,8 @@ extension PromptStyle {
 
     /// All available styles, in display order.
     static let allStyles: [PromptStyle] = [
+        pixarMovie,
+        beautifulPaint,
         none,
         editorialPhoto,
         cinematicLiveAction,
