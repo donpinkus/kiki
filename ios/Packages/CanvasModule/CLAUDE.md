@@ -137,6 +137,6 @@ MetalCanvasView (UIView, CAMetalLayer)
 | `CanvasRenderer.swift` | Metal device/queue/pipelines, Layer struct, texture management, render passes, CIContext, shaders (embedded MSL) |
 | `CanvasViewModel.swift` | @Observable bridge between AppCoordinator and MetalCanvasView, snapshot/thumbnail compositing |
 | `CanvasView.swift` | UIViewRepresentable wrapper, callback wiring |
-| `RotatableCanvasContainer.swift` | Gesture handling (zoom/rotate/pan), cursor overlay, background image, lasso selection view |
+| `RotatableCanvasContainer.swift` | Gesture handling (zoom/rotate/pan), cursor overlay, background image, lasso selection view. Also hosts app-overlay hooks: `externalTransformRegionProvider`/`onExternalTransform` (forward a two-finger gesture that starts over a registered rect — e.g. the fullscreen result panel — instead of transforming the canvas) and `onContactPointChanged` (reports the live single-touch contact point + brush diameter in pane space for the panel transparency-hole effect). |
 | `LassoSelectionView.swift` | Gesture-only view for lasso transform (pan/pinch/rotate), marching ants |
 | `DrawingEngine.swift` | Stroke/StrokePoint/BrushConfig/ToolState/LayerInfo/LayeredDrawing types |

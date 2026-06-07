@@ -42,7 +42,7 @@ Last updated: 2026-04-19
 
 13. **Never blank after first image.** Once the first successful generated image appears, the right pane never shows a blank/empty state — even during errors, reconnections, or provisioning. The last successful image stays visible.
 
-14. **Streaming badge.** While actively receiving generated frames, a "LIVE" badge with frame count appears in the top-right corner of the result pane.
+14. **Result layouts.** Settings → Display toggles between **Split** (fixed result pane on the left half) and **Fullscreen** (the result floats as an image-only panel over the canvas). The choice persists across launches.
 
 15. **Error toast.** If generation fails, a non-blocking error toast appears at the bottom of the result pane. It auto-dismisses after 10 seconds. The last successful image remains visible behind it.
 
@@ -73,3 +73,17 @@ Last updated: 2026-04-19
 24. **Network interruption.** If the network drops briefly during drawing, the app reconnects automatically (up to 5 attempts with backoff). The pod stays alive during the interruption. Once reconnected, generation resumes from the current canvas state.
 
 25. **Backend redeploy.** If the Railway backend redeploys while the user is connected, the WebSocket drops and the app reconnects to the new backend instance. The existing pod is reused if still alive.
+
+---
+
+## Fullscreen Result Panel
+
+26. **Always visible, image-sized.** In fullscreen, the generated image floats as a panel sized to the image (rounded corners + drop shadow, no buttons or glass backing). It is always visible — never auto-hidden and there is no close button.
+
+27. **Canvas fills the pane.** In fullscreen the drawing surface fills the available height below the toolbar (a large square), not a small centered square.
+
+28. **Draw through the panel.** A single finger or Apple Pencil that touches the panel draws on the canvas underneath — the panel never intercepts single-touch drawing. A stroke begun on the canvas keeps drawing as it passes over the panel.
+
+29. **Two-finger move/scale.** Two fingers starting on the panel move it; pinch scales it (aspect-locked, no rotation). Two fingers on the canvas still pan/zoom/rotate the canvas as usual.
+
+30. **Transparency hole.** While drawing, the panel becomes see-through in a soft circle around the pencil so the canvas is visible underneath; the hole follows the pencil and fades closed shortly after lifting. (Hover-driven hole requires M2+ iPad Pro hardware and is not currently shipped.)
