@@ -419,7 +419,7 @@ public final class CanvasRenderer {
     /// vs. N single-instance draws (serialized by submission order). If overlapping wet
     /// stamps mix wrong in the instanced path, the per-stamp path will look correct — that
     /// tells us whether framebuffer-fetch RMW needs explicit ordering here.
-    func applyWetStamps(_ stamps: [StampInstance], brushLinear: SIMD3<Float>) {
+    func applyWetStamps(_ stamps: [StampInstance]) {
         guard let wetPSO = wetStampPSO, let canvas = activeLayerTexture, !stamps.isEmpty,
               let basisBuf = wetBasisBuffer, let matBuf = wetMatBuffer else { return }
 
@@ -428,10 +428,6 @@ public final class CanvasRenderer {
             guard let base = ptr.baseAddress else { return nil }
             return device.makeBuffer(bytes: base, length: byteCount, options: .storageModeShared)
         }) else { return }
-
-        // Per-stroke KM brush data: the brush color's K/S spectrum + endpoint residual.
-        let brushData = wetBrushData(linear: brushLinear)
-        var residual = brushData.residual
 
         guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
 
@@ -446,13 +442,9 @@ public final class CanvasRenderer {
         enc.setVertexBuffer(stampBuf, offset: 0, index: 1)
         var canvasSize = SIMD2<Float>(Float(canvasWidth), Float(canvasHeight))
         enc.setVertexBytes(&canvasSize, length: MemoryLayout<SIMD2<Float>>.size, index: 2)
-        // Fragment KM tables + per-stroke brush data.
+        // Fragment KM tables (the carried-load + canvas colors are upsampled in-shader).
         enc.setFragmentBuffer(basisBuf, offset: 0, index: 0)
         enc.setFragmentBuffer(matBuf, offset: 0, index: 1)
-        brushData.ks.withUnsafeBytes { raw in
-            enc.setFragmentBytes(raw.baseAddress!, length: raw.count, index: 2)
-        }
-        enc.setFragmentBytes(&residual, length: MemoryLayout<SIMD3<Float>>.size, index: 3)
         let stride = MemoryLayout<StampInstance>.stride
         if wetOrderingPerStamp {
             // N serialized single-instance draws (submission-ordered RMW).
@@ -542,18 +534,47 @@ public final class CanvasRenderer {
     }
 
     private static func ksD(_ R: Double) -> Double { let r = max(1e-4, min(1.0-1e-6, R)); return (1-r)*(1-r)/(2*r) }
+    private static func rFromKSD(_ ks: Double) -> Double { max(0, min(1, 1 + ks - sqrt(ks*ks + 2*ks))) }
 
-    /// Brush-color KM data for the wet shader: per-band K/S + endpoint residual (brushLin − roundtrip).
-    private func wetBrushData(linear: SIMD3<Float>) -> (ks: [Float], residual: SIMD3<Float>) {
-        let lin = SIMD3<Double>(Double(linear.x), Double(linear.y), Double(linear.z))
-        let spec = wetUpsample(lin)
-        let ks = spec.map { Float(Self.ksD($0)) }
-        var rt = SIMD3<Double>.zero
-        for i in 0..<Self.wetNB { rt += spec[i] * wetMat[i] }
-        // Clamp the round-trip to [0,1] before the residual (matches the shader + reference).
-        rt = SIMD3<Double>(max(0, min(1, rt.x)), max(0, min(1, rt.y)), max(0, min(1, rt.z)))
-        let residual = SIMD3<Float>(Float(lin.x - rt.x), Float(lin.y - rt.y), Float(lin.z - rt.z))
-        return (ks, residual)
+    /// Spectral Kubelka-Munk mix of two linear-RGB colors on the CPU (same model as the
+    /// wet shader). Used to evolve the brush's carried LOAD as it picks up canvas color
+    /// (Step 3 smear). Endpoint-exact: t=0 → a, t=1 → b.
+    func kmMixCPU(_ a: SIMD3<Float>, _ b: SIMD3<Float>, _ t: Float) -> SIMD3<Float> {
+        let td = Double(t)
+        let aD = SIMD3<Double>(Double(a.x), Double(a.y), Double(a.z))
+        let bD = SIMD3<Double>(Double(b.x), Double(b.y), Double(b.z))
+        let sa = wetUpsample(aD), sb = wetUpsample(bD)
+        var mixLin = SIMD3<Double>.zero, aRT = SIMD3<Double>.zero, bRT = SIMD3<Double>.zero
+        for i in 0..<Self.wetNB {
+            let A = wetMat[i]
+            aRT += sa[i] * A; bRT += sb[i] * A
+            let ksm = Self.ksD(sa[i]) * (1 - td) + Self.ksD(sb[i]) * td
+            mixLin += Self.rFromKSD(ksm) * A
+        }
+        func cl(_ v: SIMD3<Double>) -> SIMD3<Double> { SIMD3(max(0,min(1,v.x)), max(0,min(1,v.y)), max(0,min(1,v.z))) }
+        let m = cl(mixLin), ar = cl(aRT), br = cl(bRT)
+        let out = m + (1 - td) * (aD - ar) + td * (bD - br)
+        return SIMD3<Float>(Float(max(0, min(1, out.x))), Float(max(0, min(1, out.y))), Float(max(0, min(1, out.z))))
+    }
+
+    /// Sample the active layer at a canvas-pixel position as a STRAIGHT LINEAR color +
+    /// alpha (1×1 getBytes on .shared storage — cheap, coherent for committed paint).
+    /// Used by the wet brush to pick up the canvas color it crosses. Returns nil out of bounds.
+    func sampleLayerColor(x: Int, y: Int) -> (color: SIMD3<Float>, alpha: Float)? {
+        guard let tex = activeLayerTexture, x >= 0, y >= 0, x < canvasWidth, y < canvasHeight else { return nil }
+        var bgra = [UInt8](repeating: 0, count: 4)
+        bgra.withUnsafeMutableBytes { ptr in
+            tex.getBytes(ptr.baseAddress!, bytesPerRow: 4,
+                         from: MTLRegionMake2D(x, y, 1, 1), mipmapLevel: 0)
+        }
+        let a = Float(bgra[3]) / 255.0
+        guard a > 1e-4 else { return (SIMD3<Float>(0, 0, 0), 0) }
+        // BGRA, sRGB-encoded, premultiplied → straight sRGB → linear.
+        func s2l(_ c: Float) -> Float { c <= 0.04045 ? c/12.92 : pow((c+0.055)/1.055, 2.4) }
+        let b = Float(bgra[0]) / 255.0 / a
+        let g = Float(bgra[1]) / 255.0 / a
+        let r = Float(bgra[2]) / 255.0 / a
+        return (SIMD3<Float>(s2l(min(r,1)), s2l(min(g,1)), s2l(min(b,1))), a)
     }
 
     /// Render a batch of brush stamps directly into the canvas texture (source-over).
@@ -1421,17 +1442,15 @@ public final class CanvasRenderer {
     // Wet-mix brush with spectral Kubelka-Munk pigment mixing (pro-brush Phase 4 Step 2).
     // Reads the canvas pixel under the stamp (framebuffer fetch), upsamples it to a
     // 36-band reflectance spectrum (Mallett-Yuksel 7-basis), KM-mixes per band toward the
-    // brush color's precomputed K/S spectrum by weight w, integrates back to linear RGB,
-    // and applies endpoint-exact residual correction so unmixed colors stay faithful.
-    // This makes overlaps chromatic (blue+yellow→green) instead of the muddy linear average.
-    // Tables: basis (7×36, k-major) buffer(0); spectrum→linRGB matrix (36×3) buffer(1);
-    // brush K/S spectrum (36) buffer(2); brush endpoint residual buffer(3).
+    // per-stamp carried LOAD color (in.color.rgb, evolves along the stroke — Step 3 smear),
+    // integrates back to linear RGB, and applies endpoint-exact residual correction so
+    // unmixed colors stay faithful. Both the canvas color and the load color are upsampled
+    // in-shader (the load varies per stamp, so it can't be a per-stroke uniform).
+    // Tables: basis (7×36, k-major) buffer(0); spectrum→linRGB matrix (36×3) buffer(1).
     fragment float4 wetStampFragment(
         StampVaryings in [[stage_in]],
         constant float* basis [[buffer(0)]],
         constant float* mat [[buffer(1)]],
-        constant float* brushKS [[buffer(2)]],
-        constant float3& brushResidual [[buffer(3)]],
         float4 dst [[color(0)]]
     ) {
         constexpr int NB = 36;
@@ -1441,44 +1460,48 @@ public final class CanvasRenderer {
         float start = min(in.hardness, 1.0 - aa) - soft * soft * 0.85;
         float cov = 1.0 - smoothstep(start, 1.0, d);
         if (cov <= 0.0) { return dst; }
-        float w = cov * in.color.a;                 // KM mix weight toward the brush color
-        // Un-premultiply the under-color, then fade the mix target from the brush color
-        // (no paint underneath) to the under-color by how much paint is actually present
-        // (dst.a). This removes the hard green→blue step at a soft under-color's feathered
-        // edge — the old hard branch flipped from full under-color to brush at dst.a≈0, so
-        // a faint yellow fringe still mixed to full green and then snapped to blue. Now the
-        // transition tracks the under-color's own edge softness. Opaque cores (dst.a≈1) are
-        // unchanged → the validated KM mixes hold.
+        float w = cov * in.color.a;                 // KM mix weight toward the carried load
+        float3 brushLin = in.color.rgb;             // carried load color (linear), per stamp
+        // Fade the mix target from the load color (no paint underneath) to the under-color
+        // by how much paint is present (dst.a), so the transition tracks the under-color's
+        // own edge softness (no hard step). Opaque cores (dst.a≈1) → full under-color.
         float3 under = dst.rgb / max(dst.a, 1e-4);
-        float3 dstLin = mix(in.color.rgb, under, dst.a);
+        float3 dstLin = mix(brushLin, under, dst.a);
 
-        // Mallett-Yuksel sorted-channel upsample weights for the canvas color.
-        float3 c = max(dstLin, 0.0);
-        float mn = min(c.r, min(c.g, c.b));
-        float wt[7] = { mn, 0, 0, 0, 0, 0, 0 };     // white,cyan,magenta,yellow,red,green,blue
-        float rr = c.r - mn, gg = c.g - mn, bb = c.b - mn;
-        if (rr <= gg && rr <= bb) { wt[1] = min(gg, bb); if (gg > bb) wt[5] = gg - bb; else wt[6] = bb - gg; }
-        else if (gg <= rr && gg <= bb) { wt[2] = min(rr, bb); if (rr > bb) wt[4] = rr - bb; else wt[6] = bb - rr; }
-        else { wt[3] = min(rr, gg); if (rr > gg) wt[4] = rr - gg; else wt[5] = gg - rr; }
+        // Mallett-Yuksel sorted-channel upsample weights for an sRGB-linear color.
+        float dstW[7], brW[7];
+        { float3 c = max(dstLin, 0.0); float mn = min(c.r, min(c.g, c.b));
+          dstW[0]=mn; dstW[1]=0; dstW[2]=0; dstW[3]=0; dstW[4]=0; dstW[5]=0; dstW[6]=0;
+          float rr=c.r-mn, gg=c.g-mn, bb=c.b-mn;
+          if (rr<=gg && rr<=bb) { dstW[1]=min(gg,bb); if (gg>bb) dstW[5]=gg-bb; else dstW[6]=bb-gg; }
+          else if (gg<=rr && gg<=bb) { dstW[2]=min(rr,bb); if (rr>bb) dstW[4]=rr-bb; else dstW[6]=bb-rr; }
+          else { dstW[3]=min(rr,gg); if (rr>gg) dstW[4]=rr-gg; else dstW[5]=gg-rr; } }
+        { float3 c = max(brushLin, 0.0); float mn = min(c.r, min(c.g, c.b));
+          brW[0]=mn; brW[1]=0; brW[2]=0; brW[3]=0; brW[4]=0; brW[5]=0; brW[6]=0;
+          float rr=c.r-mn, gg=c.g-mn, bb=c.b-mn;
+          if (rr<=gg && rr<=bb) { brW[1]=min(gg,bb); if (gg>bb) brW[5]=gg-bb; else brW[6]=bb-gg; }
+          else if (gg<=rr && gg<=bb) { brW[2]=min(rr,bb); if (rr>bb) brW[4]=rr-bb; else brW[6]=bb-rr; }
+          else { brW[3]=min(rr,gg); if (rr>gg) brW[4]=rr-gg; else brW[5]=gg-rr; } }
 
-        float3 mixLin = float3(0.0), dstRT = float3(0.0);
+        float3 mixLin = float3(0.0), dstRT = float3(0.0), brushRT = float3(0.0);
         for (int i = 0; i < NB; i++) {
-            float spec = 0.0;
-            for (int k = 0; k < 7; k++) spec += wt[k] * basis[k * NB + i];
-            spec = clamp(spec, 0.004, 1.0);
+            float sd = 0.0, sb = 0.0;
+            for (int k = 0; k < 7; k++) { float bk = basis[k * NB + i]; sd += dstW[k]*bk; sb += brW[k]*bk; }
+            sd = clamp(sd, 0.004, 1.0); sb = clamp(sb, 0.004, 1.0);
             float3 A = float3(mat[i*3+0], mat[i*3+1], mat[i*3+2]);
-            dstRT += spec * A;
-            float ksd = (1.0 - spec) * (1.0 - spec) / (2.0 * spec);
-            float ksm = mix(ksd, brushKS[i], w);
+            dstRT += sd * A; brushRT += sb * A;
+            float ksd = (1.0 - sd) * (1.0 - sd) / (2.0 * sd);
+            float ksb = (1.0 - sb) * (1.0 - sb) / (2.0 * sb);
+            float ksm = mix(ksd, ksb, w);
             float Rm = clamp(1.0 + ksm - sqrt(ksm * ksm + 2.0 * ksm), 0.0, 1.0);
             mixLin += Rm * A;
         }
-        // Clamp integrated linear RGB to [0,1] before the residual math (matches the
-        // tuned reference, which round-trips through sRGB and so clamps here).
+        // Clamp integrated linear RGB to [0,1] before the residual math (matches reference).
         mixLin = clamp(mixLin, 0.0, 1.0);
         dstRT = clamp(dstRT, 0.0, 1.0);
-        // Endpoint-exact residual correction (linear): unmixed dst & full-deposit brush stay faithful.
-        float3 corrected = max(mixLin + (1.0 - w) * (dstLin - dstRT) + w * brushResidual, 0.0);
+        brushRT = clamp(brushRT, 0.0, 1.0);
+        // Endpoint-exact residual correction (linear): unmixed dst & full-deposit load stay faithful.
+        float3 corrected = max(mixLin + (1.0 - w) * (dstLin - dstRT) + w * (brushLin - brushRT), 0.0);
 
         // Alpha builds by COVERAGE (opaque wet paint; no translucent fringe → no white halo).
         float outA = dst.a + cov * (1.0 - dst.a);

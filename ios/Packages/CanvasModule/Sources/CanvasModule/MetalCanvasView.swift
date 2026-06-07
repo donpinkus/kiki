@@ -90,6 +90,10 @@ public final class MetalCanvasView: UIView {
     private var lastWetPointIndex: Int = 0
     private var lastWetStampPos: CGPoint = .zero
     private var lastWetSpacing: CGFloat = 0.5
+    /// Carried paint "load" (linear straight RGB) for the wet smear (Step 3): starts as the
+    /// brush color, contaminates toward the canvas color it crosses, so the deposited color
+    /// evolves and travels along the stroke. Reset each stroke.
+    private var wetLoad: SIMD3<Float> = .zero
 
     /// Debug: route wet stamps as per-stamp draws (serialized) vs one instanced draw.
     /// Forwarded to the renderer for the Phase-4 draw-order A/B experiment.
@@ -931,23 +935,37 @@ public final class MetalCanvasView: UIView {
         // Per-stamp deposit weight. In wet mode the Opacity slider scales deposit
         // (build-up rate) — the direct-to-layer path has no scratch ceiling to apply it to.
         let dep = Float(max(0, min(1, brush.wetStrength)) * max(0, min(1, brush.opacity)))
-        let color = SIMD4<Float>(s2l(brush.color.red), s2l(brush.color.green), s2l(brush.color.blue), dep)
+        let baseColor = SIMD3<Float>(s2l(brush.color.red), s2l(brush.color.green), s2l(brush.color.blue))
         let hardness = Float(brush.hardness)
         let spacingFrac = max(brush.spacing, 0.02)
+        let pickup: Float = 0.25   // how fast the carried load contaminates toward the canvas
+
+        // Fresh paint load at the start of a stroke.
+        if lastWetPointIndex == 0 { wetLoad = baseColor }
 
         var newStamps: [CanvasRenderer.StampInstance] = []
         var stampPos = lastWetStampPos
         var spacing = lastWetSpacing
 
+        // Place a stamp carrying the CURRENT load, then contaminate the load toward the
+        // canvas color under it (the smear: deposited color evolves & travels).
+        func emit(_ pos: CGPoint, _ width: CGFloat) {
+            guard clipPath.map({ $0.contains(pos) }) ?? true else { return }
+            let cx = Int(pos.x * scale), cy = Int(pos.y * scale)
+            newStamps.append(CanvasRenderer.StampInstance(
+                center: SIMD2<Float>(Float(pos.x * scale), Float(pos.y * scale)),
+                radius: Float(width * 0.5 * scale), rotation: 0,
+                color: SIMD4<Float>(wetLoad.x, wetLoad.y, wetLoad.z, dep), hardness: hardness))
+            if let s = renderer.sampleLayerColor(x: cx, y: cy), s.alpha > 0.05 {
+                wetLoad = renderer.kmMixCPU(wetLoad, s.color, pickup * s.alpha)
+            }
+        }
+
         // First dab of the stroke (so a tap/dot deposits paint), placed once.
         if lastWetPointIndex == 0 {
             let p0 = stroke.points[0]
             let w0 = brush.effectiveWidth(force: p0.force, altitude: p0.altitude)
-            if clipPath.map({ $0.contains(p0.position) }) ?? true {
-                newStamps.append(CanvasRenderer.StampInstance(
-                    center: SIMD2<Float>(Float(p0.position.x * scale), Float(p0.position.y * scale)),
-                    radius: Float(w0 * 0.5 * scale), rotation: 0, color: color, hardness: hardness))
-            }
+            emit(p0.position, w0)
             stampPos = p0.position
             spacing = max(w0 * spacingFrac, 0.5)
         }
@@ -972,12 +990,7 @@ public final class MetalCanvasView: UIView {
                 let altitude = prev.altitude + (curr.altitude - prev.altitude) * t
                 let width = brush.effectiveWidth(force: force, altitude: altitude)
 
-                let pos = CGPoint(x: x, y: y)
-                if clipPath.map({ $0.contains(pos) }) ?? true {
-                    newStamps.append(CanvasRenderer.StampInstance(
-                        center: SIMD2<Float>(Float(x * scale), Float(y * scale)),
-                        radius: Float(width * 0.5 * scale), rotation: 0, color: color, hardness: hardness))
-                }
+                emit(CGPoint(x: x, y: y), width)
 
                 stampPos = CGPoint(x: x, y: y)
                 spacing = max(width * spacingFrac, 0.5)
@@ -990,7 +1003,7 @@ public final class MetalCanvasView: UIView {
         lastWetSpacing = spacing
 
         guard !newStamps.isEmpty else { return }
-        renderer.applyWetStamps(newStamps, brushLinear: SIMD3<Float>(color.x, color.y, color.z))
+        renderer.applyWetStamps(newStamps)
     }
 
     // MARK: - Stroke Completion
