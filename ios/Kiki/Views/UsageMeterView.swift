@@ -17,7 +17,7 @@ struct UsageMeterView: View {
                 content
             }
             .buttonStyle(.plain)
-            .accessibilityLabel(accessibilityText)
+            .accessibilityLabel(labelText)
         }
     }
 
@@ -33,16 +33,13 @@ struct UsageMeterView: View {
         }
     }
 
-    /// Compact on-screen label: just the percentage. Full phrasing lives in the
-    /// accessibility label.
-    private var labelText: String { "\(remainingPct)%" }
-
-    private var accessibilityText: String {
-        fraction >= 1 ? "Out of free drawing — subscribe" : "\(remainingPct)% free drawing left"
+    private var labelText: String {
+        if fraction >= 1 { return "Out of free drawing — Subscribe" }
+        return "\(remainingPct)% free drawing left"
     }
 
     private var content: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: 6) {
             ZStack(alignment: .leading) {
                 Capsule().fill(Color.secondary.opacity(0.25))
                     .frame(width: barWidth, height: 4)
@@ -52,12 +49,12 @@ struct UsageMeterView: View {
             .animation(.easeOut(duration: 0.3), value: fraction)
 
             Text(labelText)
-                .font(.system(size: 10, weight: .semibold))
+                .font(.caption2.weight(.semibold))
                 .foregroundStyle(fraction >= 1 ? Color.red : .secondary)
                 .fixedSize()
         }
-        .padding(.horizontal, 7)
-        .padding(.vertical, 4)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
         .background(.ultraThinMaterial, in: Capsule())
         .overlay(
             Capsule().strokeBorder(Color.primary.opacity(0.06), lineWidth: 1)
