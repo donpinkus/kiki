@@ -48,6 +48,7 @@ enum SideBySideVideoComposer {
     static func compose(
         canvasSegments: [URL],
         generatedSegments: [URL],
+        generatedVideoURL: URL? = nil,
         outputURL: URL,
         layout: ReplayLayout = .horizontal,
         speed: Double = 1,
@@ -66,6 +67,9 @@ enum SideBySideVideoComposer {
 
         // Stitch the per-checkpoint segments back-to-back into each track.
         var cursor = CMTime.zero
+        var lastCanvasTrack: AVAssetTrack?
+        var lastGeneratedTrack: AVAssetTrack?
+        var lastSegmentDuration = CMTime.zero
         for (canvasURL, generatedURL) in zip(canvasSegments, generatedSegments) {
             let canvasAsset = AVURLAsset(url: canvasURL)
             let generatedAsset = AVURLAsset(url: generatedURL)
@@ -80,13 +84,16 @@ enum SideBySideVideoComposer {
             try canvasComp.insertTimeRange(range, of: canvasTrack, at: cursor)
             try generatedComp.insertTimeRange(range, of: generatedTrack, at: cursor)
             cursor = cursor + dur
+            lastCanvasTrack = canvasTrack
+            lastGeneratedTrack = generatedTrack
+            lastSegmentDuration = dur
         }
         guard cursor > .zero else { throw ComposeError.missingTrack }
         let baseDuration = cursor
         let baseRange = CMTimeRange(start: .zero, duration: baseDuration)
 
         // Speed: scale both tracks' timelines to 1/speed of their duration.
-        let finalDuration: CMTime
+        var finalDuration: CMTime
         if speed != 1, speed > 0 {
             let scaled = CMTimeMultiplyByFloat64(baseDuration, multiplier: 1.0 / speed)
             canvasComp.scaleTimeRange(baseRange, toDuration: scaled)
@@ -96,9 +103,47 @@ enum SideBySideVideoComposer {
             finalDuration = baseDuration
         }
 
+        let renderSize = layout.renderSize
+
+        // Tail: append the generated animation (canvas frozen on the final drawing
+        // | animation playing in the generated pane), or — if there's no animation
+        // — hold the final frame for 2s. Real-time, not sped up.
+        let oneFrame = CMTime(value: 1, timescale: 12)
+        let tailStart = finalDuration
+        var tailGeneratedTransform: CGAffineTransform?
+        if lastSegmentDuration > oneFrame, let lastCanvasTrack {
+            let lastFrameRange = CMTimeRange(start: lastSegmentDuration - oneFrame, duration: oneFrame)
+            var appendedAnimation = false
+
+            if let generatedVideoURL {
+                let animAsset = AVURLAsset(url: generatedVideoURL)
+                let animTracks = try? await animAsset.loadTracks(withMediaType: .video)
+                let animDuration = try? await animAsset.load(.duration)
+                if let animTrack = animTracks?.first, let animDuration, animDuration.isValid, animDuration > .zero {
+                    try generatedComp.insertTimeRange(CMTimeRange(start: .zero, duration: animDuration), of: animTrack, at: tailStart)
+                    try canvasComp.insertTimeRange(lastFrameRange, of: lastCanvasTrack, at: tailStart)
+                    canvasComp.scaleTimeRange(CMTimeRange(start: tailStart, duration: oneFrame), toDuration: animDuration)
+                    // The animation isn't 768²; fit it into the generated pane.
+                    let animSize = (try? await animTrack.load(.naturalSize)) ?? CGSize(width: side, height: side)
+                    tailGeneratedTransform = fitTransform(sourceSize: animSize, into: generatedPaneRect(for: layout, render: renderSize))
+                    finalDuration = tailStart + animDuration
+                    appendedAnimation = true
+                }
+            }
+
+            if !appendedAnimation, let lastGeneratedTrack {
+                let hold = CMTime(seconds: 2, preferredTimescale: 600)
+                try canvasComp.insertTimeRange(lastFrameRange, of: lastCanvasTrack, at: tailStart)
+                try generatedComp.insertTimeRange(lastFrameRange, of: lastGeneratedTrack, at: tailStart)
+                let frozen = CMTimeRange(start: tailStart, duration: oneFrame)
+                canvasComp.scaleTimeRange(frozen, toDuration: hold)
+                generatedComp.scaleTimeRange(frozen, toDuration: hold)
+                finalDuration = tailStart + hold
+            }
+        }
+
         // Layout: position each pane within the render canvas. Uncovered areas
         // (the vertical layout's side margins) render black — intentional letterbox.
-        let renderSize = layout.renderSize
         let src = CGFloat(side)
         let (canvasTransform, generatedTransform) = transforms(for: layout, source: src, render: renderSize)
 
@@ -106,6 +151,11 @@ enum SideBySideVideoComposer {
         canvasInstruction.setTransform(canvasTransform, at: .zero)
         let generatedInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: generatedComp)
         generatedInstruction.setTransform(generatedTransform, at: .zero)
+        // The appended animation has its own size, so re-fit the generated pane
+        // from the tail onward.
+        if let tailGeneratedTransform {
+            generatedInstruction.setTransform(tailGeneratedTransform, at: tailStart)
+        }
 
         let instruction = AVMutableVideoCompositionInstruction()
         instruction.timeRange = CMTimeRange(start: .zero, duration: finalDuration)
@@ -166,6 +216,32 @@ enum SideBySideVideoComposer {
         return t
     }
 
+    /// The destination rect of the generated (right/bottom) pane in the render
+    /// canvas — used to fit the appended animation, which may not be square.
+    private static func generatedPaneRect(for layout: ReplayLayout, render: CGSize) -> CGRect {
+        switch layout {
+        case .horizontal:
+            let pane = render.width / 2
+            return CGRect(x: pane, y: 0, width: pane, height: pane)
+        case .vertical:
+            let pane = render.height / 2
+            return CGRect(x: (render.width - pane) / 2, y: pane, width: pane, height: pane)
+        }
+    }
+
+    /// Aspect-fit a source of `sourceSize` centered within `rect`.
+    private static func fitTransform(sourceSize: CGSize, into rect: CGRect) -> CGAffineTransform {
+        guard sourceSize.width > 0, sourceSize.height > 0 else { return .identity }
+        let scale = min(rect.width / sourceSize.width, rect.height / sourceSize.height)
+        let drawW = sourceSize.width * scale
+        let drawH = sourceSize.height * scale
+        return place(
+            scale: scale,
+            tx: rect.minX + (rect.width - drawW) / 2,
+            ty: rect.minY + (rect.height - drawH) / 2
+        )
+    }
+
     // MARK: - Watermark
 
     /// Core Animation overlay tool that burns a small "Drawn with Kiki" + app-icon
@@ -191,6 +267,9 @@ enum SideBySideVideoComposer {
         // margin at the video's native resolution (a literal few px is invisible
         // once Instagram scales 1080-wide footage onto a phone).
         let margin = scaleBase * 0.02
+        // The vertical/story layout needs extra right clearance so the mark
+        // doesn't sit under Instagram's "..." / close (X) buttons in the top-right.
+        let rightMargin = margin + (layout == .vertical ? 160 : 0)
         let iconSize = scaleBase * 0.04
         let fontSize = scaleBase * 0.0165
         let gap = iconSize * 0.3
@@ -257,8 +336,9 @@ enum SideBySideVideoComposer {
         layer.contentsGravity = .resizeAspect
         layer.opacity = 0.9
         layer.frame = CGRect(
-            x: size.width - margin - contentW,
-            y: size.height - margin - contentH,
+            x: size.width - rightMargin - contentW,
+            // 5px lower than the top margin (CA origin is bottom-left, so subtract).
+            y: size.height - margin - contentH - 5,
             width: contentW,
             height: contentH
         )

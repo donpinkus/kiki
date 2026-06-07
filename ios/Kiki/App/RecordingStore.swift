@@ -66,6 +66,28 @@ struct RecordingStore {
         try fm.moveItem(at: generatedTemp, to: generatedURL(drawingId, index))
     }
 
+    // MARK: - Generated animation (backend idle-state video)
+
+    private func animationURL(_ drawingId: UUID) -> URL {
+        directory(for: drawingId).appendingPathComponent("animation.mp4")
+    }
+
+    /// The persisted generated-animation MP4 for a drawing, if one exists. This
+    /// is the backend LTX idle-state video (the animated version of the final
+    /// result) — kept here so the replay can append it, since the live copy is
+    /// ephemeral.
+    func generatedVideoURL(for drawingId: UUID) -> URL? {
+        let url = animationURL(drawingId)
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
+    /// Persist (overwrite) a drawing's generated-animation video.
+    func saveGeneratedVideo(_ data: Data, for drawingId: UUID) throws {
+        let dir = directory(for: drawingId)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try data.write(to: animationURL(drawingId), options: .atomic)
+    }
+
     /// Remove a drawing's recording (called when the drawing is deleted).
     func delete(_ drawingId: UUID) {
         try? FileManager.default.removeItem(at: directory(for: drawingId))

@@ -741,6 +741,7 @@ final class AppCoordinator {
         guard let drawingId = currentDrawingId else { return nil }
         let segments = RecordingStore.shared.segmentURLs(for: drawingId)
         guard !segments.canvas.isEmpty else { return nil }
+        let animationURL = RecordingStore.shared.generatedVideoURL(for: drawingId)
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let output = dir.appendingPathComponent("Speed Paint.mp4")
         do {
@@ -748,6 +749,7 @@ final class AppCoordinator {
             try await SideBySideVideoComposer.compose(
                 canvasSegments: segments.canvas,
                 generatedSegments: segments.generated,
+                generatedVideoURL: animationURL,
                 outputURL: output,
                 layout: layout,
                 speed: speed,
@@ -1402,6 +1404,11 @@ final class AppCoordinator {
                 try mp4Data.write(to: url, options: .atomic)
                 currentVideoMP4URL = url
                 resultState = .videoLooping(mp4URL: url, fallback: fallback)
+                // Persist the animation per drawing so the speed-paint replay can
+                // append it (the temp copy above is cleared on resume/stop).
+                if let drawingId = currentDrawingId {
+                    try? RecordingStore.shared.saveGeneratedVideo(mp4Data, for: drawingId)
+                }
                 streamLog.info("[result] \(prev) → videoLooping bytes=\(mp4Data.count) frames=\(frames ?? -1)")
             } catch {
                 streamLog.error("[result] mp4 write failed: \(error.localizedDescription)")
