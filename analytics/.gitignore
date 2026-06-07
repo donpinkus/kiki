@@ -1,0 +1,9 @@
+node_modules/
+dist/
+web/dist/
+web/node_modules/
+.env
+.env.local
+*.log
+# Local blob storage when developing without the Railway volume mount
+blobs/

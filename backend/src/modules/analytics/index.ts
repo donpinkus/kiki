@@ -17,6 +17,7 @@
 
 import { PostHog } from 'posthog-node';
 import { config } from '../../config/index.js';
+import { captureInsights, flushInsights } from '../insights/client.js';
 
 let client: PostHog | null = null;
 
@@ -33,6 +34,8 @@ function getClient(): PostHog | null {
  * get dropped when Railway restarts the container.
  */
 export async function shutdownAnalytics(): Promise<void> {
+  // Flush any queued Insights events before the container dies.
+  await flushInsights();
   if (client) {
     await client.shutdown();
     client = null;
@@ -44,6 +47,11 @@ export async function shutdownAnalytics(): Promise<void> {
 // ────────────────────────────────────────────────────────────────────────────
 
 function capture(distinctId: string, event: string, properties: Record<string, unknown>): void {
+  // Dual-write to the Insights microsite (best-effort, no-op unless configured).
+  // Done before the PostHog early-return so Insights mirroring is independent of
+  // whether PostHog is enabled.
+  captureInsights(distinctId, event, properties);
+
   const c = getClient();
   if (!c) return;
   c.capture({ distinctId, event, properties });

@@ -1,0 +1,9 @@
+node_modules
+dist
+web/node_modules
+web/dist
+blobs
+.env
+.env.local
+*.log
+smoke.mjs

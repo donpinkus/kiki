@@ -131,6 +131,16 @@ export interface AppConfig {
    * self-hosted. */
   readonly POSTHOG_HOST: string;
 
+  // ─── Kiki Insights (internal per-user analytics microsite) ─────────────
+  /** Base URL of the Insights service (e.g. https://kiki-insights.up.railway.app).
+   * When set together with INSIGHTS_INGEST_KEY, every backend analytics event is
+   * dual-written to Insights' /ingest (best-effort, fire-and-forget) alongside
+   * PostHog. Unset → no-op (local dev / CI). */
+  readonly INSIGHTS_URL: string;
+  /** Service key presented as `x-insights-key` to Insights' /ingest. MUST equal
+   * the value set on the Insights service. Unset → Insights dual-write no-ops. */
+  readonly INSIGHTS_INGEST_KEY: string;
+
   // ─── Pod-boot stall watchdog ───────────────────────────────────────────
   /** When true, `waitForRuntime` fast-fails with `PodBootStallError` once
    * `pod.runtime` has stayed null longer than `POD_BOOT_STALL_MS`, and
@@ -266,6 +276,8 @@ function validateConfig(): AppConfig {
     RECONCILE_MIN_AGE_SEC: Number(process.env['RECONCILE_MIN_AGE_SEC'] ?? 600),
     POSTHOG_API_KEY: process.env['POSTHOG_API_KEY'] ?? '',
     POSTHOG_HOST: process.env['POSTHOG_HOST'] ?? 'https://us.i.posthog.com',
+    INSIGHTS_URL: process.env['INSIGHTS_URL'] ?? '',
+    INSIGHTS_INGEST_KEY: process.env['INSIGHTS_INGEST_KEY'] ?? '',
     POD_BOOT_WATCHDOG_ENABLED: process.env['POD_BOOT_WATCHDOG_ENABLED'] !== 'false',
     POD_BOOT_STALL_MS: Number(process.env['POD_BOOT_STALL_MS'] ?? 45_000),
     POD_BOOT_MAX_REROLLS: Number(process.env['POD_BOOT_MAX_REROLLS'] ?? 2),

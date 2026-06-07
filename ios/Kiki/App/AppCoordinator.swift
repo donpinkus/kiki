@@ -246,6 +246,12 @@ final class AppCoordinator {
     /// duration for the `drawing.closed` analytics event. Set in
     /// `openDrawing`/`newDrawing`, read + cleared in `navigateToGallery`.
     private var currentDrawingOpenedAt: Date?
+
+    /// Wall-clock when the app last entered the foreground. Brackets an app-level
+    /// session: `app.foregrounded` on entry, `app.backgrounded` (with duration)
+    /// on exit. Powers the Insights login/session timeline.
+    private var appForegroundedAt: Date?
+
     private(set) var streamReadiness: StreamSession.StreamReadiness = .disconnected
 
     /// Currently-playing video MP4 temp path. Tracked so we can delete it
@@ -303,11 +309,24 @@ final class AppCoordinator {
 
     init(
         modelContext: ModelContext,
-        backendURL: URL = URL(string: "https://kiki-backend-production-eb81.up.railway.app")!
+        backendURL: URL = URL(string: "https://kiki-backend-production-eb81.up.railway.app")!,
+        // Kiki Insights microsite base URL (internal per-user analytics). The
+        // sink no-ops while nil; set to the deployed service to enable the
+        // event mirror + drawing upload.
+        insightsURL: URL? = URL(string: "https://kiki-insights-production.up.railway.app")
     ) {
         self.modelContext = modelContext
         self.backendURL = backendURL
         self.authService = AuthService(backendURL: backendURL)
+
+        // Wire the Insights mirror. Reuses the existing access token (no new
+        // client secret); events queue until a token exists.
+        let auth = self.authService
+        Task {
+            await InsightsSink.shared.configure(baseURL: insightsURL) {
+                try? await auth.currentAccessToken()
+            }
+        }
 
         if let stored = UserDefaults.standard.string(forKey: "drawingLayout"),
            let layout = DrawingLayout(rawValue: stored) {
@@ -343,6 +362,11 @@ final class AppCoordinator {
 
         applyTool()
         startObservingCanvas()
+
+        // Cold launch = first foreground. scenePhase onChange may not fire for
+        // the initial .active value, so open the app session here; subsequent
+        // foregrounds go through handleScenePhaseChange (idempotent).
+        markForegrounded()
 
         // Pre-warm the GPU pod as soon as the app launches with a signed-in
         // user. ~90s cold start otherwise dominates time-to-first-image and
@@ -632,14 +656,36 @@ final class AppCoordinator {
         }
         currentDrawingOpenedAt = nil
 
-        // Delete empty drawings
+        // Delete empty drawings; for non-empty ones, mirror the final thumbnail +
+        // generated image to Insights (one upload per close; upserts by id).
         if let drawingId = currentDrawingId {
             let id = drawingId
             var descriptor = FetchDescriptor<Drawing>(predicate: #Predicate { $0.id == id })
             descriptor.fetchLimit = 1
-            if let drawing = try? modelContext.fetch(descriptor).first, drawing.isContentEmpty {
-                modelContext.delete(drawing)
-                try? modelContext.save()
+            if let drawing = try? modelContext.fetch(descriptor).first {
+                if drawing.isContentEmpty {
+                    modelContext.delete(drawing)
+                    try? modelContext.save()
+                } else {
+                    let payload = (
+                        id: drawing.id.uuidString,
+                        prompt: drawing.promptText,
+                        styleId: drawing.styleId,
+                        updatedAt: drawing.updatedAt,
+                        thumbnail: drawing.canvasThumbnailData,
+                        generated: drawing.generatedImageData
+                    )
+                    Task {
+                        await InsightsSink.shared.uploadDrawing(
+                            id: payload.id,
+                            prompt: payload.prompt,
+                            styleId: payload.styleId,
+                            updatedAt: payload.updatedAt,
+                            thumbnail: payload.thumbnail,
+                            generated: payload.generated
+                        )
+                    }
+                }
             }
         }
 
@@ -1149,11 +1195,13 @@ final class AppCoordinator {
 
         switch phase {
         case .background:
+            markBackgrounded()
             if streamSession != nil {
                 streamWasActiveBeforeBackground = true
                 stopStream()
             }
         case .active:
+            markForegrounded()
             if streamWasActiveBeforeBackground
                 && currentScreen == .drawing
                 && streamSession == nil {
@@ -1166,6 +1214,24 @@ final class AppCoordinator {
         @unknown default:
             break
         }
+    }
+
+    /// Open an app-level session if one isn't already open. Idempotent so the
+    /// active→inactive→active churn (Control Center, notifications) doesn't emit
+    /// duplicates. Called at launch and on every foreground.
+    func markForegrounded() {
+        guard appForegroundedAt == nil else { return }
+        appForegroundedAt = Date()
+        Analytics.track(.appForegrounded)
+    }
+
+    /// Close the current app-level session, emitting its duration. No-op if none
+    /// is open.
+    private func markBackgrounded() {
+        guard let openedAt = appForegroundedAt else { return }
+        let durationMs = Int(Date().timeIntervalSince(openedAt) * 1000)
+        Analytics.track(.appBackgrounded, properties: ["duration_ms": durationMs])
+        appForegroundedAt = nil
     }
 
     private func buildStreamConfig() -> StreamConfig {

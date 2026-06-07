@@ -27,6 +27,11 @@ enum AnalyticsEvent: String {
     case userSignedIn = "user.signed_in"
     case userSignedOut = "user.signed_out"
 
+    // App lifecycle (powers the Insights login/session timeline — Apple sign-in
+    // fires once, so "opens" are the real per-use signal).
+    case appForegrounded = "app.foregrounded"
+    case appBackgrounded = "app.backgrounded"
+
     // Navigation
     case galleryOpened = "gallery.opened"
 
@@ -61,6 +66,9 @@ enum Analytics {
     /// `Bool` — PostHog serializes them as JSON.
     static func track(_ event: AnalyticsEvent, properties: [String: Any]? = nil) {
         PostHogSDK.shared.capture(event.rawValue, properties: properties)
+        // Mirror to the Kiki Insights microsite (best-effort, off the hot path,
+        // no-op until configured). Same event name + properties.
+        Task { await InsightsSink.shared.record(name: event.rawValue, properties: properties) }
     }
 
     /// Bind future events to a signed-in user. PostHog stitches prior
