@@ -11,8 +11,8 @@
 		404C38372F69891C00EB39C6 /* CanvasModule in Frameworks */ = {isa = PBXBuildFile; productRef = 40949E012F5E400100AF4CF7 /* CanvasModule */; };
 		404C383A2F69891C00EB39C6 /* NetworkModule in Frameworks */ = {isa = PBXBuildFile; productRef = 40949E012F5E400400AF4CF7 /* NetworkModule */; };
 		404C383B2F69891C00EB39C6 /* ResultModule in Frameworks */ = {isa = PBXBuildFile; productRef = 40949E012F5E400500AF4CF7 /* ResultModule */; };
-		6060000000000000000000A3 /* ExportModule in Frameworks */ = {isa = PBXBuildFile; productRef = 6060000000000000000000A2 /* ExportModule */; };
 		5050000000000000000000A3 /* PostHog in Frameworks */ = {isa = PBXBuildFile; productRef = 5050000000000000000000A2 /* PostHog */; };
+		6060000000000000000000A3 /* ExportModule in Frameworks */ = {isa = PBXBuildFile; productRef = 6060000000000000000000A2 /* ExportModule */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -286,6 +286,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Kiki saves your speed paint replay videos to your photo library.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -318,6 +319,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Kiki saves your speed paint replay videos to your photo library.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -416,14 +418,14 @@
 			isa = XCSwiftPackageProductDependency;
 			productName = ResultModule;
 		};
-		6060000000000000000000A2 /* ExportModule */ = {
-			isa = XCSwiftPackageProductDependency;
-			productName = ExportModule;
-		};
 		5050000000000000000000A2 /* PostHog */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 5050000000000000000000A1 /* XCRemoteSwiftPackageReference "posthog-ios" */;
 			productName = PostHog;
+		};
+		6060000000000000000000A2 /* ExportModule */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = ExportModule;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

@@ -66,6 +66,7 @@ enum AnalyticsEvent: String {
 
     // Share / export
     case imageShared = "image.shared"
+    case videoShared = "video.shared"
 }
 
 enum Analytics {

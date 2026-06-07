@@ -68,6 +68,12 @@ final class StreamSession {
     /// change so the unchanged sketch re-generates under the new prompt.
     private var lastSentJpegData: Data?
 
+    /// Fired with the resized canvas snapshot whenever a frame survives the
+    /// dirty check (i.e. the canvas visibly changed). Drives the session video
+    /// recorder. Fires regardless of whether the network send later succeeds —
+    /// the canvas changed either way.
+    var onCanvasFrameCaptured: ((UIImage) -> Void)?
+
     /// Current readiness, observed by AppCoordinator. The warm-up start time
     /// lives inside `.warming(startedAt:)` itself — `warm()` carries it
     /// forward across consecutive warming transitions.
@@ -479,6 +485,8 @@ final class StreamSession {
                     // Skip if the rendered output hasn't changed since last send.
                     // Catches all visual changes: mid-stroke, eraser, lasso, undo.
                     if data == self.lastSentJpegData { return nil }
+                    // Canvas changed — hand the snapshot to the video recorder.
+                    self.onCanvasFrameCaptured?(resized)
                     return data
                 }
 

@@ -713,6 +713,56 @@ final class AppCoordinator {
         }
     }
 
+    // MARK: - Video sharing
+
+    /// Whether the current drawing has a finalized recording to replay/share.
+    var canShareVideo: Bool {
+        currentDrawingId.map(RecordingStore.shared.hasRecording) ?? false
+    }
+
+    /// Compose the current drawing's two recorded tracks into a speed-paint
+    /// replay MP4 in the chosen layout + speed, for preview and sharing. Each
+    /// call writes a fresh file (in its own temp dir, so the preview player never
+    /// reads a file being overwritten) named "Speed Paint.mp4" for a clean
+    /// Save-to-Files name. Returns the URL, or nil on failure.
+    func composeReplay(layout: ReplayLayout, speed: Double) async -> URL? {
+        guard let drawingId = currentDrawingId, RecordingStore.shared.hasRecording(drawingId) else { return nil }
+        let urls = RecordingStore.shared.urls(for: drawingId)
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let output = dir.appendingPathComponent("Speed Paint.mp4")
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try await SideBySideVideoComposer.compose(
+                canvasURL: urls.canvas,
+                generatedURL: urls.generated,
+                outputURL: output,
+                layout: layout,
+                speed: speed
+            )
+            return output
+        } catch {
+            streamLog.error("Replay compose failed: \(error.localizedDescription)")
+            SentrySDK.capture(error: error)
+            return nil
+        }
+    }
+
+    /// Finalize a session recording off the main thread, holding a background
+    /// task assertion so `finishWriting` can complete if the app is backgrounding.
+    private func finalizeRecording(_ recorder: DrawingVideoRecorder, drawingId: UUID) {
+        let bgTask = UIApplication.shared.beginBackgroundTask(withName: "finalize-recording")
+        Task.detached {
+            if let urls = await recorder.finish() {
+                try? RecordingStore.shared.finalize(
+                    canvasTemp: urls.canvas,
+                    generatedTemp: urls.generated,
+                    for: drawingId
+                )
+            }
+            await MainActor.run { UIApplication.shared.endBackgroundTask(bgTask) }
+        }
+    }
+
     // MARK: - Gallery / Persistence
 
     func newDrawing() {
@@ -822,6 +872,10 @@ final class AppCoordinator {
             descriptor.fetchLimit = 1
             if let drawing = try? modelContext.fetch(descriptor).first {
                 if drawing.isContentEmpty {
+                    // Discard any in-progress recording — stopStream's finalize
+                    // will then no-op — and remove any stored recording.
+                    recorder?.cancel()
+                    RecordingStore.shared.delete(id)
                     modelContext.delete(drawing)
                     try? modelContext.save()
                 } else {
@@ -859,6 +913,7 @@ final class AppCoordinator {
     }
 
     func deleteDrawing(_ drawing: Drawing) {
+        RecordingStore.shared.delete(drawing.id)
         modelContext.delete(drawing)
         try? modelContext.save()
 
@@ -1018,6 +1073,11 @@ final class AppCoordinator {
         }
     }
 
+    /// Records the current drawing's two timelapse tracks (canvas + generated).
+    /// Created per stream session, finalized in `stopStream`. Separate from the
+    /// ephemeral backend idle-animation MP4 (`currentVideoMP4URL`).
+    private var recorder: DrawingVideoRecorder?
+
     @MainActor
     private func startStreamSession(request: URLRequest, backendWsURL: URL) {
         let session = StreamSession(
@@ -1027,10 +1087,21 @@ final class AppCoordinator {
         )
         session.captureInterval = 1.0 / streamCaptureFPS
 
+        // Record this session's two timelapse tracks. A paired frame is appended
+        // whenever either source changes (canvas dirty-tick below, or a new
+        // generated frame in onImageReceived).
+        let videoRecorder = DrawingVideoRecorder()
+        videoRecorder.start()
+        recorder = videoRecorder
+        session.onCanvasFrameCaptured = { [weak self] canvasImage in
+            self?.recorder?.canvasChanged(canvasImage)
+        }
+
         session.onImageReceived = { [weak self] image in
             guard let self else { return }
             self.streamFrameCount += 1
             self.lastSuccessfulImage = image
+            self.recorder?.generatedChanged(image)
             // Resuming img2img clobbers any in-flight video state. Drop the
             // looping MP4 from disk now — otherwise NSTemporaryDirectory
             // accumulates one file per draw/idle cycle until stopStream.
@@ -1218,6 +1289,14 @@ final class AppCoordinator {
             try? FileManager.default.removeItem(at: url)
             currentVideoMP4URL = nil
         }
+
+        // Finalize this session's timelapse recording (distinct from the LTX
+        // idle-animation MP4 above). If the recorder was cancelled (empty
+        // drawing) finish() no-ops and stores nothing.
+        if let recorder, let drawingId = currentDrawingId {
+            finalizeRecording(recorder, drawingId: drawingId)
+        }
+        recorder = nil
 
         if hadSession {
             Analytics.track(.streamEnded, properties: [

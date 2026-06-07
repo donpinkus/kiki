@@ -7,6 +7,7 @@ struct DrawingTopBar: View {
     @State private var showSettings = false
     @State private var showColorPicker = false
     @State private var shareItem: ShareItem?
+    @State private var showReplay = false
 
     var body: some View {
         @Bindable var coordinator = coordinator
@@ -50,13 +51,18 @@ struct DrawingTopBar: View {
                         }
                     }
                 }
+                if coordinator.canShareVideo {
+                    Section("Share video") {
+                        Button("Speed paint replay") { showReplay = true }
+                    }
+                }
             } label: {
                 Text("Share")
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(Color.primary)
             }
             .tint(Color.primary)
-            .disabled(!coordinator.canShare)
+            .disabled(!(coordinator.canShare || coordinator.canShareVideo))
 
             UsageMeterView()
 
@@ -127,6 +133,10 @@ struct DrawingTopBar: View {
         .background(.bar)
         .sheet(item: $shareItem) { item in
             ShareSheet(activityItems: [item.url])
+        }
+        .sheet(isPresented: $showReplay) {
+            SpeedPaintReplayView()
+                .environment(coordinator)
         }
     }
 
