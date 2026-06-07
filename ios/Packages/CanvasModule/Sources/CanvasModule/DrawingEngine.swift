@@ -93,7 +93,9 @@ public struct BrushConfig: Codable, Sendable {
     /// the canvas layer (eraser-style RMW) and mixes its color into the pixels under it,
     /// instead of stamping opaquely via the scratch — i.e. wet-on-wet build-up.
     public var wetEnabled: Bool
-    /// Wet deposit strength [0,1]: per-stamp weight toward the brush color in the mix.
+    /// Wet deposit strength [0,1]: per-stamp weight toward the brush color in the mix
+    /// (scaled further by `opacity` in the wet path). Low values let the underlying
+    /// color show through and build up gradually — high values cover in one pass.
     public var wetStrength: CGFloat
 
     public init(
@@ -108,7 +110,7 @@ public struct BrushConfig: Codable, Sendable {
         spacing: CGFloat = 0.3,
         taper: CGFloat = 0.0,
         wetEnabled: Bool = false,
-        wetStrength: CGFloat = 0.8
+        wetStrength: CGFloat = 0.25
     ) {
         self.color = color
         self.baseWidth = baseWidth
@@ -166,7 +168,7 @@ public struct BrushConfig: Codable, Sendable {
         spacing = try container.decodeIfPresent(CGFloat.self, forKey: .spacing) ?? 0.3
         taper = try container.decodeIfPresent(CGFloat.self, forKey: .taper) ?? 0.0
         wetEnabled = try container.decodeIfPresent(Bool.self, forKey: .wetEnabled) ?? false
-        wetStrength = try container.decodeIfPresent(CGFloat.self, forKey: .wetStrength) ?? 0.8
+        wetStrength = try container.decodeIfPresent(CGFloat.self, forKey: .wetStrength) ?? 0.25
         // Removed fields — decoded for backward compat with saved configs, not stored.
         _ = try container.decodeIfPresent(CGFloat.self, forKey: .pressureOpacity)
         _ = try container.decodeIfPresent(CGFloat.self, forKey: .taperIn)

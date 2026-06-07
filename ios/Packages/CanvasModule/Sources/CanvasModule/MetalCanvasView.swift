@@ -928,7 +928,9 @@ public final class MetalCanvasView: UIView {
         let scale = canvasScale
         let clipPath = lassoClipPath
         func s2l(_ c: CGFloat) -> Float { let x = Float(c); return x <= 0.04045 ? x/12.92 : pow((x+0.055)/1.055, 2.4) }
-        let dep = Float(max(0, min(1, brush.wetStrength)))
+        // Per-stamp deposit weight. In wet mode the Opacity slider scales deposit
+        // (build-up rate) — the direct-to-layer path has no scratch ceiling to apply it to.
+        let dep = Float(max(0, min(1, brush.wetStrength)) * max(0, min(1, brush.opacity)))
         let color = SIMD4<Float>(s2l(brush.color.red), s2l(brush.color.green), s2l(brush.color.blue), dep)
         let hardness = Float(brush.hardness)
         let spacingFrac = max(brush.spacing, 0.02)
