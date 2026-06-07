@@ -201,7 +201,10 @@ final class AppCoordinator {
             x: (paneContact.x - rect.minX) / safeScale,
             y: (paneContact.y - rect.minY) / safeScale
         )
-        panelHole.radius = (50 + diameter / 2) / safeScale
+        // Base halo (140pt) + brush radius. Large so a wide area around the
+        // pencil is cleared; the feather is set small in the mask so most of
+        // this radius is fully transparent rather than a long falloff.
+        panelHole.radius = (140 + diameter / 2) / safeScale
         panelHole.isActive = true
     }
 

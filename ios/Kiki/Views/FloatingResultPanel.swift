@@ -95,7 +95,9 @@ struct FloatingResultPanel: View {
             Circle()
                 .fill(Color.black)
                 .frame(width: radius * 2, height: radius * 2)
-                .blur(radius: max(radius * 0.5, 0.5))
+                // Small feather relative to the radius → most of the hole is
+                // fully transparent with only a thin soft edge (low falloff).
+                .blur(radius: max(radius * 0.2, 0.5))
                 .position(center)
                 .blendMode(.destinationOut)
         }
