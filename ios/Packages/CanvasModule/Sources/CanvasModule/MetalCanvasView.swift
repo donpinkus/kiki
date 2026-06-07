@@ -305,15 +305,29 @@ public final class MetalCanvasView: UIView {
 
     public override class var layerClass: AnyClass { CAMetalLayer.self }
 
+    /// Fixed document resolution (square), in pixels. Decoupled from the view
+    /// size: the canvas is always allocated at this resolution and the compositor
+    /// scales it to the drawable. Chosen ≥ the largest the square canvas is ever
+    /// displayed at on any iPad (fullscreen ≈ 1894 px), so display is always a
+    /// sharp downscale, never an upscale. 2048² × 4 bytes ≈ 16 MB/layer.
+    static let documentSide = 2048
+
     public override func layoutSubviews() {
         super.layoutSubviews()
         let metalLayer = self.layer as! CAMetalLayer
         let scale = window?.screen.scale ?? UIScreen.main.scale
         metalLayer.contentsScale = scale
+        // Drawable tracks the view (crisp at the current on-screen size)…
         let pixelW = Int(bounds.width * scale)
         let pixelH = Int(bounds.height * scale)
         metalLayer.drawableSize = CGSize(width: pixelW, height: pixelH)
-        renderer.resizeCanvas(width: pixelW, height: pixelH, viewScale: scale)
+        // …but the document texture stays at a FIXED resolution. viewScale is the
+        // live document-pixels-per-view-point ratio so touch mapping tracks the
+        // view as it resizes; the texture itself is never reallocated/resampled.
+        let viewScale = bounds.width > 0
+            ? CGFloat(Self.documentSide) / bounds.width
+            : scale
+        renderer.configureDocument(side: Self.documentSide, viewScale: viewScale)
 
         // If drawing data was loaded before layout (canvas texture didn't exist
         // yet), apply it now that the texture is allocated.
@@ -2151,7 +2165,7 @@ public final class MetalCanvasView: UIView {
         pendingLayeredDrawing = nil
 
         // Create the right number of layer textures.
-        // The first layer already exists from resizeCanvas. Add more as needed.
+        // The first layer already exists from configureDocument. Add more as needed.
         while renderer.layers.count < layered.layers.count {
             renderer.addLayer()
         }
@@ -2292,8 +2306,17 @@ public final class MetalCanvasView: UIView {
 
     // MARK: - Helpers
 
+    /// Canvas-pixels per view-point for the FIXED-resolution document. Because the
+    /// document texture is decoupled from the view, this ratio (document side ÷
+    /// view width) changes as the view resizes even though the texture doesn't.
+    /// All touch→texture mapping (stamps, eraser, lasso) funnels through this, so
+    /// the on-screen brush size stays invariant: a larger ratio paints into a
+    /// proportionally larger document, which the compositor scales back down.
     private var canvasScale: CGFloat {
-        window?.screen.scale ?? UIScreen.main.scale
+        guard bounds.width > 0, renderer.canvasWidth > 0 else {
+            return window?.screen.scale ?? UIScreen.main.scale
+        }
+        return CGFloat(renderer.canvasWidth) / bounds.width
     }
 
     /// Premultiplied stamp color. Alpha is the brush's **flow** (per-stamp deposit) —

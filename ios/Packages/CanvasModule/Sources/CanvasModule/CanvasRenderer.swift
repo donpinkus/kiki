@@ -81,9 +81,12 @@ public final class CanvasRenderer {
 
     // MARK: - Canvas State
 
+    /// Fixed document resolution (square), decoupled from the view's pixel size.
     private(set) var canvasWidth: Int = 0
     private(set) var canvasHeight: Int = 0
-    /// Ratio of canvas pixels to view points (retina scale). Set by resizeCanvas.
+    /// Live canvas-pixels-per-view-point ratio (document side ÷ current view
+    /// width). Unlike a retina scale this varies with the view size while the
+    /// document stays fixed. Refreshed every layout by `configureDocument`.
     private(set) var canvasScale: CGFloat = 1
 
     var hasCanvas: Bool { !layers.isEmpty }
@@ -188,46 +191,36 @@ public final class CanvasRenderer {
         return desc
     }
 
-    /// (Re)allocate layer textures and scratch texture to match the given pixel size.
-    /// On first call, creates a single layer (index 0). On resize, existing layers
-    /// are discarded (caller should save/restore if needed).
-    func resizeCanvas(width: Int, height: Int, viewScale: CGFloat = 0) {
-        guard width > 0, height > 0 else { return }
-        guard width != canvasWidth || height != canvasHeight else { return }
-
-        let oldWidth = canvasWidth
-        let oldHeight = canvasHeight
-        let oldScale = canvasScale
-
-        canvasWidth = width
-        canvasHeight = height
+    /// Allocate the document layer textures at a FIXED resolution, decoupled from
+    /// the view's pixel size. The compositor scales this document texture to the
+    /// drawable (`compositeToDrawable`), so view/layout changes — a modal
+    /// present/dismiss that perturbs the canvas bounds, the fullscreen↔split-screen
+    /// toggle, rotation — only restride the *display*. They never reallocate or
+    /// resample the document, so the drawing's resolution is never degraded and
+    /// strokes are never wiped.
+    ///
+    /// `viewScale` is the live canvas-pixels-per-view-point ratio (document side ÷
+    /// view width). It changes as the view resizes even though the texture doesn't,
+    /// so it's refreshed on every call (before the allocation guard) to keep
+    /// touch→texture mapping and the floating selection transform correct.
+    func configureDocument(side: Int, viewScale: CGFloat = 0) {
         if viewScale > 0 { canvasScale = viewScale }
+        guard side > 0 else { return }
+        // Document resolution is fixed for the canvas's lifetime: allocate once,
+        // then short-circuit on every subsequent layout pass.
+        guard side != canvasWidth || side != canvasHeight else { return }
+
+        canvasWidth = side
+        canvasHeight = side
 
         let desc = makeLayerDescriptor()
-
-        // Create initial single layer if none exist, otherwise recreate all layers.
-        if layers.isEmpty {
-            guard let tex = device.makeTexture(descriptor: desc) else {
-                canvasWidth = oldWidth; canvasHeight = oldHeight; canvasScale = oldScale
-                return
-            }
-            clearTexture(tex)
-            layers = [Layer(id: UUID(), name: "Layer 1", isVisible: true, texture: tex)]
-            activeLayerIndex = 0
-        } else {
-            // Build complete array before assigning — rollback on partial failure.
-            var newLayers: [Layer] = []
-            for old in layers {
-                guard let tex = device.makeTexture(descriptor: desc) else {
-                    canvasWidth = oldWidth; canvasHeight = oldHeight; canvasScale = oldScale
-                    return
-                }
-                clearTexture(tex)
-                newLayers.append(Layer(id: old.id, name: old.name, isVisible: old.isVisible, texture: tex))
-            }
-            layers = newLayers
+        guard let tex = device.makeTexture(descriptor: desc) else {
+            canvasWidth = 0; canvasHeight = 0
+            return
         }
-
+        clearTexture(tex)
+        layers = [Layer(id: UUID(), name: "Layer 1", isVisible: true, texture: tex)]
+        activeLayerIndex = 0
         scratchTexture = device.makeTexture(descriptor: desc)
     }
 
