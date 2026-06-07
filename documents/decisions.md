@@ -14,6 +14,16 @@ Record implementation decisions here as they are made. Newest first. This preven
 
 ---
 
+### 2026-06-06 — Auth gate made a real, fail-closed global gate
+
+**Context:** `authPlugin` was a plain `FastifyPluginAsync` registered via `app.register`, so Fastify encapsulated its `preHandler` + `request.userId`/`authClaims` decorators to a child context that owned no routes — the "global auth gate" gated nothing. Every route self-authed (signout/usage/subscription → `verifyAccess`; stream → WS handshake; ops → `X-Ops-Key`), masking it, until `/v1/usage` + `/v1/subscription/verify` relied on `request.userId` and 401'd on valid tokens.
+
+**Decision:** `installAuth(app)` (`backend/src/modules/auth/index.ts`) attaches the preHandler + decorators on the **root** app (global, not encapsulated). Fail-closed: every route requires a valid Bearer token by default; a route opts out with **`config: { public: true }`** declared at its own definition (Fastify v5 `request.routeOptions.config`). Exemptions live next to each route — no central path list to drift. Opted out: `/health`, `/debug-sentry`, `/v1/auth/apple`, `/v1/auth/refresh`, `/v1/app-store/notify` (JWS-auth), the `/v1/ops/*` routes (own `X-Ops-Key` preHandler still runs), and `/v1/stream` (WS self-auth, also url-guarded in the hook). `usage`/`subscription`/`signout` now read `request.userId`.
+
+**Alternatives considered:** Delete the dead plugin + keep per-route self-auth (rejected — fail-OPEN: a future route leaks unless someone remembers to auth it). Central `PUBLIC_PATHS` allowlist (rejected — fails closed but rots silently, lives far from routes). Per-route `config` gives fail-closed + locality.
+
+**Consequences:** A forgotten exemption fails closed (locks out, never leaks). No new deps (root `app.addHook` avoids `fastify-plugin`). Verified end-to-end locally via `app.inject` against a throwaway Postgres (public reachable unauthed; gated 200 with valid token / 401 without; ops skipped by JWT gate but still gated by `X-Ops-Key`) + prod smoke.
+
 ### 2026-06-06 — Apple StoreKit 2 subscription flow (Stage 3)
 
 **Context:** Stages 1–2 (Postgres accounts + the $10/mo fal-spend cap) left a non-exempt user who hit the cap with no way out — `subscription_status` was permanently `'none'` because no purchase flow existed. Stage 3 builds the auto-renewable subscription so a capped user can subscribe and keep drawing.
