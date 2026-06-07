@@ -5,7 +5,8 @@ struct RootView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
-        Group {
+        @Bindable var coordinator = coordinator
+        return Group {
             switch coordinator.currentScreen {
             case .signIn:
                 SignInView()
@@ -25,6 +26,10 @@ struct RootView: View {
         }
         .onChange(of: scenePhase) { _, newPhase in
             coordinator.handleScenePhaseChange(newPhase)
+        }
+        .fullScreenCover(isPresented: $coordinator.showPaywall) {
+            PaywallView()
+                .environment(coordinator)
         }
     }
 }

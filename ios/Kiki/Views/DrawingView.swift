@@ -198,10 +198,6 @@ struct DrawingView: View {
             StylePickerView()
                 .environment(coordinator)
         }
-        .fullScreenCover(isPresented: $coordinator.showPaywall) {
-            PaywallView()
-                .environment(coordinator)
-        }
     }
 
     // MARK: - QuickShape Tooltip
