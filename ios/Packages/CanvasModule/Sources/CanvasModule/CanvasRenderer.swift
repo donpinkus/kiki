@@ -1442,7 +1442,15 @@ public final class CanvasRenderer {
         float cov = 1.0 - smoothstep(start, 1.0, d);
         if (cov <= 0.0) { return dst; }
         float w = cov * in.color.a;                 // KM mix weight toward the brush color
-        float3 dstLin = dst.a > 1e-4 ? dst.rgb / dst.a : in.color.rgb;
+        // Un-premultiply the under-color, then fade the mix target from the brush color
+        // (no paint underneath) to the under-color by how much paint is actually present
+        // (dst.a). This removes the hard green→blue step at a soft under-color's feathered
+        // edge — the old hard branch flipped from full under-color to brush at dst.a≈0, so
+        // a faint yellow fringe still mixed to full green and then snapped to blue. Now the
+        // transition tracks the under-color's own edge softness. Opaque cores (dst.a≈1) are
+        // unchanged → the validated KM mixes hold.
+        float3 under = dst.rgb / max(dst.a, 1e-4);
+        float3 dstLin = mix(in.color.rgb, under, dst.a);
 
         // Mallett-Yuksel sorted-channel upsample weights for the canvas color.
         float3 c = max(dstLin, 0.0);
