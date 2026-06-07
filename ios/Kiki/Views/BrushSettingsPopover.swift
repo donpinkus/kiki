@@ -24,10 +24,8 @@ struct BrushSettingsPopover: View {
                 + Text("  (experimental)").font(.caption).foregroundColor(.secondary)
             }
             if coordinator.toolWetEnabled {
-                Toggle(isOn: $coordinator.wetOrderingPerStamp) {
-                    Text("Per-stamp draw").font(.caption)
-                    + Text("  (debug: draw-order A/B)").font(.caption2).foregroundColor(.secondary)
-                }
+                sliderRow("Mix", value: $coordinator.toolWetStrength, range: 0.05...1.0)
+                sliderRow("Smear", value: $coordinator.toolWetPickup, range: 0.0...1.0)
             }
         }
         .padding(20)

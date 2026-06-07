@@ -93,10 +93,14 @@ public struct BrushConfig: Codable, Sendable {
     /// the canvas layer (eraser-style RMW) and mixes its color into the pixels under it,
     /// instead of stamping opaquely via the scratch — i.e. wet-on-wet build-up.
     public var wetEnabled: Bool
-    /// Wet deposit strength [0,1]: per-stamp weight toward the brush color in the mix
-    /// (scaled further by `opacity` in the wet path). Low values let the underlying
-    /// color show through and build up gradually — high values cover in one pass.
+    /// Wet deposit strength [0,1] ("Mix"): per-stamp weight toward the carried load color
+    /// (scaled further by `opacity` in the wet path). Low values let the underlying color
+    /// show through and build up gradually — high values cover in one pass.
     public var wetStrength: CGFloat
+    /// Wet pickup [0,1] ("Smear"): how fast the carried load contaminates toward the canvas
+    /// color it crosses. 0 = no smear (pure deposit); higher = the brush drags/carries color
+    /// further along the stroke (smudgier).
+    public var wetPickup: CGFloat
 
     public init(
         color: CodableColor,
@@ -110,7 +114,8 @@ public struct BrushConfig: Codable, Sendable {
         spacing: CGFloat = 0.3,
         taper: CGFloat = 0.0,
         wetEnabled: Bool = false,
-        wetStrength: CGFloat = 0.4
+        wetStrength: CGFloat = 0.4,
+        wetPickup: CGFloat = 0.25
     ) {
         self.color = color
         self.baseWidth = baseWidth
@@ -124,6 +129,7 @@ public struct BrushConfig: Codable, Sendable {
         self.taper = taper
         self.wetEnabled = wetEnabled
         self.wetStrength = wetStrength
+        self.wetPickup = wetPickup
     }
 
     public static let defaultPen = BrushConfig(color: .black, baseWidth: 5, pressureGamma: 0.7)
@@ -146,7 +152,7 @@ public struct BrushConfig: Codable, Sendable {
     enum CodingKeys: String, CodingKey {
         case color, baseWidth, opacity, flow, pressureGamma, pressureOpacity
         case streamline, taperIn, taperOut, tiltSensitivity
-        case hardness, spacing, taper, wetEnabled, wetStrength
+        case hardness, spacing, taper, wetEnabled, wetStrength, wetPickup
     }
 
     public init(from decoder: Decoder) throws {
@@ -169,6 +175,7 @@ public struct BrushConfig: Codable, Sendable {
         taper = try container.decodeIfPresent(CGFloat.self, forKey: .taper) ?? 0.0
         wetEnabled = try container.decodeIfPresent(Bool.self, forKey: .wetEnabled) ?? false
         wetStrength = try container.decodeIfPresent(CGFloat.self, forKey: .wetStrength) ?? 0.4
+        wetPickup = try container.decodeIfPresent(CGFloat.self, forKey: .wetPickup) ?? 0.25
         // Removed fields — decoded for backward compat with saved configs, not stored.
         _ = try container.decodeIfPresent(CGFloat.self, forKey: .pressureOpacity)
         _ = try container.decodeIfPresent(CGFloat.self, forKey: .taperIn)
@@ -189,6 +196,7 @@ public struct BrushConfig: Codable, Sendable {
         try container.encode(taper, forKey: .taper)
         try container.encode(wetEnabled, forKey: .wetEnabled)
         try container.encode(wetStrength, forKey: .wetStrength)
+        try container.encode(wetPickup, forKey: .wetPickup)
     }
 }
 

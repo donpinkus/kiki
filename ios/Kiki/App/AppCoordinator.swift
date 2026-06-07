@@ -128,6 +128,20 @@ final class AppCoordinator {
             applyTool()
         }
     }
+    /// Wet "Mix": per-stamp deposit strength toward the carried load color.
+    var toolWetStrength: CGFloat = 0.4 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    /// Wet "Smear": how much the brush picks up and carries the canvas color it crosses.
+    var toolWetPickup: CGFloat = 0.25 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
     /// Debug: A/B the wet draw-order experiment (per-stamp vs instanced draws).
     var wetOrderingPerStamp = false {
         didSet { canvasViewModel.setWetOrderingPerStamp(wetOrderingPerStamp) }
@@ -1580,7 +1594,9 @@ final class AppCoordinator {
                 hardness: toolHardness,
                 spacing: toolSpacing,
                 taper: toolTaper,
-                wetEnabled: toolWetEnabled
+                wetEnabled: toolWetEnabled,
+                wetStrength: toolWetStrength,
+                wetPickup: toolWetPickup
             )
             canvasViewModel.selectBrush(config)
         case .eraser:

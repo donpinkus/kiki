@@ -938,7 +938,7 @@ public final class MetalCanvasView: UIView {
         let baseColor = SIMD3<Float>(s2l(brush.color.red), s2l(brush.color.green), s2l(brush.color.blue))
         let hardness = Float(brush.hardness)
         let spacingFrac = max(brush.spacing, 0.02)
-        let pickup: Float = 0.25   // how fast the carried load contaminates toward the canvas
+        let pickup = Float(max(0, min(1, brush.wetPickup)))   // how fast the load picks up canvas color
 
         // Fresh paint load at the start of a stroke.
         if lastWetPointIndex == 0 { wetLoad = baseColor }
