@@ -33,8 +33,9 @@ struct UsageMeterView: View {
 
     private var labelText: String {
         if fraction >= 1 { return "Out of free drawing — Subscribe" }
-        let remaining = max((coordinator.usageCapUsd ?? 0) - (coordinator.usageSpendUsd ?? 0), 0)
-        return String(format: "$%.2f free drawing left", remaining)
+        // Percent of the free tier remaining (don't expose the dollar cap).
+        let remainingPct = Int((max(1 - fraction, 0) * 100).rounded())
+        return "\(remainingPct)% free drawing left"
     }
 
     private var content: some View {
