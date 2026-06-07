@@ -181,6 +181,13 @@ struct DrawingView: View {
                 }
                 .background(Color(.systemGray6))
             }
+            // Fill the bottom home-indicator safe-area inset so the (black) Metal
+            // canvas reaches the physical bottom edge like it already does on the
+            // top/left/right edges. Without this, the systemGray6 background bleeds
+            // into the bottom inset while the canvas content stops above it, leaving
+            // a ~24pt gray bar. Touch→texture mapping is unaffected: it's computed
+            // from the centered canvas square's own bounds, not the pane height.
+            .ignoresSafeArea(edges: .bottom)
         }
         .animation(.easeInOut(duration: 0.3), value: coordinator.generationError != nil)
         .animation(.easeOut(duration: 0.25), value: coordinator.shouldShowQuickShapeTooltip)
