@@ -111,34 +111,45 @@ enum SideBySideVideoComposer {
         let oneFrame = CMTime(value: 1, timescale: 12)
         let tailStart = finalDuration
         var tailGeneratedTransform: CGAffineTransform?
+        // Best-effort: a tail failure must NEVER blank the whole replay. On any
+        // error we reset to the pre-tail duration; the instruction below is
+        // clamped to `finalDuration`, so partial inserts past it aren't rendered.
         if lastSegmentDuration > oneFrame, let lastCanvasTrack {
-            let lastFrameRange = CMTimeRange(start: lastSegmentDuration - oneFrame, duration: oneFrame)
-            var appendedAnimation = false
+            do {
+                let lastFrameRange = CMTimeRange(start: lastSegmentDuration - oneFrame, duration: oneFrame)
+                var appendedAnimation = false
 
-            if let generatedVideoURL {
-                let animAsset = AVURLAsset(url: generatedVideoURL)
-                let animTracks = try? await animAsset.loadTracks(withMediaType: .video)
-                let animDuration = try? await animAsset.load(.duration)
-                if let animTrack = animTracks?.first, let animDuration, animDuration.isValid, animDuration > .zero {
-                    try generatedComp.insertTimeRange(CMTimeRange(start: .zero, duration: animDuration), of: animTrack, at: tailStart)
-                    try canvasComp.insertTimeRange(lastFrameRange, of: lastCanvasTrack, at: tailStart)
-                    canvasComp.scaleTimeRange(CMTimeRange(start: tailStart, duration: oneFrame), toDuration: animDuration)
-                    // The animation isn't 768²; fit it into the generated pane.
-                    let animSize = (try? await animTrack.load(.naturalSize)) ?? CGSize(width: side, height: side)
-                    tailGeneratedTransform = fitTransform(sourceSize: animSize, into: generatedPaneRect(for: layout, render: renderSize))
-                    finalDuration = tailStart + animDuration
-                    appendedAnimation = true
+                if let generatedVideoURL {
+                    let animAsset = AVURLAsset(url: generatedVideoURL)
+                    let animTrack = try? await animAsset.loadTracks(withMediaType: .video).first
+                    // Use the TRACK's own range — the asset duration can exceed it,
+                    // which would make insertTimeRange throw.
+                    let animRange = try? await animTrack?.load(.timeRange)
+                    if let animTrack, let animRange, animRange.duration.isValid, animRange.duration > .zero {
+                        try generatedComp.insertTimeRange(animRange, of: animTrack, at: tailStart)
+                        try canvasComp.insertTimeRange(lastFrameRange, of: lastCanvasTrack, at: tailStart)
+                        canvasComp.scaleTimeRange(CMTimeRange(start: tailStart, duration: oneFrame), toDuration: animRange.duration)
+                        // The animation isn't 768²; fit it into the generated pane.
+                        let animSize = (try? await animTrack.load(.naturalSize)) ?? CGSize(width: side, height: side)
+                        tailGeneratedTransform = fitTransform(sourceSize: animSize, into: generatedPaneRect(for: layout, render: renderSize))
+                        finalDuration = tailStart + animRange.duration
+                        appendedAnimation = true
+                    }
                 }
-            }
 
-            if !appendedAnimation, let lastGeneratedTrack {
-                let hold = CMTime(seconds: 2, preferredTimescale: 600)
-                try canvasComp.insertTimeRange(lastFrameRange, of: lastCanvasTrack, at: tailStart)
-                try generatedComp.insertTimeRange(lastFrameRange, of: lastGeneratedTrack, at: tailStart)
-                let frozen = CMTimeRange(start: tailStart, duration: oneFrame)
-                canvasComp.scaleTimeRange(frozen, toDuration: hold)
-                generatedComp.scaleTimeRange(frozen, toDuration: hold)
-                finalDuration = tailStart + hold
+                if !appendedAnimation, let lastGeneratedTrack {
+                    let hold = CMTime(seconds: 2, preferredTimescale: 600)
+                    try canvasComp.insertTimeRange(lastFrameRange, of: lastCanvasTrack, at: tailStart)
+                    try generatedComp.insertTimeRange(lastFrameRange, of: lastGeneratedTrack, at: tailStart)
+                    let frozen = CMTimeRange(start: tailStart, duration: oneFrame)
+                    canvasComp.scaleTimeRange(frozen, toDuration: hold)
+                    generatedComp.scaleTimeRange(frozen, toDuration: hold)
+                    finalDuration = tailStart + hold
+                }
+            } catch {
+                // Drop the tail, keep the main replay.
+                finalDuration = tailStart
+                tailGeneratedTransform = nil
             }
         }
 
