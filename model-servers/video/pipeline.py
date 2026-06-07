@@ -283,11 +283,23 @@ class Ltx23VideoPipeline:
 
         # Imports gated to load() so that startup failures (missing weights,
         # ImportError on ltx_core/ltx_pipelines) surface in the loader log
-        # rather than at module import time.
+        # rather than at module import time. These read the ltx_*/torch
+        # packages off the network-volume venv, so on a cold volume this block
+        # can block on NFS for minutes (observed ~167 s on pod cynw8gxpytk7d0,
+        # 2026-06-07, with flat host RSS — i.e. blocked on I/O, not computing).
+        # Timed + logged so a recurrence pinpoints imports-vs-path-resolve
+        # instead of leaving the silent gap to inference.
+        t_imports = time.time()
         from ltx_core.model.video_vae import TilingConfig
         from ltx_core.quantization import QuantizationPolicy
         from ltx_pipelines.distilled import DistilledPipeline
         from ltx_pipelines.utils.types import OffloadMode
+        imports_ms = int((time.time() - t_imports) * 1000)
+        self._phase_timings["imports_ms"] = imports_ms
+        logger.info(
+            f"LTX-2.3 gated imports loaded in {imports_ms / 1000:.1f}s",
+            extra={"imports_ms": imports_ms},
+        )
 
         # Resolve pre-populated paths from the offline HF cache. Pod is
         # HF_HUB_OFFLINE=1; populate script ran these as online downloads.
@@ -297,11 +309,14 @@ class Ltx23VideoPipeline:
             config.LTX_SPATIAL_UPSCALER_REPO, config.LTX_SPATIAL_UPSCALER_FILE
         )
         gemma_root = _resolve_hf_snapshot_path(config.LTX_TEXT_ENCODER_REPO)
-        self._phase_timings["resolve_paths_ms"] = int((time.time() - t_phase) * 1000)
+        resolve_paths_ms = int((time.time() - t_phase) * 1000)
+        self._phase_timings["resolve_paths_ms"] = resolve_paths_ms
         logger.info(
-            f"Resolved offline paths: checkpoint={checkpoint_path} "
+            f"Resolved offline paths in {resolve_paths_ms / 1000:.1f}s: "
+            f"checkpoint={checkpoint_path} "
             f"upscaler={upscaler_path} gemma={gemma_root}",
             extra={
+                "resolve_paths_ms": resolve_paths_ms,
                 "checkpoint_path": str(checkpoint_path),
                 "upscaler_path": str(upscaler_path),
                 "gemma_root": str(gemma_root),
