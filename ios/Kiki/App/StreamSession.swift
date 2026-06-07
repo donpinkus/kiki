@@ -98,6 +98,16 @@ final class StreamSession {
     /// Called when stream readiness changes.
     var onReadinessChanged: ((StreamReadiness) -> Void)?
 
+    /// Called for out-of-band server `type=="error"` messages, carrying the
+    /// machine-readable `code` (e.g. "free_limit_reached") so the coordinator
+    /// can branch — e.g. present the subscription paywall — independent of the
+    /// readiness-driven banner text.
+    var onServerError: ((_ code: String?, _ message: String?) -> Void)?
+
+    /// Called for `type=="usage"` messages — the backend's live free-tier spend
+    /// push (monthly fal spend + cap, USD), driving the in-app usage meter.
+    var onUsageUpdate: ((_ spendUsd: Double, _ capUsd: Double) -> Void)?
+
     // MARK: - Reconnection
 
     private var reconnectAttempts = 0
@@ -626,7 +636,12 @@ final class StreamSession {
                             scope.setExtra(value: status.message ?? "(no message)", key: "serverMessage")
                         }
                         self.reconnectAttempts = 0
+                        self.onServerError?(status.code, status.message)
                         self.setReadiness(.failed(message: status.message ?? "Server error"))
+                    } else if status.type == "usage",
+                              let spend = status.spendUsd, let cap = status.capUsd {
+                        // Live free-tier spend push — drives the in-app meter.
+                        self.onUsageUpdate?(spend, cap)
                     }
                 }
             }

@@ -1070,6 +1070,13 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
               try {
                 const total = await addMonthlySpendUsd(uid, (deltaMs / 1000) * RATE_USD_PER_SEC);
                 lastBilledMs = ms; // advance only on success → a failed write retries next fire
+                // Live usage push so the client's free-tier meter ticks up in
+                // near-real-time (every onUsage fire, ~10s). Best-effort.
+                if (!clientDisconnected && socket.readyState === socket.OPEN) {
+                  socket.send(
+                    JSON.stringify({ type: 'usage', spendUsd: total, capUsd: config.FREE_TIER_FAL_USD }),
+                  );
+                }
                 if (total >= config.FREE_TIER_FAL_USD) enforceCut(total);
               } catch (err) {
                 // Fail-open: don't advance lastBilledMs; the delta is retried on

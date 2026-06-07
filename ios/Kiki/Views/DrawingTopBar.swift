@@ -34,6 +34,8 @@ struct DrawingTopBar: View {
             }
             .tint(Color.primary)
 
+            UsageMeterView()
+
             Spacer()
 
             // MARK: Center — Style, Prompt

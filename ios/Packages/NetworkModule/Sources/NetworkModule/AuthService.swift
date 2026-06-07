@@ -45,6 +45,25 @@ public actor AuthService {
         let refreshToken: String
     }
 
+    private struct VerifySubscriptionRequest: Codable {
+        let jws: String
+    }
+
+    /// Result of `/v1/subscription/verify`. `expiresAt` is epoch milliseconds
+    /// (or nil if never subscribed).
+    public struct SubscriptionStatusResponse: Codable, Sendable {
+        public let subscriptionStatus: String
+        public let expiresAt: Double?
+    }
+
+    /// Result of `/v1/usage` — the user's current free-tier fal spend. `exempt`
+    /// is true for test accounts + active subscribers (the meter is hidden).
+    public struct UsageResponse: Codable, Sendable {
+        public let spendUsd: Double
+        public let capUsd: Double
+        public let exempt: Bool
+    }
+
     // MARK: - Constants
 
     /// Refresh proactively when the access token has less than this many seconds left.
@@ -124,6 +143,40 @@ public actor AuthService {
             throw AuthError.refreshFailed("no token after refresh")
         }
         return refreshed.accessToken
+    }
+
+    /// Submit a StoreKit 2 `Transaction.jwsRepresentation` to the backend for
+    /// verification. The backend validates the Apple signature, records the
+    /// subscription state, and returns the resulting status. Authenticated with
+    /// the current access token (auto-refreshes). Call after a purchase, for
+    /// Restore Purchases, and on launch for each current entitlement.
+    public func verifySubscription(jws: String) async throws -> SubscriptionStatusResponse {
+        let token = try await currentAccessToken()
+        return try await authedPost(
+            path: "/v1/subscription/verify",
+            body: VerifySubscriptionRequest(jws: jws),
+            token: token
+        )
+    }
+
+    /// Fetch the signed-in user's current free-tier usage (for the in-app
+    /// meter). Authenticated; auto-refreshes the access token.
+    public func fetchUsage() async throws -> UsageResponse {
+        let token = try await currentAccessToken()
+        let url = backendURL.appendingPathComponent("/v1/usage")
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        let (data, rawResponse) = try await urlSession.data(for: request)
+        guard let http = rawResponse as? HTTPURLResponse else { throw AuthError.invalidResponse }
+        if !(200..<300).contains(http.statusCode) {
+            throw AuthError.backendRejected("HTTP \(http.statusCode)")
+        }
+        do {
+            return try JSONDecoder().decode(UsageResponse.self, from: data)
+        } catch {
+            throw AuthError.invalidResponse
+        }
     }
 
     /// Clears all credentials from Keychain. Call on explicit sign-out.
@@ -220,10 +273,26 @@ public actor AuthService {
     }
 
     private func post<Req: Encodable, Resp: Decodable>(path: String, body: Req) async throws -> Resp {
+        return try await send(path: path, body: body, token: nil)
+    }
+
+    /// Like `post`, but attaches a Bearer token for authenticated endpoints.
+    private func authedPost<Req: Encodable, Resp: Decodable>(
+        path: String, body: Req, token: String
+    ) async throws -> Resp {
+        return try await send(path: path, body: body, token: token)
+    }
+
+    private func send<Req: Encodable, Resp: Decodable>(
+        path: String, body: Req, token: String?
+    ) async throws -> Resp {
         let url = backendURL.appendingPathComponent(path)
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let token {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
         request.httpBody = try JSONEncoder().encode(body)
 
         let (data, rawResponse) = try await urlSession.data(for: request)

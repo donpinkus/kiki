@@ -43,6 +43,15 @@ public actor StreamWebSocketClient {
         // and for type=="state" when state=="failed". Client renders verbatim
         // — no category-to-string mapping that fabricates a cause.
         public let message: String?
+        // Stable machine-readable error code for type=="error" (e.g.
+        // "free_limit_reached"). Lets the client branch on the cause (show a
+        // paywall) without string-matching `message`. nil for state events.
+        public let code: String?
+        // Free-tier usage, present for type=="usage" — the backend pushes the
+        // running monthly fal spend + cap (~every 10s while drawing) so the
+        // in-app meter ticks up live. Both nil for non-usage events.
+        public let spendUsd: Double?
+        public let capUsd: Double?
     }
 
     /// A generated image frame from the pod. `requestId` is set when the

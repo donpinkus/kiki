@@ -19,6 +19,18 @@ CREATE TABLE IF NOT EXISTS users (
   updated_at              TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- StoreKit subscription binding (Stage 3). `original_transaction_id` is the
+-- stable per-subscription key; the (unauthenticated) App Store webhook resolves
+-- a user by it, while the authenticated /v1/subscription/verify call binds it.
+-- Partial-unique: most users are NULL (no sub), but a given Apple sub maps to
+-- exactly one Kiki account. `subscription_last_signed_ms` is the JWS signedDate
+-- of the last transaction we applied — the monotonic guard that makes webhook
+-- processing idempotent + order-safe (see modules/appstore/subscriptions.ts).
+ALTER TABLE users ADD COLUMN IF NOT EXISTS original_transaction_id TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS subscription_last_signed_ms BIGINT;
+CREATE UNIQUE INDEX IF NOT EXISTS users_original_transaction_id_key
+  ON users (original_transaction_id) WHERE original_transaction_id IS NOT NULL;
+
 -- Per-user, per-month fal image-generation spend (USD), for the free-tier cap.
 -- One row per (user, calendar month UTC); a new month is a fresh row reading 0,
 -- so the monthly reset is implicit. Incremented atomically as the relay reports

@@ -13,6 +13,9 @@ const PUBLIC_PATHS = new Set<string>([
   '/health',
   '/v1/auth/apple',
   '/v1/auth/refresh',
+  // App Store Server Notifications webhook: Apple calls it with no Bearer; the
+  // JWS signature on the payload is the authentication (verified in-handler).
+  '/v1/app-store/notify',
 ]);
 
 function isPublic(url: string): boolean {

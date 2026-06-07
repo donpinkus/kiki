@@ -24,6 +24,15 @@ struct DrawingView: View {
                         .font(.subheadline)
                         .lineLimit(2)
                     Spacer()
+                    if coordinator.isOutOfDrawingTime {
+                        Button("Subscribe") {
+                            coordinator.showPaywall = true
+                        }
+                        .font(.subheadline.weight(.semibold))
+                        .buttonStyle(.borderedProminent)
+                        .tint(.white)
+                        .foregroundStyle(.red)
+                    }
                     Button {
                         coordinator.generationError = nil
                     } label: {
@@ -177,8 +186,13 @@ struct DrawingView: View {
         .animation(.easeOut(duration: 0.25), value: coordinator.shouldShowQuickShapeTooltip)
         .ignoresSafeArea(.keyboard)
         .onAppear { KeyboardDismissal.installIfNeeded() }
+        .task { coordinator.refreshUsage() }
         .fullScreenCover(isPresented: $coordinator.showStylePicker) {
             StylePickerView()
+                .environment(coordinator)
+        }
+        .fullScreenCover(isPresented: $coordinator.showPaywall) {
+            PaywallView()
                 .environment(coordinator)
         }
     }

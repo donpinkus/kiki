@@ -231,6 +231,51 @@ final class AppCoordinator {
     private let backendURL: URL
     private let authService: AuthService
 
+    // MARK: - Subscription / paywall
+
+    /// StoreKit 2 subscription state + purchase flow (see SubscriptionManager).
+    let subscriptionManager: SubscriptionManager
+    /// Drives the paywall `fullScreenCover`. Set true on `free_limit_reached`
+    /// (or a manual upgrade tap); cleared on dismiss / successful purchase.
+    var showPaywall = false
+    /// True once the backend reported the monthly free-tier cap was hit. Keeps a
+    /// "Subscribe" affordance in the error banner after the paywall is dismissed.
+    var isOutOfDrawingTime = false
+
+    // -- Free-tier usage meter --
+    /// Current monthly fal spend / cap (USD). nil until first loaded. Updated
+    /// live over the WS while drawing (`onUsageUpdate`) and via `refreshUsage()`
+    /// (`GET /v1/usage`) on screen appear + after a stream stops.
+    var usageSpendUsd: Double?
+    var usageCapUsd: Double?
+    /// True for test accounts + active subscribers (no cap) → meter hidden.
+    var usageExempt = false
+
+    /// Show the meter only once loaded, for a non-exempt signed-in user with a
+    /// real cap.
+    var showUsageBar: Bool {
+        signedInUserId != nil && !usageExempt && usageSpendUsd != nil && (usageCapUsd ?? 0) > 0
+    }
+
+    /// Spend as a 0…1 fraction of the cap, for the bar fill.
+    var usageFraction: Double {
+        guard let spend = usageSpendUsd, let cap = usageCapUsd, cap > 0 else { return 0 }
+        return min(max(spend / cap, 0), 1)
+    }
+
+    /// Fetch current usage from the backend (best-effort). Call on screen appear
+    /// and after a stream stops; the live WS push covers mid-drawing.
+    func refreshUsage() {
+        guard signedInUserId != nil else { return }
+        Task { @MainActor [authService] in
+            if let usage = try? await authService.fetchUsage() {
+                self.usageSpendUsd = usage.spendUsd
+                self.usageCapUsd = usage.capUsd
+                self.usageExempt = usage.exempt
+            }
+        }
+    }
+
     // MARK: - Auth
 
     var signedInUserId: String?
@@ -322,6 +367,14 @@ final class AppCoordinator {
         self.backendURL = backendURL
         self.authService = AuthService(backendURL: backendURL)
 
+        // StoreKit manager posts each verified transaction's signed JWS to the
+        // backend (which lifts the fal cap). `verify` is injected to keep the
+        // manager decoupled from the networking layer.
+        let authForSub = self.authService
+        self.subscriptionManager = SubscriptionManager(verify: { jws in
+            _ = try await authForSub.verifySubscription(jws: jws)
+        })
+
         // Wire the Insights mirror. Reuses the existing access token (no new
         // client secret); events queue until a token exists.
         let auth = self.authService
@@ -350,6 +403,14 @@ final class AppCoordinator {
             // users stay bound to their anonymous device ID forever and iOS events
             // never stitch to the backend-emitted userId.
             Analytics.identify(userId: initialUserId!, email: initialEmail)
+
+            // Re-sync subscription entitlements on launch: posts any current
+            // StoreKit entitlement to the backend (reconciles a missed webhook /
+            // fresh install) and updates local status for the paywall.
+            Task { @MainActor [subscriptionManager] in
+                await subscriptionManager.refreshEntitlements()
+            }
+            refreshUsage()
 
             // If no drawings exist, go directly to a new drawing
             let descriptor = FetchDescriptor<Drawing>(sortBy: [SortDescriptor(\.updatedAt, order: .reverse)])
@@ -965,11 +1026,39 @@ final class AppCoordinator {
             self.handleVideoEvent(event)
         }
 
+        session.onServerError = { [weak self] code, _ in
+            guard let self else { return }
+            // Free-tier cap hit: surface the paywall. The readiness `.failed`
+            // path (above) still sets `generationError` for the banner text.
+            if code == "free_limit_reached" {
+                self.isOutOfDrawingTime = true
+                self.showPaywall = true
+            }
+        }
+
+        session.onUsageUpdate = { [weak self] spend, cap in
+            guard let self else { return }
+            self.usageSpendUsd = spend
+            self.usageCapUsd = cap
+            // A usage push only fires for metered (non-exempt) sessions.
+            self.usageExempt = false
+        }
+
         self.streamSession = session
 
         Task {
             await session.start()
         }
+    }
+
+    /// Called after a successful subscribe/restore. Clears the out-of-time state
+    /// and restarts the stream — the backend cap is now lifted, so the start
+    /// gate will pass on reconnect.
+    func subscriptionDidActivate() {
+        showPaywall = false
+        isOutOfDrawingTime = false
+        generationError = nil
+        resumeStream()
     }
 
     /// Public entry point for resuming a paused/idle session. Used by:
@@ -1021,6 +1110,10 @@ final class AppCoordinator {
         streamSession = nil
         streamReadiness = .disconnected
         streamFrameCount = 0
+        // Pull the final billed spend after the session closes (the backend's
+        // last usage flush happens post-disconnect, so the live push won't have
+        // delivered it). Best-effort.
+        if hadSession { refreshUsage() }
         // If we're stopping before first frame, mark the startup tx as cancelled.
         pendingStartupTransaction?.finish(status: .cancelled)
         pendingStartupTransaction = nil

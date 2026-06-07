@@ -1,0 +1,60 @@
+{
+  "identifier" : "63337FD4-B8A4-425A-BEAA-B58346902795",
+  "nonRenewingSubscriptions" : [
+
+  ],
+  "products" : [
+
+  ],
+  "settings" : {
+    "_applicationInternalID" : "0",
+    "_developerTeamID" : "0",
+    "_failTransactionsEnabled" : false,
+    "_lastSynchronizedDate" : 0,
+    "_locale" : "en_US",
+    "_storefront" : "USA",
+    "_storeKitErrors" : [
+
+    ]
+  },
+  "subscriptionGroups" : [
+    {
+      "id" : "12859",
+      "localizations" : [
+
+      ],
+      "name" : "Kiki Pro",
+      "subscriptions" : [
+        {
+          "adHocOffers" : [
+
+          ],
+          "codeOffers" : [
+
+          ],
+          "displayPrice" : "3.99",
+          "familyShareable" : false,
+          "groupNumber" : 1,
+          "internalID" : "3EFAF1D7-914D-494D-8C20-E9F9352E6DEA",
+          "introductoryOffer" : null,
+          "localizations" : [
+            {
+              "description" : "Unlimited drawing every month",
+              "displayName" : "Kiki Pro",
+              "locale" : "en_US"
+            }
+          ],
+          "productID" : "com.don.Kiki.pro.monthly",
+          "recurringSubscriptionPeriod" : "P1M",
+          "referenceName" : "Kiki Pro Monthly",
+          "subscriptionGroupID" : "7AE6C96E-51CE-4265-9C03-86B8BBCF9227",
+          "type" : "RecurringSubscription"
+        }
+      ]
+    }
+  ],
+  "version" : {
+    "major" : 4,
+    "minor" : 0
+  }
+}

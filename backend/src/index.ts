@@ -80,6 +80,9 @@ import { AppError, RateLimitedError } from './errors.js';
 import { healthRoute } from './routes/health.js';
 import { streamRoute } from './routes/stream.js';
 import { authRoute } from './routes/auth.js';
+import { subscriptionRoute } from './routes/subscription.js';
+import { appStoreNotifyRoute } from './routes/appStoreNotify.js';
+import { usageRoute } from './routes/usage.js';
 import { opsRoute } from './routes/ops.js';
 import { authPlugin } from './modules/auth/index.js';
 import { start as startOrchestrator } from './modules/orchestrator/orchestrator.js';
@@ -116,6 +119,9 @@ await app.register(authPlugin);
 // --- Routes ---
 await app.register(healthRoute);
 await app.register(authRoute);
+await app.register(subscriptionRoute);
+await app.register(appStoreNotifyRoute);
+await app.register(usageRoute);
 await app.register(streamRoute);
 await app.register(opsRoute);
 

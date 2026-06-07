@@ -13,8 +13,14 @@ export interface AppConfig {
   readonly JWT_ACCESS_SECRET: string;
   /** Separate HS256 secret for refresh tokens (30d TTL). */
   readonly JWT_REFRESH_SECRET: string;
-  /** iOS app's bundle identifier — used as Apple identity-token audience. */
+  /** iOS app's bundle identifier — used as Apple identity-token audience and as
+   * the bundle id when verifying StoreKit transactions / App Store notifications. */
   readonly APPLE_BUNDLE_ID: string;
+  /** Numeric App Store app id ("Apple ID" in App Store Connect → App Information).
+   * Required by Apple's lib to build a PRODUCTION StoreKit verifier; until set,
+   * the backend verifies Sandbox/TestFlight transactions but rejects Production
+   * ones with a clear error. 0/unset = not configured (pre-App-Store-launch). */
+  readonly APPLE_APP_APPLE_ID: number;
   /** When true, reject WS connections without a valid Bearer token. When
    * false (default), backend accepts both legacy ?session= and new Bearer
    * for the rollout window. */
@@ -255,6 +261,7 @@ function validateConfig(): AppConfig {
     JWT_ACCESS_SECRET: jwtAccessSecret,
     JWT_REFRESH_SECRET: jwtRefreshSecret,
     APPLE_BUNDLE_ID: appleBundleId,
+    APPLE_APP_APPLE_ID: Number(process.env['APPLE_APP_APPLE_ID'] ?? 0),
     AUTH_REQUIRED: process.env['AUTH_REQUIRED'] === 'true',
     FREE_TIER_FAL_USD: Number(process.env['FREE_TIER_FAL_USD'] ?? 10),
     ONDEMAND_FALLBACK_ENABLED: process.env['ONDEMAND_FALLBACK_ENABLED'] === 'true',

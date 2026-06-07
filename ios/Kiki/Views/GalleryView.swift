@@ -48,6 +48,8 @@ struct GalleryView: View {
 
                 Spacer()
 
+                UsageMeterView()
+
                 Button {
                     isDeleteMode = false
                     coordinator.newDrawing()
@@ -81,6 +83,7 @@ struct GalleryView: View {
                 isDeleteMode = false
             }
         }
+        .task { coordinator.refreshUsage() }
     }
 }
 

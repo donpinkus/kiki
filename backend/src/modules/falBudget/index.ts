@@ -53,11 +53,14 @@ export async function checkFalBudget(userId: string): Promise<FalBudgetStatus> {
   const capUsd = config.FREE_TIER_FAL_USD;
   const res = await query<{
     is_test_account: boolean;
-    subscription_status: string;
+    subscribed: boolean;
     spend: string;
   }>(
+    // `subscribed` requires BOTH an active status AND an unexpired window. The
+    // expiry check is the self-heal: if a renewal/expiry webhook is ever missed,
+    // a lapsed subscription still loses its exemption once the timestamp passes.
     `SELECT u.is_test_account,
-            u.subscription_status,
+            (u.subscription_status = 'active' AND u.subscription_expires_at > now()) AS subscribed,
             COALESCE(m.fal_spend_usd, 0) AS spend
      FROM users u
      LEFT JOIN monthly_usage m
@@ -69,7 +72,7 @@ export async function checkFalBudget(userId: string): Promise<FalBudgetStatus> {
   const row = res.rows[0];
   // Unknown user (e.g. legacy/Redis-only id mid-cutover): treat as non-exempt
   // with zero spend — they'll get the full free tier, gated normally.
-  const exempt = row ? row.is_test_account || row.subscription_status === 'active' : false;
+  const exempt = row ? row.is_test_account || row.subscribed : false;
   const spendUsd = row ? Number(row.spend) : 0;
   return { allowed: exempt || spendUsd < capUsd, exempt, spendUsd, capUsd };
 }

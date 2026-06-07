@@ -23,6 +23,7 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
+    "@apple/app-store-server-library": "^3.1.0",
     "@fastify/cors": "^11.0.0",
     "@fastify/websocket": "^11.0.1",
     "@sentry/node": "^10.49.0",

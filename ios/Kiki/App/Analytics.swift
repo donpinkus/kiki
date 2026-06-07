@@ -58,6 +58,11 @@ enum AnalyticsEvent: String {
     case strokeSnapAbstained = "stroke.snap.abstained"
     case strokeSnapUndoneWithin2s = "stroke.snap.undone_within_2s"
     case strokeSnapPreviewCanceled = "stroke.snap.preview_canceled"
+
+    // Subscription / paywall
+    case paywallShown = "paywall.shown"
+    case subscriptionPurchased = "subscription.purchased"
+    case subscriptionRestored = "subscription.restored"
 }
 
 enum Analytics {
