@@ -75,6 +75,11 @@ public struct BrushConfig: Codable, Sendable {
     public var pressureGamma: CGFloat
     /// How much Apple Pencil tilt widens the stroke (0 = none, 1 = dramatic).
     public var tiltSensitivity: CGFloat
+    /// StreamLine stabilization [0,1]. 0 = the drawn point follows the pencil exactly;
+    /// higher values lag the drawn point behind the pencil (low-pass smoothing) for
+    /// steadier, more confident lines. Applied at input time and baked into the stored
+    /// stroke points (see `MetalCanvasView.smoothedStrokePoint`). See pro-brush-roadmap Phase 1.
+    public var streamline: CGFloat
 
     public init(
         color: CodableColor,
@@ -82,7 +87,8 @@ public struct BrushConfig: Codable, Sendable {
         opacity: CGFloat = 1.0,
         flow: CGFloat = 1.0,
         pressureGamma: CGFloat = 0.7,
-        tiltSensitivity: CGFloat = 0.0
+        tiltSensitivity: CGFloat = 0.0,
+        streamline: CGFloat = 0.0
     ) {
         self.color = color
         self.baseWidth = baseWidth
@@ -90,6 +96,7 @@ public struct BrushConfig: Codable, Sendable {
         self.flow = flow
         self.pressureGamma = pressureGamma
         self.tiltSensitivity = tiltSensitivity
+        self.streamline = streamline
     }
 
     public static let defaultPen = BrushConfig(color: .black, baseWidth: 5, pressureGamma: 0.7)
@@ -124,9 +131,11 @@ public struct BrushConfig: Codable, Sendable {
         // unchanged (old "opacity" was baked per-stamp ≈ flow=1.0 with the value as ceiling).
         flow = try container.decodeIfPresent(CGFloat.self, forKey: .flow) ?? 1.0
         tiltSensitivity = try container.decodeIfPresent(CGFloat.self, forKey: .tiltSensitivity) ?? 0.0
+        // Default streamline to 0.0 so configs saved without it decode to "no smoothing"
+        // (matches pre-Phase-1 behavior). The key already existed as a legacy no-op.
+        streamline = try container.decodeIfPresent(CGFloat.self, forKey: .streamline) ?? 0.0
         // Removed fields — decoded for backward compat with saved configs, not stored.
         _ = try container.decodeIfPresent(CGFloat.self, forKey: .pressureOpacity)
-        _ = try container.decodeIfPresent(CGFloat.self, forKey: .streamline)
         _ = try container.decodeIfPresent(CGFloat.self, forKey: .taperIn)
         _ = try container.decodeIfPresent(CGFloat.self, forKey: .taperOut)
     }
@@ -139,6 +148,7 @@ public struct BrushConfig: Codable, Sendable {
         try container.encode(flow, forKey: .flow)
         try container.encode(pressureGamma, forKey: .pressureGamma)
         try container.encode(tiltSensitivity, forKey: .tiltSensitivity)
+        try container.encode(streamline, forKey: .streamline)
     }
 }
 

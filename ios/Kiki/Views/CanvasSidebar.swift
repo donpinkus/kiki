@@ -6,6 +6,7 @@ struct CanvasSidebar: View {
     @State private var isDraggingSize = false
     @State private var isDraggingOpacity = false
     @State private var isDraggingFlow = false
+    @State private var isDraggingStreamline = false
 
     private let widthRange = BrushConfig.widthRange
 
@@ -70,6 +71,29 @@ struct CanvasSidebar: View {
             .overlay(alignment: .trailing) {
                 if isDraggingFlow {
                     Text("\(Int(coordinator.toolFlow * 100))%")
+                        .font(.caption2.weight(.medium).monospacedDigit())
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 6))
+                        .offset(x: 50)
+                }
+            }
+            .disabled(coordinator.currentTool == .eraser)
+            .opacity(coordinator.currentTool == .eraser ? 0.3 : 1)
+
+            Divider().frame(width: 24)
+
+            // Stabilize slider (brush only) — StreamLine smoothing; steadier lines.
+            // See pro-brush-roadmap Phase 1.
+            Slider(value: $coordinator.toolStreamline, in: 0.0...1.0) { editing in
+                isDraggingStreamline = editing
+            }
+            .frame(width: 100)
+            .rotationEffect(.degrees(-90))
+            .frame(width: 30, height: 100)
+            .overlay(alignment: .trailing) {
+                if isDraggingStreamline {
+                    Text("\(Int(coordinator.toolStreamline * 100))%")
                         .font(.caption2.weight(.medium).monospacedDigit())
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)

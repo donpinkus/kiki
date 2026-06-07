@@ -70,6 +70,11 @@ public final class MetalCanvasView: UIView {
     private var activeStroke: Stroke?
     private var activeStrokeStamps: [CanvasRenderer.StampInstance] = []
 
+    /// Running smoothed cursor for StreamLine stabilization (brush only). Reset to the
+    /// first touch position at `touchesBegan`; each subsequent point is low-pass filtered
+    /// toward the raw pencil position. See `smoothedStrokePoint`. nil when not stabilizing.
+    private var streamlineCursor: CGPoint?
+
     /// For eraser: tracks the last stroke-point index that was applied to the canvas.
     /// Eraser stamps are applied incrementally (each touchesMoved renders only NEW
     /// stamps directly into the canvas), unlike brush which rebuilds all stamps each frame.
@@ -477,6 +482,8 @@ public final class MetalCanvasView: UIView {
         case .brush(let config):
             activeStroke = Stroke(points: [makeStrokePoint(from: touch)], brush: config)
             activeStrokeStamps = []
+            // Seed the StreamLine cursor at the true start so the first point isn't lagged.
+            streamlineCursor = touch.location(in: self)
             appendStampsForLatestPoints(touch: touch, event: nil)
             // QuickShape: reset recognizer state for the new stroke.
             if isQuickShapeEnabled {
@@ -578,10 +585,12 @@ public final class MetalCanvasView: UIView {
 
         switch currentTool {
         case .brush:
-            // Append coalesced points and rebuild all stamps for live preview.
+            // Append coalesced points (StreamLine-smoothed) and rebuild all stamps
+            // for live preview. Smoothing is baked into the stored points.
             let coalesced = event?.coalescedTouches(for: touch) ?? [touch]
+            let streamline = activeStroke?.brush.streamline ?? 0
             for ct in coalesced {
-                activeStroke?.points.append(makeStrokePoint(from: ct))
+                activeStroke?.points.append(smoothedStrokePoint(from: ct, streamline: streamline))
             }
             appendStampsForLatestPoints(touch: touch, event: event)
             // QuickShape: feed recognizer + drive snap state machine. Only
@@ -713,6 +722,13 @@ public final class MetalCanvasView: UIView {
                 }
                 print("===== [QS] STROKE END =====\n")
             }
+        }
+
+        // Brush + StreamLine: the smoothed cursor lags behind the pencil, so the
+        // stabilized stroke would stop short of where the user lifted. Pull it to the
+        // true lift position so the stroke reaches the pen tip.
+        if case .brush(let config) = currentTool, config.streamline > 0 {
+            activeStroke?.points.append(makeStrokePoint(from: touch))
         }
 
         if case .lasso = currentTool {
@@ -2340,6 +2356,30 @@ public final class MetalCanvasView: UIView {
         if let brush = activeStroke?.brush { return Float(brush.opacity) }
         if case .brush(let config) = currentTool { return Float(config.opacity) }
         return 1.0
+    }
+
+    /// StreamLine stabilization: low-pass the drawn position toward the raw pencil
+    /// position. `streamline` 0 → follow exactly (no change); higher → more lag/steadier
+    /// lines. Updates `streamlineCursor` and bakes the smoothed position into the returned
+    /// point so live preview, replay, undo, and persistence all see the same path.
+    /// Only `position` is smoothed; pressure/altitude/timestamp pass through raw.
+    private func smoothedStrokePoint(from touch: UITouch, streamline: CGFloat) -> StrokePoint {
+        var point = makeStrokePoint(from: touch)
+        guard streamline > 0 else {
+            streamlineCursor = point.position
+            return point
+        }
+        let prev = streamlineCursor ?? point.position
+        // factor 1 = follow exactly; → small = heavy lag. Clamped so the cursor always
+        // makes progress (never fully freezes, even at streamline = 1).
+        let factor = max(1.0 - streamline * 0.9, 0.08)
+        let smoothed = CGPoint(
+            x: prev.x + (point.position.x - prev.x) * factor,
+            y: prev.y + (point.position.y - prev.y) * factor
+        )
+        streamlineCursor = smoothed
+        point.position = smoothed
+        return point
     }
 
     private func makeStrokePoint(from touch: UITouch) -> StrokePoint {

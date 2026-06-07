@@ -91,11 +91,19 @@ final class AppCoordinator {
             applyTool()
         }
     }
+    /// StreamLine stabilization ("Stabilize"). 0 = no smoothing; higher = steadier,
+    /// more confident lines (the drawn point lags the pencil). See pro-brush-roadmap Phase 1.
+    var toolStreamline: CGFloat = 0.35 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
 
     // MARK: - Per-tool stored settings
 
-    /// While true, toolSize / toolOpacity / toolFlow didSet should skip applyTool()
-    /// (used when swapping values on a tool change).
+    /// While true, toolSize / toolOpacity / toolFlow / toolStreamline didSet should skip
+    /// applyTool() (used when swapping values on a tool change).
     private var isSwappingToolValues = false
     private var storedToolSizes: [DrawingTool: CGFloat] = [
         .brush: 15,
@@ -112,16 +120,23 @@ final class AppCoordinator {
         .eraser: 1.0,
         .lasso: 1.0
     ]
+    private var storedToolStreamlines: [DrawingTool: CGFloat] = [
+        .brush: 0.35,
+        .eraser: 0.0,
+        .lasso: 0.0
+    ]
 
     private func swapToolValues(from oldTool: DrawingTool, to newTool: DrawingTool) {
         guard oldTool != newTool else { return }
         storedToolSizes[oldTool] = toolSize
         storedToolOpacities[oldTool] = toolOpacity
         storedToolFlows[oldTool] = toolFlow
+        storedToolStreamlines[oldTool] = toolStreamline
         isSwappingToolValues = true
         toolSize = storedToolSizes[newTool] ?? toolSize
         toolOpacity = storedToolOpacities[newTool] ?? toolOpacity
         toolFlow = storedToolFlows[newTool] ?? toolFlow
+        toolStreamline = storedToolStreamlines[newTool] ?? toolStreamline
         isSwappingToolValues = false
     }
     var currentColor: Color = .black {
@@ -1395,7 +1410,8 @@ final class AppCoordinator {
                 opacity: toolOpacity,
                 flow: toolFlow,
                 pressureGamma: 0.35,
-                tiltSensitivity: 1.0
+                tiltSensitivity: 1.0,
+                streamline: toolStreamline
             )
             canvasViewModel.selectBrush(config)
         case .eraser:
