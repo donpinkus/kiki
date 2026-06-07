@@ -1,13 +1,15 @@
 import Foundation
 
-/// Maps a drawing id to the on-disk MP4s for its two timelapse tracks, stored
-/// under Application Support so they're persistent and URL-addressable for
-/// AVFoundation (playback / compose / share). Tracks are recorded to temp
-/// partials and atomically moved here on finalize.
+/// Stores a drawing's timelapse recording as an ordered list of MP4 *segments*
+/// per track, under Application Support (persistent, URL-addressable for
+/// AVFoundation). Segments accumulate as the session is checkpointed (so the
+/// replay can be shared mid-drawing) and are stitched back together at compose
+/// time.
 ///
-/// This is deliberately separate from the ephemeral backend idle-animation MP4
-/// (`AppCoordinator.currentVideoMP4URL`), which lives in the temp dir and is
-/// deleted on resume.
+/// Files: `Recordings/<drawingId>/{canvas,generated}-<index>.mp4`.
+///
+/// Distinct from the ephemeral backend idle-animation MP4
+/// (`AppCoordinator.currentVideoMP4URL`), which lives in the temp dir.
 struct RecordingStore {
     static let shared = RecordingStore()
 
@@ -18,46 +20,54 @@ struct RecordingStore {
         root = base.appendingPathComponent("Recordings", isDirectory: true)
     }
 
-    /// Directory holding one drawing's recordings.
     func directory(for drawingId: UUID) -> URL {
         root.appendingPathComponent(drawingId.uuidString, isDirectory: true)
     }
 
-    /// The two finalized track URLs (may not exist on disk yet).
-    func urls(for drawingId: UUID) -> (canvas: URL, generated: URL) {
-        let dir = directory(for: drawingId)
-        return (dir.appendingPathComponent("canvas.mp4"),
-                dir.appendingPathComponent("generated.mp4"))
+    private func canvasURL(_ drawingId: UUID, _ index: Int) -> URL {
+        directory(for: drawingId).appendingPathComponent("canvas-\(index).mp4")
     }
 
-    /// True when both finalized tracks exist — i.e. there's a shareable video.
+    private func generatedURL(_ drawingId: UUID, _ index: Int) -> URL {
+        directory(for: drawingId).appendingPathComponent("generated-\(index).mp4")
+    }
+
+    /// True once at least one finalized segment pair exists — i.e. there's a
+    /// shareable recording.
     func hasRecording(_ drawingId: UUID) -> Bool {
-        let (canvas, generated) = urls(for: drawingId)
         let fm = FileManager.default
-        return fm.fileExists(atPath: canvas.path) && fm.fileExists(atPath: generated.path)
+        return fm.fileExists(atPath: canvasURL(drawingId, 0).path)
+            && fm.fileExists(atPath: generatedURL(drawingId, 0).path)
     }
 
-    /// Atomically replace the drawing's stored tracks with the given temp files.
-    /// Replacing is intentional: re-opening a drawing and drawing more produces a
-    /// fresh recording that supersedes the prior one.
-    func finalize(canvasTemp: URL, generatedTemp: URL, for drawingId: UUID) throws {
+    /// The ordered segment URLs for each track (parallel arrays, equal length).
+    func segmentURLs(for drawingId: UUID) -> (canvas: [URL], generated: [URL]) {
+        let fm = FileManager.default
+        var canvas: [URL] = []
+        var generated: [URL] = []
+        var index = 0
+        while fm.fileExists(atPath: canvasURL(drawingId, index).path),
+              fm.fileExists(atPath: generatedURL(drawingId, index).path) {
+            canvas.append(canvasURL(drawingId, index))
+            generated.append(generatedURL(drawingId, index))
+            index += 1
+        }
+        return (canvas, generated)
+    }
+
+    /// Append a finalized segment (moving the temp files into place).
+    func appendSegment(canvasTemp: URL, generatedTemp: URL, for drawingId: UUID) throws {
         let dir = directory(for: drawingId)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let (canvasDest, generatedDest) = urls(for: drawingId)
-        try replaceItem(at: canvasDest, with: canvasTemp)
-        try replaceItem(at: generatedDest, with: generatedTemp)
+        let fm = FileManager.default
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        var index = 0
+        while fm.fileExists(atPath: canvasURL(drawingId, index).path) { index += 1 }
+        try fm.moveItem(at: canvasTemp, to: canvasURL(drawingId, index))
+        try fm.moveItem(at: generatedTemp, to: generatedURL(drawingId, index))
     }
 
-    /// Remove a drawing's recordings (called when the drawing is deleted).
+    /// Remove a drawing's recording (called when the drawing is deleted).
     func delete(_ drawingId: UUID) {
         try? FileManager.default.removeItem(at: directory(for: drawingId))
-    }
-
-    private func replaceItem(at dest: URL, with src: URL) throws {
-        let fm = FileManager.default
-        if fm.fileExists(atPath: dest.path) {
-            try fm.removeItem(at: dest)
-        }
-        try fm.moveItem(at: src, to: dest)
     }
 }

@@ -1,5 +1,6 @@
 import AVFoundation
 import CoreGraphics
+import UIKit
 
 /// How the two recorded panes are arranged in the exported replay, sized to
 /// fit common Instagram aspect ratios.
@@ -45,32 +46,44 @@ enum SideBySideVideoComposer {
     /// `side` is the per-track source edge (matches the recorder); `speed` scales
     /// the timeline (2 = twice as fast).
     static func compose(
-        canvasURL: URL,
-        generatedURL: URL,
+        canvasSegments: [URL],
+        generatedSegments: [URL],
         outputURL: URL,
         layout: ReplayLayout = .horizontal,
         speed: Double = 1,
+        watermark: Bool = true,
         side: Int = 768
     ) async throws {
-        let canvasAsset = AVURLAsset(url: canvasURL)
-        let generatedAsset = AVURLAsset(url: generatedURL)
-
-        guard let canvasTrack = try await canvasAsset.loadTracks(withMediaType: .video).first,
-              let generatedTrack = try await generatedAsset.loadTracks(withMediaType: .video).first else {
+        guard !canvasSegments.isEmpty, canvasSegments.count == generatedSegments.count else {
             throw ComposeError.missingTrack
         }
-
-        // Both tracks are equal length; min() guards against any rounding skew.
-        let baseDuration = try await min(canvasAsset.load(.duration), generatedAsset.load(.duration))
-        let baseRange = CMTimeRange(start: .zero, duration: baseDuration)
 
         let composition = AVMutableComposition()
         guard let canvasComp = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid),
               let generatedComp = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else {
             throw ComposeError.exportSetupFailed
         }
-        try canvasComp.insertTimeRange(baseRange, of: canvasTrack, at: .zero)
-        try generatedComp.insertTimeRange(baseRange, of: generatedTrack, at: .zero)
+
+        // Stitch the per-checkpoint segments back-to-back into each track.
+        var cursor = CMTime.zero
+        for (canvasURL, generatedURL) in zip(canvasSegments, generatedSegments) {
+            let canvasAsset = AVURLAsset(url: canvasURL)
+            let generatedAsset = AVURLAsset(url: generatedURL)
+            guard let canvasTrack = try await canvasAsset.loadTracks(withMediaType: .video).first,
+                  let generatedTrack = try await generatedAsset.loadTracks(withMediaType: .video).first else {
+                continue
+            }
+            // Segments are equal length per pair; min() guards rounding skew.
+            let dur = try await min(canvasAsset.load(.duration), generatedAsset.load(.duration))
+            guard dur.isValid, dur > .zero else { continue }
+            let range = CMTimeRange(start: .zero, duration: dur)
+            try canvasComp.insertTimeRange(range, of: canvasTrack, at: cursor)
+            try generatedComp.insertTimeRange(range, of: generatedTrack, at: cursor)
+            cursor = cursor + dur
+        }
+        guard cursor > .zero else { throw ComposeError.missingTrack }
+        let baseDuration = cursor
+        let baseRange = CMTimeRange(start: .zero, duration: baseDuration)
 
         // Speed: scale both tracks' timelines to 1/speed of their duration.
         let finalDuration: CMTime
@@ -102,6 +115,10 @@ enum SideBySideVideoComposer {
         videoComposition.renderSize = renderSize
         videoComposition.frameDuration = CMTime(value: 1, timescale: 30)
         videoComposition.instructions = [instruction]
+
+        if watermark {
+            videoComposition.animationTool = watermarkTool(renderSize: renderSize, layout: layout)
+        }
 
         try? FileManager.default.removeItem(at: outputURL)
         guard let export = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetHighestQuality) else {
@@ -147,5 +164,113 @@ enum SideBySideVideoComposer {
         t.tx = tx
         t.ty = ty
         return t
+    }
+
+    // MARK: - Watermark
+
+    /// Core Animation overlay tool that burns a small "Drawn with Kiki" + app-icon
+    /// watermark into the top-right corner of the composed video.
+    private static func watermarkTool(renderSize: CGSize, layout: ReplayLayout) -> AVVideoCompositionCoreAnimationTool {
+        let videoLayer = CALayer()
+        videoLayer.frame = CGRect(origin: .zero, size: renderSize)
+        let parent = CALayer()
+        parent.frame = CGRect(origin: .zero, size: renderSize)
+        parent.addSublayer(videoLayer)
+        if let mark = watermarkLayer(in: renderSize, layout: layout) {
+            parent.addSublayer(mark)
+        }
+        return AVVideoCompositionCoreAnimationTool(postProcessingAsVideoLayer: videoLayer, in: parent)
+    }
+
+    /// Renders the text + rounded icon into a single image and returns a layer
+    /// positioned top-right. Core Animation uses a bottom-left origin, so the top
+    /// edge is the high-y end. Kept small and slightly translucent to stay discreet.
+    private static func watermarkLayer(in size: CGSize, layout: ReplayLayout) -> CALayer? {
+        let scaleBase = max(size.width, size.height)
+        // Inset from the top/right corner. Proportional so it reads as a real
+        // margin at the video's native resolution (a literal few px is invisible
+        // once Instagram scales 1080-wide footage onto a phone).
+        let margin = scaleBase * 0.02
+        let iconSize = scaleBase * 0.04
+        let fontSize = scaleBase * 0.0165
+        let gap = iconSize * 0.3
+        // Padding inside the rendered image so the drop shadow isn't clipped.
+        let pad = ceil(fontSize * 0.18)
+
+        // "Drawn with " in a dark blue-grey; "Kiki" in a vivid icon purple.
+        let attributed = NSMutableAttributedString(
+            string: "Drawn with Kiki",
+            attributes: [
+                .font: roundedFont(ofSize: fontSize, weight: .bold),
+                .foregroundColor: UIColor(red: 0.15, green: 0.17, blue: 0.24, alpha: 1),
+            ]
+        )
+        let kikiRange = (attributed.string as NSString).range(of: "Kiki")
+        if kikiRange.location != NSNotFound {
+            attributed.addAttribute(
+                .foregroundColor,
+                value: UIColor(hue: 0.75, saturation: 0.85, brightness: 0.92, alpha: 1),
+                range: kikiRange
+            )
+        }
+        let textSize = attributed.size()
+        let contentW = pad + textSize.width + gap + iconSize + pad
+        let contentH = max(iconSize, textSize.height) + pad * 2
+        let textOrigin = CGPoint(x: pad, y: (contentH - textSize.height) / 2)
+
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = false
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: contentW, height: contentH), format: format)
+        let image = renderer.image { ctx in
+            let cg = ctx.cgContext
+
+            // Pass 1: tight white drop shadow — high contrast for the dark text,
+            // especially where it strays over the darker generated pane.
+            cg.setShadow(
+                offset: CGSize(width: 0, height: max(1, fontSize * 0.05)),
+                blur: fontSize * 0.08,
+                color: UIColor.white.cgColor
+            )
+            attributed.draw(at: textOrigin)
+
+            // Pass 2: soft, even, low-opacity white halo (no offset) so the TOPS of
+            // the letters stay legible too.
+            cg.setShadow(
+                offset: .zero,
+                blur: max(2, fontSize * 0.1),
+                color: UIColor.white.withAlphaComponent(0.5).cgColor
+            )
+            attributed.draw(at: textOrigin)
+
+            if let icon = UIImage(named: "kiki_mark") {
+                let iconRect = CGRect(x: pad + textSize.width + gap, y: (contentH - iconSize) / 2, width: iconSize, height: iconSize)
+                cg.saveGState()
+                UIBezierPath(roundedRect: iconRect, cornerRadius: iconSize * 0.22).addClip()
+                icon.draw(in: iconRect)
+                cg.restoreGState()
+            }
+        }
+
+        let layer = CALayer()
+        layer.contents = image.cgImage
+        layer.contentsGravity = .resizeAspect
+        layer.opacity = 0.9
+        layer.frame = CGRect(
+            x: size.width - margin - contentW,
+            y: size.height - margin - contentH,
+            width: contentW,
+            height: contentH
+        )
+        return layer
+    }
+
+    /// SF Pro Rounded at the given weight — friendlier and more legible than the
+    /// default system font for a watermark. Falls back to the system font if the
+    /// rounded design isn't available.
+    private static func roundedFont(ofSize size: CGFloat, weight: UIFont.Weight) -> UIFont {
+        let base = UIFont.systemFont(ofSize: size, weight: weight)
+        guard let descriptor = base.fontDescriptor.withDesign(.rounded) else { return base }
+        return UIFont(descriptor: descriptor, size: size)
     }
 }

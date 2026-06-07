@@ -53,7 +53,12 @@ struct DrawingTopBar: View {
                 }
                 if coordinator.canShareVideo {
                     Section("Share video") {
-                        Button("Speed paint replay") { showReplay = true }
+                        Button("Speed paint replay") {
+                            Task { @MainActor in
+                                await coordinator.flushRecording()
+                                showReplay = true
+                            }
+                        }
                     }
                 }
             } label: {
@@ -134,7 +139,7 @@ struct DrawingTopBar: View {
         .sheet(item: $shareItem) { item in
             ShareSheet(activityItems: [item.url])
         }
-        .sheet(isPresented: $showReplay) {
+        .fullScreenCover(isPresented: $showReplay) {
             SpeedPaintReplayView()
                 .environment(coordinator)
         }

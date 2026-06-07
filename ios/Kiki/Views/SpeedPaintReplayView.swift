@@ -9,8 +9,9 @@ struct SpeedPaintReplayView: View {
     @Environment(AppCoordinator.self) private var coordinator
     @Environment(\.dismiss) private var dismiss
 
-    @State private var layout: ReplayLayout = .horizontal
-    @State private var speed: Double = 1
+    @State private var layout: ReplayLayout = .vertical
+    @State private var speed: Double = 2
+    @State private var watermark = true
     @State private var composedURL: URL?
     @State private var isComposing = false
     @State private var shareItem: ReplayShareItem?
@@ -36,7 +37,9 @@ struct SpeedPaintReplayView: View {
                 }
                 .pickerStyle(.segmented)
 
-                Spacer()
+                Toggle(isOn: $watermark) {
+                    Label("“Drawn with Kiki” watermark", systemImage: "sparkles")
+                }
 
                 VStack(spacing: 12) {
                     Button {
@@ -106,15 +109,15 @@ struct SpeedPaintReplayView: View {
             }
         }
         .aspectRatio(layout.aspectRatio, contentMode: .fit)
-        .frame(maxHeight: 440)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private var composeKey: String { "\(layout.rawValue)-\(Int(speed))" }
+    private var composeKey: String { "\(layout.rawValue)-\(Int(speed))-\(watermark)" }
 
     private func recompose() async {
         isComposing = true
         defer { isComposing = false }
-        guard let url = await coordinator.composeReplay(layout: layout, speed: speed) else { return }
+        guard let url = await coordinator.composeReplay(layout: layout, speed: speed, watermark: watermark) else { return }
         composedURL = url
         // A freshly replaced item starts at zero; just play.
         player.replaceCurrentItem(with: AVPlayerItem(url: url))

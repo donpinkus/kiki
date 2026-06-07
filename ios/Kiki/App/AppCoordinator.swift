@@ -715,29 +715,43 @@ final class AppCoordinator {
 
     // MARK: - Video sharing
 
-    /// Whether the current drawing has a finalized recording to replay/share.
+    /// Whether there's a replay to share: either a finalized recording on disk,
+    /// or enough live footage captured this session (so the button is available
+    /// while drawing, not only after a gallery round-trip).
     var canShareVideo: Bool {
-        currentDrawingId.map(RecordingStore.shared.hasRecording) ?? false
+        if let id = currentDrawingId, RecordingStore.shared.hasRecording(id) { return true }
+        return recordedCanvasFrames >= 2
     }
 
-    /// Compose the current drawing's two recorded tracks into a speed-paint
-    /// replay MP4 in the chosen layout + speed, for preview and sharing. Each
-    /// call writes a fresh file (in its own temp dir, so the preview player never
-    /// reads a file being overwritten) named "Speed Paint.mp4" for a clean
-    /// Save-to-Files name. Returns the URL, or nil on failure.
-    func composeReplay(layout: ReplayLayout, speed: Double) async -> URL? {
-        guard let drawingId = currentDrawingId, RecordingStore.shared.hasRecording(drawingId) else { return nil }
-        let urls = RecordingStore.shared.urls(for: drawingId)
+    /// Flush the in-progress recording to a stored segment so the replay includes
+    /// the latest strokes. Recording continues afterward. Call before opening the
+    /// replay modal.
+    func flushRecording() async {
+        guard let drawingId = currentDrawingId, let recorder else { return }
+        if let urls = await recorder.checkpoint() {
+            try? RecordingStore.shared.appendSegment(canvasTemp: urls.canvas, generatedTemp: urls.generated, for: drawingId)
+        }
+    }
+
+    /// Compose the current drawing's recorded segments into a speed-paint replay
+    /// MP4 in the chosen layout + speed, for preview and sharing. Writes a fresh
+    /// file in its own temp dir (so the preview player never reads a file being
+    /// overwritten), named "Speed Paint.mp4" for a clean Save-to-Files name.
+    func composeReplay(layout: ReplayLayout, speed: Double, watermark: Bool) async -> URL? {
+        guard let drawingId = currentDrawingId else { return nil }
+        let segments = RecordingStore.shared.segmentURLs(for: drawingId)
+        guard !segments.canvas.isEmpty else { return nil }
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let output = dir.appendingPathComponent("Speed Paint.mp4")
         do {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             try await SideBySideVideoComposer.compose(
-                canvasURL: urls.canvas,
-                generatedURL: urls.generated,
+                canvasSegments: segments.canvas,
+                generatedSegments: segments.generated,
                 outputURL: output,
                 layout: layout,
-                speed: speed
+                speed: speed,
+                watermark: watermark
             )
             return output
         } catch {
@@ -753,7 +767,7 @@ final class AppCoordinator {
         let bgTask = UIApplication.shared.beginBackgroundTask(withName: "finalize-recording")
         Task.detached {
             if let urls = await recorder.finish() {
-                try? RecordingStore.shared.finalize(
+                try? RecordingStore.shared.appendSegment(
                     canvasTemp: urls.canvas,
                     generatedTemp: urls.generated,
                     for: drawingId
@@ -1078,6 +1092,11 @@ final class AppCoordinator {
     /// ephemeral backend idle-animation MP4 (`currentVideoMP4URL`).
     private var recorder: DrawingVideoRecorder?
 
+    /// Canvas frames captured since this session's recorder started — gates
+    /// `canShareVideo` so the replay is offered while drawing, before any segment
+    /// has been finalized to disk.
+    private var recordedCanvasFrames = 0
+
     @MainActor
     private func startStreamSession(request: URLRequest, backendWsURL: URL) {
         let session = StreamSession(
@@ -1093,8 +1112,11 @@ final class AppCoordinator {
         let videoRecorder = DrawingVideoRecorder()
         videoRecorder.start()
         recorder = videoRecorder
+        recordedCanvasFrames = 0
         session.onCanvasFrameCaptured = { [weak self] canvasImage in
-            self?.recorder?.canvasChanged(canvasImage)
+            guard let self else { return }
+            self.recordedCanvasFrames += 1
+            self.recorder?.canvasChanged(canvasImage)
         }
 
         session.onImageReceived = { [weak self] image in

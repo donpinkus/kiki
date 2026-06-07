@@ -34,24 +34,30 @@ final class DrawingVideoRecorder {
     }
 
     func start() {
-        queue.async { self.startLocked() }
+        queue.async {
+            self.lastCanvas = nil
+            self.lastGenerated = nil
+            self.blank = nil
+            self.started = self.makeWritersLocked()
+        }
     }
 
-    private func startLocked() {
+    /// Create a fresh pair of track writers (a new segment) on temp files, and
+    /// reset the per-segment frame index. Preserves `lastCanvas`/`lastGenerated`
+    /// so a segment created by `checkpoint()` continues visually from where the
+    /// previous one ended.
+    private func makeWritersLocked() -> Bool {
         let dir = FileManager.default.temporaryDirectory
         let canvasURL = dir.appendingPathComponent("rec-canvas-\(UUID().uuidString).mp4")
         let generatedURL = dir.appendingPathComponent("rec-generated-\(UUID().uuidString).mp4")
         guard let c = TrackWriter(url: canvasURL, side: side),
-              let g = TrackWriter(url: generatedURL, side: side) else { return }
+              let g = TrackWriter(url: generatedURL, side: side) else { return false }
         canvas = c
         generated = g
         canvasTempURL = canvasURL
         generatedTempURL = generatedURL
         frameIndex = 0
-        lastCanvas = nil
-        lastGenerated = nil
-        blank = nil
-        started = true
+        return true
     }
 
     /// Call when the canvas visibly changed (passes the capture-loop dirty check).
@@ -86,8 +92,36 @@ final class DrawingVideoRecorder {
         frameIndex += 1
     }
 
-    /// Finalize both writers. Returns the two temp URLs (ready to hand to
-    /// `RecordingStore.finalize`), or nil if too few frames were captured.
+    /// Finalize the current segment and immediately start a new one so recording
+    /// continues uninterrupted. Returns the finalized segment's temp URLs (to hand
+    /// to `RecordingStore.appendSegment`), or nil if nothing new was captured since
+    /// the last checkpoint.
+    func checkpoint() async -> (canvas: URL, generated: URL)? {
+        await withCheckedContinuation { continuation in
+            queue.async {
+                guard self.started, self.frameIndex >= 2,
+                      let oldCanvas = self.canvas, let oldGenerated = self.generated,
+                      let oldCanvasURL = self.canvasTempURL, let oldGeneratedURL = self.generatedTempURL else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                // Swap in fresh writers FIRST so any queued appends land in the new
+                // segment, never in the one being finalized.
+                if !self.makeWritersLocked() {
+                    self.started = false
+                }
+                let group = DispatchGroup()
+                group.enter(); oldCanvas.finish { group.leave() }
+                group.enter(); oldGenerated.finish { group.leave() }
+                group.notify(queue: self.queue) {
+                    continuation.resume(returning: (oldCanvasURL, oldGeneratedURL))
+                }
+            }
+        }
+    }
+
+    /// Finalize the current segment and stop. Returns its temp URLs, or nil if
+    /// too few frames were captured.
     func finish() async -> (canvas: URL, generated: URL)? {
         await withCheckedContinuation { continuation in
             queue.async {
@@ -98,11 +132,15 @@ final class DrawingVideoRecorder {
                     continuation.resume(returning: nil)
                     return
                 }
+                self.started = false
                 let group = DispatchGroup()
                 group.enter(); canvas.finish { group.leave() }
                 group.enter(); generated.finish { group.leave() }
                 group.notify(queue: self.queue) {
-                    self.started = false
+                    self.canvas = nil
+                    self.generated = nil
+                    self.canvasTempURL = nil
+                    self.generatedTempURL = nil
                     continuation.resume(returning: (canvasURL, generatedURL))
                 }
             }
