@@ -123,6 +123,11 @@ interface PodKindConfig {
    *  Video: 240 s (LTX-2.3 22B FP8 + Gemma encoder load is heavier than
    *  LTXV 2B distilled was; needs more headroom before giving up). */
   stallMs: number;
+  /** Budget for `waitForHealth` (the /health-200 wait, after runtime is up).
+   *  Image: 240 s. Video: 360 s — LTX-2.3 22B + Gemma cold load can legitimately
+   *  exceed the 240 s default, which killed a genuinely-slow pod as
+   *  `boot_stalled` on 2026-06-07 (transformer build alone was 131 s). */
+  healthTimeoutMs: number;
   /** Create a pod for the chosen DC. Image: spot then on-demand fallback.
    *  Video: on-demand only (preemption recovery via replaceVideoSession is
    *  cleaner than spot complexity at our scale).
@@ -643,6 +648,7 @@ const POD_CONFIGS: Record<PodKind, PodKindConfig> = {
     gpuTypeId: 'NVIDIA GeForce RTX 5090',
     volumesByDc: config.NETWORK_VOLUMES_BY_DC,
     stallMs: config.POD_BOOT_WATCHDOG_ENABLED ? config.POD_BOOT_STALL_MS : Infinity,
+    healthTimeoutMs: 240_000,
     createPodForDc: (target, sessionId, streamId) => {
       const podName = `${POD_PREFIX}${sessionId.slice(0, 16)}`;
       return createPodWithFallback(sessionId, target, podName, BOOT_DOCKER_ARGS, streamId);
@@ -721,6 +727,7 @@ const POD_CONFIGS: Record<PodKind, PodKindConfig> = {
     // LTX-2.3 22B + Gemma encoder load is heavier than LTXV 0.9.8's 2B —
     // the previous 180s budget routinely tripped the watchdog on cold pulls.
     stallMs: 240_000,
+    healthTimeoutMs: 360_000,
     createPodForDc: async (target, sessionId, streamId) => {
       const podName = `${VIDEO_POD_PREFIX}${sessionId.slice(0, 16)}`;
       const dcField = target.dataCenterId ? { dataCenterId: target.dataCenterId } : {};
@@ -741,20 +748,35 @@ const POD_CONFIGS: Record<PodKind, PodKindConfig> = {
       });
       return { podId: result.id, podType: 'onDemand', dc: target.dataCenterId };
     },
-    // Video: row only has `videoPodId`; no state field. Probe RunPod for
-    // RUNNING+runtime as the readiness signal. ~500ms cost on every
-    // reconnect — acceptable because video reconnects are less frequent
-    // than image's per-message touch traffic.
+    // Video: row only has `videoPodId`; no state field. The pod's own /health
+    // through the proxy is the readiness signal — NOT RunPod's `pod.runtime`
+    // API field. We used to gate reuse on `getPod().runtime !== null`, but that
+    // field can lag minutes behind reality (observed ~226 s of runtime=null on
+    // a serving pod, 2026-06-07); the lag made this probe reject a healthy pod
+    // on reconnect and provision a duplicate, leaking the original. /health 200
+    // confirms the exact proxy path the relay will use and is strictly stronger
+    // evidence than desiredStatus===RUNNING, so it's the only gate we need.
+    // 200 → reuse; anything else (still booting, dead, or gone) → provision fresh.
     getReusableFromRow: async (row) => {
       if (!row.videoPodId) return null;
-      const pod = await getPod(row.videoPodId).catch(() => null);
-      if (pod && pod.desiredStatus === 'RUNNING' && pod.runtime !== null) {
-        return {
-          podId: row.videoPodId,
-          podUrl: `wss://${row.videoPodId}-${POD_CONFIGS.video.port}.proxy.runpod.net/ws`,
-        };
-      }
-      return null;
+      const healthUrl = `https://${row.videoPodId}-${POD_CONFIGS.video.port}.proxy.runpod.net/health`;
+      const probeStart = Date.now();
+      const ok = await probeHealthOk(healthUrl);
+      log.info(
+        {
+          sessionId: row.sessionId,
+          videoPodId: row.videoPodId,
+          ok,
+          probeMs: Date.now() - probeStart,
+          event: 'video_reuse_probe',
+        },
+        'video_reuse_probe',
+      );
+      if (!ok) return null;
+      return {
+        podId: row.videoPodId,
+        podUrl: `wss://${row.videoPodId}-${POD_CONFIGS.video.port}.proxy.runpod.net/ws`,
+      };
     },
     stampRow: (sessionId, pod) =>
       patchSession(sessionId, { videoPodId: pod.podId }),
@@ -887,12 +909,15 @@ export async function _runProvisionLoop(
       }
 
       try {
-        // 3. Wait for container to boot. Dominated by image pull.
+        const healthUrl = `https://${podId}-${cfg.port}.proxy.runpod.net/health`;
+        // 3. Wait for container to boot. Dominated by image pull. Pass healthUrl
+        // so the watchdog trusts /health over RunPod's laggy `runtime` field
+        // before declaring a stall (see waitForRuntime).
         await opts.onProvisionPhase?.('fetching_image', podId);
         currentState = 'fetching_image';
         await Sentry.startSpan(
           { name: 'pod.fetching_image', op: 'pod.fetching_image', attributes: { podId, kind, dc: dc ?? 'unknown', attempt } },
-          () => waitForRuntime(podId as string, { stallMs: cfg.stallMs }),
+          () => waitForRuntime(podId as string, { stallMs: cfg.stallMs, healthUrl }),
         );
         phaseTimings.fetching_image_ms = Date.now() - phaseStart;
         phaseStart = Date.now();
@@ -900,10 +925,9 @@ export async function _runProvisionLoop(
         // 4. Poll /health until the server reports ready.
         await opts.onProvisionPhase?.('warming_model', podId);
         currentState = 'warming_model';
-        const healthUrl = `https://${podId}-${cfg.port}.proxy.runpod.net/health`;
         const healthResult = await Sentry.startSpan(
           { name: 'pod.warming_model', op: 'pod.warming_model', attributes: { podId, kind, dc: dc ?? 'unknown' } },
-          () => waitForHealth(podId as string, healthUrl),
+          () => waitForHealth(podId as string, healthUrl, cfg.healthTimeoutMs),
         );
         phaseTimings.warming_model_ms = Date.now() - phaseStart;
         // Merge per-substage warmup timings reported by the FLUX server's
@@ -1056,9 +1080,28 @@ export async function _runProvisionLoop(
  * instead of waiting out the full `timeoutMs`. Pass `Infinity` to disable
  * the watchdog and preserve the legacy binary-timeout behavior.
  */
+/**
+ * Probe a pod's /health endpoint through the RunPod proxy. Returns true iff it
+ * answers 200 with `{status:"ok"}`. This is the authoritative readiness signal:
+ * it confirms the exact proxy path the relay will use, and is trusted OVER
+ * RunPod's API `pod.runtime` field, which can lag minutes behind reality
+ * (observed ~226 s of runtime=null on an already-serving pod, 2026-06-07).
+ * Never throws — any error (timeout, refused, non-200, bad body) → false.
+ */
+async function probeHealthOk(healthUrl: string, timeoutMs = 5000): Promise<boolean> {
+  try {
+    const res = await fetch(healthUrl, { signal: AbortSignal.timeout(timeoutMs) });
+    if (!res.ok) return false;
+    const body = (await res.json()) as { status?: string };
+    return body.status === 'ok';
+  } catch {
+    return false;
+  }
+}
+
 async function waitForRuntime(
   podId: string,
-  opts: { timeoutMs?: number; stallMs?: number } = {},
+  opts: { timeoutMs?: number; stallMs?: number; healthUrl?: string } = {},
 ): Promise<void> {
   const timeoutMs = opts.timeoutMs ?? 10 * 60 * 1000;
   const stallMs = opts.stallMs
@@ -1077,6 +1120,24 @@ async function waitForRuntime(
     if (pod.machine?.dataCenterId) lastDc = pod.machine.dataCenterId;
     if (pod.runtime) {
       log.info({ podId, uptimeInSeconds: pod.runtime.uptimeInSeconds }, 'Container runtime up');
+      return;
+    }
+    // RunPod's `runtime` field can lag minutes behind the container actually
+    // running — and the boot-stall watchdog below would then kill a pod that
+    // is already serving (the 2026-06-07 false `boot_stalled`). The pod's own
+    // /health through the proxy is authoritative, so if the app answers we
+    // proceed even though RunPod still reports runtime=null. waitForHealth
+    // (next phase) re-probes and parses the body, so nothing is lost here.
+    if (opts.healthUrl && (await probeHealthOk(opts.healthUrl))) {
+      log.info(
+        {
+          podId,
+          elapsedSec: Math.round((Date.now() - start) / 1000),
+          dc: lastDc,
+          event: 'pod.ready_via_health_runtime_null',
+        },
+        'Pod /health is 200 while RunPod still reports runtime=null — proceeding (runtime-report lag)',
+      );
       return;
     }
     const elapsedMs = Date.now() - start;
