@@ -1,6 +1,35 @@
 # Pro-Brush Roadmap — From Soft Circle to Procreate-Class Paint Engine
 
-**Written:** 2026-06-06
+**Written:** 2026-06-06 · **Status updated:** 2026-06-07
+
+## Status (2026-06-07)
+
+Shipped to `origin/main` and verified on device:
+- ✅ **Phase 0** — Flow / Opacity split (per-stamp flow vs per-stroke opacity ceiling).
+- ✅ **Phase 1** — StreamLine stabilization.
+- ✅ **Phase 2** — Hardness / Spacing / Taper, moved secondary controls into a **gear popover**
+  (`BrushSettingsPopover`), each slider with a "?" help popover.
+- ✅ **Phase 4 — Wet paint** (jumped ahead of Phase 3, it was the headline want). What actually
+  shipped:
+  - Direct-to-layer, eraser-style framebuffer-read RMW (`wetStampFragment`, `applyWetStamps`).
+    **Device-only** — framebuffer fetch makes the wet PSO nil on the Simulator, so wet no-ops there.
+  - **Spectral Kubelka-Munk** pigment mixing (Mallett-Yuksel 7-basis, 36-band; tables in
+    `CanvasRenderer.setupWetKMTables`; CPU mirror `kmMixCPU`). Per-channel KM was rejected
+    (collapses blue+yellow to black). See `documents/references/wet-paint-color-spike/`.
+  - **Carried-load smear** (`MetalCanvasView.wetLoad`): the brush carries a paint load that
+    picks up the canvas color it crosses (`sampleLayerColor` 1×1 read) and redeposits the
+    evolving mix → green throughout overlaps + directional smear.
+  - Alpha builds by **coverage** (opaque; no white halo). Controls: **Mix** (`wetStrength`) +
+    **Smear** (`wetPickup`) in the popover.
+- ⬜ **Phase 3** — Shape & grain (gate grain on an img2img survival spike).
+- ⬜ **Phase 5** — Brush preset library.
+
+Wet-paint follow-ups / known tradeoffs:
+- The per-stamp canvas read sees **committed** paint only, not the in-flight current stroke →
+  smearing your *own* just-laid paint within one stroke is approximate. The "truer" fix is a
+  **GPU reservoir** (carry the load in a small texture updated in the wet pass).
+- A **Smudge preset** (Mix low / Smear high) is a trivial add once presets exist.
+- KM gotcha: clamp integrated linear RGB to [0,1] **before** the endpoint-residual correction.
 
 ## Context
 
