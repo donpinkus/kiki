@@ -15,6 +15,11 @@ let package = Package(
             name: "CanvasModule",
             dependencies: [
                 .product(name: "StrokeRecognizerModule", package: "StrokeRecognizerModule"),
+            ],
+            resources: [
+                // Folder-referenced grayscale brush-stamp PNGs (luminance = coverage).
+                // Drop a PNG in here + add a BrushShapeCatalog entry to expose a new shape.
+                .copy("Resources/BrushShapes"),
             ]
         ),
     ]

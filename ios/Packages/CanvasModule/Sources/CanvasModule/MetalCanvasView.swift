@@ -386,6 +386,7 @@ public final class MetalCanvasView: UIView {
         if case .eraser = currentTool { isErasing = true } else { isErasing = false }
 
         renderer.activeStrokeOpacity = currentStrokeOpacity()
+        renderer.activeShapeTexture = isErasing ? nil : currentShapeTexture()
         renderer.renderFrame(drawable: drawable, isErasing: isErasing)
     }
 
@@ -2281,7 +2282,11 @@ public final class MetalCanvasView: UIView {
             for stroke in savedStrokes {
                 let stamps = generateStampsForStroke(stroke, scale: scale)
                 if !stamps.isEmpty {
-                    renderer.commitStampsToCanvas(stamps, strokeOpacity: Float(stroke.brush.opacity))
+                    renderer.commitStampsToCanvas(
+                        stamps,
+                        strokeOpacity: Float(stroke.brush.opacity),
+                        shapeTexture: renderer.shapeTexture(for: stroke.brush.shapeID)
+                    )
                 }
             }
             strokeCount = savedStrokes.count
@@ -2364,13 +2369,29 @@ public final class MetalCanvasView: UIView {
         let clipPath = lassoClipPath
         var stamps: [CanvasRenderer.StampInstance] = []
 
+        // Textured (non-round) shapes orient their stamps to the stroke direction so
+        // anisotropic tips (dry-brush streaks, chisel) run along the line, not across it.
+        // Convention: the stamp's local +y axis (the PNG's vertical) is aligned with the
+        // travel direction → rotation = atan2(-dx, dy). Round (procedural) brushes are
+        // radially symmetric, so they stay at 0.
+        let orientsToStroke = BrushShapeCatalog.orientsToStroke(brush.shapeID)
+        func strokeRotation(dx: CGFloat, dy: CGFloat) -> Float {
+            guard orientsToStroke, dx != 0 || dy != 0 else { return 0 }
+            return Float(atan2(-dx, dy))
+        }
+        // Direction at the very start/end caps, taken from the first/last real segment.
+        let firstDir: (CGFloat, CGFloat) = stroke.points.count > 1
+            ? (stroke.points[1].position.x - stroke.points[0].position.x,
+               stroke.points[1].position.y - stroke.points[0].position.y)
+            : (0, 0)
+
         let first = stroke.points[0]
         let firstWidth = brush.effectiveWidth(force: first.force, altitude: first.altitude)
         if clipPath.map({ $0.contains(first.position) }) ?? true {
             stamps.append(CanvasRenderer.StampInstance(
                 center: SIMD2<Float>(Float(first.position.x * scale), Float(first.position.y * scale)),
                 radius: Float(firstWidth * 0.5 * scale),
-                rotation: 0,
+                rotation: strokeRotation(dx: firstDir.0, dy: firstDir.1),
                 color: color,
                 hardness: hardness
             ))
@@ -2403,7 +2424,7 @@ public final class MetalCanvasView: UIView {
                     stamps.append(CanvasRenderer.StampInstance(
                         center: SIMD2<Float>(Float(x * scale), Float(y * scale)),
                         radius: Float(width * 0.5 * scale),
-                        rotation: 0,
+                        rotation: strokeRotation(dx: dx, dy: dy),
                         color: color,
                         hardness: hardness
                     ))
@@ -2418,11 +2439,16 @@ public final class MetalCanvasView: UIView {
         // End cap.
         if let last = stroke.points.last {
             let width = brush.effectiveWidth(force: last.force, altitude: last.altitude)
+            let n = stroke.points.count
+            let lastDir: (CGFloat, CGFloat) = n > 1
+                ? (last.position.x - stroke.points[n - 2].position.x,
+                   last.position.y - stroke.points[n - 2].position.y)
+                : firstDir
             if clipPath.map({ $0.contains(last.position) }) ?? true {
                 stamps.append(CanvasRenderer.StampInstance(
                     center: SIMD2<Float>(Float(last.position.x * scale), Float(last.position.y * scale)),
                     radius: Float(width * 0.5 * scale),
-                    rotation: 0,
+                    rotation: strokeRotation(dx: lastDir.0, dy: lastDir.1),
                     color: color,
                     hardness: hardness
                 ))
@@ -2536,6 +2562,21 @@ public final class MetalCanvasView: UIView {
         if let brush = activeStroke?.brush { return Float(brush.opacity) }
         if case .brush(let config) = currentTool { return Float(config.opacity) }
         return 1.0
+    }
+
+    /// The brush-tip stamp texture for the active/current brush, or nil for the procedural
+    /// round brush. Set on the renderer each frame so the live preview + stroke-end flatten
+    /// (which share the scratch) render with the selected shape.
+    private func currentShapeTexture() -> MTLTexture? {
+        let shapeID: String?
+        if let brush = activeStroke?.brush {
+            shapeID = brush.shapeID
+        } else if case .brush(let config) = currentTool {
+            shapeID = config.shapeID
+        } else {
+            shapeID = nil
+        }
+        return renderer.shapeTexture(for: shapeID)
     }
 
     /// StreamLine stabilization: low-pass the drawn position toward the raw pencil

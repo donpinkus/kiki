@@ -11,6 +11,8 @@ struct BrushSettingsPopover: View {
         @Bindable var coordinator = coordinator
 
         VStack(alignment: .leading, spacing: 18) {
+            BrushShapePicker(selection: $coordinator.toolShapeID)
+
             BrushSliderRow("Opacity", value: $coordinator.toolOpacity, range: 0.05...1.0, help: Self.help["Opacity"]!)
             BrushSliderRow("Flow", value: $coordinator.toolFlow, range: 0.05...1.0, help: Self.help["Flow"]!)
             BrushSliderRow("Stabilize", value: $coordinator.toolStreamline, range: 0.0...1.0, help: Self.help["Stabilize"]!)
@@ -59,6 +61,48 @@ struct BrushSettingsPopover: View {
             low: "No pickup — always lays your color, no blending trail.",
             high: "Soaks up and drags color along the stroke (smudgy, blends).")
     ]
+}
+
+/// Brush-tip shape selector (pro-brush Phase 3). A grid of labeled chips; "Round" is the
+/// procedural soft circle (`toolShapeID == nil`), the rest bind grayscale stamp textures.
+private struct BrushShapePicker: View {
+    /// nil == round (procedural).
+    @Binding var selection: String?
+
+    private let columns = [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())]
+
+    private func isSelected(_ shape: BrushShapeDescriptor) -> Bool {
+        (selection ?? BrushShapeCatalog.roundID) == shape.id
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Shape").font(.subheadline.weight(.medium))
+            LazyVGrid(columns: columns, spacing: 8) {
+                ForEach(BrushShapeCatalog.all) { shape in
+                    let selected = isSelected(shape)
+                    Button {
+                        selection = shape.id == BrushShapeCatalog.roundID ? nil : shape.id
+                    } label: {
+                        Text(shape.displayName)
+                            .font(.caption)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.7)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                            .background(selected ? Color.accentColor.opacity(0.18) : Color.gray.opacity(0.12))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .strokeBorder(selected ? Color.accentColor : .clear, lineWidth: 1.5)
+                            )
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .foregroundStyle(selected ? Color.accentColor : .primary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
 }
 
 /// Help text for a brush control: a one-line summary plus the 0% / 100% extremes.

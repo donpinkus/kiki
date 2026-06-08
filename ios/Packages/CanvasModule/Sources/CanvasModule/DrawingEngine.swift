@@ -101,6 +101,10 @@ public struct BrushConfig: Codable, Sendable {
     /// color it crosses. 0 = no smear (pure deposit); higher = the brush drags/carries color
     /// further along the stroke (smudgier).
     public var wetPickup: CGFloat
+    /// Brush-tip shape id (see `BrushShapeCatalog`). nil / "round" = the procedural soft
+    /// circle; other ids bind a grayscale stamp texture. Textured shapes orient to the
+    /// stroke direction. See pro-brush-roadmap Phase 3.
+    public var shapeID: String?
 
     public init(
         color: CodableColor,
@@ -115,7 +119,8 @@ public struct BrushConfig: Codable, Sendable {
         taper: CGFloat = 0.0,
         wetEnabled: Bool = false,
         wetStrength: CGFloat = 0.4,
-        wetPickup: CGFloat = 0.25
+        wetPickup: CGFloat = 0.25,
+        shapeID: String? = nil
     ) {
         self.color = color
         self.baseWidth = baseWidth
@@ -130,6 +135,7 @@ public struct BrushConfig: Codable, Sendable {
         self.wetEnabled = wetEnabled
         self.wetStrength = wetStrength
         self.wetPickup = wetPickup
+        self.shapeID = shapeID
     }
 
     public static let defaultPen = BrushConfig(color: .black, baseWidth: 5, pressureGamma: 0.7)
@@ -152,7 +158,7 @@ public struct BrushConfig: Codable, Sendable {
     enum CodingKeys: String, CodingKey {
         case color, baseWidth, opacity, flow, pressureGamma, pressureOpacity
         case streamline, taperIn, taperOut, tiltSensitivity
-        case hardness, spacing, taper, wetEnabled, wetStrength, wetPickup
+        case hardness, spacing, taper, wetEnabled, wetStrength, wetPickup, shapeID
     }
 
     public init(from decoder: Decoder) throws {
@@ -176,6 +182,8 @@ public struct BrushConfig: Codable, Sendable {
         wetEnabled = try container.decodeIfPresent(Bool.self, forKey: .wetEnabled) ?? false
         wetStrength = try container.decodeIfPresent(CGFloat.self, forKey: .wetStrength) ?? 0.4
         wetPickup = try container.decodeIfPresent(CGFloat.self, forKey: .wetPickup) ?? 0.25
+        // Phase 3 — default nil (procedural round) so pre-Phase-3 configs decode unchanged.
+        shapeID = try container.decodeIfPresent(String.self, forKey: .shapeID)
         // Removed fields — decoded for backward compat with saved configs, not stored.
         _ = try container.decodeIfPresent(CGFloat.self, forKey: .pressureOpacity)
         _ = try container.decodeIfPresent(CGFloat.self, forKey: .taperIn)
@@ -197,6 +205,7 @@ public struct BrushConfig: Codable, Sendable {
         try container.encode(wetEnabled, forKey: .wetEnabled)
         try container.encode(wetStrength, forKey: .wetStrength)
         try container.encode(wetPickup, forKey: .wetPickup)
+        try container.encodeIfPresent(shapeID, forKey: .shapeID)
     }
 }
 

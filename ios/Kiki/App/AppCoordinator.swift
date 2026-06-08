@@ -142,6 +142,15 @@ final class AppCoordinator {
             applyTool()
         }
     }
+    /// Selected brush-tip shape id (see `BrushShapeCatalog`). nil / "round" = the
+    /// procedural soft circle; other ids bind a grayscale stamp texture (Phase 3).
+    var toolShapeID: String? = nil {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+
     /// Debug: A/B the wet draw-order experiment (per-stamp vs instanced draws).
     var wetOrderingPerStamp = false {
         didSet { canvasViewModel.setWetOrderingPerStamp(wetOrderingPerStamp) }
@@ -190,6 +199,8 @@ final class AppCoordinator {
         .eraser: 0.0,
         .lasso: 0.0
     ]
+    /// Per-tool brush shape. Absent = procedural round; only the brush meaningfully uses it.
+    private var storedToolShapes: [DrawingTool: String] = [:]
 
     private func swapToolValues(from oldTool: DrawingTool, to newTool: DrawingTool) {
         guard oldTool != newTool else { return }
@@ -200,6 +211,7 @@ final class AppCoordinator {
         storedToolHardnesses[oldTool] = toolHardness
         storedToolSpacings[oldTool] = toolSpacing
         storedToolTapers[oldTool] = toolTaper
+        storedToolShapes[oldTool] = toolShapeID  // nil clears the entry
         isSwappingToolValues = true
         toolSize = storedToolSizes[newTool] ?? toolSize
         toolOpacity = storedToolOpacities[newTool] ?? toolOpacity
@@ -208,6 +220,7 @@ final class AppCoordinator {
         toolHardness = storedToolHardnesses[newTool] ?? toolHardness
         toolSpacing = storedToolSpacings[newTool] ?? toolSpacing
         toolTaper = storedToolTapers[newTool] ?? toolTaper
+        toolShapeID = storedToolShapes[newTool]
         isSwappingToolValues = false
     }
     var currentColor: Color = .black {
@@ -1596,7 +1609,8 @@ final class AppCoordinator {
                 taper: toolTaper,
                 wetEnabled: toolWetEnabled,
                 wetStrength: toolWetStrength,
-                wetPickup: toolWetPickup
+                wetPickup: toolWetPickup,
+                shapeID: toolShapeID
             )
             canvasViewModel.selectBrush(config)
         case .eraser:

@@ -24,6 +24,10 @@ public final class CanvasRenderer {
     // MARK: - Pipeline States
 
     private let brushStampPSO: MTLRenderPipelineState
+    /// Textured-shape brush (pro-brush Phase 3): samples a grayscale stamp mask instead
+    /// of the procedural circle. Same source-over blend as `brushStampPSO`. Optional only
+    /// for defensive degradation to the round brush if compilation ever fails.
+    private let shapedBrushStampPSO: MTLRenderPipelineState?
     private let eraserStampPSO: MTLRenderPipelineState
     /// Wet-mix brush: programmable framebuffer-read RMW into the layer (pro-brush
     /// Phase 4). nil if pipeline creation failed (e.g. on the Simulator, which doesn't
@@ -96,6 +100,17 @@ public final class CanvasRenderer {
     /// Soft-circle brush mask (single-channel, R8Unorm). Quadratic falloff:
     /// α(r) = (1 − (r/R)²)², matching the plan's 5-stop gradient.
     private let brushMaskTexture: MTLTexture
+
+    /// Loaded grayscale stamp textures keyed by `BrushShapeDescriptor.id` (pro-brush
+    /// Phase 3). Built once at init from `Resources/BrushShapes`. The procedural round
+    /// brush has no entry here.
+    private let shapeTextures: [String: MTLTexture]
+
+    /// The stamp texture for the stroke currently being drawn/flattened, or nil for the
+    /// procedural round brush. `MetalCanvasView` sets this when a stroke starts (alongside
+    /// `activeStrokeOpacity`); the live + flatten render paths read it to pick the shaped
+    /// PSO and bind the texture.
+    var activeShapeTexture: MTLTexture?
 
     /// Quad vertex buffer: 6 vertices for two triangles covering [-1,1]² with
     /// texcoords [0,1]². Shared by brush stamps and compositor.
@@ -173,6 +188,9 @@ public final class CanvasRenderer {
         self.brushStampPSO = brushPSO
         self.eraserStampPSO = erasePSO
         self.compositorPSO = compPSO
+        // Textured-shape brush PSO (pro-brush Phase 3). Optional: degrade to round if it
+        // ever fails to compile.
+        self.shapedBrushStampPSO = Self.makeShapedBrushStampPSO(device: device, library: lib)
         // Wet PSO uses framebuffer fetch — unsupported on the Simulator, so this may
         // be nil there; the wet tool guards on it and no-ops if unavailable.
         self.wetStampPSO = Self.makeWetStampPSO(device: device, library: lib)
@@ -200,6 +218,10 @@ public final class CanvasRenderer {
         // Brush mask texture (64×64 soft circle).
         guard let mask = Self.generateBrushMask(device: device, size: 64) else { return nil }
         self.brushMaskTexture = mask
+
+        // Load textured brush-shape stamps (pro-brush Phase 3). Missing/failed assets are
+        // skipped — that shape just falls back to the procedural round brush at draw time.
+        self.shapeTextures = Self.loadShapeTextures(device: device, queue: queue)
 
         // All stored properties initialized — build the wet KM spectral tables.
         setupWetKMTables()
@@ -581,7 +603,7 @@ public final class CanvasRenderer {
     /// Used for stroke replay during persistence restore — each saved stroke is
     /// regenerated as stamps and committed in one pass. `strokeOpacity` is the
     /// per-stroke ceiling applied at flatten (stamp alpha carries the brush's flow).
-    func commitStampsToCanvas(_ stamps: [StampInstance], strokeOpacity: Float = 1.0) {
+    func commitStampsToCanvas(_ stamps: [StampInstance], strokeOpacity: Float = 1.0, shapeTexture: MTLTexture? = nil) {
         guard let canvas = activeLayerTexture, !stamps.isEmpty else { return }
         guard let scratch = scratchTexture else { return }
         guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
@@ -600,12 +622,17 @@ public final class CanvasRenderer {
         }) else { return }
 
         if let enc = cmdBuf.makeRenderCommandEncoder(descriptor: scratchRPD) {
-            enc.setRenderPipelineState(brushStampPSO)
             enc.setVertexBuffer(quadVertexBuffer, offset: 0, index: 0)
             enc.setVertexBuffer(stampBuf, offset: 0, index: 1)
             var canvasSize = SIMD2<Float>(Float(canvasWidth), Float(canvasHeight))
             enc.setVertexBytes(&canvasSize, length: MemoryLayout<SIMD2<Float>>.size, index: 2)
-            enc.setFragmentTexture(brushMaskTexture, index: 0)
+            if let shapeTexture, let shapedPSO = shapedBrushStampPSO {
+                enc.setRenderPipelineState(shapedPSO)
+                enc.setFragmentTexture(shapeTexture, index: 0)
+            } else {
+                enc.setRenderPipelineState(brushStampPSO)
+                enc.setFragmentTexture(brushMaskTexture, index: 0)
+            }
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: stamps.count)
             enc.endEncoding()
         }
@@ -1141,12 +1168,19 @@ public final class CanvasRenderer {
         guard let enc = commandBuffer.makeRenderCommandEncoder(descriptor: rpd) else { return }
 
         if stampCount > 0 {
-            enc.setRenderPipelineState(isEraser ? eraserStampPSO : brushStampPSO)
             enc.setVertexBuffer(quadVertexBuffer, offset: 0, index: 0)
             enc.setVertexBuffer(stampBuffer, offset: 0, index: 1)
             var canvasSize = SIMD2<Float>(Float(canvasWidth), Float(canvasHeight))
             enc.setVertexBytes(&canvasSize, length: MemoryLayout<SIMD2<Float>>.size, index: 2)
-            enc.setFragmentTexture(brushMaskTexture, index: 0)
+            // Textured shape (Phase 3) takes priority for the brush; eraser + round brush
+            // keep the procedural path.
+            if !isEraser, let shapeTex = activeShapeTexture, let shapedPSO = shapedBrushStampPSO {
+                enc.setRenderPipelineState(shapedPSO)
+                enc.setFragmentTexture(shapeTex, index: 0)
+            } else {
+                enc.setRenderPipelineState(isEraser ? eraserStampPSO : brushStampPSO)
+                enc.setFragmentTexture(brushMaskTexture, index: 0)
+            }
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: stampCount)
         }
 
@@ -1246,6 +1280,24 @@ public final class CanvasRenderer {
         return try? device.makeRenderPipelineState(descriptor: desc)
     }
 
+    /// Textured-shape brush PSO (pro-brush Phase 3): samples a grayscale stamp mask via
+    /// `shapedStampFragment`. Same premultiplied source-over blend as the round brush.
+    private static func makeShapedBrushStampPSO(device: MTLDevice, library: MTLLibrary) -> MTLRenderPipelineState? {
+        let desc = MTLRenderPipelineDescriptor()
+        desc.vertexFunction = library.makeFunction(name: "brushStampVertex")
+        desc.fragmentFunction = library.makeFunction(name: "shapedStampFragment")
+        desc.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
+        let ca = desc.colorAttachments[0]!
+        ca.isBlendingEnabled = true
+        ca.rgbBlendOperation = .add
+        ca.alphaBlendOperation = .add
+        ca.sourceRGBBlendFactor = .one
+        ca.destinationRGBBlendFactor = .oneMinusSourceAlpha
+        ca.sourceAlphaBlendFactor = .one
+        ca.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        return try? device.makeRenderPipelineState(descriptor: desc)
+    }
+
     /// Wet-mix PSO: programmable framebuffer read (wetStampFragment reads [[color(0)]],
     /// mixes, returns the final pixel). Fixed-function blending off. Returns nil where
     /// framebuffer fetch is unsupported (Simulator) so the wet tool can degrade gracefully.
@@ -1335,6 +1387,64 @@ public final class CanvasRenderer {
         return texture
     }
 
+    // MARK: - Brush Shape Stamps (Phase 3)
+
+    /// Texture for a given shape id, or nil for the procedural round brush / unknown id.
+    /// `MetalCanvasView` resolves this when a stroke starts and assigns `activeShapeTexture`.
+    func shapeTexture(for id: String?) -> MTLTexture? {
+        guard let id, id != BrushShapeCatalog.roundID else { return nil }
+        return shapeTextures[id]
+    }
+
+    /// Load every catalog shape that has a PNG resource into a mipmapped R8Unorm mask
+    /// texture (luminance = coverage). Mipmaps avoid minification shimmer when a large
+    /// (2048²) stamp is scaled down to a small brush radius.
+    private static func loadShapeTextures(device: MTLDevice, queue: MTLCommandQueue) -> [String: MTLTexture] {
+        var out: [String: MTLTexture] = [:]
+        for descriptor in BrushShapeCatalog.all {
+            guard let resourceName = descriptor.resourceName,
+                  let url = Bundle.module.url(forResource: resourceName, withExtension: "png", subdirectory: "BrushShapes"),
+                  let data = try? Data(contentsOf: url),
+                  let cgImage = UIImage(data: data)?.cgImage,
+                  let texture = makeGrayscaleMaskTexture(device: device, queue: queue, cgImage: cgImage) else {
+                continue
+            }
+            out[descriptor.id] = texture
+        }
+        return out
+    }
+
+    /// Rasterize a (grayscale) PNG into a mipmapped single-channel R8Unorm mask. The
+    /// luminance is read straight as coverage; a dedicated DeviceGray context keeps this
+    /// off the sRGB/P3 color path (a mask isn't a color — see CanvasModule CLAUDE.md).
+    private static func makeGrayscaleMaskTexture(device: MTLDevice, queue: MTLCommandQueue, cgImage: CGImage) -> MTLTexture? {
+        let w = cgImage.width, h = cgImage.height
+        guard w > 0, h > 0 else { return nil }
+        var bytes = [UInt8](repeating: 0, count: w * h)
+        guard let ctx = CGContext(
+            data: &bytes, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w,
+            space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue
+        ) else { return nil }
+        ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: w, height: h))
+
+        let desc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .r8Unorm, width: w, height: h, mipmapped: true
+        )
+        desc.usage = .shaderRead
+        guard let texture = device.makeTexture(descriptor: desc) else { return nil }
+        texture.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0, withBytes: &bytes, bytesPerRow: w)
+
+        if texture.mipmapLevelCount > 1,
+           let cmdBuf = queue.makeCommandBuffer(),
+           let blit = cmdBuf.makeBlitCommandEncoder() {
+            blit.generateMipmaps(for: texture)
+            blit.endEncoding()
+            cmdBuf.commit()
+            cmdBuf.waitUntilCompleted()  // one-time at init, not interactive
+        }
+        return texture
+    }
+
     // MARK: - Embedded Shader Source
 
     private static let shaderSource = """
@@ -1416,6 +1526,24 @@ public final class CanvasRenderer {
         float start = min(in.hardness, 1.0 - aa) - soft * soft * 0.85;
         float alpha = 1.0 - smoothstep(start, 1.0, d);
         return in.color * alpha;
+    }
+
+    // Textured-shape brush (pro-brush Phase 3). Samples a grayscale stamp mask (luminance
+    // = coverage) over the quad's texCoord instead of computing a procedural circle, so
+    // chalk/charcoal/bristle/etc. dabs carry real edge + interior texture. Hardness acts
+    // as a coverage gamma centered near neutral at 0.5: lower → lighter/feathered (the
+    // mask's mid-grays recede), higher → denser/punchier (mid-grays fill in), without
+    // destroying the mask's internal variation. in.color is premultiplied (rgb*flow,
+    // flow); scaling by coverage keeps it premultiplied for the source-over blend.
+    fragment float4 shapedStampFragment(
+        StampVaryings in [[stage_in]],
+        texture2d<float> shapeTex [[texture(0)]]
+    ) {
+        constexpr sampler shapeSampler(filter::linear, mip_filter::linear, address::clamp_to_zero);
+        float m = shapeTex.sample(shapeSampler, in.texCoord).r;
+        float gamma = mix(1.8, 0.55, clamp(in.hardness, 0.0, 1.0));
+        float cov = pow(max(m, 0.0), gamma);
+        return in.color * cov;
     }
 
     // Programmable-blend eraser: reads current framebuffer value, applies
