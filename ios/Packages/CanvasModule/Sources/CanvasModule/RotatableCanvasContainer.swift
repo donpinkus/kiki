@@ -58,6 +58,9 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
     private let ringView = ColorPickerRingView()
     /// Vertical offset applied so the ring sits above the finger instead of being covered.
     private static let ringFingerOffset: CGFloat = 80
+    /// Flattened canvas snapshot captured at eyedropper pickup and reused for every
+    /// `.changed` sample, so we don't re-flatten the Metal canvas on each finger move.
+    private var eyedropperSnapshot: UIImage?
     private var lassoSelectionView: LassoSelectionView?
     private var cursorBaseWidth: CGFloat = 5
     private var cursorPressureGamma: CGFloat = 0.7
@@ -365,6 +368,8 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
 
         switch gesture.state {
         case .began:
+            // Flatten the canvas once at pickup; reused for every `.changed` sample.
+            eyedropperSnapshot = canvasView.opaqueImageSnapshot(backgroundImage: backgroundImageView.image)
             let containerPoint = gesture.location(in: self)
             let ringCenter = CGPoint(x: containerPoint.x, y: containerPoint.y - Self.ringFingerOffset)
             ringView.previousColor = currentBrushColorProvider?() ?? .black
@@ -385,10 +390,12 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
         case .ended:
             let committed = ringView.currentColor
             ringView.isHidden = true
+            eyedropperSnapshot = nil
             onColorPicked?(committed)
 
         case .cancelled, .failed:
             ringView.isHidden = true
+            eyedropperSnapshot = nil
 
         default:
             break
@@ -396,41 +403,23 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
     }
 
     /// Sample the displayed pixel at a point in the container's coordinate system.
-    /// Snapshots the transformView (which holds background + canvas at their displayed
-    /// positions/transforms) and reads the pixel directly — no coordinate conversion needed.
+    ///
+    /// The canvas is backed by a `CAMetalLayer` whose pixels live in a GPU
+    /// drawable, so `CALayer.render(in:)` captures nothing from it — sampling
+    /// that way only ever read the white surround. Instead we read from a
+    /// flattened Metal snapshot (strokes composited over the background via the
+    /// same source-over path as on-screen), captured once at pickup in
+    /// `eyedropperSnapshot`. The container point is converted into the canvas
+    /// view's own (untransformed) coordinate space via `convert(_:from:)`, which
+    /// inverts the live zoom / rotate / pan automatically.
     private func sampleColorInContainer(at point: CGPoint) -> UIColor? {
-        let size = bounds.size
-        guard size.width > 0, size.height > 0 else { return nil }
-        guard point.x >= 0, point.y >= 0, point.x < size.width, point.y < size.height else {
-            return .white
-        }
-
-        // Render a 1x1 snapshot of the container at the target point.
-        // drawHierarchy on self captures the transformView (background + canvas)
-        // exactly as displayed, including any rotation/scale transforms.
-        var pixel: [UInt8] = [0, 0, 0, 0]
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
-        guard let ctx = CGContext(
-            data: &pixel, width: 1, height: 1,
-            bitsPerComponent: 8, bytesPerRow: 4,
-            space: colorSpace,
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else { return nil }
-
-        // Translate so the target point maps to (0,0)
-        ctx.translateBy(x: -point.x, y: -point.y)
-        // Fill white background (canvas area outside content)
-        ctx.setFillColor(UIColor.white.cgColor)
-        ctx.fill(CGRect(origin: .zero, size: size))
-        // Render the transform view (contains background image + canvas)
-        transformView.layer.render(in: ctx)
-
-        let r = CGFloat(pixel[0]) / 255
-        let g = CGFloat(pixel[1]) / 255
-        let b = CGFloat(pixel[2]) / 255
-        let a = CGFloat(pixel[3]) / 255
-        guard a > 0 else { return UIColor(red: r, green: g, blue: b, alpha: 0) }
-        return UIColor(red: r / a, green: g / a, blue: b / a, alpha: a)
+        let canvasPoint = canvasView.convert(point, from: self)
+        let canvasBounds = canvasView.bounds
+        guard canvasBounds.width > 0, canvasBounds.height > 0 else { return nil }
+        // Outside the canvas surface → the white surround.
+        guard canvasBounds.contains(canvasPoint) else { return .white }
+        guard let snapshot = eyedropperSnapshot else { return .white }
+        return snapshot.pixelColor(at: canvasPoint, in: canvasBounds.size)
     }
 
     public func gestureRecognizer(

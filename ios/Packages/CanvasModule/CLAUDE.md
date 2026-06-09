@@ -2,6 +2,31 @@
 
 ## Critical Rules (NEVER violate)
 
+### Color pipeline — the one correct mental model (read this BEFORE touching color)
+
+Our intuition here was wrong repeatedly and shipped real bugs: washed-out exports, an eyedropper that drifted on every sample, and save→reopen marching colors to black. **For each rule below, the "obvious" version is the trap.**
+
+**The invariant:** a `.bgra8Unorm_srgb` texture stores `sRGB_encode(linear)` bytes, and **Metal's hardware owns the gamma at every texture boundary** — the sampler DECODES sRGB→linear on read, the render target ENCODES linear→sRGB on store. Therefore: anything that touches a texture directly must speak **linear**; anything that emits a standalone image/file for UIKit/SwiftUI must speak **sRGB**. Pick the wrong side and the sRGB gamma curve is applied twice — one direction lightens, the other darkens.
+
+| Boundary | Dir | Use | If you use the "obvious" space instead |
+|---|---|---|---|
+| brush/stamp color → `_srgb` scratch (`premultipliedColor`, wet brush) | write | **linear** — `s2l(brush.color)` | sRGB → double-encode → strokes paint a shade too light |
+| `CIContext.render(_:to: _srgb texture, colorSpace:)` (`renderCIImage`) | write | **linearSRGB** | sRGB → double-encode → washed-out midtones |
+| `CIImage(mtlTexture: _srgb, options:[.colorSpace:])` (`textureToCIImage`) | read | **linearSRGB** | sRGB → re-decode → darkens; **compounds to black on save/reopen** |
+| `createCGImage(..., colorSpace:)` / `pngRepresentation(..., colorSpace:)` | output | **sRGB** | the image/PNG leaves Metal; tag it sRGB so UIKit shows it right |
+| `CIImage(cgImage:)` of a loaded PNG | input | sRGB (the file's own tag) | it's a genuine sRGB file |
+| `CIContext` working color space | — | **sRGB** | |
+| sampling a single canvas pixel (eyedropper) | read | Metal snapshot, then sample in **sRGB** | see below |
+
+**Intuitions that are WRONG — each one of these shipped a bug (fixed 2026-06-08):**
+- ❌ "The texture is `_srgb`, so read it back with `CIImage(mtlTexture:, colorSpace: .sRGB)`." → re-decodes already-linear texels → darkens every snapshot/thumbnail/save, compounding to black. ✅ **linearSRGB.**
+- ❌ "`brush.color` is the sRGB color I picked, so pack it straight into the stamp." → the `_srgb` store re-encodes it → strokes land a shade too light (and eyedropper sample→repaint compounds *lighter*). ✅ **convert sRGB→linear (`s2l`) first.**
+- ❌ "To read a canvas pixel, render the view/layer into a CGContext (`CALayer.render`/`drawHierarchy`)." → a `CAMetalLayer`'s pixels live in a GPU drawable; `CALayer.render` captures **nothing** (you read the white background). ✅ **read a Metal snapshot** (`opaqueImageSnapshot`/`flattenedCGImage`), then sample it.
+- ❌ "`CGColorSpaceCreateDeviceRGB()` is the neutral default RGB." → it's **Display P3** on iPads; it gamut-shifts sRGB data a shade darker/desaturated. ✅ explicit `CGColorSpace(name: CGColorSpace.sRGB)!`.
+- ❌ "Both color paths looked fine, so the pipeline is fine." → a lighten bug and a darken bug **cancel out** until one side is touched. The eyedropper round-trip is what exposed both. ✅ **always test the full loop: pick → paint → eyedrop → repaint → save → reopen.** A single hop proves nothing.
+
+The detailed rules below expand each of these.
+
 ### sRGB Premultiplied Alpha — The Bidirectional CIImage Rule
 
 The canvas uses `.bgra8Unorm_srgb` Metal textures. The `_srgb` suffix means Metal's blend pipeline works in **linear** space: it decodes sRGB→linear on read, blends, then encodes linear→sRGB on write. The stored premultiplied values are `sRGB_encode(linear_R × alpha)`.
@@ -12,10 +37,10 @@ The canvas uses `.bgra8Unorm_srgb` Metal textures. The `_srgb` suffix means Meta
 
 | Direction | Correct | WRONG (causes darkening) |
 |---|---|---|
-| Metal→CGImage | `CIImage(mtlTexture:)` → `CIContext.createCGImage()` | `texture.getBytes()` → `CGDataProvider` → `CGImage(...)` |
-| CGImage→Metal | `CIImage(cgImage:)` → `CIContext.render(_:to:commandBuffer:bounds:colorSpace:)` | `CGContext.draw(image)` → `texture.replace(region:withBytes:)` |
+| Metal→CGImage | `CIImage(mtlTexture:, [.colorSpace: linearSRGB])` → `CIContext.createCGImage(colorSpace: sRGB)` | `texture.getBytes()` → `CGDataProvider` → `CGImage(...)`; **or** `CIImage(mtlTexture:, [.colorSpace: sRGB])` (re-decodes → darkens) |
+| CGImage→Metal | `CIImage(cgImage:)` → `CIContext.render(_:to:commandBuffer:bounds:colorSpace: linearSRGB)` | `CGContext.draw(image)` → `texture.replace(region:withBytes:)`; **or** `colorSpace: sRGB` (re-encodes → washes out) |
 
-CIContext is cached on `CanvasRenderer` (created once at init, backed by the same MTLDevice). Both CIImage paths handle sRGB↔linear conversion and premultiplied alpha correctly.
+CIContext is cached on `CanvasRenderer` (created once at init, backed by the same MTLDevice). The CIImage paths handle premultiplied alpha correctly — but **you** must pass the right color space at each Metal boundary (linearSRGB) vs. output (sRGB); see the mental-model table above. Using the cached CIContext does **not** absolve you of getting the gamma side right.
 
 **Y-flip:** CIImage uses bottom-left origin; Metal textures use top-left. Apply `CGAffineTransform(scaleX: 1, y: -1).translatedBy(x: 0, y: -extent.height)` when converting in either direction.
 
@@ -25,10 +50,13 @@ CIContext is cached on `CanvasRenderer` (created once at init, backed by the sam
 
 **ALWAYS use `CGColorSpace(name: CGColorSpace.sRGB)!`** for:
 - `CIContext` working color space
-- `CIImage(mtlTexture:, options: [.colorSpace: ...])` 
-- `CIContext.createCGImage(..., colorSpace: ...)`
+- `CIContext.createCGImage(..., colorSpace: ...)` and `CIContext.pngRepresentation(..., colorSpace: ...)` — the OUTPUT tag of an image/file should be sRGB
 
-**EXCEPTION — `CIContext.render(_:to:bounds:colorSpace:)` writing into a `_srgb` Metal texture:** pass `CGColorSpace(name: CGColorSpace.linearSRGB)!`, NOT sRGB. Metal's render pipeline already applies linear→sRGB encoding on store for `_srgb` formats. Passing sRGB makes CIContext also encode → gamma applied twice → midtones lift to mid-gray (deep blacks become medium gray, contrast washes out). Passing linearSRGB tells CIContext to hand off linear values; Metal handles the encoding once.
+**EXCEPTION — direct Metal-texture I/O for a `_srgb` format uses `CGColorSpace(name: CGColorSpace.linearSRGB)!`, NOT sRGB, in BOTH directions.** Metal's hardware does the sRGB↔linear conversion for `.bgra8Unorm_srgb` textures (decode on sampler read, encode on render store), so Core Image must deal in *linear* values at the Metal boundary and let Metal own the gamma. This is symmetric:
+- **Writing** — `CIContext.render(_:to:bounds:colorSpace: linearSRGB)` into a `_srgb` texture. Passing sRGB makes CIContext *also* encode → gamma applied twice → midtones lift to mid-gray (washed out).
+- **Reading** — `CIImage(mtlTexture:, options: [.colorSpace: linearSRGB])` from a `_srgb` texture. The sampler already decoded sRGB→linear, so the values CI receives are linear. Passing sRGB makes CIImage *re-decode* → every read darkens AND over-saturates. Because the save path (`layerPNGData`→`textureToPNGData`) and all snapshots/thumbnails/eyedropper funnel through `textureToCIImage`, that extra decode bakes into stored PNGs and **compounds on each save/reopen, marching any color toward black.** (Fixed 2026-06-08; the read side had wrongly used sRGB.)
+
+The only sRGB tags in this round-trip are on CGImage/PNG *outputs* (a CGImage that leaves the Metal world should be sRGB-tagged so UIKit/SwiftUI display it correctly) and on a CGImage *input* being loaded (`CIImage(cgImage:)` of an sRGB PNG). The `_srgb`-texture endpoints are always linearSRGB.
 
 ### UIGraphicsImageRenderer — Always Force sRGB
 
@@ -107,7 +135,7 @@ MetalCanvasView (UIView, CAMetalLayer)
 ### Brush rendering flow
 1. Touch points → `StrokePoint` array (pressure, altitude, position)
 2. Arc-length resample with **adaptive spacing** (`max(effectiveWidth × 0.3, 0.5)`)
-3. Per-stamp: `StampInstance` (center, radius, rotation, premultiplied color). **Stamp alpha = the brush's `flow`** (per-stamp deposit), NOT opacity — so overlapping stamps build up *within* a stroke.
+3. Per-stamp: `StampInstance` (center, radius, rotation, premultiplied color). **Stamp color is fed in LINEAR** — `brush.color` is sRGB, but stamps render into a `.bgra8Unorm_srgb` scratch whose store re-encodes linear→sRGB, so `premultipliedColor` (and the wet brush) apply sRGB→linear (`s2l`) first. Packing sRGB directly double-encodes → strokes paint a shade too light and eyedropper sample→repaint compounds lighter. **Stamp alpha = the brush's `flow`** (per-stamp deposit), NOT opacity — so overlapping stamps build up *within* a stroke.
 4. All stamps → shared `MTLBuffer` → single instanced draw call into scratch texture (premultiplied source-over; the scratch holds the whole stroke in isolation, saturating toward alpha 1)
 5. On touchesEnded: flatten scratch into active layer, scaling the whole scratch by the brush's **per-stroke `opacity` ceiling** (`compositorFragment` `color * opacity`). This two-stage flow/opacity split ("Glaze") is why a sub-100% stroke that crosses itself stays flat instead of stacking. Live preview (`compositeToDrawable`) and snapshot/export paths apply the same ceiling — the former via `CanvasRenderer.activeStrokeOpacity`, the latter via an explicit `strokeOpacity:` parameter. See `documents/plans/pro-brush-roadmap.md` Phase 0.
 

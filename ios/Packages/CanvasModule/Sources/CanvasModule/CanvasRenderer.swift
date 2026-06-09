@@ -825,8 +825,17 @@ public final class CanvasRenderer {
     }
 
     private func textureToCIImage(_ texture: MTLTexture) -> CIImage? {
+        // linearSRGB — the texture is .bgra8Unorm_srgb, so Metal's sampler applies
+        // sRGB→linear DECODE on read; Core Image therefore receives already-linear
+        // values. Labelling them sRGB here makes CIImage apply the decode a SECOND
+        // time → every read darkens (and over-saturates) the image. Because the save
+        // path (layerPNGData) and snapshots both funnel through here, that extra
+        // decode bakes into stored PNGs and compounds on each save/reopen, marching
+        // any color toward black. This is the exact inverse of the write path
+        // (`renderCIImage`), which passes linearSRGB for the same reason: let Metal —
+        // not Core Image — own the sRGB↔linear conversion for `_srgb` textures.
         guard var ciImage = CIImage(mtlTexture: texture, options: [
-            .colorSpace: sRGBColorSpace
+            .colorSpace: linearSRGBColorSpace
         ]) else { return nil }
         ciImage = ciImage.transformed(by: CGAffineTransform(scaleX: 1, y: -1)
             .translatedBy(x: 0, y: -ciImage.extent.height))

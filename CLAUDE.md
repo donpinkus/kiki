@@ -68,6 +68,7 @@ The drawing canvas uses a custom Metal-based rendering engine (`MetalCanvasView`
 - **Active stroke**: rendered into a scratch texture (ephemeral), composited onto the canvas each frame. Flattened into the canvas texture on touchesEnded.
 - **Undo**: full-texture CPU snapshots (`texture.getBytes()` → `Data`), depth 30. Restore via `texture.replace()`.
 - **Stream capture**: reads canvas texture via `persistentImageSnapshot` (CGImage from `.shared` texture). **Never** uses `drawHierarchy` — that forces a synchronous GPU drain.
+- **Color correctness (read this before touching any color/snapshot/eyedropper code)**: the `.bgra8Unorm_srgb` textures make Metal's hardware own the sRGB↔linear gamma at every texture boundary, so **texture-side ops speak linear (linearSRGB / `s2l` brush color), image/file outputs speak sRGB**. The "obvious" choice is wrong on both sides and we shipped bugs both ways (washed-out exports, eyedropper drift, save→reopen → black). Never read a `CAMetalLayer` pixel via `CALayer.render`/`drawHierarchy` (captures nothing) and never use `CGColorSpaceCreateDeviceRGB()` (it's Display P3). Full mental model + the exact wrong-intuition list: `ios/Packages/CanvasModule/CLAUDE.md` → "Color pipeline — the one correct mental model".
 - **Lasso**: Phase 2 (path drawing works, selection extraction not yet implemented).
 - **Smudge**: not yet implemented on Metal (reverted from a CPU attempt that hit <1 fps). Will be a ping-pong texture fragment-shader pass. See `documents/plans/metal-canvas-rewrite.md`.
 

@@ -14,6 +14,19 @@ Record implementation decisions here as they are made. Newest first. This preven
 
 ---
 
+### 2026-06-08 — Canvas color pipeline: linear at every Metal boundary, sRGB only at image outputs
+
+**Context:** A new eyedropper exposed that colors round-tripped through the canvas were wrong, and a long-standing "gallery thumbnails look darker + more saturated than drawn" bug had the same root. Diagnosis (4 parallel agents + manual adjudication) found **two opposite gamma bugs that had been cancelling each other**, plus the eyedropper's own read bug — so the canvas looked roughly right until the eyedropper made the full loop visible. Our initial intuition ("the texture is `_srgb`, so use sRGB everywhere"; "`brush.color` is the sRGB color I picked, so pack it straight in") was wrong on **both** the read and write sides.
+
+**Decision:** Codify one model: a `.bgra8Unorm_srgb` texture makes **Metal hardware own the sRGB↔linear gamma at every texture boundary** (sampler decodes on read, render target encodes on store). So **texture-side ops must speak linear; standalone image/file outputs must speak sRGB.** Concretely fixed:
+- `CanvasRenderer.textureToCIImage` read: `.colorSpace` sRGB → **linearSRGB** (was re-decoding → darkened every snapshot/thumbnail/**save**, compounding to black on each save/reopen).
+- `MetalCanvasView.premultipliedColor` write: pack **`s2l(brush.color)`** (sRGB→linear) before the stamp, matching the wet brush (was double-encoding → strokes a shade too light).
+- Eyedropper read path: sample a **Metal snapshot** (`opaqueImageSnapshot`) not `CALayer.render` (which captures nothing from a `CAMetalLayer`); sample in explicit **sRGB**, not `CGColorSpaceCreateDeviceRGB()` (= Display P3 on iPads); fix a Y-flip in the 1×1 readback.
+
+**Alternatives considered:** Setting `CAMetalLayer.colorspace = sRGB` (Agent 2's lead theory) — **rejected**, the color-picker swatch already matched the canvas, proving the *display* was correct and the canvas was ground truth; the bugs were in the CPU read/write paths, not presentation. A double-`linearSRGB` "tidy story" blaming only the read path — rejected; the cumulative *lightening* after the read fix proved a second, paint-side bug existed.
+
+**Consequences:** Pick→paint→eyedrop→repaint→save→reopen is now idempotent (no drift). **New strokes are slightly more saturated/correct than before** (they now match the picker exactly); **already-saved drawings keep their baked-in too-light values** (only new paint is corrected). Full rules + the explicit list of wrong intuitions: `ios/Packages/CanvasModule/CLAUDE.md` → "Color pipeline — the one correct mental model". Lesson: a lighten bug and a darken bug cancel until one side moves — always test the **full color round-trip**, never a single hop.
+
 ### 2026-06-06 — Auth gate made a real, fail-closed global gate
 
 **Context:** `authPlugin` was a plain `FastifyPluginAsync` registered via `app.register`, so Fastify encapsulated its `preHandler` + `request.userId`/`authClaims` decorators to a child context that owned no routes — the "global auth gate" gated nothing. Every route self-authed (signout/usage/subscription → `verifyAccess`; stream → WS handshake; ops → `X-Ops-Key`), masking it, until `/v1/usage` + `/v1/subscription/verify` relied on `request.userId` and 401'd on valid tokens.

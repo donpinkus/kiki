@@ -2511,9 +2511,19 @@ public final class MetalCanvasView: UIView {
     /// + `CanvasRenderer.activeStrokeOpacity`). This split is what lets a 30%-opacity
     /// stroke that crosses itself stay 30% instead of stacking to opaque.
     private func premultipliedColor(_ brush: BrushConfig) -> SIMD4<Float> {
-        let r = Float(brush.color.red)
-        let g = Float(brush.color.green)
-        let b = Float(brush.color.blue)
+        // brush.color is sRGB (display) values. Stamps render into a
+        // .bgra8Unorm_srgb scratch texture, whose store applies a linear→sRGB
+        // ENCODE — so the shader must be fed LINEAR values for the stored pixel to
+        // equal the chosen color. Packing sRGB directly encodes a second time →
+        // every stroke lands a shade too light, and (now that the eyedropper reads
+        // the true canvas value) sampling a painted color and repainting it
+        // compounds lighter each cycle. Convert sRGB→linear here, matching the wet
+        // brush (`applyNewWetStamps`). Premultiply by flow in linear space, since
+        // the `_srgb` blend pipeline composites in linear.
+        func s2l(_ c: CGFloat) -> Float { let x = Float(c); return x <= 0.04045 ? x / 12.92 : pow((x + 0.055) / 1.055, 2.4) }
+        let r = s2l(brush.color.red)
+        let g = s2l(brush.color.green)
+        let b = s2l(brush.color.blue)
         let a = Float(brush.flow)
         return SIMD4<Float>(r * a, g * a, b * a, a)
     }

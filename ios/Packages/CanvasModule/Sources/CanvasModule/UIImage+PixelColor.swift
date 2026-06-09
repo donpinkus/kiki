@@ -29,7 +29,12 @@ extension UIImage {
     /// This avoids depending on the source image's byte order (RGBA vs BGRA).
     private static func samplePixel(from cgImage: CGImage, x: Int, y: Int) -> UIColor? {
         var pixel: [UInt8] = [0, 0, 0, 0] // R, G, B, A
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        // Explicit sRGB — NEVER CGColorSpaceCreateDeviceRGB(), which is Display P3
+        // on modern iPads. The source snapshot is sRGB-tagged, so drawing it into a
+        // P3 context performs a real sRGB→P3 gamut conversion; reading those bytes
+        // back as sRGB shifts the sampled color a shade darker. sRGB→sRGB is an
+        // identity passthrough, so the picked color exactly matches the canvas pixel.
+        let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
         guard let context = CGContext(
             data: &pixel,
             width: 1,
@@ -40,8 +45,12 @@ extension UIImage {
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         ) else { return nil }
 
-        // Draw just the target pixel into the 1x1 context
-        context.draw(cgImage, in: CGRect(x: -x, y: -y, width: cgImage.width, height: cgImage.height))
+        // Draw just the target pixel into the 1x1 context. A raw CGBitmapContext
+        // has a bottom-left origin and CGContext.draw renders images bottom-up, so
+        // offsetting by `-y` would sample the vertically-mirrored row. `x`/`y` are
+        // top-left pixel coordinates, so flip y to `height-1-y` before offsetting.
+        let flippedY = cgImage.height - 1 - y
+        context.draw(cgImage, in: CGRect(x: -x, y: -flippedY, width: cgImage.width, height: cgImage.height))
 
         let r = CGFloat(pixel[0]) / 255
         let g = CGFloat(pixel[1]) / 255
