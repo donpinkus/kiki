@@ -17,7 +17,8 @@
     "add-dc-volume": "tsx scripts/add-dc-volume.ts",
     "launch-test-pod": "tsx scripts/launch-test-pod.ts",
     "terminate-test-pod": "tsx scripts/terminate-test-pod.ts",
-    "list-test-pods": "tsx scripts/list-test-pods.ts"
+    "list-test-pods": "tsx scripts/list-test-pods.ts",
+    "set-test-account": "tsx scripts/set-test-account.ts"
   },
   "engines": {
     "node": ">=20.0.0"
