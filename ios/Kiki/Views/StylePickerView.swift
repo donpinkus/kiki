@@ -320,66 +320,14 @@ private struct StyleThumbnailSpec {
             return StyleThumbnailSpec(colors: [rgb(0.68, 0.70, 0.74), rgb(0.34, 0.36, 0.4)], symbolName: "slash.circle", motif: .diagonalStripes)
         case "beautiful_paint":
             return StyleThumbnailSpec(colors: [rgb(0.36, 0.52, 0.78), rgb(0.86, 0.66, 0.42)], symbolName: "paintbrush.pointed.fill", motif: .circles)
-        case "pixar_movie":
-            return StyleThumbnailSpec(colors: [rgb(0.3, 0.58, 0.9), rgb(0.96, 0.76, 0.32)], symbolName: "lightbulb.fill", motif: .circles)
-        case "editorial_photo":
-            return StyleThumbnailSpec(colors: [rgb(0.16, 0.18, 0.2), rgb(0.64, 0.55, 0.43)], symbolName: "camera.fill", motif: .circles)
-        case "cinematic_live_action":
-            return StyleThumbnailSpec(colors: [rgb(0.08, 0.1, 0.16), rgb(0.93, 0.5, 0.25)], symbolName: "film.fill", motif: .scanlines)
-        case "3d_render":
-            return StyleThumbnailSpec(colors: [rgb(0.36, 0.5, 0.9), rgb(0.74, 0.35, 0.86)], symbolName: "cube.fill", motif: .triangles)
-        case "pastel_animation":
-            return StyleThumbnailSpec(colors: [rgb(0.95, 0.68, 0.74), rgb(0.56, 0.78, 0.92)], symbolName: "paintpalette.fill", motif: .circles)
-        case "anime_action":
-            return StyleThumbnailSpec(colors: [rgb(0.95, 0.16, 0.22), rgb(0.1, 0.12, 0.23)], symbolName: "bolt.fill", motif: .diagonalStripes)
-        case "claymation":
-            return StyleThumbnailSpec(colors: [rgb(0.82, 0.46, 0.28), rgb(0.96, 0.72, 0.38)], symbolName: "circle.fill", motif: .circles)
-        case "low_poly":
-            return StyleThumbnailSpec(colors: [rgb(0.14, 0.56, 0.5), rgb(0.88, 0.78, 0.28)], symbolName: "triangle.fill", motif: .triangles)
-        case "pixel_art":
-            return StyleThumbnailSpec(colors: [rgb(0.18, 0.22, 0.5), rgb(0.25, 0.78, 0.87)], symbolName: "square.grid.3x3.fill", motif: .grid)
-        case "paper_cutout":
-            return StyleThumbnailSpec(colors: [rgb(0.95, 0.85, 0.55), rgb(0.86, 0.32, 0.34)], symbolName: "scissors", motif: .panels)
-        case "graphic_ink":
-            return StyleThumbnailSpec(colors: [rgb(0.08, 0.08, 0.09), rgb(0.86, 0.86, 0.82)], symbolName: "bubble.left.and.bubble.right.fill", motif: .panels)
-        case "isometric_diorama":
-            return StyleThumbnailSpec(colors: [rgb(0.45, 0.64, 0.46), rgb(0.89, 0.76, 0.48)], symbolName: "shippingbox.fill", motif: .grid)
-        case "felt_puppet":
-            return StyleThumbnailSpec(colors: [rgb(0.68, 0.18, 0.35), rgb(0.93, 0.58, 0.38)], symbolName: "theatermasks.fill", motif: .circles)
-        case "collage_animation":
-            return StyleThumbnailSpec(colors: [rgb(0.28, 0.18, 0.42), rgb(0.92, 0.66, 0.28)], symbolName: "square.stack.3d.up.fill", motif: .panels)
-        case "technical_explainer":
-            return StyleThumbnailSpec(colors: [rgb(0.12, 0.46, 0.78), rgb(0.28, 0.84, 0.74)], symbolName: "slider.horizontal.3", motif: .grid)
         case "studio_commercial":
             return StyleThumbnailSpec(colors: [rgb(0.92, 0.9, 0.84), rgb(0.18, 0.22, 0.26)], symbolName: "camera.aperture", motif: .circles)
-        case "music_video":
-            return StyleThumbnailSpec(colors: [rgb(0.95, 0.1, 0.62), rgb(0.16, 0.1, 0.8)], symbolName: "music.note", motif: .diagonalStripes)
-        case "vhs_camcorder":
-            return StyleThumbnailSpec(colors: [rgb(0.2, 0.22, 0.25), rgb(0.63, 0.2, 0.42)], symbolName: "video.fill", motif: .scanlines)
-        case "night_vision":
-            return StyleThumbnailSpec(colors: [rgb(0.02, 0.12, 0.05), rgb(0.22, 0.72, 0.24)], symbolName: "eye.fill", motif: .scanlines)
-        case "neon_sci_fi":
-            return StyleThumbnailSpec(colors: [rgb(0.04, 0.07, 0.22), rgb(0.0, 0.85, 0.9), rgb(0.9, 0.1, 0.85)], symbolName: "sparkles", motif: .diagonalStripes)
-        case "akira":
-            return StyleThumbnailSpec(colors: [rgb(0.78, 0.04, 0.04), rgb(0.08, 0.08, 0.11)], symbolName: "bolt.fill", motif: .scanlines)
-        case "halo":
-            return StyleThumbnailSpec(colors: [rgb(0.08, 0.28, 0.2), rgb(0.26, 0.7, 0.52)], symbolName: "shield.fill", motif: .triangles)
-        case "westworld":
-            return StyleThumbnailSpec(colors: [rgb(0.86, 0.58, 0.26), rgb(0.24, 0.18, 0.14)], symbolName: "sun.max.fill", motif: .circles)
-        case "world_of_warcraft":
-            return StyleThumbnailSpec(colors: [rgb(0.08, 0.34, 0.68), rgb(0.93, 0.62, 0.15)], symbolName: "flame.fill", motif: .triangles)
-        case "starcraft":
-            return StyleThumbnailSpec(colors: [rgb(0.1, 0.16, 0.3), rgb(0.48, 0.72, 0.95)], symbolName: "star.fill", motif: .scanlines)
-        case "pixar_feature":
+        case "pixar_movie":
             return StyleThumbnailSpec(colors: [rgb(0.3, 0.58, 0.9), rgb(0.96, 0.76, 0.32)], symbolName: "lightbulb.fill", motif: .circles)
-        case "spider_verse":
-            return StyleThumbnailSpec(colors: [rgb(0.08, 0.12, 0.65), rgb(0.95, 0.12, 0.2)], symbolName: "sparkle", motif: .grid)
-        case "arcane":
-            return StyleThumbnailSpec(colors: [rgb(0.15, 0.12, 0.35), rgb(0.88, 0.48, 0.2)], symbolName: "wand.and.stars", motif: .panels)
+        case "pastel_animation":
+            return StyleThumbnailSpec(colors: [rgb(0.95, 0.68, 0.74), rgb(0.56, 0.78, 0.92)], symbolName: "paintpalette.fill", motif: .circles)
         case "lego_stop_motion":
             return StyleThumbnailSpec(colors: [rgb(0.94, 0.78, 0.04), rgb(0.1, 0.38, 0.82)], symbolName: "square.grid.2x2.fill", motif: .grid)
-        case "matcap_model":
-            return StyleThumbnailSpec(colors: [rgb(0.42, 0.44, 0.48), rgb(0.84, 0.86, 0.88)], symbolName: "circle.fill", motif: .triangles)
         default:
             return StyleThumbnailSpec(colors: [rgb(0.28, 0.34, 0.42), rgb(0.52, 0.6, 0.7)], symbolName: "wand.and.stars", motif: .circles)
         }
