@@ -146,7 +146,14 @@ final class StreamSession {
     /// timing on the receive-loop end and reconnect breadcrumbs.
     private var currentConnectStartedAt: Date?
 
-    private static let captureSize = CGSize(width: 768, height: 768)
+    /// Canvas snapshot is resized to this before JPEG-encoding. Tracks the
+    /// live fal output resolution (`config.imageSize`) so the input never has
+    /// to be upscaled into a larger generation. The 2048² document downscales
+    /// cleanly to either preset. `square_hd` → 1024², else `square` → 768².
+    private var captureSize: CGSize {
+        let side: CGFloat = config.imageSize == "square_hd" ? 1024 : 768
+        return CGSize(width: side, height: side)
+    }
 
     // MARK: - Lifecycle
 
@@ -261,7 +268,7 @@ final class StreamSession {
     /// Used by the preview controller so preview and live frames match.
     func captureFrameJPEG() -> Data? {
         guard let snapshot = canvasViewModel.captureSnapshot() else { return nil }
-        guard let resized = resizeImage(snapshot.image, to: Self.captureSize) else { return nil }
+        guard let resized = resizeImage(snapshot.image, to: captureSize) else { return nil }
         return resized.jpegData(compressionQuality: 0.7)
     }
 
@@ -480,7 +487,7 @@ final class StreamSession {
 
                 let jpeg: Data? = await MainActor.run {
                     guard let snapshot = self.canvasViewModel.captureSnapshot() else { return nil }
-                    guard let resized = self.resizeImage(snapshot.image, to: Self.captureSize) else { return nil }
+                    guard let resized = self.resizeImage(snapshot.image, to: self.captureSize) else { return nil }
                     guard let data = resized.jpegData(compressionQuality: 0.7) else { return nil }
                     // Skip if the rendered output hasn't changed since last send.
                     // Catches all visual changes: mid-stroke, eraser, lasso, undo.

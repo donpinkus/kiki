@@ -416,6 +416,18 @@ final class AppCoordinator {
     /// Fixed seed (nil = server picks a stable per-session seed).
     var streamSeed: Int? { didSet { syncStreamConfig() } }
 
+    /// Live fal img2img output resolution (px, square). Only fal's two realtime
+    /// presets exist — 768 (`square`) and 1024 (`square_hd`); there is no higher
+    /// option on `fal-ai/flux-2/klein/realtime`. Drives both the `image_size`
+    /// config key and the canvas capture size (StreamSession matches the input
+    /// JPEG to the output). Default 1024.
+    var streamResolution: Int = 1024 { didSet { syncStreamConfig() } }
+
+    /// Live fal `schedule_mu` — denoise-schedule time shift (fal range 0.3–2.5).
+    /// Lower = more uniform denoising / tighter adherence to the sketch; fal's
+    /// own default is 2.3 (looser/more restyling). Default 1.2 (more adherence).
+    var streamScheduleMu: Double = 1.2 { didSet { syncStreamConfig() } }
+
     /// LTX-2.3 video override — square resolution (px). Session-only by design:
     /// not @AppStorage, so each app launch resets to the perf baseline (512).
     /// Step 3.5 benchmark needs deterministic baselines per launch.
@@ -1576,6 +1588,8 @@ final class AppCoordinator {
             prompt: composedPrompt,
             steps: streamSteps,
             seed: streamSeed,
+            imageSize: streamResolution >= 1024 ? "square_hd" : "square",
+            scheduleMu: streamScheduleMu,
             videoWidth: videoResolution,
             videoHeight: videoResolution,
             videoFrames: videoFrames,

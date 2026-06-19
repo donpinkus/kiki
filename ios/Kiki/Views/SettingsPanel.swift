@@ -19,6 +19,8 @@ struct SettingsPanel: View {
                     Button("Reset All to Defaults", role: .destructive) {
                         coordinator.streamSteps = 4
                         coordinator.streamSeed = nil
+                        coordinator.streamResolution = 1024
+                        coordinator.streamScheduleMu = 1.2
                         coordinator.streamCaptureFPS = 2
                         coordinator.drawingLayout = .splitScreen
                         coordinator.videoResolution = 512
@@ -84,6 +86,12 @@ struct SettingsPanel: View {
         @Bindable var coordinator = coordinator
 
         return Section("Parameters") {
+            Picker("Resolution", selection: $coordinator.streamResolution) {
+                Text("768²").tag(768)
+                Text("1024²").tag(1024)
+            }
+            .pickerStyle(.segmented)
+
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
                     Text("Steps")
@@ -100,6 +108,24 @@ struct SettingsPanel: View {
                     in: 1...8,
                     step: 1
                 )
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("schedule_mu")
+                        .font(.subheadline)
+                    Spacer()
+                    Text(String(format: "%.2f", coordinator.streamScheduleMu))
+                        .font(.subheadline.monospacedDigit())
+                }
+                Slider(
+                    value: $coordinator.streamScheduleMu,
+                    in: 0.3...2.5,
+                    step: 0.05
+                )
+                Text("Lower = tighter adherence to the sketch. fal default 2.3.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             HStack {

@@ -383,11 +383,17 @@ export class FalImageRelay implements ImageRelay {
     if (typeof steps === 'number' && Number.isFinite(steps)) {
       next['num_inference_steps'] = Math.max(1, Math.min(8, Math.trunc(steps)));
     }
-    if (typeof payload['schedule_mu'] === 'number') next['schedule_mu'] = payload['schedule_mu'];
+    if (typeof payload['schedule_mu'] === 'number' && Number.isFinite(payload['schedule_mu'])) {
+      // fal accepts 0.3–2.5; clamp so a stale/oversized client value can't 422.
+      next['schedule_mu'] = Math.max(0.3, Math.min(2.5, payload['schedule_mu']));
+    }
     if (typeof payload['output_feedback_strength'] === 'number') {
       next['output_feedback_strength'] = payload['output_feedback_strength'];
     }
-    if (typeof payload['image_size'] === 'string') next['image_size'] = payload['image_size'];
+    if (payload['image_size'] === 'square' || payload['image_size'] === 'square_hd') {
+      // Only fal's two realtime presets exist; ignore anything else.
+      next['image_size'] = payload['image_size'];
+    }
     if (typeof payload['enable_interpolation'] === 'boolean') {
       next['enable_interpolation'] = payload['enable_interpolation'];
     }
