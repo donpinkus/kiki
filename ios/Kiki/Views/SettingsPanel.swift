@@ -46,6 +46,7 @@ struct SettingsPanel: View {
             Picker("Layout", selection: $coordinator.drawingLayout) {
                 Text("Split").tag(DrawingLayout.splitScreen)
                 Text("Fullscreen").tag(DrawingLayout.fullscreen)
+                Text("Overlay").tag(DrawingLayout.overlay)
             }
             .pickerStyle(.segmented)
         }

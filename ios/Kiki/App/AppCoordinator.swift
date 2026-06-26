@@ -30,7 +30,14 @@ enum AppScreen: Equatable {
 }
 
 enum DrawingLayout: String, CaseIterable {
-    case splitScreen, fullscreen
+    /// Result pane on the left half; canvas on the right half.
+    case splitScreen
+    /// Canvas fills the pane; the generated image floats as a draggable panel.
+    case fullscreen
+    /// Generated image overlaid opaque, locked exactly on top of the canvas
+    /// (pan/zoom/rotate together); fresh strokes flash on a visual-only surface
+    /// above it and clear on every returned generation frame.
+    case overlay
 }
 
 @MainActor
@@ -898,6 +905,7 @@ final class AppCoordinator {
             backgroundImageData: drawing.backgroundImageData
         ))
 
+        NSLog("%@", "🔬OVL AppCoordinator.openDrawing → .drawing  layout=\(drawingLayout.rawValue)  hasLastImage=\(lastSuccessfulImage != nil)")
         currentScreen = .drawing
         isSuppressingObservation = false
 
@@ -1177,6 +1185,10 @@ final class AppCoordinator {
             self.streamFrameCount += 1
             self.lastSuccessfulImage = image
             self.recorder?.generatedChanged(image)
+            // Overlay mode: a new generated frame reflects the user's latest strokes
+            // via fal's img2img loop → wipe the visual-only fresh-stroke surface so
+            // the strokes "hand off" to the generated image. No-op in other layouts.
+            self.canvasViewModel.clearOverlayStrokes()
             // Resuming img2img clobbers any in-flight video state. Drop the
             // looping MP4 from disk now — otherwise NSTemporaryDirectory
             // accumulates one file per draw/idle cycle until stopStream.
@@ -1436,6 +1448,10 @@ final class AppCoordinator {
                 return
             }
             resultState = .videoStreaming(latestFrame: frame, fallback: fallback)
+            // Overlay mode: clear the visual-only fresh-stroke surface on each video
+            // frame too, so the idle-state animation shows cleanly in the locked
+            // overlay position. No-op in other layouts.
+            canvasViewModel.clearOverlayStrokes()
             streamLog.info("[result] \(prev) → videoStreaming index=\(index ?? -1)/\(total ?? -1)")
             // Phase transition: → animating. Set on every video frame so a
             // resume-drawing → frame-arrives transition cleanly flips back

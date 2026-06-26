@@ -88,6 +88,16 @@ public final class CanvasRenderer {
     /// from stamp instances; conceptually memoryless between frames.
     private(set) var scratchTexture: MTLTexture?
 
+    /// Overlay-stroke accumulation texture (overlay drawing mode only). Holds the
+    /// fresh strokes drawn *since the last generated frame* — a visual-only surface
+    /// shown above the opaque generated image in `.overlay` layout. NOT part of the
+    /// drawing/generation pipeline: it never feeds the canvas layers, has no undo,
+    /// no layers, and is wiped (`clearOverlayStrokes`) on every returned generation
+    /// frame. Allocated lazily on first overlay use so split-screen/fullscreen never
+    /// pay for it. `.bgra8Unorm_srgb` + `.shared`, identical format to the canvas so
+    /// the exact same stamp pipeline + color path applies (linear `s2l` premultiplied).
+    private(set) var overlayStrokeTexture: MTLTexture?
+
     /// Per-stroke opacity ceiling for the live render path — the on-screen preview
     /// (`compositeToDrawable`) and the stroke-end flatten (`flattenScratchIntoCanvas`).
     /// `MetalCanvasView` sets this immediately before each of those calls, so it's never
@@ -259,20 +269,27 @@ public final class CanvasRenderer {
         guard side > 0 else { return }
         // Document resolution is fixed for the canvas's lifetime: allocate once,
         // then short-circuit on every subsequent layout pass.
-        guard side != canvasWidth || side != canvasHeight else { return }
+        guard side != canvasWidth || side != canvasHeight else {
+            NSLog("%@", "🔬OVL configureDocument side=\(side) SHORT-CIRCUIT (already \(canvasWidth)×\(canvasHeight))")
+            return
+        }
+        NSLog("%@", "🔬OVL configureDocument side=\(side) ALLOCATING")
 
         canvasWidth = side
         canvasHeight = side
 
         let desc = makeLayerDescriptor()
         guard let tex = device.makeTexture(descriptor: desc) else {
+            NSLog("%@", "🔬OVL configureDocument makeTexture FAILED")
             canvasWidth = 0; canvasHeight = 0
             return
         }
+        NSLog("%@", "🔬OVL configureDocument → clearTexture(layer)")
         clearTexture(tex)
         layers = [Layer(id: UUID(), name: "Layer 1", isVisible: true, texture: tex)]
         activeLayerIndex = 0
         scratchTexture = device.makeTexture(descriptor: desc)
+        NSLog("%@", "🔬OVL configureDocument DONE (scratch=\(scratchTexture != nil))")
     }
 
     // MARK: - Layer Management
@@ -355,7 +372,10 @@ public final class CanvasRenderer {
     /// Render one frame: clear scratch → draw stamps into scratch → composite
     /// all visible layers + scratch into the given drawable texture.
     func renderFrame(drawable: CAMetalDrawable, isErasing: Bool) {
-        guard !layers.isEmpty, let scratch = scratchTexture else { return }
+        guard !layers.isEmpty, let scratch = scratchTexture else {
+            NSLog("%@", "🔬OVL renderer.renderFrame GUARD-RETURN (layers=\(layers.count) scratch=\(scratchTexture != nil)) — main drawable NOT presented")
+            return
+        }
         guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
 
         // Pass 1: Clear scratch + render stamps into it.
@@ -392,6 +412,145 @@ public final class CanvasRenderer {
 
         cmdBuf.commit()
         cmdBuf.waitUntilCompleted()
+    }
+
+    // MARK: - Overlay Stroke Surface (overlay drawing mode)
+
+    /// Lazily allocate the overlay-stroke accumulation texture (overlay mode only),
+    /// matching the document resolution + format. Cleared to transparent. No-op if
+    /// the document isn't configured yet or the texture already exists.
+    func ensureOverlayStrokeTexture() {
+        guard overlayStrokeTexture == nil, canvasWidth > 0, canvasHeight > 0 else {
+            NSLog("%@", "🔬OVL ensureOverlayStrokeTexture SKIP (texExists=\(overlayStrokeTexture != nil) canvasW=\(canvasWidth))")
+            return
+        }
+        NSLog("%@", "🔬OVL ensureOverlayStrokeTexture ALLOCATING (canvasW=\(canvasWidth))")
+        let desc = makeLayerDescriptor()
+        guard let tex = device.makeTexture(descriptor: desc) else {
+            NSLog("%@", "🔬OVL ensureOverlayStrokeTexture makeTexture FAILED")
+            return
+        }
+        clearTexture(tex)
+        overlayStrokeTexture = tex
+        NSLog("%@", "🔬OVL ensureOverlayStrokeTexture DONE")
+    }
+
+    /// Wipe the overlay-stroke accumulation texture to fully transparent. Called on
+    /// every returned generation frame (still + video, ~2 FPS) so fresh strokes flash,
+    /// then the generated image takes over. No-op when the overlay texture isn't
+    /// allocated (i.e. not in overlay mode) → harmless in split-screen/fullscreen.
+    ///
+    /// Uses an async clear render pass — NOT the blocking `clearTexture` — because
+    /// this runs on the (main-thread) per-generation-frame cadence, and the overlay is
+    /// visual-only: it's same-queue-ordered with the next `renderOverlayFrame`, so no
+    /// CPU-coherent readback/`waitUntilCompleted` is needed. (`clearTexture`'s wait is
+    /// reserved for alloc/resize, per CanvasModule/CLAUDE.md.)
+    func clearOverlayStrokes() {
+        guard let tex = overlayStrokeTexture else { return }
+        guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
+        let rpd = MTLRenderPassDescriptor()
+        rpd.colorAttachments[0].texture = tex
+        rpd.colorAttachments[0].loadAction = .clear
+        rpd.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        rpd.colorAttachments[0].storeAction = .store
+        guard let enc = cmdBuf.makeRenderCommandEncoder(descriptor: rpd) else { return }
+        enc.endEncoding()
+        cmdBuf.commit()
+    }
+
+    /// Release the overlay-stroke accumulation texture (~16 MB) when leaving overlay
+    /// mode, so split-screen/fullscreen don't carry it for the canvas's lifetime after
+    /// a single overlay visit. Re-allocated lazily (`ensureOverlayStrokeTexture`) on the
+    /// next overlay activation — and because the fresh texture is cleared on alloc, this
+    /// also guarantees stale strokes from a prior overlay session never reappear.
+    func releaseOverlayStrokeTexture() {
+        overlayStrokeTexture = nil
+    }
+
+    /// Render the overlay-stroke surface into its own drawable: the accumulated
+    /// overlay strokes (source-over) plus the live in-progress stroke (the same
+    /// `scratch` the canvas uses this frame), capped at `activeStrokeOpacity`.
+    /// Transparent everywhere there's no stroke so the opaque generated image
+    /// underneath shows through. Mirrors `compositeToDrawable`'s blend setup, so
+    /// color is identical to the canvas (linear `s2l` premultiplied → `_srgb` store).
+    ///
+    /// Runs on the same display tick as `renderFrame`; the scratch already holds this
+    /// frame's stamps (populated by the caller before `renderFrame`), so no extra
+    /// stamp work is added. No `waitUntilCompleted` — async present, hot-path safe.
+    ///
+    /// Takes the LAYER, not a pre-acquired drawable: `nextDrawable()` is called only
+    /// AFTER the render guards pass, so we never acquire a drawable we won't present.
+    /// Acquiring without presenting (e.g. when `overlayStrokeTexture` isn't allocated
+    /// yet on the first frames after entering overlay mode) leaks the drawable, and
+    /// after the 2-deep pool exhausts `nextDrawable()` blocks the main thread forever
+    /// → hard UI freeze. (Root cause of the 2026-06-22 gallery freeze.)
+    func renderOverlayFrame(layer: CAMetalLayer) {
+        guard let overlay = overlayStrokeTexture, let scratch = scratchTexture else {
+            NSLog("%@", "🔬OVL renderOverlayFrame GUARD-RETURN (overlayTex=\(overlayStrokeTexture != nil) scratch=\(scratchTexture != nil)) — NOT acquiring drawable")
+            return
+        }
+        NSLog("%@", "🔬OVL renderOverlayFrame → overlay layer.nextDrawable() drawableSize=\(layer.drawableSize)")
+        guard let drawable = layer.nextDrawable() else {
+            NSLog("%@", "🔬OVL renderOverlayFrame overlay nextDrawable() == nil — skip")
+            return
+        }
+        NSLog("%@", "🔬OVL renderOverlayFrame got overlay drawable")
+        guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
+
+        let rpd = MTLRenderPassDescriptor()
+        rpd.colorAttachments[0].texture = drawable.texture
+        rpd.colorAttachments[0].loadAction = .clear
+        rpd.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        rpd.colorAttachments[0].storeAction = .store
+
+        guard let enc = cmdBuf.makeRenderCommandEncoder(descriptor: rpd) else { return }
+        enc.setRenderPipelineState(compositorPSO)
+        enc.setVertexBuffer(quadVertexBuffer, offset: 0, index: 0)
+
+        // Accumulated overlay strokes (full opacity — already flattened at their ceiling).
+        var full: Float = 1.0
+        enc.setFragmentTexture(overlay, index: 0)
+        enc.setFragmentBytes(&full, length: MemoryLayout<Float>.size, index: 0)
+        enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+
+        // Live in-progress stroke on top, capped at the per-stroke opacity ceiling.
+        if stampCount > 0 {
+            var scratchOpacity: Float = activeStrokeOpacity
+            enc.setFragmentTexture(scratch, index: 0)
+            enc.setFragmentBytes(&scratchOpacity, length: MemoryLayout<Float>.size, index: 0)
+            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+        }
+
+        enc.endEncoding()
+        cmdBuf.present(drawable)
+        cmdBuf.commit()
+    }
+
+    /// Flatten the active stroke's `scratch` into the overlay accumulation texture
+    /// (stroke completion in overlay mode). Source-over, capped at `strokeOpacity` —
+    /// the same ceiling the canvas applies, so the accumulated overlay matches the
+    /// live preview. No-op when the overlay texture isn't allocated. Async commit
+    /// (no `waitUntilCompleted`): this is the visual-only surface, not the canvas
+    /// persistence path, so we never need a CPU-coherent readback here.
+    func flattenScratchIntoOverlay(strokeOpacity: Float) {
+        guard let overlay = overlayStrokeTexture, let scratch = scratchTexture else { return }
+        guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
+
+        let rpd = MTLRenderPassDescriptor()
+        rpd.colorAttachments[0].texture = overlay
+        rpd.colorAttachments[0].loadAction = .load
+        rpd.colorAttachments[0].storeAction = .store
+
+        guard let enc = cmdBuf.makeRenderCommandEncoder(descriptor: rpd) else { return }
+        enc.setRenderPipelineState(compositorPSO)
+        enc.setFragmentTexture(scratch, index: 0)
+        var opacity: Float = strokeOpacity
+        enc.setFragmentBytes(&opacity, length: MemoryLayout<Float>.size, index: 0)
+        enc.setVertexBuffer(quadVertexBuffer, offset: 0, index: 0)
+        enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+        enc.endEncoding()
+
+        cmdBuf.commit()
     }
 
     /// Render eraser stamps directly into the canvas texture with destination-out
@@ -1247,7 +1406,9 @@ public final class CanvasRenderer {
         cmdBuf.commit()
         // waitUntilCompleted is acceptable here — clearTexture runs once during
         // canvas resize, not on the per-frame hot path.
+        NSLog("%@", "🔬OVL clearTexture → waitUntilCompleted (main=\(Thread.isMainThread))")
         cmdBuf.waitUntilCompleted()
+        NSLog("%@", "🔬OVL clearTexture waitUntilCompleted RETURNED")
     }
 
     // MARK: - Pipeline State Builders

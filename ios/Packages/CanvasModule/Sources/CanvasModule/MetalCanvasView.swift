@@ -57,6 +57,27 @@ public final class MetalCanvasView: UIView {
     private let renderer: CanvasRenderer
     private var displayLink: CADisplayLink?
     private var isDirty = true
+
+    /// Overlay drawing mode: the external `CAMetalLayer` (owned by
+    /// `RotatableCanvasContainer`, sitting above the generated image inside the
+    /// transformed view) into which we also composite the visual-only overlay
+    /// strokes every display tick. `nil` in split-screen/fullscreen → the overlay
+    /// path is completely inert (zero added GPU/CPU work). Set by the container.
+    public var overlayStrokeLayer: CAMetalLayer? {
+        didSet {
+            guard oldValue !== overlayStrokeLayer else { return }
+            NSLog("%@", "🔬OVL MCV.overlayStrokeLayer didSet → \(overlayStrokeLayer != nil ? "SET" : "nil")")
+            if overlayStrokeLayer != nil {
+                // May no-op if the document isn't laid out yet (canvasWidth == 0);
+                // layoutSubviews re-tries the allocation once configureDocument runs.
+                renderer.ensureOverlayStrokeTexture()
+            } else {
+                // Leaving overlay mode → free the ~16 MB accumulation texture.
+                renderer.releaseOverlayStrokeTexture()
+            }
+            isDirty = true
+        }
+    }
     /// Canvas bitmap deferred from loadDrawingData until layout is ready.
     private var pendingCanvasImage: CGImage?
     /// Encoded canvas bitmap deferred from loadDrawingData until layout is ready.
@@ -325,6 +346,18 @@ public final class MetalCanvasView: UIView {
         }
     }
 
+    /// Wipe the visual-only overlay-stroke surface (overlay drawing mode). Called on
+    /// each returned generation frame so fresh strokes flash, then the generated image
+    /// takes over. No-op when no overlay texture is allocated (not in overlay mode).
+    public func clearOverlayStrokes() {
+        renderer.clearOverlayStrokes()
+        isDirty = true
+    }
+
+    /// The Metal device backing this canvas — shared with the overlay-stroke layer so
+    /// both render on the same device/queue.
+    public var metalDevice: MTLDevice { renderer.device }
+
     public override class var layerClass: AnyClass { CAMetalLayer.self }
 
     /// Fixed document resolution (square), in pixels. Decoupled from the view
@@ -336,6 +369,7 @@ public final class MetalCanvasView: UIView {
 
     public override func layoutSubviews() {
         super.layoutSubviews()
+        NSLog("%@", "🔬OVL MCV.layoutSubviews ENTER bounds=\(bounds.size) overlayLayerSet=\(overlayStrokeLayer != nil)")
         let metalLayer = self.layer as! CAMetalLayer
         let scale = window?.screen.scale ?? UIScreen.main.scale
         metalLayer.contentsScale = scale
@@ -349,7 +383,18 @@ public final class MetalCanvasView: UIView {
         let viewScale = bounds.width > 0
             ? CGFloat(Self.documentSide) / bounds.width
             : scale
+        NSLog("%@", "🔬OVL MCV.layoutSubviews → configureDocument(side=\(Self.documentSide))")
         renderer.configureDocument(side: Self.documentSide, viewScale: viewScale)
+
+        // If overlay mode was activated before the document was laid out (e.g. the
+        // app launched directly into overlay layout), the overlayStrokeLayer didSet
+        // fired while canvasWidth == 0 and the texture didn't allocate. Now that
+        // configureDocument has set the resolution, allocate it. No-op otherwise.
+        if overlayStrokeLayer != nil {
+            NSLog("%@", "🔬OVL MCV.layoutSubviews → ensureOverlayStrokeTexture")
+            renderer.ensureOverlayStrokeTexture()
+        }
+        NSLog("%@", "🔬OVL MCV.layoutSubviews configureDocument block DONE")
 
         // If drawing data was loaded before layout (canvas texture didn't exist
         // yet), apply it now that the texture is allocated.
@@ -374,7 +419,12 @@ public final class MetalCanvasView: UIView {
 
     private func renderFrame() {
         let metalLayer = self.layer as! CAMetalLayer
-        guard let drawable = metalLayer.nextDrawable() else { return }
+        NSLog("%@", "🔬OVL MCV.renderFrame ENTER overlayLayerSet=\(overlayStrokeLayer != nil) → main nextDrawable() drawableSize=\(metalLayer.drawableSize)")
+        guard let drawable = metalLayer.nextDrawable() else {
+            NSLog("%@", "🔬OVL MCV.renderFrame main nextDrawable() == nil — skip")
+            return
+        }
+        NSLog("%@", "🔬OVL MCV.renderFrame got main drawable")
 
         // Populate stamp buffer from active stroke stamps.
         renderer.clearStamps()
@@ -388,6 +438,21 @@ public final class MetalCanvasView: UIView {
         renderer.activeStrokeOpacity = currentStrokeOpacity()
         renderer.activeShapeTexture = isErasing ? nil : currentShapeTexture()
         renderer.renderFrame(drawable: drawable, isErasing: isErasing)
+        NSLog("%@", "🔬OVL MCV.renderFrame main renderFrame returned")
+
+        // Overlay drawing mode: composite the visual-only overlay strokes
+        // (accumulated + the live scratch this frame already holds) into the
+        // overlay layer, in the same tick. No extra stamp generation; the scratch
+        // was populated above. Only runs when an overlay layer is attached.
+        // Pass the LAYER (not a pre-acquired drawable): renderOverlayFrame acquires
+        // the drawable only after its render guards pass, so it never leaks an
+        // un-presented drawable (which deadlocks nextDrawable → UI freeze).
+        if let overlayLayer = overlayStrokeLayer {
+            NSLog("%@", "🔬OVL MCV.renderFrame → renderOverlayFrame")
+            renderer.renderOverlayFrame(layer: overlayLayer)
+            NSLog("%@", "🔬OVL MCV.renderFrame renderOverlayFrame returned")
+        }
+        NSLog("%@", "🔬OVL MCV.renderFrame DONE")
     }
 
     // MARK: - Touch Handling
@@ -1057,6 +1122,13 @@ public final class MetalCanvasView: UIView {
         }
         renderer.activeStrokeOpacity = Float(stroke.brush.opacity)
         renderer.flattenScratchIntoCanvas()
+        // Overlay drawing mode: accumulate the just-finished brush stroke into the
+        // visual-only overlay surface too, at the same opacity ceiling. The scratch
+        // still holds this stroke (flattenScratchIntoCanvas reads it, doesn't clear).
+        // No-op unless an overlay texture is allocated.
+        if overlayStrokeLayer != nil {
+            renderer.flattenScratchIntoOverlay(strokeOpacity: Float(stroke.brush.opacity))
+        }
 
         strokeCount += 1
         onDrawingChanged?()

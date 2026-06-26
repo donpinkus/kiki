@@ -12,6 +12,8 @@ struct DrawingView: View {
 
     var body: some View {
         @Bindable var coordinator = coordinator
+        let _ = NSLog("%@", "🔬OVL DrawingView.body render")
+        let _ = Self._printChanges()
 
         VStack(spacing: 0) {
             DrawingTopBar()
@@ -65,6 +67,10 @@ struct DrawingView: View {
                     CanvasView(
                         viewModel: coordinator.canvasViewModel,
                         drawingSurfaceSide: canvasSide,
+                        overlayActive: coordinator.drawingLayout == .overlay,
+                        overlayImage: coordinator.drawingLayout == .overlay
+                            ? coordinator.resultState.displayImage
+                            : nil,
                         externalTransformRegionProvider: { [weak coordinator] in
                             // Two-finger gestures over the floating panel's rect
                             // move/scale it instead of the canvas. nil = no panel
@@ -160,7 +166,11 @@ struct DrawingView: View {
                     if coordinator.drawingLayout == .splitScreen {
                         splitScreenResultPane(geometry: geometry)
                             .zIndex(2)
-                    } else if let image = coordinator.resultState.displayImage {
+                    } else if coordinator.drawingLayout == .fullscreen,
+                              let image = coordinator.resultState.displayImage {
+                        // Overlay mode renders the generated image INSIDE the canvas
+                        // container (locked to the canvas transform), so this branch is
+                        // fullscreen-only. Overlay → render nothing here.
                         // Fullscreen: image-only floating preview, sized to the
                         // image's aspect ratio. Visual-only (allowsHitTesting
                         // false) — a single finger / pencil draws straight through

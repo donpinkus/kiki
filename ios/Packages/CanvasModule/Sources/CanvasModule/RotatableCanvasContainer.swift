@@ -54,6 +54,15 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
     /// The container itself has no transform (SwiftUI manages its frame).
     private let transformView = UIView()
     private let backgroundImageView = UIImageView()
+    /// Overlay drawing mode: opaque generated image, locked exactly on top of the
+    /// canvas (inside `transformView`, so it inherits the canvas pan/zoom/rotate
+    /// 1:1). Non-interactive — touches fall through to `canvasView` underneath, so
+    /// real drawing/generation are unchanged. Hidden unless overlay mode is active.
+    private let generatedImageView = UIImageView()
+    /// Overlay drawing mode: visual-only fresh-stroke surface, a `CAMetalLayer` view
+    /// above `generatedImageView`. The Metal canvas composites the overlay-stroke
+    /// texture into this layer every tick. Non-interactive. Hidden unless active.
+    private let overlayStrokeView = MetalOverlayLayerView()
     private let cursorView = CursorOverlayView()
     private let ringView = ColorPickerRingView()
     /// Vertical offset applied so the ring sits above the finger instead of being covered.
@@ -118,6 +127,24 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
         canvasView.frame = transformView.bounds
         canvasView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         transformView.addSubview(canvasView)
+
+        // Overlay drawing mode: opaque generated image locked over the canvas, plus a
+        // visual-only fresh-stroke surface above it. Both inside transformView (so they
+        // ride the canvas pan/zoom/rotate exactly) and both non-interactive (single
+        // finger / pencil draws straight through to canvasView). Hidden until activated.
+        generatedImageView.frame = transformView.bounds
+        generatedImageView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        generatedImageView.contentMode = .scaleAspectFill
+        generatedImageView.clipsToBounds = true
+        generatedImageView.isUserInteractionEnabled = false
+        generatedImageView.isHidden = true
+        transformView.addSubview(generatedImageView)
+
+        overlayStrokeView.frame = transformView.bounds
+        overlayStrokeView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        overlayStrokeView.isUserInteractionEnabled = false
+        overlayStrokeView.isHidden = true
+        transformView.addSubview(overlayStrokeView)
 
         // Cursor overlay — renders on top of canvas, shows brush/eraser size at touch position
         cursorView.frame = CGRect(x: 0, y: 0, width: 5, height: 5)
@@ -478,6 +505,40 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
         return isTransform(gestureRecognizer) && isTransform(other)
         // Long-press is exclusive — it should not fire alongside any other gesture.
         // Multi-finger gestures naturally cancel it since they introduce additional touches.
+    }
+
+    // MARK: - Overlay Drawing Mode
+
+    /// Toggle overlay drawing mode. When active, the opaque generated image +
+    /// visual-only fresh-stroke surface are shown locked over the canvas, and the
+    /// canvas's Metal renderer also composites overlay strokes into the overlay
+    /// layer each tick. When inactive, both views hide and the canvas stops
+    /// touching the overlay path (zero added work in split-screen/fullscreen).
+    public func setOverlayActive(_ active: Bool) {
+        NSLog("%@", "🔬OVL container.setOverlayActive(\(active)) ENTER bounds=\(bounds.size) overlayStrokeView.bounds=\(overlayStrokeView.bounds.size)")
+        generatedImageView.isHidden = !active
+        overlayStrokeView.isHidden = !active
+        // Configure the overlay metal layer's device once, then hand it to the
+        // canvas so it renders into it. nil detaches it (inert).
+        if active {
+            overlayStrokeView.configureDevice(canvasView.metalDevice)
+            canvasView.overlayStrokeLayer = overlayStrokeView.metalLayer
+        } else {
+            canvasView.overlayStrokeLayer = nil
+        }
+        NSLog("%@", "🔬OVL container.setOverlayActive(\(active)) DONE")
+    }
+
+    /// Push the generated image to display locked over the canvas (overlay mode).
+    /// `nil` clears it. Bound to `resultState.displayImage` upstream, which already
+    /// falls back to the last successful image → "show last, never blank" for free.
+    public func setOverlayImage(_ image: UIImage?) {
+        generatedImageView.image = image
+    }
+
+    /// Wipe the visual-only overlay-stroke surface (called on each generation frame).
+    public func clearOverlayStrokes() {
+        canvasView.clearOverlayStrokes()
     }
 
     // MARK: - Public API
