@@ -6,6 +6,7 @@ import CanvasModule
 /// The native `.popover` dismisses on a tap outside (pen or finger). See pro-brush-roadmap.
 struct BrushSettingsPopover: View {
     @Environment(AppCoordinator.self) private var coordinator
+    @State private var showStudio = false
 
     var body: some View {
         @Bindable var coordinator = coordinator
@@ -29,9 +30,24 @@ struct BrushSettingsPopover: View {
                 BrushSliderRow("Mix", value: $coordinator.toolWetStrength, range: 0.05...1.0, help: Self.help["Mix"]!)
                 BrushSliderRow("Smear", value: $coordinator.toolWetPickup, range: 0.0...1.0, help: Self.help["Smear"]!)
             }
+
+            Divider()
+            Button {
+                showStudio = true
+            } label: {
+                Label("Brush Studio (dev)", systemImage: "slider.horizontal.3")
+                    .font(.subheadline.weight(.medium))
+            }
+            if coordinator.toolDynamics != nil {
+                Text("Dynamics active").font(.caption).foregroundColor(.secondary)
+            }
         }
         .padding(20)
         .frame(width: 300)
+        .sheet(isPresented: $showStudio) {
+            BrushStudioView(initial: coordinator.toolDynamics)
+                .environment(coordinator)
+        }
     }
 
     // One-sentence summary + what 0% and 100% mean, per control.

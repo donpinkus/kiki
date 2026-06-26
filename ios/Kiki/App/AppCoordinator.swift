@@ -157,6 +157,21 @@ final class AppCoordinator {
             applyTool()
         }
     }
+    /// Krita-grade brush dynamics (sensor→curve→combine→remap). nil = no dynamics (legacy pen).
+    /// Edited live by the Brush Studio dev panel; applied to the active brush on change.
+    var toolDynamics: BrushDynamics? = nil {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    /// Smudge mode (with wet path): seed the carried load from the canvas instead of the ink.
+    var toolWetSmudge = false {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
 
     /// Debug: A/B the wet draw-order experiment (per-stamp vs instanced draws).
     var wetOrderingPerStamp = false {
@@ -1623,6 +1638,28 @@ final class AppCoordinator {
         return result.isEmpty ? nil : result
     }
 
+    /// Load a curated brush preset into the live tool (Brush Studio dev panel). Batched so the
+    /// brush is rebuilt once. Preserves the user's color / size / opacity / flow.
+    func applyBrushPreset(_ preset: BrushPreset) {
+        isSwappingToolValues = true
+        toolDynamics = preset.dynamics
+        toolHardness = preset.hardness
+        toolSpacing = preset.spacing
+        toolShapeID = preset.shapeID
+        toolWetSmudge = false
+        isSwappingToolValues = false
+        applyTool()
+    }
+
+    /// Reset the live tool to the plain default pen (no dynamics, no smudge).
+    func resetBrushDynamics() {
+        isSwappingToolValues = true
+        toolDynamics = nil
+        toolWetSmudge = false
+        isSwappingToolValues = false
+        applyTool()
+    }
+
     private func applyTool() {
         switch currentTool {
         case .brush:
@@ -1637,10 +1674,12 @@ final class AppCoordinator {
                 hardness: toolHardness,
                 spacing: toolSpacing,
                 taper: toolTaper,
-                wetEnabled: toolWetEnabled,
+                wetEnabled: toolWetEnabled || toolWetSmudge,
                 wetStrength: toolWetStrength,
                 wetPickup: toolWetPickup,
-                shapeID: toolShapeID
+                wetSmudge: toolWetSmudge,
+                shapeID: toolShapeID,
+                dynamics: toolDynamics
             )
             canvasViewModel.selectBrush(config)
         case .eraser:
