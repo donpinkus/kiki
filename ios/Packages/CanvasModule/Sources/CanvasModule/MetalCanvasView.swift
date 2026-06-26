@@ -2469,10 +2469,21 @@ public final class MetalCanvasView: UIView {
         let hasDyn = !(dyn?.isInert ?? true)
         func s2lLocal(_ c: CGFloat) -> Float { let x = Float(c); return x <= 0.04045 ? x / 12.92 : pow((x + 0.055) / 1.055, 2.4) }
         // Only the dynamics path consumes these; keep the default-pen path free of the extra
-        // sRGB→linear work (it returns before touching them).
-        let baseLinRGB: SIMD3<Float> = hasDyn
-            ? SIMD3<Float>(s2lLocal(brush.color.red), s2lLocal(brush.color.green), s2lLocal(brush.color.blue))
-            : .zero
+        // work (it returns before touching them). Per-stroke color jitter (if any) is applied
+        // ONCE here in sRGB-HSV, then converted to linear — so the whole stroke is one coherent
+        // jittered color (not per-dab speckle, which img2img averages out).
+        let baseLinRGB: SIMD3<Float> = {
+            guard hasDyn else { return .zero }
+            var srgb = (r: Double(brush.color.red), g: Double(brush.color.green), b: Double(brush.color.blue))
+            if let cj = dyn?.colorJitter, !cj.isInert {
+                let s = strokeSeed(stroke.id)
+                srgb = cj.applied(toSRGB: srgb,
+                                  rH: brushHash01(s, 0, 0x4011),
+                                  rS: brushHash01(s, 0, 0x4012),
+                                  rB: brushHash01(s, 0, 0x4013))
+            }
+            return SIMD3<Float>(s2lLocal(CGFloat(srgb.r)), s2lLocal(CGFloat(srgb.g)), s2lLocal(CGFloat(srgb.b)))
+        }()
         let baseFlow = Float(brush.flow)
         var dynState: StrokeDynamicsState? = hasDyn ? StrokeDynamicsState(seed: strokeSeed(stroke.id)) : nil
 
@@ -2480,9 +2491,10 @@ public final class MetalCanvasView: UIView {
         /// exact behavior; the dynamics branch advances stroke state and evaluates the curve
         /// options. `dt` is the seconds across the segment this dab sits on (for the Speed sensor).
         func dabAttrs(x: CGFloat, y: CGFloat, force: CGFloat, altitude: CGFloat, azimuth: CGFloat,
-                      dx: CGFloat, dy: CGFloat, dt: Double) -> (width: CGFloat, color: SIMD4<Float>, rotation: Float) {
+                      dx: CGFloat, dy: CGFloat, dt: Double)
+            -> (width: CGFloat, color: SIMD4<Float>, rotation: Float, offset: CGPoint) {
             guard hasDyn, var st = dynState else {
-                return (brush.effectiveWidth(force: force, altitude: altitude), color, strokeRotation(dx: dx, dy: dy))
+                return (brush.effectiveWidth(force: force, altitude: altitude), color, strokeRotation(dx: dx, dy: dy), .zero)
             }
             let input = st.advance(
                 x: Double(x), y: Double(y), force: Double(force), altitude: Double(altitude),
@@ -2498,7 +2510,15 @@ public final class MetalCanvasView: UIView {
             let col = SIMD4<Float>(baseLinRGB.x * a, baseLinRGB.y * a, baseLinRGB.z * a, a)
             var rot = strokeRotation(dx: dx, dy: dy)
             if let rotOpt = dyn?.rotation { rot += Float(rotOpt.value(input) * Double.pi) } // [-1,1] turns → ±π
-            return (w, col, rot)
+            // Scatter: per-dab random center displacement, magnitude = value × dab diameter.
+            // Displaces only the rendered stamp; the spacing/path walk uses the un-scattered point.
+            var offset = CGPoint.zero
+            if let sc = dyn?.scatter {
+                let mag = sc.value(input)
+                offset = CGPoint(x: w * CGFloat((2 * input.randScatterX - 1) * mag),
+                                 y: w * CGFloat((2 * input.randScatterY - 1) * mag))
+            }
+            return (w, col, rot, offset)
         }
         // ---------------------------------------------------------------------------------
 
@@ -2509,7 +2529,8 @@ public final class MetalCanvasView: UIView {
         let firstWidth = firstAttr.width
         if clipPath.map({ $0.contains(first.position) }) ?? true {
             stamps.append(CanvasRenderer.StampInstance(
-                center: SIMD2<Float>(Float(first.position.x * scale), Float(first.position.y * scale)),
+                center: SIMD2<Float>(Float((first.position.x + firstAttr.offset.x) * scale),
+                                     Float((first.position.y + firstAttr.offset.y) * scale)),
                 radius: Float(firstWidth * 0.5 * scale),
                 rotation: firstAttr.rotation,
                 color: firstAttr.color,
@@ -2553,7 +2574,7 @@ public final class MetalCanvasView: UIView {
                 let pos = CGPoint(x: x, y: y)
                 if clipPath.map({ $0.contains(pos) }) ?? true {
                     stamps.append(CanvasRenderer.StampInstance(
-                        center: SIMD2<Float>(Float(x * scale), Float(y * scale)),
+                        center: SIMD2<Float>(Float((x + attr.offset.x) * scale), Float((y + attr.offset.y) * scale)),
                         radius: Float(width * 0.5 * scale),
                         rotation: attr.rotation,
                         color: attr.color,
@@ -2580,7 +2601,8 @@ public final class MetalCanvasView: UIView {
             let width = attr.width
             if clipPath.map({ $0.contains(last.position) }) ?? true {
                 stamps.append(CanvasRenderer.StampInstance(
-                    center: SIMD2<Float>(Float(last.position.x * scale), Float(last.position.y * scale)),
+                    center: SIMD2<Float>(Float((last.position.x + attr.offset.x) * scale),
+                                         Float((last.position.y + attr.offset.y) * scale)),
                     radius: Float(width * 0.5 * scale),
                     rotation: attr.rotation,
                     color: attr.color,

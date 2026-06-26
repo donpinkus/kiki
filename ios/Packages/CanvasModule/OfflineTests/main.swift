@@ -133,5 +133,19 @@ let back = try! JSONDecoder().decode(BrushDynamics.self, from: JSONEncoder().enc
 checkBool("Codable round-trip equal", back == dyn)
 checkBool("empty JSON → inert", try! JSONDecoder().decode(BrushDynamics.self, from: "{}".data(using: .utf8)!).isInert)
 
+// --- scatter + color jitter (P2) ---
+check("scatter constant (no sensors → strength)", CurveOption(sensors: [], fold: .sizeLike, strength: 0.7).value(SensorInput()), 0.7)
+let hsvRT = hsvToRGB(rgbToHSV((0.2, 0.5, 0.8)))
+check("hsv roundtrip r", hsvRT.r, 0.2); check("hsv roundtrip g", hsvRT.g, 0.5); check("hsv roundtrip b", hsvRT.b, 0.8)
+let jitNoop = ColorJitter(hue: 0.1, saturation: 0.2, brightness: 0.2).applied(toSRGB: (0.2, 0.5, 0.8), rH: 0.5, rS: 0.5, rB: 0.5)
+check("color jitter r=0.5 is no-op", jitNoop.r, 0.2)
+checkBool("color jitter changes color when r≠0.5", {
+    let j = ColorJitter(hue: 0.1, saturation: 0.2, brightness: 0.2).applied(toSRGB: (0.2, 0.5, 0.8), rH: 1, rS: 1, rB: 1)
+    return j.r != 0.2 || j.g != 0.5 || j.b != 0.8
+}())
+checkBool("default SensorInput scatter symmetric (no offset)", 2 * SensorInput().randScatterX - 1 == 0)
+check("ColorJitter inert default", BrushDynamics(colorJitter: ColorJitter()).isInert ? 1 : 0, 1)
+check("scatter makes dynamics non-inert", BrushDynamics(scatter: CurveOption(sensors: [], strength: 0.5)).isInert ? 0 : 1, 1)
+
 print("")
 if failures == 0 { print("ALL PASSED") } else { print("\(failures) FAILED"); exit(1) }

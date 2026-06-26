@@ -102,6 +102,26 @@ public enum BrushPresetCatalog {
                                   fold: .rotationLike, strength: 1)),
         hardness: 0.8, spacing: 0.06, shapeID: "ink")
 
+    /// Stipple — wide spacing + per-dab scatter makes a broken, granular dab field (constant
+    /// scatter 0.7× diameter; pressure drives size). Reads as a dry stamping brush.
+    public static let stipple = BrushPreset(
+        id: "stipple", name: "Stipple",
+        dynamics: BrushDynamics(
+            size: sizeOpt([SensorChannel(sensor: .pressure)], min: 0.3),
+            scatter: CurveOption(sensors: [], fold: .sizeLike, strength: 0.7)),
+        hardness: 0.7, spacing: 0.9)
+
+    /// Pastel — soft pressure size + subtle PER-STROKE hue/sat/brightness jitter, so successive
+    /// strokes vary slightly in color like real pastel sticks (high img2img leverage; the model
+    /// reads the color variation). Uses the "pastel" textured tip.
+    public static let pastel = BrushPreset(
+        id: "pastel", name: "Pastel",
+        dynamics: BrushDynamics(
+            size: sizeOpt([SensorChannel(sensor: .pressure)], min: 0.2, common: .gamma(1.3)),
+            flow: sizeOpt([SensorChannel(sensor: .pressure)], min: 0.4),
+            colorJitter: ColorJitter(hue: 0.03, saturation: 0.15, brightness: 0.1)),
+        hardness: 0.3, spacing: 0.1, shapeID: "pastel")
+
     /// The ordered curated set, for a future preset picker UI.
-    public static let all: [BrushPreset] = [inker, softPencil, speedPencil, calligraphy]
+    public static let all: [BrushPreset] = [inker, softPencil, speedPencil, calligraphy, stipple, pastel]
 }

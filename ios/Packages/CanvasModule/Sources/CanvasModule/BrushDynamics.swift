@@ -419,6 +419,8 @@ public struct SensorInput: Sendable {
     public var fadeNorm: Double          // [0,1]
     public var randPerDab: Double        // [0,1)
     public var randPerStroke: Double     // [0,1)
+    public var randScatterX: Double      // [0,1) — independent per-dab draw for scatter X
+    public var randScatterY: Double      // [0,1) — independent per-dab draw for scatter Y
 
     public init(
         pressure: Double = 1,
@@ -429,7 +431,9 @@ public struct SensorInput: Sendable {
         distanceNorm: Double = 0,
         fadeNorm: Double = 0,
         randPerDab: Double = 0,
-        randPerStroke: Double = 0
+        randPerStroke: Double = 0,
+        randScatterX: Double = 0.5,
+        randScatterY: Double = 0.5
     ) {
         self.pressure = pressure
         self.tiltElevationNorm = tiltElevationNorm
@@ -440,6 +444,8 @@ public struct SensorInput: Sendable {
         self.fadeNorm = fadeNorm
         self.randPerDab = randPerDab
         self.randPerStroke = randPerStroke
+        self.randScatterX = randScatterX
+        self.randScatterY = randScatterY
     }
 }
 
@@ -517,6 +523,9 @@ public struct StrokeDynamicsState {
         let distNorm = distancePeriod > 0 ? wrapValue(arcLength / distancePeriod, 0, 1) : 0
         let fadeNorm = fadePeriod > 0 ? clamp01(Double(dabIndex) / fadePeriod) : 0
         let randPerDab = brushHash01(seed, dabIndex &+ 1, 0xDAB)
+        // Independent per-dab streams for scatter X/Y (distinct channels so X and Y don't correlate).
+        let scatterX = brushHash01(seed, dabIndex &+ 1, 0x5CA7)
+        let scatterY = brushHash01(seed, dabIndex &+ 1, 0x5CA8)
 
         let input = SensorInput(
             pressure: clamp01(force),
@@ -527,7 +536,9 @@ public struct StrokeDynamicsState {
             distanceNorm: distNorm,
             fadeNorm: fadeNorm,
             randPerDab: randPerDab,
-            randPerStroke: perStrokeRand
+            randPerStroke: perStrokeRand,
+            randScatterX: scatterX,
+            randScatterY: scatterY
         )
         dabIndex += 1
         return input
@@ -555,25 +566,101 @@ public struct BrushDynamics: Codable, Equatable, Sendable {
     public var flow: CurveOption?
     /// Dab rotation (turns, [-1,1] → ±π). Rotation-like fold.
     public var rotation: CurveOption?
+    /// Scatter: per-dab random center displacement, magnitude = value × dab diameter. Size-like
+    /// fold (so scatter can itself be pressure/speed-driven). Krita `KisScatterOption`.
+    public var scatter: CurveOption?
+    /// Per-stroke HSV jitter of the ink color (one random shift per stroke). High img2img
+    /// leverage (the model reads color). nil = no jitter.
+    public var colorJitter: ColorJitter?
 
-    public init(size: CurveOption? = nil, opacity: CurveOption? = nil, flow: CurveOption? = nil, rotation: CurveOption? = nil) {
+    public init(size: CurveOption? = nil, opacity: CurveOption? = nil, flow: CurveOption? = nil,
+                rotation: CurveOption? = nil, scatter: CurveOption? = nil, colorJitter: ColorJitter? = nil) {
         self.size = size
         self.opacity = opacity
         self.flow = flow
         self.rotation = rotation
+        self.scatter = scatter
+        self.colorJitter = colorJitter
     }
 
     /// True if no parameter has a non-identity dynamic — the legacy path can run unchanged.
     public var isInert: Bool {
         size == nil && opacity == nil && flow == nil && rotation == nil
+            && scatter == nil && (colorJitter?.isInert ?? true)
     }
 
-    enum CodingKeys: String, CodingKey { case size, opacity, flow, rotation }
+    enum CodingKeys: String, CodingKey { case size, opacity, flow, rotation, scatter, colorJitter }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         size = try c.decodeIfPresent(CurveOption.self, forKey: .size)
         opacity = try c.decodeIfPresent(CurveOption.self, forKey: .opacity)
         flow = try c.decodeIfPresent(CurveOption.self, forKey: .flow)
         rotation = try c.decodeIfPresent(CurveOption.self, forKey: .rotation)
+        scatter = try c.decodeIfPresent(CurveOption.self, forKey: .scatter)
+        colorJitter = try c.decodeIfPresent(ColorJitter.self, forKey: .colorJitter)
+    }
+}
+
+// MARK: - ColorJitter (per-stroke HSV shift) + sRGB↔HSV helpers
+
+/// Per-stroke random HSV jitter of the ink. Amounts in [0,1]: `hue` is a fraction of the full
+/// hue circle (±), `saturation`/`brightness` are ± multiplicative fractions. Applied ONCE per
+/// stroke from the per-stroke RNG, so a stroke is one coherent color (not per-dab speckle, which
+/// the img2img model averages out — `_CONTEXT.md`). Mirrors Krita `KisColorOption` per-stroke mode.
+public struct ColorJitter: Codable, Equatable, Sendable {
+    public var hue: Double
+    public var saturation: Double
+    public var brightness: Double
+    public init(hue: Double = 0, saturation: Double = 0, brightness: Double = 0) {
+        self.hue = hue; self.saturation = saturation; self.brightness = brightness
+    }
+    public var isInert: Bool { hue == 0 && saturation == 0 && brightness == 0 }
+
+    /// Apply the jitter to an sRGB color given three independent [0,1) random draws (one per
+    /// channel). Returns sRGB. Each draw maps to a symmetric ±shift via `2r−1`.
+    public func applied(toSRGB rgb: (r: Double, g: Double, b: Double),
+                        rH: Double, rS: Double, rB: Double) -> (r: Double, g: Double, b: Double) {
+        var hsv = rgbToHSV(rgb)
+        hsv.h = (hsv.h + (2 * rH - 1) * hue).truncatingRemainder(dividingBy: 1.0)
+        if hsv.h < 0 { hsv.h += 1.0 }
+        hsv.s = clamp01(hsv.s * (1 + (2 * rS - 1) * saturation))
+        hsv.v = clamp01(hsv.v * (1 + (2 * rB - 1) * brightness))
+        return hsvToRGB(hsv)
+    }
+}
+
+/// sRGB (each [0,1]) → HSV (h,s,v each [0,1]). Pure; operates in gamma sRGB space (matches
+/// Krita's HSV transforms, which are not linearized).
+public func rgbToHSV(_ c: (r: Double, g: Double, b: Double)) -> (h: Double, s: Double, v: Double) {
+    let maxV = max(c.r, c.g, c.b), minV = min(c.r, c.g, c.b)
+    let delta = maxV - minV
+    var h = 0.0
+    if delta > 0 {
+        if maxV == c.r { h = ((c.g - c.b) / delta).truncatingRemainder(dividingBy: 6) }
+        else if maxV == c.g { h = (c.b - c.r) / delta + 2 }
+        else { h = (c.r - c.g) / delta + 4 }
+        h /= 6
+        if h < 0 { h += 1 }
+    }
+    let s = maxV > 0 ? delta / maxV : 0
+    return (h, s, maxV)
+}
+
+/// HSV → sRGB (inverse of `rgbToHSV`).
+public func hsvToRGB(_ c: (h: Double, s: Double, v: Double)) -> (r: Double, g: Double, b: Double) {
+    if c.s <= 0 { return (c.v, c.v, c.v) }
+    let h6 = (c.h - floor(c.h)) * 6
+    let i = Int(h6)
+    let f = h6 - Double(i)
+    let p = c.v * (1 - c.s)
+    let q = c.v * (1 - c.s * f)
+    let t = c.v * (1 - c.s * (1 - f))
+    switch i % 6 {
+    case 0: return (c.v, t, p)
+    case 1: return (q, c.v, p)
+    case 2: return (p, c.v, t)
+    case 3: return (p, q, c.v)
+    case 4: return (t, p, c.v)
+    default: return (c.v, p, q)
     }
 }
