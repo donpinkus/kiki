@@ -163,6 +163,27 @@ Minor items, all **FIXED** in the final review-fix commit:
 | Stabilization could "catch-up jerk" after a long hitch (dt→large → factor→1) | Clamp `dt` to ~4 frames. |
 | Test gaps | Added scatter-determinism + X/Y decorrelation + gray/black HSV round-trips. Offline suite now **67 asserts, all pass**. |
 
+## Brush Studio dev panel + third review round (3 agents, incl. dev panel)
+
+Added `BrushStudioView` — a live tuning panel (sensors / response-curve drag / combine / strength·min·max / color jitter / smudge / preset loader), opened from the brush gear popover, applied to the active brush in real time via `AppCoordinator.toolDynamics`.
+
+Third review round verdicts: **GO (non-regression/e2e/rebase) · GO-WITH-FIXES (dev panel) · GO for P5–P9 (fidelity/perf/arch)**. The rebase onto main+overlay merged coherently; default pen still byte-identical; offline 40/40 + Codable safe. Fixes applied:
+
+| Finding | Sev | Fix |
+|---|---|---|
+| **H1** TiltElevation inverted vs Krita (perp should be 1) | high | Flipped to `altitude/(π/2)`; offline tests updated. (No shipped preset used it → no regression.) |
+| **H2** `opacity` CurveOption decoded but never consumed (dead control) | high | **Deleted** the field (Glaze opacity is a per-stroke ceiling, not a per-dab sensor; flow covers the per-dab feel). |
+| **M6** `wetEnabled`/`wetSmudge` are mode-toggles | med | Annotated "deleted at the SAB rework / P7 — do not extend." |
+| **M1** curve editor desync (load preset → drag clobbers curve) | major | Re-seed control points `.onChange(of: curve)` unless mid-drag. |
+| **M2** editing curve silently drops per-sensor curves (Speed Pencil) | major | Seed from the first real per-sensor curve + warn that editing collapses to one shared curve. |
+| **m1** sheet-from-popover may auto-dismiss on iPad | minor | Present the Studio from the **sidebar** (stable parent) via `coordinator.showBrushStudio`, not from inside the popover. |
+| **m2/m3** strip-all-sensors / min>max | minor | Caption when sensors empty; clamp `min ≤ max`. |
+| Enum persistence stability (review INFO) | info | Comment: `BrushSensor` cases + `CombineMode`/`BrushFold` ints are now append-only (in saved JSON). |
+| **P1 exit-gate** never built | process | Added an offline per-dab timing harness. Worst-case (4 CurveOptions, multi-sensor) ≈ **180 ns/dab** → ~0.7 ms for 4000 dabs: the dynamics math is well within the 8 ms budget. |
+
+### H3 — open follow-up (perf, NOT done)
+`generateStampsForStroke` re-walks the **entire** point list every frame (pre-existing; the dynamics multiply the constant). The per-dab math is cheap (timing above), but a very long held stroke is O(total points) per frame. **Follow-up:** incrementalize stamp-gen to only re-walk new points (helps the legacy path too); needs device profiling. Documented, not landed blind. Also fidelity nits deferred to device-tuning: speed normalization (`maxSpeed`) and HSV S/V jitter form differ slightly from Krita (round-trip/`.kpp`-import only).
+
 ## Device verification checklist (for Donald)
 
 1. **Build + run on device** (not Simulator — canvas needs past Sign-in; wet path is device-only).

@@ -180,6 +180,9 @@ final class AppCoordinator {
 
     /// Whether the brush-settings popover (secondary sliders) is shown.
     var showBrushSettings = false
+    /// Whether the Brush Studio (dev) tuning panel is shown. Presented from the sidebar (a
+    /// stable parent) rather than from inside the popover, so it survives the popover dismissing.
+    var showBrushStudio = false
 
     // MARK: - Per-tool stored settings
 

@@ -95,12 +95,22 @@ private struct CurveOptionEditor: View {
 
     private let allSensors: [BrushSensor] = BrushSensor.allCases
 
+    // True when the option carries per-sensor curves (e.g. Speed Pencil) that the single
+    // shared-curve editor below can't represent.
+    private var hasPerSensorCurves: Bool {
+        !option.useSameCurve && option.sensors.contains { !$0.curve.isIdentity }
+    }
+
     var body: some View {
         // Sensors
         VStack(alignment: .leading, spacing: 4) {
             Text("Sensors").font(.caption).foregroundStyle(.secondary)
             FlowChips(items: allSensors.map { ($0.rawValue, isOn(for: $0)) }) { idx in
                 toggleSensor(allSensors[idx])
+            }
+            if option.sensors.isEmpty {
+                Text("No sensors → constant value (Size loses pressure response).")
+                    .font(.caption2).foregroundStyle(.orange)
             }
         }
         // Combine mode (only meaningful with >1 scaling sensor)
@@ -114,17 +124,33 @@ private struct CurveOptionEditor: View {
             Text("diff").tag(CombineMode.difference)
         }.pickerStyle(.segmented)
 
-        // Response curve
+        // Response curve. M2: when the option has per-sensor curves, seed the editor from the
+        // first real one (not the identity commonCurve, which would misrepresent it), and warn
+        // that editing collapses to ONE shared curve across all sensors.
         VStack(alignment: .leading, spacing: 4) {
             Text("Response curve").font(.caption).foregroundStyle(.secondary)
+            if hasPerSensorCurves {
+                Text("⚠︎ This preset uses per-sensor curves. Editing applies one shared curve to all sensors.")
+                    .font(.caption2).foregroundStyle(.orange)
+            }
             ResponseCurveEditor(curve: Binding(
-                get: { option.commonCurve },
+                get: {
+                    if hasPerSensorCurves, let first = option.sensors.first(where: { !$0.curve.isIdentity }) {
+                        return first.curve
+                    }
+                    return option.commonCurve
+                },
                 set: { option.commonCurve = $0; option.useSameCurve = true }))
         }
 
         sliderRow("Strength", value: $option.strength, range: 0...2)
-        sliderRow("Min", value: $option.minValue, range: 0...1)
-        sliderRow("Max", value: $option.maxValue, range: 0...2)
+        // Clamp so min ≤ max (otherwise min silently acts as a hard ceiling — review m3).
+        sliderRow("Min", value: Binding(
+            get: { option.minValue },
+            set: { option.minValue = Swift.min($0, option.maxValue) }), range: 0...1)
+        sliderRow("Max", value: Binding(
+            get: { option.maxValue },
+            set: { option.maxValue = Swift.max($0, option.minValue) }), range: 0...2)
     }
 
     private func isOn(for s: BrushSensor) -> Bool { option.sensors.contains { $0.sensor == s } }
@@ -175,6 +201,7 @@ private struct ResponseCurveEditor: View {
     @Binding var curve: ResponseCurve
     private static let xs: [Double] = [0, 0.25, 0.5, 0.75, 1.0]
     @State private var ys: [Double]
+    @State private var dragging = false
 
     init(curve: Binding<ResponseCurve>) {
         _curve = curve
@@ -208,6 +235,7 @@ private struct ResponseCurveEditor: View {
             }
             .contentShape(Rectangle())
             .gesture(DragGesture(minimumDistance: 0).onChanged { g in
+                dragging = true
                 let nx = max(0, min(1, g.location.x / w))
                 let ny = max(0, min(1, 1 - g.location.y / h))
                 // snap to the nearest control point in x, set its y
@@ -217,9 +245,16 @@ private struct ResponseCurveEditor: View {
                 }
                 ys[best] = ny
                 curve = ResponseCurve(points: zip(Self.xs, ys).map { ResponseCurve.Point($0, $1) })
-            })
+            }.onEnded { _ in dragging = false })
         }
         .frame(height: 140)
+        // Re-seed the draggable points when the bound curve changes externally (e.g. a preset
+        // is loaded while this editor is open) — but NOT from our own drag writes (guarded by
+        // `dragging`), which would otherwise round-trip through the LUT and drift. Fixes the
+        // "load preset → drag → curve clobbered with stale points" desync (review M1).
+        .onChange(of: curve) { _, new in
+            if !dragging { ys = Self.xs.map { new.value($0) } }
+        }
     }
 }
 

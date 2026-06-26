@@ -6,7 +6,6 @@ import CanvasModule
 /// The native `.popover` dismisses on a tap outside (pen or finger). See pro-brush-roadmap.
 struct BrushSettingsPopover: View {
     @Environment(AppCoordinator.self) private var coordinator
-    @State private var showStudio = false
 
     var body: some View {
         @Bindable var coordinator = coordinator
@@ -33,7 +32,10 @@ struct BrushSettingsPopover: View {
 
             Divider()
             Button {
-                showStudio = true
+                // Close this popover, then open the Studio sheet (owned by the sidebar) so it
+                // presents reliably instead of being cancelled by the popover dismissing.
+                coordinator.showBrushSettings = false
+                coordinator.showBrushStudio = true
             } label: {
                 Label("Brush Studio (dev)", systemImage: "slider.horizontal.3")
                     .font(.subheadline.weight(.medium))
@@ -44,10 +46,6 @@ struct BrushSettingsPopover: View {
         }
         .padding(20)
         .frame(width: 300)
-        .sheet(isPresented: $showStudio) {
-            BrushStudioView(initial: coordinator.toolDynamics)
-                .environment(coordinator)
-        }
     }
 
     // One-sentence summary + what 0% and 100% mean, per control.

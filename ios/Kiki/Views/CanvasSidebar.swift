@@ -60,6 +60,12 @@ struct CanvasSidebar: View {
                     .environment(coordinator)
                     .presentationCompactAdaptation(.popover)
             }
+            // Brush Studio sheet is owned here (a stable parent), not by the popover, so it
+            // opens reliably after the popover dismisses.
+            .sheet(isPresented: $coordinator.showBrushStudio) {
+                BrushStudioView(initial: coordinator.toolDynamics)
+                    .environment(coordinator)
+            }
 
             Divider().frame(width: 24)
 

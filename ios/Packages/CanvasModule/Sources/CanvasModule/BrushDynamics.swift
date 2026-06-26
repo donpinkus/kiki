@@ -521,8 +521,11 @@ public struct StrokeDynamicsState {
         }
         let speedNorm = clamp01(smoothedSpeed / maxSpeed)
 
-        // Tilt elevation: altitude π/2 (perpendicular) → 0, 0 (flat) → 1.
-        let elevation = clamp01(1.0 - altitude / (Double.pi / 2))
+        // Tilt elevation, matching Krita's TiltElevation convention: perpendicular stylus
+        // (altitude π/2) → 1, flat (altitude 0) → 0. (Krita derives this from xTilt/yTilt via
+        // acos; iOS gives `altitude` directly. The legacy `tiltSensitivity` widening in
+        // BrushConfig.effectiveWidth uses the opposite "tilt amount" sense and is unchanged.)
+        let elevation = clamp01(altitude / (Double.pi / 2))
         // Azimuth → [0,1).
         let azNorm = wrapValue(azimuth / (2 * Double.pi), 0, 1)
         // Heading → [0,1): 0.5 + angle/2π (Krita DrawingAngle).
@@ -565,11 +568,12 @@ public struct StrokeDynamicsState {
 /// additive seed of the eventual `BrushDescriptor` (`unified-brush-engine.md` §2.1); it is
 /// introduced alongside the flat `BrushConfig` rather than replacing it, so the migration
 /// stays incremental.
+// NOTE (persistence stability): `BrushSensor` (String) cases and the `CombineMode`/`BrushFold`
+// (Int) raw values now appear in saved brush JSON. Treat them as append-only — never rename a
+// `BrushSensor` case or renumber the Int enums, or old saved brushes/presets decode wrong.
 public struct BrushDynamics: Codable, Equatable, Sendable {
     /// Size multiplier (applied to `baseWidth`). Size-like fold.
     public var size: CurveOption?
-    /// Per-stroke opacity ceiling multiplier. Size-like fold.
-    public var opacity: CurveOption?
     /// Per-dab flow multiplier. Size-like fold.
     public var flow: CurveOption?
     /// Dab rotation (turns, [-1,1] → ±π). Rotation-like fold.
@@ -580,11 +584,14 @@ public struct BrushDynamics: Codable, Equatable, Sendable {
     /// Per-stroke HSV jitter of the ink color (one random shift per stroke). High img2img
     /// leverage (the model reads color). nil = no jitter.
     public var colorJitter: ColorJitter?
+    // NOTE: there is intentionally NO per-stroke `opacity` CurveOption. Our Glaze model's opacity
+    // is a per-stroke ceiling, which doesn't map onto per-dab sensors; the per-dab "opacity" feel
+    // is `flow`. A dead `opacity` field was removed (review H2) — re-add only with a real
+    // per-stroke resolution (e.g. driven by a stroke-level sensor) wired into currentStrokeOpacity().
 
-    public init(size: CurveOption? = nil, opacity: CurveOption? = nil, flow: CurveOption? = nil,
+    public init(size: CurveOption? = nil, flow: CurveOption? = nil,
                 rotation: CurveOption? = nil, scatter: CurveOption? = nil, colorJitter: ColorJitter? = nil) {
         self.size = size
-        self.opacity = opacity
         self.flow = flow
         self.rotation = rotation
         self.scatter = scatter
@@ -593,15 +600,14 @@ public struct BrushDynamics: Codable, Equatable, Sendable {
 
     /// True if no parameter has a non-identity dynamic — the legacy path can run unchanged.
     public var isInert: Bool {
-        size == nil && opacity == nil && flow == nil && rotation == nil
+        size == nil && flow == nil && rotation == nil
             && scatter == nil && (colorJitter?.isInert ?? true)
     }
 
-    enum CodingKeys: String, CodingKey { case size, opacity, flow, rotation, scatter, colorJitter }
+    enum CodingKeys: String, CodingKey { case size, flow, rotation, scatter, colorJitter }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         size = try c.decodeIfPresent(CurveOption.self, forKey: .size)
-        opacity = try c.decodeIfPresent(CurveOption.self, forKey: .opacity)
         flow = try c.decodeIfPresent(CurveOption.self, forKey: .flow)
         rotation = try c.decodeIfPresent(CurveOption.self, forKey: .rotation)
         scatter = try c.decodeIfPresent(CurveOption.self, forKey: .scatter)

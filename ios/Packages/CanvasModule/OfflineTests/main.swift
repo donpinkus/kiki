@@ -119,9 +119,10 @@ checkBool("hash varies by index", h1 != h3)
 var st = StrokeDynamicsState(seed: 7)
 let i0 = st.advance(x: 0, y: 0, force: 0.5, altitude: .pi/2, azimuth: 0, dx: 0, dy: 0, dt: 0)
 check("state pressure passthrough", i0.pressure, 0.5)
-check("state tiltElevation perpendicular=0", i0.tiltElevationNorm, 0.0)
+// Krita convention: perpendicular stylus → 1, flat → 0 (review H1 flip).
+check("state tiltElevation perpendicular=1", i0.tiltElevationNorm, 1.0)
 let i1 = st.advance(x: 100, y: 0, force: 1.0, altitude: 0, azimuth: 0, dx: 100, dy: 0, dt: 0.1)
-check("state tiltElevation flat=1", i1.tiltElevationNorm, 1.0)
+check("state tiltElevation flat=0", i1.tiltElevationNorm, 0.0)
 checkBool("state speed>0 after move", i1.speedNorm > 0)
 checkBool("state arclength accumulates", st.arcLength == 100.0)
 
@@ -157,6 +158,33 @@ let grayRT = hsvToRGB(rgbToHSV((0.5, 0.5, 0.5)))
 check("hsv gray roundtrip", grayRT.r, 0.5); check("hsv gray s=0", rgbToHSV((0.5, 0.5, 0.5)).s, 0)
 let blackRT = hsvToRGB(rgbToHSV((0, 0, 0)))
 check("hsv black roundtrip r", blackRT.r, 0); check("hsv black v=0", rgbToHSV((0, 0, 0)).v, 0)
+
+// --- per-dab timing (the PLAN's P1 exit-gate; informational, not a hard assert) ---
+// Worst-case dynamic brush: multi-sensor size + flow + rotation + scatter, all non-identity.
+// Measures the per-dab CPU cost the dynamics path adds on top of the legacy effectiveWidth call.
+// Compile with -O for representative numbers (a debug build over-estimates several×).
+do {
+    let sizeOpt2 = CurveOption(sensors: [SensorChannel(sensor: .pressure, curve: .gamma(2)),
+                                         SensorChannel(sensor: .speed, curve: .gamma(0.5))],
+                               combineMode: .multiply, fold: .sizeLike, useSameCurve: false)
+    let flowOpt = CurveOption(sensors: [SensorChannel(sensor: .pressure, curve: .gamma(1.5))], fold: .sizeLike)
+    let rotOpt2 = CurveOption(sensors: [SensorChannel(sensor: .drawingAngle)], fold: .rotationLike)
+    let scatOpt = CurveOption(sensors: [], fold: .sizeLike, strength: 0.6)
+    let n = 4000
+    var stt = StrokeDynamicsState(seed: 99)
+    var acc = 0.0
+    let t0 = Date()
+    for i in 0..<n {
+        let inp = stt.advance(x: Double(i), y: Double(i % 50), force: 0.5 + 0.5 * Double(i % 7) / 7,
+                              altitude: 0.8, azimuth: Double(i % 6), dx: 1, dy: 0.2, dt: 0.004)
+        acc += sizeOpt2.value(inp) + flowOpt.value(inp) + rotOpt2.value(inp) + scatOpt.value(inp)
+    }
+    let ms = Date().timeIntervalSince(t0) * 1000
+    print(String(format: "TIMING: %d dabs × (advance + 4 CurveOptions) = %.2f ms total, %.0f ns/dab (debug; use -O for real). acc=%.1f",
+                 n, ms, ms * 1e6 / Double(n), acc))
+    print("  (Per-dab dynamics cost only; the real budget risk is the per-frame O(n) re-walk of the")
+    print("   whole point list in generateStampsForStroke — see IMPLEMENTATION-LOG H3 follow-up.)")
+}
 
 print("")
 if failures == 0 { print("ALL PASSED") } else { print("\(failures) FAILED"); exit(1) }

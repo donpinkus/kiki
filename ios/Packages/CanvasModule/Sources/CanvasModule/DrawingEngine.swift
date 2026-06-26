@@ -109,6 +109,9 @@ public struct BrushConfig: Codable, Sendable {
     /// Wet-mix mode (pro-brush Phase 4, Step 1). When true the brush writes directly to
     /// the canvas layer (eraser-style RMW) and mixes its color into the pixels under it,
     /// instead of stamping opaquely via the scratch — i.e. wet-on-wet build-up.
+    /// **ARCHITECTURE: this Bool (and `wetSmudge`) is a mode-toggle on the OLD wet path that the
+    /// unified-brush-engine SAB rework (Step 3 / PLAN P7) DELETES wholesale. Do NOT build new
+    /// behavior on it or extend it — wetness becomes a derived scalar in the unified pass there.**
     public var wetEnabled: Bool
     /// Wet deposit strength [0,1] ("Mix"): per-stamp weight toward the carried load color
     /// (scaled further by `opacity` in the wet path). Low values let the underlying color
