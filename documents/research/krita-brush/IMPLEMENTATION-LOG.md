@@ -147,6 +147,22 @@ review confirmed it byte-identical.
   reservoir) — not attempted overnight; they're larger GPU reworks better done with device
   iteration. The keystone (P1) is the unlock; these layer on it.
 
+## Final review round — P2/P3/P4 (3 independent agents) + fixes
+
+All three verdicts: **APPROVE / PASS / GO** — no blocking or major findings. Independently confirmed:
+the LUT-cache fix eliminates per-dab spline bakes; the default pen is byte-identical across P1–P4
+(incl. the `stepFrac` scaling — `atan2` is scale-invariant); commit integrity is clean (no overlay
+leak, no dropped hunks; HEAD builds + offline tests pass in a fresh worktree); scatter/color are
+faithful to Krita; Codable migration is safe.
+
+Minor items, all **FIXED** in the final review-fix commit:
+| Finding | Fix |
+|---|---|
+| Scatter+lasso clip tested the *un-scattered* point → dabs could bleed ≤0.7×diameter past the clip edge | Clip-test the **scattered** point at all 3 emission sites (default pen unaffected — offset is `.zero`). |
+| Per-dab `[Double]` heap alloc in `computeComponents` (dynamics path only) | Rewrote combine to track running product/sum/max/min inline — **alloc-free**, behavior-identical (all 5 combine modes still pass offline). |
+| Stabilization could "catch-up jerk" after a long hitch (dt→large → factor→1) | Clamp `dt` to ~4 frames. |
+| Test gaps | Added scatter-determinism + X/Y decorrelation + gray/black HSV round-trips. Offline suite now **67 asserts, all pass**. |
+
 ## Device verification checklist (for Donald)
 
 1. **Build + run on device** (not Simulator — canvas needs past Sign-in; wet path is device-only).

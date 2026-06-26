@@ -146,6 +146,17 @@ checkBool("color jitter changes color when r≠0.5", {
 checkBool("default SensorInput scatter symmetric (no offset)", 2 * SensorInput().randScatterX - 1 == 0)
 check("ColorJitter inert default", BrushDynamics(colorJitter: ColorJitter()).isInert ? 1 : 0, 1)
 check("scatter makes dynamics non-inert", BrushDynamics(scatter: CurveOption(sensors: [], strength: 0.5)).isInert ? 0 : 1, 1)
+// scatter DETERMINISM: two identical states produce identical scatter draws (replay/undo invariance)
+var scA = StrokeDynamicsState(seed: 5), scB = StrokeDynamicsState(seed: 5)
+let sa = scA.advance(x: 10, y: 20, force: 0.7, altitude: 1, azimuth: 0.3, dx: 2, dy: 1, dt: 0.01)
+let sb = scB.advance(x: 10, y: 20, force: 0.7, altitude: 1, azimuth: 0.3, dx: 2, dy: 1, dt: 0.01)
+checkBool("scatter deterministic (same seed+index)", sa.randScatterX == sb.randScatterX && sa.randScatterY == sb.randScatterY)
+checkBool("scatter X/Y decorrelated", sa.randScatterX != sa.randScatterY)
+// HSV edge cases: gray (s=0) and black (v=0) round-trips
+let grayRT = hsvToRGB(rgbToHSV((0.5, 0.5, 0.5)))
+check("hsv gray roundtrip", grayRT.r, 0.5); check("hsv gray s=0", rgbToHSV((0.5, 0.5, 0.5)).s, 0)
+let blackRT = hsvToRGB(rgbToHSV((0, 0, 0)))
+check("hsv black roundtrip r", blackRT.r, 0); check("hsv black v=0", rgbToHSV((0, 0, 0)).v, 0)
 
 print("")
 if failures == 0 { print("ALL PASSED") } else { print("\(failures) FAILED"); exit(1) }

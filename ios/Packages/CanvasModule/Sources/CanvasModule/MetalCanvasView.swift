@@ -2543,7 +2543,8 @@ public final class MetalCanvasView: UIView {
         let firstAttr = dabAttrs(x: first.position.x, y: first.position.y, force: first.force, altitude: first.altitude,
                                  azimuth: first.azimuth, dx: firstDir.0, dy: firstDir.1, dt: firstDt)
         let firstWidth = firstAttr.width
-        if clipPath.map({ $0.contains(first.position) }) ?? true {
+        if clipPath.map({ $0.contains(CGPoint(x: first.position.x + firstAttr.offset.x,
+                                              y: first.position.y + firstAttr.offset.y)) }) ?? true {
             stamps.append(CanvasRenderer.StampInstance(
                 center: SIMD2<Float>(Float((first.position.x + firstAttr.offset.x) * scale),
                                      Float((first.position.y + firstAttr.offset.y) * scale)),
@@ -2588,9 +2589,10 @@ public final class MetalCanvasView: UIView {
                 let width = attr.width
 
                 let pos = CGPoint(x: x, y: y)
-                if clipPath.map({ $0.contains(pos) }) ?? true {
+                let scattered = CGPoint(x: x + attr.offset.x, y: y + attr.offset.y)
+                if clipPath.map({ $0.contains(scattered) }) ?? true {
                     stamps.append(CanvasRenderer.StampInstance(
-                        center: SIMD2<Float>(Float((x + attr.offset.x) * scale), Float((y + attr.offset.y) * scale)),
+                        center: SIMD2<Float>(Float(scattered.x * scale), Float(scattered.y * scale)),
                         radius: Float(width * 0.5 * scale),
                         rotation: attr.rotation,
                         color: attr.color,
@@ -2615,7 +2617,8 @@ public final class MetalCanvasView: UIView {
             let attr = dabAttrs(x: last.position.x, y: last.position.y, force: last.force, altitude: last.altitude,
                                 azimuth: last.azimuth, dx: lastDir.0, dy: lastDir.1, dt: lastDt)
             let width = attr.width
-            if clipPath.map({ $0.contains(last.position) }) ?? true {
+            if clipPath.map({ $0.contains(CGPoint(x: last.position.x + attr.offset.x,
+                                                  y: last.position.y + attr.offset.y)) }) ?? true {
                 stamps.append(CanvasRenderer.StampInstance(
                     center: SIMD2<Float>(Float((last.position.x + attr.offset.x) * scale),
                                          Float((last.position.y + attr.offset.y) * scale)),
@@ -2772,7 +2775,9 @@ public final class MetalCanvasView: UIView {
         // convergence depend on elapsed TIME, so the steady-state lag is the same at any
         // event rate. (The streamline→tau mapping + the velocity-aware Bézier upgrade are
         // device-tuning follow-ups — see PLAN.md P3 / IMPLEMENTATION-LOG.)
-        let dt = streamlineLastTime.map { max(0, point.timestamp - $0) } ?? (1.0 / 120.0)
+        // Clamp dt so a long stall (missed frames / app hitch) can't drive factor→1 and snap the
+        // cursor to the raw position in one step (a catch-up jerk); cap at ~4 frames. P3-review.
+        let dt = min(4.0 / 120.0, streamlineLastTime.map { max(0, point.timestamp - $0) } ?? (1.0 / 120.0))
         let tau = max(0.004, Double(streamline) * 0.12) // seconds
         let factor = CGFloat(min(1.0, max(0.04, 1.0 - exp(-dt / tau))))
         let smoothed = CGPoint(

@@ -336,11 +336,15 @@ public struct CurveOption: Codable, Equatable, Sendable {
     }
 
     /// Krita `KisCurveOption::computeValueComponents` — bucket sensors and combine the
-    /// scaling bucket by `combineMode`.
+    /// scaling bucket by `combineMode`. Alloc-free: running aggregates (product/sum/max/min)
+    /// are tracked inline so the per-dab hot path makes no heap allocation (P2-review micro-opt);
+    /// behavior is identical to the prior array-based version (verified by the offline suite,
+    /// which exercises all five combine modes).
     func computeComponents(_ input: SensorInput, useStrength: Bool = true) -> Components {
         var comp = Components()
         if useCurve {
-            var scalingValues: [Double] = []
+            var prod = 1.0, sum = 0.0, mx = -Double.greatestFiniteMagnitude, mn = Double.greatestFiniteMagnitude
+            var n = 0
             for ch in sensors {
                 let v = ch.parameter(input, common: commonCurve, useSameCurve: useSameCurve)
                 if ch.sensor.isAdditive {
@@ -348,20 +352,24 @@ public struct CurveOption: Codable, Equatable, Sendable {
                 } else if ch.sensor.isAbsoluteRotation {
                     comp.absoluteOffset = v; comp.hasAbsoluteOffset = true
                 } else {
-                    scalingValues.append(v); comp.hasScaling = true
+                    n += 1; comp.hasScaling = true
+                    prod *= v; sum += v
+                    if v > mx { mx = v }
+                    if v < mn { mn = v }
                 }
             }
-            if scalingValues.count == 1 {
-                comp.scaling = scalingValues[0]
-            } else if scalingValues.count > 1 {
+            if n == 1 {
+                comp.scaling = sum // a single value: sum == prod == that value
+            } else if n > 1 {
                 switch combineMode {
-                case .add:        comp.scaling = scalingValues.reduce(0, +)
-                case .max:        comp.scaling = scalingValues.max() ?? 1
-                case .min:        comp.scaling = scalingValues.min() ?? 1
-                case .difference: comp.scaling = (scalingValues.max() ?? 0) - (scalingValues.min() ?? 0)
-                case .multiply:   comp.scaling = scalingValues.reduce(1, *)
+                case .add:        comp.scaling = sum
+                case .max:        comp.scaling = mx
+                case .min:        comp.scaling = mn
+                case .difference: comp.scaling = mx - mn
+                case .multiply:   comp.scaling = prod
                 }
             }
+            // n == 0 → no scaling sensors → comp.scaling stays its default 1.0 (as before).
         }
         if useStrength { comp.constant = strength }
         comp.minSizeLike = minValue
