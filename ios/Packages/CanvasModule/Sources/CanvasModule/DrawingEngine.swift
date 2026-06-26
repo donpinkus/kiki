@@ -23,13 +23,30 @@ public struct StrokePoint: Codable, Sendable {
     public var position: CGPoint
     public var force: CGFloat       // 0–1 normalized
     public var altitude: CGFloat    // radians: 0 = flat, π/2 = perpendicular
+    /// Apple Pencil azimuth (tilt *direction*) in radians, [0, 2π). Feeds the TiltDirection
+    /// sensor (chisel/flat-pencil shape — high img2img leverage). Defaults to 0 for inputs
+    /// and saved strokes that predate azimuth capture (backward-compatible decode below).
+    public var azimuth: CGFloat
     public var timestamp: TimeInterval
 
-    public init(position: CGPoint, force: CGFloat, altitude: CGFloat, timestamp: TimeInterval) {
+    public init(position: CGPoint, force: CGFloat, altitude: CGFloat, timestamp: TimeInterval, azimuth: CGFloat = 0) {
         self.position = position
         self.force = force
         self.altitude = altitude
+        self.azimuth = azimuth
         self.timestamp = timestamp
+    }
+
+    // Explicit CodingKeys + decoder so saved strokes without `azimuth` still load (→ 0).
+    // `encode(to:)` is synthesized from these keys.
+    enum CodingKeys: String, CodingKey { case position, force, altitude, azimuth, timestamp }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        position = try c.decode(CGPoint.self, forKey: .position)
+        force = try c.decode(CGFloat.self, forKey: .force)
+        altitude = try c.decode(CGFloat.self, forKey: .altitude)
+        azimuth = try c.decodeIfPresent(CGFloat.self, forKey: .azimuth) ?? 0
+        timestamp = try c.decode(TimeInterval.self, forKey: .timestamp)
     }
 }
 
@@ -105,6 +122,13 @@ public struct BrushConfig: Codable, Sendable {
     /// circle; other ids bind a grayscale stamp texture. Textured shapes orient to the
     /// stroke direction. See pro-brush-roadmap Phase 3.
     public var shapeID: String?
+    /// Krita-grade brush dynamics: per-parameter sensor→curve→combine→remap options
+    /// (`BrushDynamics`). `nil` (the default) means "no dynamics" — the legacy
+    /// `pressureGamma`/`tiltSensitivity` scalars drive size and everything else is a flat
+    /// scalar, i.e. today's pen exactly. Each non-nil `CurveOption` overrides one parameter.
+    /// This is the additive seed of the eventual `BrushDescriptor`
+    /// (`documents/plans/unified-brush-engine.md` §2.1 / `documents/research/krita-brush/PLAN.md`).
+    public var dynamics: BrushDynamics?
 
     public init(
         color: CodableColor,
@@ -120,7 +144,8 @@ public struct BrushConfig: Codable, Sendable {
         wetEnabled: Bool = false,
         wetStrength: CGFloat = 0.4,
         wetPickup: CGFloat = 0.25,
-        shapeID: String? = nil
+        shapeID: String? = nil,
+        dynamics: BrushDynamics? = nil
     ) {
         self.color = color
         self.baseWidth = baseWidth
@@ -136,6 +161,7 @@ public struct BrushConfig: Codable, Sendable {
         self.wetStrength = wetStrength
         self.wetPickup = wetPickup
         self.shapeID = shapeID
+        self.dynamics = dynamics
     }
 
     public static let defaultPen = BrushConfig(color: .black, baseWidth: 5, pressureGamma: 0.7)
@@ -159,6 +185,7 @@ public struct BrushConfig: Codable, Sendable {
         case color, baseWidth, opacity, flow, pressureGamma, pressureOpacity
         case streamline, taperIn, taperOut, tiltSensitivity
         case hardness, spacing, taper, wetEnabled, wetStrength, wetPickup, shapeID
+        case dynamics
     }
 
     public init(from decoder: Decoder) throws {
@@ -184,6 +211,9 @@ public struct BrushConfig: Codable, Sendable {
         wetPickup = try container.decodeIfPresent(CGFloat.self, forKey: .wetPickup) ?? 0.25
         // Phase 3 — default nil (procedural round) so pre-Phase-3 configs decode unchanged.
         shapeID = try container.decodeIfPresent(String.self, forKey: .shapeID)
+        // Krita-grade dynamics — default nil (legacy scalar behavior) so configs saved before
+        // it decode to today's pen unchanged.
+        dynamics = try container.decodeIfPresent(BrushDynamics.self, forKey: .dynamics)
         // Removed fields — decoded for backward compat with saved configs, not stored.
         _ = try container.decodeIfPresent(CGFloat.self, forKey: .pressureOpacity)
         _ = try container.decodeIfPresent(CGFloat.self, forKey: .taperIn)
@@ -206,6 +236,7 @@ public struct BrushConfig: Codable, Sendable {
         try container.encode(wetStrength, forKey: .wetStrength)
         try container.encode(wetPickup, forKey: .wetPickup)
         try container.encodeIfPresent(shapeID, forKey: .shapeID)
+        try container.encodeIfPresent(dynamics, forKey: .dynamics)
     }
 }
 

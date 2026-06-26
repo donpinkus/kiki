@@ -1,0 +1,102 @@
+import Foundation
+
+// Offline verification for BrushDynamics.swift (the sensor+curve keystone engine).
+// Pure-Swift, no UIKit — so it runs on macOS even though CanvasModule itself is iOS-only.
+// Asserts the engine's output against Krita's exact formulas (hand-computed reference
+// values). See ./README.md for how to run. Per `feedback_verify_shader_color_offline`.
+
+var failures = 0
+func check(_ name: String, _ got: Double, _ want: Double, tol: Double = 1e-9) {
+    if abs(got - want) <= tol {
+        print("PASS  \(name)  (\(got))")
+    } else {
+        print("FAIL  \(name)  got \(got) want \(want)")
+        failures += 1
+    }
+}
+func checkBool(_ name: String, _ cond: Bool) {
+    if cond { print("PASS  \(name)") } else { print("FAIL  \(name)"); failures += 1 }
+}
+
+// --- helpers mirror Krita (KisDynamicSensor / KisAlgebra2D) ---
+check("scalingToAdditive(0)", scalingToAdditive(0), -1)
+check("scalingToAdditive(1)", scalingToAdditive(1), 1)
+check("additiveToScaling(-1)", additiveToScaling(-1), 0)
+check("additiveToScaling(1)", additiveToScaling(1), 1)
+check("wrapValue(1.0,-1,1)", wrapValue(1.0, -1, 1), -1) // wraps to -1 in [-1,1)
+check("wrapValue(0.5,-1,1)", wrapValue(0.5, -1, 1), 0.5)
+check("wrapValue(1.25,0,1)", wrapValue(1.25, 0, 1), 0.25)
+check("wrapValue(-0.25,0,1)", wrapValue(-0.25, 0, 1), 0.75)
+
+// --- ResponseCurve (256-LUT; tol 1e-3 reflects LUT quantization, same as Krita's LUT) ---
+var ident = ResponseCurve.identity
+checkBool("identity.isIdentity", ident.isIdentity)
+check("identity.value(0.37)", ident.value(0.37), 0.37)
+var g2 = ResponseCurve.gamma(2.0, samples: 9)
+checkBool("gamma(2) not identity", !g2.isIdentity)
+check("gamma(2).value(0.5)", g2.value(0.5), 0.25, tol: 1e-3)
+check("gamma(2).value(0.0)", g2.value(0.0), 0.0)
+check("gamma(2).value(1.0)", g2.value(1.0), 1.0)
+check("gamma(2).value(0.25)", g2.value(0.25), 0.0625, tol: 1e-3)
+checkBool("gamma(1)==identity", ResponseCurve.gamma(1.0).isIdentity)
+
+// --- size-like fold ---
+func sizeOpt(min: Double = 0, max: Double = 1, strength: Double = 1, sensors: [SensorChannel], combine: CombineMode = .multiply) -> CurveOption {
+    CurveOption(sensors: sensors, combineMode: combine, fold: .sizeLike, strength: strength, minValue: min, maxValue: max)
+}
+let press = SensorChannel(sensor: .pressure)
+let opt1 = sizeOpt(sensors: [press])
+check("size pressure=0.5", opt1.value(SensorInput(pressure: 0.5)), 0.5)
+check("size pressure=0.0", opt1.value(SensorInput(pressure: 0.0)), 0.0)
+check("size pressure=1.0", opt1.value(SensorInput(pressure: 1.0)), 1.0)
+
+// min remap: "even zero pressure paints 20%"
+let opt2 = sizeOpt(min: 0.2, max: 1.0, sensors: [press])
+check("size min-remap pressure=0", opt2.value(SensorInput(pressure: 0)), 0.2)
+check("size min-remap pressure=0.5", opt2.value(SensorInput(pressure: 0.5)), 0.5)
+check("size min-remap pressure=1", opt2.value(SensorInput(pressure: 1)), 1.0)
+
+// combine modes: pressure(0.8) & speed(0.5)
+let speed = SensorChannel(sensor: .speed)
+let inP = SensorInput(pressure: 0.8, speedNorm: 0.5)
+check("combine multiply", sizeOpt(sensors: [press, speed], combine: .multiply).value(inP), 0.4)
+check("combine max", sizeOpt(sensors: [press, speed], combine: .max).value(inP), 0.8)
+check("combine min", sizeOpt(sensors: [press, speed], combine: .min).value(inP), 0.5)
+
+// additive sensor folds via additiveToScaling
+let fuzz = SensorChannel(sensor: .fuzzyPerStroke)
+let optF = sizeOpt(sensors: [press, fuzz])
+check("size + fuzz rand=0.5", optF.value(SensorInput(pressure: 1, randPerStroke: 0.5)), 0.5)
+check("size + fuzz rand=1.0", optF.value(SensorInput(pressure: 1, randPerStroke: 1.0)), 1.0)
+
+// rotation-like fold: drawingAngle (absolute)
+let rotOpt = CurveOption(sensors: [SensorChannel(sensor: .drawingAngle)], fold: .rotationLike, strength: 1.0)
+check("rotation drawingAngle=0.25", rotOpt.value(SensorInput(drawingAngleNorm: 0.25)), 0.5)
+check("rotation drawingAngle=0.5", rotOpt.value(SensorInput(drawingAngleNorm: 0.5)), -1.0)
+
+// deterministic hash
+let h1 = brushHash01(42, 1, 0xDAB), h2 = brushHash01(42, 1, 0xDAB), h3 = brushHash01(42, 2, 0xDAB)
+checkBool("hash stable", h1 == h2)
+checkBool("hash in [0,1)", h1 >= 0 && h1 < 1)
+checkBool("hash varies by index", h1 != h3)
+
+// StrokeDynamicsState
+var st = StrokeDynamicsState(seed: 7)
+let i0 = st.advance(x: 0, y: 0, force: 0.5, altitude: .pi/2, azimuth: 0, dx: 0, dy: 0, dt: 0)
+check("state pressure passthrough", i0.pressure, 0.5)
+check("state tiltElevation perpendicular=0", i0.tiltElevationNorm, 0.0)
+let i1 = st.advance(x: 100, y: 0, force: 1.0, altitude: 0, azimuth: 0, dx: 100, dy: 0, dt: 0.1)
+check("state tiltElevation flat=1", i1.tiltElevationNorm, 1.0)
+checkBool("state speed>0 after move", i1.speedNorm > 0)
+checkBool("state arclength accumulates", st.arcLength == 100.0)
+
+// BrushDynamics inert default + Codable backward-compat
+checkBool("empty BrushDynamics isInert", BrushDynamics().isInert)
+checkBool("BrushDynamics with size not inert", !BrushDynamics(size: opt1).isInert)
+let dyn = BrushDynamics(size: opt2, rotation: rotOpt)
+let back = try! JSONDecoder().decode(BrushDynamics.self, from: JSONEncoder().encode(dyn))
+checkBool("Codable round-trip equal", back == dyn)
+checkBool("empty JSON → inert", try! JSONDecoder().decode(BrushDynamics.self, from: "{}".data(using: .utf8)!).isInert)
+
+print("")
+if failures == 0 { print("ALL PASSED") } else { print("\(failures) FAILED"); exit(1) }
