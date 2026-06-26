@@ -2457,14 +2457,56 @@ public final class MetalCanvasView: UIView {
                stroke.points[1].position.y - stroke.points[0].position.y)
             : (0, 0)
 
+        // --- Krita-grade brush dynamics (BrushDynamics.swift) -----------------------------
+        // When the brush carries non-inert `dynamics`, size/flow/rotation are resolved per
+        // dab through the sensor→curve→combine→remap machine. When it does NOT (the default
+        // pen and every legacy brush), `dabAttrs` returns EXACTLY today's values — width via
+        // `effectiveWidth`, the constant premultiplied `color`, shape-oriented `rotation` —
+        // so existing strokes are byte-identical. The per-stroke `StrokeDynamicsState` is
+        // rebuilt on every call (this function re-runs per frame on the full point list), so
+        // live preview, replay, and undo are deterministic for the same points + seed.
+        let dyn = brush.dynamics
+        let hasDyn = !(dyn?.isInert ?? true)
+        func s2lLocal(_ c: CGFloat) -> Float { let x = Float(c); return x <= 0.04045 ? x / 12.92 : pow((x + 0.055) / 1.055, 2.4) }
+        let baseLinRGB = SIMD3<Float>(s2lLocal(brush.color.red), s2lLocal(brush.color.green), s2lLocal(brush.color.blue))
+        let baseFlow = Float(brush.flow)
+        var dynState: StrokeDynamicsState? = hasDyn ? StrokeDynamicsState(seed: strokeSeed(stroke.id)) : nil
+
+        /// Per-dab (width, premultiplied color, rotation). The `!hasDyn` branch is today's
+        /// exact behavior; the dynamics branch advances stroke state and evaluates the curve
+        /// options. `dt` is the seconds across the segment this dab sits on (for the Speed sensor).
+        func dabAttrs(x: CGFloat, y: CGFloat, force: CGFloat, altitude: CGFloat, azimuth: CGFloat,
+                      dx: CGFloat, dy: CGFloat, dt: Double) -> (width: CGFloat, color: SIMD4<Float>, rotation: Float) {
+            guard hasDyn, var st = dynState else {
+                return (brush.effectiveWidth(force: force, altitude: altitude), color, strokeRotation(dx: dx, dy: dy))
+            }
+            let input = st.advance(
+                x: Double(x), y: Double(y), force: Double(force), altitude: Double(altitude),
+                azimuth: Double(azimuth), dx: Double(dx), dy: Double(dy), dt: dt)
+            dynState = st
+            let w: CGFloat = dyn?.size != nil
+                ? brush.baseWidth * CGFloat(dyn!.size!.value(input))
+                : brush.effectiveWidth(force: force, altitude: altitude)
+            let flowMul = dyn?.flow?.value(input) ?? 1.0
+            let a = baseFlow * Float(flowMul)
+            let col = SIMD4<Float>(baseLinRGB.x * a, baseLinRGB.y * a, baseLinRGB.z * a, a)
+            var rot = strokeRotation(dx: dx, dy: dy)
+            if let rotOpt = dyn?.rotation { rot += Float(rotOpt.value(input) * Double.pi) } // [-1,1] turns → ±π
+            return (w, col, rot)
+        }
+        // ---------------------------------------------------------------------------------
+
         let first = stroke.points[0]
-        let firstWidth = brush.effectiveWidth(force: first.force, altitude: first.altitude)
+        let firstDt = stroke.points.count > 1 ? max(0, Double(stroke.points[1].timestamp - first.timestamp)) : 0
+        let firstAttr = dabAttrs(x: first.position.x, y: first.position.y, force: first.force, altitude: first.altitude,
+                                 azimuth: first.azimuth, dx: firstDir.0, dy: firstDir.1, dt: firstDt)
+        let firstWidth = firstAttr.width
         if clipPath.map({ $0.contains(first.position) }) ?? true {
             stamps.append(CanvasRenderer.StampInstance(
                 center: SIMD2<Float>(Float(first.position.x * scale), Float(first.position.y * scale)),
                 radius: Float(firstWidth * 0.5 * scale),
-                rotation: strokeRotation(dx: firstDir.0, dy: firstDir.1),
-                color: color,
+                rotation: firstAttr.rotation,
+                color: firstAttr.color,
                 hardness: hardness
             ))
         }
@@ -2482,6 +2524,7 @@ public final class MetalCanvasView: UIView {
 
             let leftover = hypot(prev.position.x - lastStampPos.x, prev.position.y - lastStampPos.y)
             var traveled = max(0, currentSpacing - leftover)
+            let segDt = max(0, Double(curr.timestamp - prev.timestamp))
 
             while traveled <= segmentDist {
                 let t = traveled / segmentDist
@@ -2489,15 +2532,18 @@ public final class MetalCanvasView: UIView {
                 let y = prev.position.y + dy * t
                 let force = prev.force + (curr.force - prev.force) * t
                 let altitude = prev.altitude + (curr.altitude - prev.altitude) * t
-                let width = brush.effectiveWidth(force: force, altitude: altitude)
+                let azimuth = prev.azimuth + (curr.azimuth - prev.azimuth) * t
+                let attr = dabAttrs(x: x, y: y, force: force, altitude: altitude, azimuth: azimuth,
+                                    dx: dx, dy: dy, dt: segDt)
+                let width = attr.width
 
                 let pos = CGPoint(x: x, y: y)
                 if clipPath.map({ $0.contains(pos) }) ?? true {
                     stamps.append(CanvasRenderer.StampInstance(
                         center: SIMD2<Float>(Float(x * scale), Float(y * scale)),
                         radius: Float(width * 0.5 * scale),
-                        rotation: strokeRotation(dx: dx, dy: dy),
-                        color: color,
+                        rotation: attr.rotation,
+                        color: attr.color,
                         hardness: hardness
                     ))
                 }
@@ -2510,18 +2556,21 @@ public final class MetalCanvasView: UIView {
 
         // End cap.
         if let last = stroke.points.last {
-            let width = brush.effectiveWidth(force: last.force, altitude: last.altitude)
             let n = stroke.points.count
             let lastDir: (CGFloat, CGFloat) = n > 1
                 ? (last.position.x - stroke.points[n - 2].position.x,
                    last.position.y - stroke.points[n - 2].position.y)
                 : firstDir
+            let lastDt = n > 1 ? max(0, Double(last.timestamp - stroke.points[n - 2].timestamp)) : 0
+            let attr = dabAttrs(x: last.position.x, y: last.position.y, force: last.force, altitude: last.altitude,
+                                azimuth: last.azimuth, dx: lastDir.0, dy: lastDir.1, dt: lastDt)
+            let width = attr.width
             if clipPath.map({ $0.contains(last.position) }) ?? true {
                 stamps.append(CanvasRenderer.StampInstance(
                     center: SIMD2<Float>(Float(last.position.x * scale), Float(last.position.y * scale)),
                     radius: Float(width * 0.5 * scale),
-                    rotation: strokeRotation(dx: lastDir.0, dy: lastDir.1),
-                    color: color,
+                    rotation: attr.rotation,
+                    color: attr.color,
                     hardness: hardness
                 ))
             }
@@ -2683,12 +2732,35 @@ public final class MetalCanvasView: UIView {
         } else {
             force = 0.5
         }
+        // Azimuth (tilt direction) is only meaningful for the pencil; finger touches report 0.
+        // Stored raw in [0,2π); the TiltDirection sensor wraps it. Feeds chisel/flat-pencil
+        // shape dynamics (high img2img leverage). See BrushDynamics.swift.
+        let azimuth: CGFloat
+        if touch.type == .pencil {
+            let raw = touch.azimuthAngle(in: self)
+            azimuth = raw >= 0 ? raw : raw + 2 * .pi
+        } else {
+            azimuth = 0
+        }
         return StrokePoint(
             position: location,
             force: force,
             altitude: touch.altitudeAngle,
-            timestamp: touch.timestamp
+            timestamp: touch.timestamp,
+            azimuth: azimuth
         )
+    }
+
+    /// Stable per-stroke RNG seed derived from the stroke's UUID (FNV-1a over the 16 bytes).
+    /// Stable across app launches — unlike `UUID.hashValue`, which is process-seeded — so a
+    /// saved stroke's scatter/jitter replays identically after relaunch. Feeds the Fuzzy
+    /// sensors + scatter (`StrokeDynamicsState`, `BrushDynamics.swift`).
+    private func strokeSeed(_ id: UUID) -> UInt64 {
+        let b = id.uuid
+        let bytes = [b.0, b.1, b.2, b.3, b.4, b.5, b.6, b.7, b.8, b.9, b.10, b.11, b.12, b.13, b.14, b.15]
+        var h: UInt64 = 0xcbf2_9ce4_8422_2325
+        for byte in bytes { h = (h ^ UInt64(byte)) &* 0x0000_0100_0000_01b3 }
+        return h
     }
 
 }
