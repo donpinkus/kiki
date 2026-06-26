@@ -95,6 +95,9 @@ public final class MetalCanvasView: UIView {
     /// first touch position at `touchesBegan`; each subsequent point is low-pass filtered
     /// toward the raw pencil position. See `smoothedStrokePoint`. nil when not stabilizing.
     private var streamlineCursor: CGPoint?
+    /// Timestamp of the last point fed to the streamline low-pass, for the frame-rate-independent
+    /// (dt-derived) smoothing factor. nil at stroke start.
+    private var streamlineLastTime: TimeInterval?
 
     /// For eraser: tracks the last stroke-point index that was applied to the canvas.
     /// Eraser stamps are applied incrementally (each touchesMoved renders only NEW
@@ -567,6 +570,7 @@ public final class MetalCanvasView: UIView {
             activeStrokeStamps = []
             // Seed the StreamLine cursor at the true start so the first point isn't lagged.
             streamlineCursor = touch.location(in: self)
+            streamlineLastTime = touch.timestamp
             if config.wetEnabled {
                 // Wet brush writes directly to the layer (eraser-style): snapshot for undo
                 // BEFORE any paint lands, and init cross-batch stamp bookkeeping.
@@ -2744,17 +2748,27 @@ public final class MetalCanvasView: UIView {
         var point = makeStrokePoint(from: touch)
         guard streamline > 0 else {
             streamlineCursor = point.position
+            streamlineLastTime = point.timestamp
             return point
         }
         let prev = streamlineCursor ?? point.position
-        // factor 1 = follow exactly; → small = heavy lag. Clamped so the cursor always
-        // makes progress (never fully freezes, even at streamline = 1).
-        let factor = max(1.0 - streamline * 0.9, 0.08)
+        // FRAME-RATE-INDEPENDENT low-pass: the pull factor is derived from a time constant
+        // (`tau`) and the elapsed `dt`, NOT applied per-event. Previously a fixed per-event
+        // factor smoothed ~2× harder at 120 Hz than 60 Hz and gave a flick and a crawl the
+        // same lag (the bug the Krita-stabilization research flagged). `tau` scales with
+        // `streamline` so higher = more lag; `dt`-derived `factor = 1−e^(−dt/tau)` makes the
+        // convergence depend on elapsed TIME, so the steady-state lag is the same at any
+        // event rate. (The streamline→tau mapping + the velocity-aware Bézier upgrade are
+        // device-tuning follow-ups — see PLAN.md P3 / IMPLEMENTATION-LOG.)
+        let dt = streamlineLastTime.map { max(0, point.timestamp - $0) } ?? (1.0 / 120.0)
+        let tau = max(0.004, Double(streamline) * 0.12) // seconds
+        let factor = CGFloat(min(1.0, max(0.04, 1.0 - exp(-dt / tau))))
         let smoothed = CGPoint(
             x: prev.x + (point.position.x - prev.x) * factor,
             y: prev.y + (point.position.y - prev.y) * factor
         )
         streamlineCursor = smoothed
+        streamlineLastTime = point.timestamp
         point.position = smoothed
         return point
     }
