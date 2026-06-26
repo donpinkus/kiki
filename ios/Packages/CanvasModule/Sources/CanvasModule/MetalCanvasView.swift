@@ -1010,8 +1010,20 @@ public final class MetalCanvasView: UIView {
         let spacingFrac = max(brush.spacing, 0.02)
         let pickup = Float(max(0, min(1, brush.wetPickup)))   // how fast the load picks up canvas color
 
-        // Fresh paint load at the start of a stroke.
-        if lastWetPointIndex == 0 { wetLoad = baseColor }
+        // Fresh paint load at the start of a stroke. SMUDGE seeds the load from the CANVAS
+        // color under the first dab (push existing color, introduce no new ink); a normal wet
+        // brush seeds from the brush ink. On blank canvas (no paint under the first dab) smudge
+        // falls back to the ink — a v1 limitation (Procreate smudges nothing on blank canvas).
+        if lastWetPointIndex == 0 {
+            if brush.wetSmudge,
+               let p0 = stroke.points.first,
+               let s = renderer.sampleLayerColor(x: Int(p0.position.x * scale), y: Int(p0.position.y * scale)),
+               s.alpha > 0.02 {
+                wetLoad = s.color
+            } else {
+                wetLoad = baseColor
+            }
+        }
 
         var newStamps: [CanvasRenderer.StampInstance] = []
         var stampPos = lastWetStampPos

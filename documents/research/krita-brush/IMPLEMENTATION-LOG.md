@@ -81,7 +81,86 @@ Preset dynamics verified offline (`/tmp` harness: size rises with pressure, spee
 calligraphy rotation tracks heading). The preset → BrushConfig wrapper preserves the user's
 color / baseWidth / opacity.
 
+### P2 continued — scatter + per-stroke color jitter  ✅
+
+- **Scatter** (`BrushDynamics.scatter`): per-dab random center displacement (magnitude = curve
+  value × dab diameter), independent seeded X/Y draws. Displaces only the rendered stamp; the
+  spacing/path walk uses the un-scattered point. Krita `KisScatterOption`.
+- **Per-stroke color jitter** (`BrushDynamics.colorJitter` = `ColorJitter{hue,saturation,brightness}`):
+  one coherent HSV shift per stroke (NOT per-dab speckle, which img2img averages out), applied in
+  sRGB-HSV then converted to linear. Pure sRGB↔HSV helpers added + offline-verified (round-trip,
+  no-op at r=0.5, changes color otherwise).
+- Presets added: **Stipple** (wide spacing + scatter) and **Pastel** (soft size + subtle
+  per-stroke color jitter). Offline suite now 40 asserts, all pass.
+
 > **Not yet wired into the production brush-picker UI** — those files (AppCoordinator /
 > SettingsPanel / brush controls) are mid-edit by the in-progress overlay-mode work, and I'm
 > avoiding conflicts with it. Wiring a preset picker is a small follow-up (apply
 > `BrushPreset.applied(to:)` to the active brush). See the checklist.
+
+---
+
+## P3 — Stabilization: frame-rate-independence fix  ✅ (committed `99ff437`)
+
+The streamline low-pass applied a **fixed pull factor per coalesced touch**, so it smoothed ~2×
+harder at 120 Hz than 60 Hz and gave a flick and a crawl the same lag (the concrete bug the
+Krita-stabilization research flagged). Now the factor is **time-constant-derived**:
+`factor = 1 − e^(−dt/τ)`, τ scaling with `streamline`, so steady-state lag is event-rate
+independent. **Default (`streamline == 0`) is unchanged** (early return).
+
+**Deliberately bounded:** the full **velocity-aware Bézier** rebuild and the exact `streamline→τ`
+curve are *device-tuning* work — stabilization feel is subjective and can't be validated in the
+Simulator, so I fixed the provable bug and left the feel-tuning for a device session (PLAN.md P3).
+
+---
+
+## P4 — v1 Smudge  ✅ (committed next)
+
+`BrushConfig.wetSmudge` (Bool, backward-compatible) + `BrushConfig.smudge(...)` factory. With
+`wetEnabled`, the carried paint load is **seeded from the canvas color under the first dab**
+instead of the brush ink — so the brush pushes existing color around (Procreate-style smudge) and
+introduces no new ink. The existing carried-load + Smear machinery does the rest. `wetStrength`
+(Mix) = redeposit strength; `wetPickup` (Smear) = how fast it re-grabs canvas color.
+
+**Limitations (v1):** device-only (inherits the wet render path — the wet PSO is nil on the
+Simulator); on blank canvas it falls back to ink; it smears *committed* paint (in-flight
+self-smear needs the SAB rework). A true displacement-drag smear is the P7 SAB follow-up. **I could
+not feel-test this** — only confirmed it compiles.
+
+---
+
+## Build & verification status
+
+Every commit: **BUILD SUCCEEDED** (iPad Pro 13" M4 sim). Offline correctness: **40 asserts pass**
+(`OfflineTests/`, re-run per README). Default-pen non-regression: **by construction** (every new
+behavior gated behind non-inert `dynamics` / `wetSmudge`; legacy branches unchanged) — and the P1
+review confirmed it byte-identical.
+
+## What is NOT done / deferred (honest list)
+
+- **UI wiring** — no preset picker / smudge-tool button in the shipping UI yet (avoided the
+  overlay-mode WIP that owns those files). Engine + presets are ready; wiring is small.
+- **Device feel-tuning** — dynamic-brush feel, stabilization τ curve, smudge strength: all need
+  Donald's device. Numbers in presets are sensible starting points, not final.
+- **P5–P9** (airbrush/time-axis, editable tips, grain HEIGHT-mode, masking/blend modes, bristle
+  families) and the **P7 SAB wet rework** (true displacement smear, Simulator-safe wet, GPU
+  reservoir) — not attempted overnight; they're larger GPU reworks better done with device
+  iteration. The keystone (P1) is the unlock; these layer on it.
+
+## Device verification checklist (for Donald)
+
+1. **Build + run on device** (not Simulator — canvas needs past Sign-in; wet path is device-only).
+2. **Non-regression first:** draw with the default pen — must feel/look exactly as before. Save a
+   drawing, reopen — strokes intact (StrokePoint/BrushConfig schema changes are backward-compatible).
+3. **Dynamics:** set the active brush to each preset (`BrushPresetCatalog.all`) — quickest path is a
+   temporary dev button calling `coordinator.brush = preset.applied(to: coordinator.brush)`:
+   - *Inker* — width + darkness rise with pressure.
+   - *Speed Pencil* — fast strokes thin out.
+   - *Calligraphy* — the "ink" tip orients to stroke direction (thick/thin edges).
+   - *Stipple* — broken, scattered dab field.
+   - *Pastel* — successive strokes vary slightly in color.
+4. **Tilt/azimuth:** a tilt-driven brush should respond to pencil tilt direction (chisel feel).
+5. **Smudge:** `BrushConfig.smudge()` over existing paint — should drag/blend color, add no new ink.
+6. **Perf:** dynamic brushes (esp. Stipple/scatter) must hold 120 Hz / <8 ms — watch for hitching.
+   The per-stroke LUT-cache fix should keep it cheap; confirm on the oldest target iPad.
+7. **Determinism:** draw a scatter stroke, undo, redo — the scattered dabs must land identically.

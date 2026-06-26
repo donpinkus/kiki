@@ -118,6 +118,12 @@ public struct BrushConfig: Codable, Sendable {
     /// color it crosses. 0 = no smear (pure deposit); higher = the brush drags/carries color
     /// further along the stroke (smudgier).
     public var wetPickup: CGFloat
+    /// Smudge mode (P4): when true (with `wetEnabled`), the carried paint load is seeded from
+    /// the CANVAS color under the first dab instead of the brush ink — so the brush pushes
+    /// existing color around (Procreate-style smudge) and introduces no new ink. `wetStrength`
+    /// (Mix) = redeposit strength; `wetPickup` (Smear) = how fast it re-grabs canvas color.
+    /// Device-only (inherits the wet render path). See `BrushConfig.smudge(...)`.
+    public var wetSmudge: Bool
     /// Brush-tip shape id (see `BrushShapeCatalog`). nil / "round" = the procedural soft
     /// circle; other ids bind a grayscale stamp texture. Textured shapes orient to the
     /// stroke direction. See pro-brush-roadmap Phase 3.
@@ -144,6 +150,7 @@ public struct BrushConfig: Codable, Sendable {
         wetEnabled: Bool = false,
         wetStrength: CGFloat = 0.4,
         wetPickup: CGFloat = 0.25,
+        wetSmudge: Bool = false,
         shapeID: String? = nil,
         dynamics: BrushDynamics? = nil
     ) {
@@ -160,8 +167,16 @@ public struct BrushConfig: Codable, Sendable {
         self.wetEnabled = wetEnabled
         self.wetStrength = wetStrength
         self.wetPickup = wetPickup
+        self.wetSmudge = wetSmudge
         self.shapeID = shapeID
         self.dynamics = dynamics
+    }
+
+    /// A ready-to-use Procreate-style smudge brush: wet path, load seeded from the canvas
+    /// (no new ink), strong smear. Wire a smudge tool button to set this as the active brush.
+    public static func smudge(baseWidth: CGFloat = 30, strength: CGFloat = 0.6) -> BrushConfig {
+        BrushConfig(color: .black, baseWidth: baseWidth, opacity: 1.0, hardness: 0.5,
+                    wetEnabled: true, wetStrength: strength, wetPickup: 0.85, wetSmudge: true)
     }
 
     public static let defaultPen = BrushConfig(color: .black, baseWidth: 5, pressureGamma: 0.7)
@@ -185,7 +200,7 @@ public struct BrushConfig: Codable, Sendable {
         case color, baseWidth, opacity, flow, pressureGamma, pressureOpacity
         case streamline, taperIn, taperOut, tiltSensitivity
         case hardness, spacing, taper, wetEnabled, wetStrength, wetPickup, shapeID
-        case dynamics
+        case dynamics, wetSmudge
     }
 
     public init(from decoder: Decoder) throws {
@@ -209,6 +224,7 @@ public struct BrushConfig: Codable, Sendable {
         wetEnabled = try container.decodeIfPresent(Bool.self, forKey: .wetEnabled) ?? false
         wetStrength = try container.decodeIfPresent(CGFloat.self, forKey: .wetStrength) ?? 0.4
         wetPickup = try container.decodeIfPresent(CGFloat.self, forKey: .wetPickup) ?? 0.25
+        wetSmudge = try container.decodeIfPresent(Bool.self, forKey: .wetSmudge) ?? false
         // Phase 3 — default nil (procedural round) so pre-Phase-3 configs decode unchanged.
         shapeID = try container.decodeIfPresent(String.self, forKey: .shapeID)
         // Krita-grade dynamics — default nil (legacy scalar behavior) so configs saved before
@@ -235,6 +251,7 @@ public struct BrushConfig: Codable, Sendable {
         try container.encode(wetEnabled, forKey: .wetEnabled)
         try container.encode(wetStrength, forKey: .wetStrength)
         try container.encode(wetPickup, forKey: .wetPickup)
+        try container.encode(wetSmudge, forKey: .wetSmudge)
         try container.encodeIfPresent(shapeID, forKey: .shapeID)
         try container.encodeIfPresent(dynamics, forKey: .dynamics)
     }
