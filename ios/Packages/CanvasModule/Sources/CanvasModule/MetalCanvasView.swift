@@ -2468,7 +2468,11 @@ public final class MetalCanvasView: UIView {
         let dyn = brush.dynamics
         let hasDyn = !(dyn?.isInert ?? true)
         func s2lLocal(_ c: CGFloat) -> Float { let x = Float(c); return x <= 0.04045 ? x / 12.92 : pow((x + 0.055) / 1.055, 2.4) }
-        let baseLinRGB = SIMD3<Float>(s2lLocal(brush.color.red), s2lLocal(brush.color.green), s2lLocal(brush.color.blue))
+        // Only the dynamics path consumes these; keep the default-pen path free of the extra
+        // sRGB→linear work (it returns before touching them).
+        let baseLinRGB: SIMD3<Float> = hasDyn
+            ? SIMD3<Float>(s2lLocal(brush.color.red), s2lLocal(brush.color.green), s2lLocal(brush.color.blue))
+            : .zero
         let baseFlow = Float(brush.flow)
         var dynState: StrokeDynamicsState? = hasDyn ? StrokeDynamicsState(seed: strokeSeed(stroke.id)) : nil
 
@@ -2488,7 +2492,9 @@ public final class MetalCanvasView: UIView {
                 ? brush.baseWidth * CGFloat(dyn!.size!.value(input))
                 : brush.effectiveWidth(force: force, altitude: altitude)
             let flowMul = dyn?.flow?.value(input) ?? 1.0
-            let a = baseFlow * Float(flowMul)
+            // Clamp to [0,1]: a brush authored with flow.maxValue > 1 could otherwise produce
+            // premultiplied alpha > 1 (malformed for the _srgb blend). P1-review fix.
+            let a = min(1, max(0, baseFlow * Float(flowMul)))
             let col = SIMD4<Float>(baseLinRGB.x * a, baseLinRGB.y * a, baseLinRGB.z * a, a)
             var rot = strokeRotation(dx: dx, dy: dy)
             if let rotOpt = dyn?.rotation { rot += Float(rotOpt.value(input) * Double.pi) } // [-1,1] turns → ±π
@@ -2525,6 +2531,10 @@ public final class MetalCanvasView: UIView {
             let leftover = hypot(prev.position.x - lastStampPos.x, prev.position.y - lastStampPos.y)
             var traveled = max(0, currentSpacing - leftover)
             let segDt = max(0, Double(curr.timestamp - prev.timestamp))
+            // Shortest-arc azimuth delta so interpolation across the 0/2π seam takes the short
+            // way (a chisel tip rotating past 0 must not spin ~360° backward). P1-review fix.
+            var dAz = curr.azimuth - prev.azimuth
+            if dAz > .pi { dAz -= 2 * .pi } else if dAz < -.pi { dAz += 2 * .pi }
 
             while traveled <= segmentDist {
                 let t = traveled / segmentDist
@@ -2532,9 +2542,12 @@ public final class MetalCanvasView: UIView {
                 let y = prev.position.y + dy * t
                 let force = prev.force + (curr.force - prev.force) * t
                 let altitude = prev.altitude + (curr.altitude - prev.altitude) * t
-                let azimuth = prev.azimuth + (curr.azimuth - prev.azimuth) * t
+                let azimuth = prev.azimuth + dAz * t
+                // Per-dab step (fraction of the segment) so the Speed sensor sees this dab's own
+                // dt/displacement instead of the whole segment's reused N times. P1-review fix.
+                let stepFrac = min(1, currentSpacing / segmentDist)
                 let attr = dabAttrs(x: x, y: y, force: force, altitude: altitude, azimuth: azimuth,
-                                    dx: dx, dy: dy, dt: segDt)
+                                    dx: dx * stepFrac, dy: dy * stepFrac, dt: segDt * Double(stepFrac))
                 let width = attr.width
 
                 let pos = CGPoint(x: x, y: y)

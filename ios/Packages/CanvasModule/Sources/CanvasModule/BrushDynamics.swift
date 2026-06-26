@@ -9,12 +9,20 @@ import Foundation
 // the per-sensor results combine by a selectable operator, and the combined value is
 // folded into a final brush scalar by one of two folds (size-like or rotation-like).
 //
-// The math here mirrors Krita verbatim so the behavior is predictable and a future
-// `.kpp`/`.brush` importer round-trips. Source of truth re-verified against
-// `~/krita_src`:
+// The fold/combine/sensor-folding MATH mirrors Krita exactly (verified line-by-line, P1
+// review) so behavior is predictable and a future `.kpp`/`.brush` importer round-trips.
+// Source of truth re-verified against `~/krita_src`:
 //   - folds + combine:   plugins/paintops/libpaintop/KisCurveOption.cpp:61-163
 //   - sensor parameter:  plugins/paintops/libpaintop/sensors/KisDynamicSensor.cpp:35-51
 //   - HSV fold split:    plugins/paintops/libpaintop/KisHSVOption.cpp:44-53
+//
+// DELIBERATE divergences (sound, not bugs): (1) monotone-cubic (Fritsch–Carlson) LUT instead
+// of Krita's natural cubic — no overshoot; (2) stateless-hash RNG instead of taus88 —
+// lock-free + replay-deterministic. INPUT-DOMAIN substitutions (iOS gives different raw
+// axes than Krita's tablet layer): tiltElevation is derived from `UITouch.altitudeAngle`
+// (not Krita's xTilt/yTilt `acos`); the speed `maxSpeed` scale is a tunable, not Krita's
+// tool-layer constant. SIMPLIFICATIONS: Distance is periodic-only and Fade is clamp-only
+// (Krita's per-sensor `isPeriodic` flag is collapsed to one mode each).
 //
 // Pure Swift (Foundation only, no UIKit/simd) so it compiles into the iOS target AND can
 // be verified offline with a standalone `swift` harness (per `feedback_verify_shader_color_offline`).
@@ -61,21 +69,40 @@ public struct ResponseCurve: Codable, Equatable, Sendable {
         public init(_ x: Double, _ y: Double) { self.x = x; self.y = y }
     }
 
-    /// Sorted-by-x control points, each in [0,1]². Default is the identity `(0,0)…(1,1)`.
-    public var points: [Point]
+    /// Sorted-by-x control points, each in [0,1]². **Immutable** (`let`) so the baked LUT can
+    /// never go stale relative to the points. Default is the identity `(0,0)…(1,1)`.
+    public let points: [Point]
+
+    /// Baked 256-entry LUT, computed **once** at init/decode (nil for the identity curve,
+    /// which passes through). Because the bake is eager and `points` is immutable, `value()`
+    /// is a pure read and copies of this struct share the LUT via copy-on-write — so
+    /// evaluating a curve on the per-dab hot path does **ZERO** spline bakes. (The previous
+    /// lazy/mutating cache was structurally unreachable: callers copy the struct by value, so
+    /// the cache was written to a throwaway and re-baked every dab. Fixed per P1 review.)
+    private let lut: [Double]?
+
+    /// True when this is the literal identity line, so callers skip evaluation entirely
+    /// (Krita drops identity curves to `nullopt`, `KisDynamicSensor.cpp:21-23`).
+    public let isIdentity: Bool
 
     public init(points: [Point]) {
-        self.points = points.sorted { $0.x < $1.x }
+        let sorted = points.sorted { $0.x < $1.x }
+        self.points = sorted
+        let ident = sorted.count == 2
+            && sorted[0].x == 0 && sorted[0].y == 0
+            && sorted[1].x == 1 && sorted[1].y == 1
+        self.isIdentity = ident
+        self.lut = ident ? nil : Self.bakeLUT(sorted)
     }
 
-    /// The identity curve — a pass-through. Detected so it can skip the LUT entirely
-    /// (Krita drops identity curves to `nullopt`, `KisDynamicSensor.cpp:21-23`).
+    /// The identity curve — a pass-through.
     public static let identity = ResponseCurve(points: [Point(0, 0), Point(1, 1)])
 
     /// A `pow(x, gamma)` curve sampled at `samples` control points — the bridge that turns
-    /// our legacy `pressureGamma` into a curve preset.
+    /// our legacy `pressureGamma` into a curve preset. Precondition `gamma > 0`
+    /// (`pow(0, gamma<0)` = +Inf); a non-positive gamma falls back to identity.
     public static func gamma(_ gamma: Double, samples: Int = 9) -> ResponseCurve {
-        guard gamma != 1.0 else { return .identity }
+        guard gamma > 0, gamma != 1.0 else { return .identity }
         let n = max(2, samples)
         var pts: [Point] = []
         for i in 0..<n {
@@ -85,21 +112,19 @@ public struct ResponseCurve: Codable, Equatable, Sendable {
         return ResponseCurve(points: pts)
     }
 
-    /// True when this curve is the literal identity line, so callers can skip evaluation.
-    public var isIdentity: Bool {
-        points.count == 2 &&
-        points[0].x == 0 && points[0].y == 0 &&
-        points[1].x == 1 && points[1].y == 1
+    /// Evaluate at `x ∈ [0,1]` — a pure LUT read (identity passes through). Non-mutating: the
+    /// LUT was baked at construction, so there is no per-call/per-dab spline solve.
+    public func value(_ x: Double) -> Double {
+        guard let lut else { return min(1, max(0, x)) }
+        return Self.readLUT(lut, x)
     }
 
-    // The baked LUT is computed lazily and cached. Not part of Codable (derived).
-    private var _lut: [Double]? = nil
-
+    // Codable: only `points` is stored; the LUT + isIdentity are recomputed on decode via
+    // the designated initializer.
     private enum CodingKeys: String, CodingKey { case points }
-
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        self.points = try c.decode([Point].self, forKey: .points).sorted { $0.x < $1.x }
+        self.init(points: try c.decode([Point].self, forKey: .points))
     }
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -107,20 +132,6 @@ public struct ResponseCurve: Codable, Equatable, Sendable {
     }
 
     public static func == (lhs: ResponseCurve, rhs: ResponseCurve) -> Bool { lhs.points == rhs.points }
-
-    /// Evaluate the curve at `x ∈ [0,1]`. Identity short-circuits to `x`. Otherwise a
-    /// clamp + floor + lerp on the baked LUT (Krita `interpolateLinear`).
-    public mutating func value(_ x: Double) -> Double {
-        if isIdentity { return min(1, max(0, x)) }
-        if _lut == nil { _lut = Self.bakeLUT(points) }
-        return Self.readLUT(_lut!, x)
-    }
-
-    /// Non-mutating evaluation (bakes a throwaway LUT). Prefer the mutating form on a hot path.
-    public func valued(_ x: Double) -> Double {
-        if isIdentity { return min(1, max(0, x)) }
-        return Self.readLUT(Self.bakeLUT(points), x)
-    }
 
     static let lutSize = 256
 
@@ -251,7 +262,7 @@ public struct SensorChannel: Codable, Equatable, Sendable {
     /// curve, unfold. Returns the post-curve sensor value in the sensor's native domain.
     func parameter(_ input: SensorInput, common: ResponseCurve?, useSameCurve: Bool) -> Double {
         let raw = sensor.rawValue(input)
-        var c = (useSameCurve ? (common ?? curve) : curve)
+        let c = (useSameCurve ? (common ?? curve) : curve) // value-type; no copy cost, LUT shared (COW)
         if c.isIdentity { return raw }
         if sensor.isAdditive {
             let scaled = c.value(additiveToScaling(raw)) // [-1,1]→[0,1]→curve
@@ -483,10 +494,16 @@ public struct StrokeDynamicsState {
         }
         lastX = x; lastY = y
 
-        // Speed: instantaneous distance/time, EMA-smoothed, normalized by maxSpeed.
+        // Speed: instantaneous distance/time, smoothed, normalized by maxSpeed. The EMA is
+        // TIME-CONSTANT (alpha derived from dt), not fixed-weight, so the smoothed speed is
+        // independent of dab DENSITY — a dense stroke and a sparse one over the same path and
+        // time converge identically. (A fixed `0.4·inst + 0.6·prev` per dab would converge
+        // faster the more dabs/sec, making speed response depend on spacing. P1-review fix.)
         if dt > 0 {
             let inst = hypotD(dx, dy) / dt
-            smoothedSpeed = 0.4 * inst + 0.6 * smoothedSpeed
+            let tau = 0.05 // seconds — speed smoothing time constant
+            let alpha = 1 - exp(-dt / tau)
+            smoothedSpeed += (inst - smoothedSpeed) * alpha
         }
         let speedNorm = clamp01(smoothedSpeed / maxSpeed)
 
