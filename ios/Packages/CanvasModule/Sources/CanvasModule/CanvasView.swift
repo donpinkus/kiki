@@ -6,6 +6,11 @@ public struct CanvasView: UIViewRepresentable {
     private let externalTransformRegionProvider: (() -> CGRect?)?
     private let onExternalTransform: ((CGPoint, CGFloat) -> Void)?
     private let onContactPointChanged: ((CGPoint?, CGFloat) -> Void)?
+    /// DEV: live brush-input HUD sink + tunable engine-normalization constants.
+    private let onBrushInputSample: ((BrushInputSample) -> Void)?
+    private let devMaxSpeed: Double
+    private let devDistancePeriod: Double
+    private let devFadePeriod: Double
     /// Overlay drawing mode: when active, `overlayImage` is shown opaque, locked over
     /// the canvas, with a visual-only fresh-stroke surface above it. Both default off
     /// so split-screen/fullscreen are untouched.
@@ -19,7 +24,11 @@ public struct CanvasView: UIViewRepresentable {
         overlayImage: UIImage? = nil,
         externalTransformRegionProvider: (() -> CGRect?)? = nil,
         onExternalTransform: ((CGPoint, CGFloat) -> Void)? = nil,
-        onContactPointChanged: ((CGPoint?, CGFloat) -> Void)? = nil
+        onContactPointChanged: ((CGPoint?, CGFloat) -> Void)? = nil,
+        onBrushInputSample: ((BrushInputSample) -> Void)? = nil,
+        devMaxSpeed: Double = 1500,
+        devDistancePeriod: Double = 600,
+        devFadePeriod: Double = 64
     ) {
         self.viewModel = viewModel
         self.drawingSurfaceSide = drawingSurfaceSide
@@ -28,6 +37,10 @@ public struct CanvasView: UIViewRepresentable {
         self.externalTransformRegionProvider = externalTransformRegionProvider
         self.onExternalTransform = onExternalTransform
         self.onContactPointChanged = onContactPointChanged
+        self.onBrushInputSample = onBrushInputSample
+        self.devMaxSpeed = devMaxSpeed
+        self.devDistancePeriod = devDistancePeriod
+        self.devFadePeriod = devFadePeriod
     }
 
     public func makeUIView(context: Context) -> RotatableCanvasContainer {
@@ -38,6 +51,12 @@ public struct CanvasView: UIViewRepresentable {
         container.onContactPointChanged = onContactPointChanged
         let canvasView = container.canvasView
         viewModel.attach(canvasView, container: container)
+
+        // DEV: brush-input HUD + tunable constants (set on the Metal view directly).
+        canvasView.onBrushInputSample = onBrushInputSample
+        canvasView.devMaxSpeed = devMaxSpeed
+        canvasView.devDistancePeriod = devDistancePeriod
+        canvasView.devFadePeriod = devFadePeriod
 
         // Wire canvas callbacks to view model.
         // All callbacks fire from UIKit event handlers (main thread) so no
@@ -96,6 +115,11 @@ public struct CanvasView: UIViewRepresentable {
         uiView.externalTransformRegionProvider = externalTransformRegionProvider
         uiView.onExternalTransform = onExternalTransform
         uiView.onContactPointChanged = onContactPointChanged
+        // DEV: push the tunable constants every update so Brush Studio sliders take effect live.
+        uiView.canvasView.onBrushInputSample = onBrushInputSample
+        uiView.canvasView.devMaxSpeed = devMaxSpeed
+        uiView.canvasView.devDistancePeriod = devDistancePeriod
+        uiView.canvasView.devFadePeriod = devFadePeriod
         // Push overlay drawing-mode state on every update (image changes ~2 FPS while
         // streaming). Routed through the view model — idempotent setters.
         NSLog("%@", "🔬OVL CanvasView.updateUIView overlayActive=\(overlayActive) hasImage=\(overlayImage != nil)")

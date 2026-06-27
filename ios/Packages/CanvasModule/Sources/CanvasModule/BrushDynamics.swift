@@ -477,8 +477,10 @@ public struct StrokeDynamicsState {
     /// Period (in points) over which Distance/Fade sensors ramp 0→1, then optionally repeat.
     public var distancePeriod: Double
     public var fadePeriod: Double
-    /// Max speed (points/second) that maps to speedNorm = 1. Tunable; Krita normalizes in
-    /// its tool layer (research §2.2 — unverified constant, tune on device).
+    /// Max speed (points/second) that maps to speedNorm = 1. Tuned on device (2026-06-27):
+    /// 3000 was too high — normal-fast strokes only reached ~0.3–0.5, so the Speed sensor barely
+    /// registered. 1500 makes a moderately-fast stroke hit full effect. Krita normalizes in its
+    /// tool layer (research §2.2). Raise if every stroke reads thin; lower if speed barely bites.
     public var maxSpeed: Double
 
     public private(set) var arcLength: Double = 0
@@ -488,7 +490,7 @@ public struct StrokeDynamicsState {
     private var smoothedSpeed: Double = 0
     private let perStrokeRand: Double
 
-    public init(seed: UInt64, distancePeriod: Double = 256, fadePeriod: Double = 64, maxSpeed: Double = 3000) {
+    public init(seed: UInt64, distancePeriod: Double = 256, fadePeriod: Double = 64, maxSpeed: Double = 1500) {
         self.seed = seed
         self.distancePeriod = distancePeriod
         self.fadePeriod = fadePeriod
@@ -557,6 +559,30 @@ public struct StrokeDynamicsState {
 }
 
 @inline(__always) func hypotD(_ a: Double, _ b: Double) -> Double { (a * a + b * b).squareRoot() }
+
+// MARK: - BrushInputSample (live dev HUD readout)
+
+/// A snapshot of the live brush inputs + resulting multipliers, for the on-device input HUD used
+/// to tune the dynamics engine (dev-only). Emitted per move-sample while drawing a dynamic brush.
+public struct BrushInputSample: Sendable, Equatable {
+    public var pressure: Double
+    public var speedRaw: Double        // points/second (pre-normalization)
+    public var speedNorm: Double       // [0,1] after maxSpeed normalization + smoothing
+    public var tiltElevation: Double   // [0,1] (1 = perpendicular)
+    public var azimuth: Double         // [0,1] (tilt direction / 2π)
+    public var drawingAngle: Double    // [0,1] (stroke heading)
+    public var sizeMul: Double         // active size CurveOption value (1 if none)
+    public var flowMul: Double         // active flow CurveOption value (1 if none)
+    public var dabIndex: Int
+
+    public init(pressure: Double = 0, speedRaw: Double = 0, speedNorm: Double = 0,
+                tiltElevation: Double = 0, azimuth: Double = 0, drawingAngle: Double = 0,
+                sizeMul: Double = 1, flowMul: Double = 1, dabIndex: Int = 0) {
+        self.pressure = pressure; self.speedRaw = speedRaw; self.speedNorm = speedNorm
+        self.tiltElevation = tiltElevation; self.azimuth = azimuth; self.drawingAngle = drawingAngle
+        self.sizeMul = sizeMul; self.flowMul = flowMul; self.dabIndex = dabIndex
+    }
+}
 
 // MARK: - BrushDynamics (the per-brush collection of curve options)
 

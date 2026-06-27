@@ -184,6 +184,20 @@ final class AppCoordinator {
     /// stable parent) rather than from inside the popover, so it survives the popover dismissing.
     var showBrushStudio = false
 
+    // MARK: - DEV brush-tuning harness (input HUD + engine knobs + active test note)
+
+    /// Latest live brush-input sample (from MetalCanvasView), shown in the on-canvas HUD.
+    var liveBrushInput: BrushInputSample?
+    /// Whether the live input HUD is shown on the canvas.
+    var showInputHUD = false
+    /// Tunable engine-normalization constants (pushed into the canvas via DrawingView's CanvasView
+    /// on each @Observable update; dialed via Brush Studio sliders).
+    var devMaxSpeed: Double = 1500
+    var devDistancePeriod: Double = 600
+    var devFadePeriod: Double = 64
+    /// The active test brush's instruction note (shown in Brush Studio).
+    var activeTestNote: String?
+
     // MARK: - Per-tool stored settings
 
     /// While true, toolSize / toolOpacity / toolFlow / toolStreamline didSet should skip
@@ -1641,8 +1655,9 @@ final class AppCoordinator {
         return result.isEmpty ? nil : result
     }
 
-    /// Load a curated brush preset into the live tool (Brush Studio dev panel). Batched so the
-    /// brush is rebuilt once. Preserves the user's color / size / opacity / flow.
+    /// Load a brush preset / control-isolation test into the live tool (Brush Studio). Batched so
+    /// the brush is rebuilt once. Applies the preset's pin-overrides (baseWidth/opacity/flow) where
+    /// set, so a test fully specifies the brush; otherwise the user's values are kept.
     func applyBrushPreset(_ preset: BrushPreset) {
         isSwappingToolValues = true
         toolDynamics = preset.dynamics
@@ -1650,7 +1665,11 @@ final class AppCoordinator {
         toolSpacing = preset.spacing
         toolShapeID = preset.shapeID
         toolWetSmudge = false
+        if let bw = preset.baseWidth { toolSize = bw }
+        if let op = preset.opacity { toolOpacity = op }
+        if let fl = preset.flow { toolFlow = fl }
         isSwappingToolValues = false
+        activeTestNote = preset.note
         applyTool()
     }
 
@@ -1660,6 +1679,7 @@ final class AppCoordinator {
         toolDynamics = nil
         toolWetSmudge = false
         isSwappingToolValues = false
+        activeTestNote = nil
         applyTool()
     }
 

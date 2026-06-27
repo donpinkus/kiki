@@ -106,7 +106,13 @@ struct DrawingView: View {
                                     coordinator.panelHole.isActive = false
                                 }
                             }
-                        }
+                        },
+                        onBrushInputSample: { [weak coordinator] sample in
+                            coordinator?.liveBrushInput = sample
+                        },
+                        devMaxSpeed: coordinator.devMaxSpeed,
+                        devDistancePeriod: coordinator.devDistancePeriod,
+                        devFadePeriod: coordinator.devFadePeriod
                     )
                         .frame(width: canvasPaneWidth, height: geometry.size.height)
                         .frame(
@@ -116,6 +122,15 @@ struct DrawingView: View {
                         )
                         .ignoresSafeArea(.keyboard)
                         .zIndex(0)
+
+                    // DEV: live brush-input HUD (top-right), visual-only.
+                    if coordinator.showInputHUD {
+                        BrushInputHUD(sample: coordinator.liveBrushInput, note: coordinator.activeTestNote)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                            .padding(.top, 16).padding(.trailing, 16)
+                            .allowsHitTesting(false)
+                            .zIndex(5)
+                    }
 
                     CanvasSidebar()
                         .frame(maxHeight: .infinity, alignment: .leading)

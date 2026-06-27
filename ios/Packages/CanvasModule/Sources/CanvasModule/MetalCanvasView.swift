@@ -2,6 +2,7 @@ import UIKit
 import Metal
 import CoreImage
 import StrokeRecognizerModule
+import os
 
 /// Metal-backed drawing canvas. GPU-resident
 /// texture pipeline: all painting happens in Metal shaders, display via
@@ -48,6 +49,17 @@ public final class MetalCanvasView: UIView {
     public var onStateChanged: (() -> Void)?
     public var onInteractionBegan: (() -> Void)?
     public var onInteractionEnded: (() -> Void)?
+    /// DEV: fires (throttled, ~per move event) while drawing a dynamic brush, with the live brush
+    /// inputs + resulting multipliers, for the on-device input HUD. nil = not observed.
+    public var onBrushInputSample: ((BrushInputSample) -> Void)?
+    /// DEV: tunable engine-normalization constants, plumbed into `StrokeDynamicsState`. Set from the
+    /// Brush Studio "Engine tuning" sliders so e.g. `maxSpeed` is dialed live against the HUD.
+    public var devMaxSpeed: Double = 1500
+    public var devDistancePeriod: Double = 600
+    public var devFadePeriod: Double = 64
+    /// DEV: persistent per-stroke state for the input HUD (advanced in touchesMoved).
+    private var hudState: StrokeDynamicsState?
+    private var lastHUDEmit: TimeInterval = 0
     /// Fired when a lasso selection is extracted. No UIImage — the selection lives
     /// as an MTLTexture on the renderer, displayed by the Metal compositor.
     public var onLassoSelectionStarted: ((_ closedPath: CGPath, _ selectionBounds: CGRect) -> Void)?
@@ -571,6 +583,12 @@ public final class MetalCanvasView: UIView {
             // Seed the StreamLine cursor at the true start so the first point isn't lagged.
             streamlineCursor = touch.location(in: self)
             streamlineLastTime = touch.timestamp
+            // DEV input-HUD state for a dynamic brush (fresh per stroke).
+            hudState = (config.dynamics?.isInert == false)
+                ? StrokeDynamicsState(seed: strokeSeed(activeStroke!.id),
+                                      distancePeriod: devDistancePeriod, fadePeriod: devFadePeriod,
+                                      maxSpeed: devMaxSpeed)
+                : nil
             if config.wetEnabled {
                 // Wet brush writes directly to the layer (eraser-style): snapshot for undo
                 // BEFORE any paint lands, and init cross-batch stamp bookkeeping.
@@ -689,6 +707,7 @@ public final class MetalCanvasView: UIView {
             for ct in coalesced {
                 activeStroke?.points.append(smoothedStrokePoint(from: ct, streamline: streamline))
             }
+            emitBrushInputSample(brush: config)
             if config.wetEnabled {
                 // Wet: apply only NEW stamps directly to the layer (no scratch).
                 applyNewWetStamps()
@@ -1108,6 +1127,8 @@ public final class MetalCanvasView: UIView {
         }
 
         guard let stroke = activeStroke, !stroke.points.isEmpty else { return }
+
+        logStrokeDynamicsDiagnostic(stroke)
 
         if case .eraser = currentTool {
             // Eraser stamps were already applied directly to canvas during touchesMoved.
@@ -2501,7 +2522,10 @@ public final class MetalCanvasView: UIView {
             return SIMD3<Float>(s2lLocal(CGFloat(srgb.r)), s2lLocal(CGFloat(srgb.g)), s2lLocal(CGFloat(srgb.b)))
         }()
         let baseFlow = Float(brush.flow)
-        var dynState: StrokeDynamicsState? = hasDyn ? StrokeDynamicsState(seed: strokeSeed(stroke.id)) : nil
+        var dynState: StrokeDynamicsState? = hasDyn
+            ? StrokeDynamicsState(seed: strokeSeed(stroke.id), distancePeriod: devDistancePeriod,
+                                  fadePeriod: devFadePeriod, maxSpeed: devMaxSpeed)
+            : nil
 
         /// Per-dab (width, premultiplied color, rotation). The `!hasDyn` branch is today's
         /// exact behavior; the dynamics branch advances stroke state and evaluates the curve
@@ -2815,6 +2839,67 @@ public final class MetalCanvasView: UIView {
             timestamp: touch.timestamp,
             azimuth: azimuth
         )
+    }
+
+    // TEMPORARY brush-tuning diagnostic. Logs one summary line per completed dynamic stroke with
+    // the practical input ranges (pressure, raw px/s speed, normalized speedNorm, tilt) + the
+    // resulting size/flow multipliers — so brush dynamics can be tuned from real device values
+    // instead of guessing. View with: Xcode console, or
+    //   log stream --predicate 'subsystem == "com.kiki.canvas" AND category == "brushdiag"'
+    // Remove once dynamics tuning is settled.
+    private static let brushDiag = Logger(subsystem: "com.kiki.canvas", category: "brushdiag")
+
+    /// DEV: build + emit a live `BrushInputSample` for the input HUD (throttled ~20 Hz). Advances
+    /// the persistent `hudState` with the latest segment so the values match what the brush sees.
+    private func emitBrushInputSample(brush: BrushConfig) {
+        guard let cb = onBrushInputSample, var st = hudState,
+              let pts = activeStroke?.points, pts.count >= 2 else { return }
+        let curr = pts[pts.count - 1], prev = pts[pts.count - 2]
+        let dx = Double(curr.position.x - prev.position.x)
+        let dy = Double(curr.position.y - prev.position.y)
+        let dt = max(0, Double(curr.timestamp - prev.timestamp))
+        let input = st.advance(x: Double(curr.position.x), y: Double(curr.position.y),
+                               force: Double(curr.force), altitude: Double(curr.altitude),
+                               azimuth: Double(curr.azimuth), dx: dx, dy: dy, dt: dt)
+        hudState = st
+        guard curr.timestamp - lastHUDEmit > 0.05 else { return }
+        lastHUDEmit = curr.timestamp
+        let rawSpeed = dt > 0 ? (dx * dx + dy * dy).squareRoot() / dt : 0
+        let dyn = brush.dynamics
+        cb(BrushInputSample(
+            pressure: input.pressure, speedRaw: rawSpeed, speedNorm: input.speedNorm,
+            tiltElevation: input.tiltElevationNorm, azimuth: input.azimuthNorm,
+            drawingAngle: input.drawingAngleNorm,
+            sizeMul: dyn?.size?.value(input) ?? 1, flowMul: dyn?.flow?.value(input) ?? 1,
+            dabIndex: Int(st.dabIndex)))
+    }
+
+    private func logStrokeDynamicsDiagnostic(_ stroke: Stroke) {
+        let dyn = stroke.brush.dynamics
+        guard !(dyn?.isInert ?? true), stroke.points.count > 1 else { return }
+        var st = StrokeDynamicsState(seed: strokeSeed(stroke.id), distancePeriod: devDistancePeriod,
+                                     fadePeriod: devFadePeriod, maxSpeed: devMaxSpeed)
+        var pMin = 1.0, pMax = 0.0, rawMax = 0.0, snMax = 0.0, teMin = 1.0, teMax = 0.0
+        var szMin = 99.0, szMax = 0.0, flMin = 99.0, flMax = 0.0
+        for i in 1..<stroke.points.count {
+            let prev = stroke.points[i - 1], curr = stroke.points[i]
+            let dx = Double(curr.position.x - prev.position.x)
+            let dy = Double(curr.position.y - prev.position.y)
+            let dt = max(0, Double(curr.timestamp - prev.timestamp))
+            let input = st.advance(x: Double(curr.position.x), y: Double(curr.position.y),
+                                   force: Double(curr.force), altitude: Double(curr.altitude),
+                                   azimuth: Double(curr.azimuth), dx: dx, dy: dy, dt: dt)
+            let raw = dt > 0 ? (dx * dx + dy * dy).squareRoot() / dt : 0
+            pMin = min(pMin, input.pressure); pMax = max(pMax, input.pressure)
+            rawMax = max(rawMax, raw); snMax = max(snMax, input.speedNorm)
+            teMin = min(teMin, input.tiltElevationNorm); teMax = max(teMax, input.tiltElevationNorm)
+            if let s = dyn?.size { let v = s.value(input); szMin = min(szMin, v); szMax = max(szMax, v) }
+            if let f = dyn?.flow { let v = f.value(input); flMin = min(flMin, v); flMax = max(flMax, v) }
+        }
+        let msg = String(format: "n=%d  pressure=[%.2f…%.2f]  speed=%dpx/s max (norm→%.2f)  tilt=[%.2f…%.2f]  size×=[%.2f…%.2f]  flow×=[%.2f…%.2f]",
+                         stroke.points.count, pMin, pMax, Int(rawMax), snMax, teMin, teMax,
+                         szMin > szMax ? 0 : szMin, szMax, flMin > flMax ? 0 : flMin, flMax)
+        Self.brushDiag.log("\(msg, privacy: .public)")
     }
 
     /// Stable per-stroke RNG seed derived from the stroke's UUID (FNV-1a over the 16 bytes).

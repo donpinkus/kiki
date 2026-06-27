@@ -25,7 +25,7 @@ struct BrushStudioView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Presets") {
+                Section("Control-isolation test brushes") {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 8) {
                             presetButton("Default Pen") { coordinator.resetBrushDynamics(); dyn = BrushDynamics() }
@@ -37,6 +37,20 @@ struct BrushStudioView: View {
                             }
                         }
                     }
+                    if let note = coordinator.activeTestNote {
+                        Text(note).font(.caption).foregroundStyle(.blue)
+                    }
+                }
+
+                Section("Dev tools") {
+                    Toggle("Live input HUD", isOn: Binding(
+                        get: { coordinator.showInputHUD }, set: { coordinator.showInputHUD = $0 }))
+                    devSlider("Max speed", value: Binding(get: { coordinator.devMaxSpeed }, set: { coordinator.devMaxSpeed = $0 }),
+                              range: 500...30000, fmt: "%.0f")
+                    devSlider("Distance period", value: Binding(get: { coordinator.devDistancePeriod }, set: { coordinator.devDistancePeriod = $0 }),
+                              range: 100...4000, fmt: "%.0f")
+                    devSlider("Fade period", value: Binding(get: { coordinator.devFadePeriod }, set: { coordinator.devFadePeriod = $0 }),
+                              range: 8...512, fmt: "%.0f")
                 }
 
                 curveSection("Size", option: $dyn.size, fold: .sizeLike, defaultSensor: .pressure)
@@ -69,6 +83,14 @@ struct BrushStudioView: View {
             .controlSize(.small)
     }
 
+    private func devSlider(_ label: String, value: Binding<Double>, range: ClosedRange<Double>, fmt: String) -> some View {
+        HStack {
+            Text(label).font(.caption).frame(width: 110, alignment: .leading)
+            Slider(value: value, in: range)
+            Text(String(format: fmt, value.wrappedValue)).font(.caption.monospaced()).frame(width: 60)
+        }
+    }
+
     private func curveSection(_ title: String, option: Binding<CurveOption?>,
                               fold: BrushFold, defaultSensor: BrushSensor) -> some View {
         Section(title) {
@@ -84,6 +106,40 @@ struct BrushStudioView: View {
                     get: { option.wrappedValue ?? CurveOption(sensors: [], fold: fold) },
                     set: { option.wrappedValue = $0 }))
             }
+        }
+    }
+}
+
+// MARK: - Live input HUD (dev)
+
+/// On-canvas readout of the live brush inputs + resulting multipliers, for tuning the engine.
+struct BrushInputHUD: View {
+    let sample: BrushInputSample?
+    let note: String?
+    var body: some View {
+        let s = sample ?? BrushInputSample()
+        VStack(alignment: .leading, spacing: 2) {
+            if let note { Text(note).font(.caption2).foregroundStyle(.yellow).frame(maxWidth: 220, alignment: .leading) }
+            row("pressure", String(format: "%.2f", s.pressure))
+            row("speed", String(format: "%.0f px/s", s.speedRaw))
+            row("  →norm", String(format: "%.2f", s.speedNorm))
+            row("tilt", String(format: "%.2f", s.tiltElevation))
+            row("azimuth", String(format: "%.2f", s.azimuth))
+            row("angle", String(format: "%.2f", s.drawingAngle))
+            row("size×", String(format: "%.2f", s.sizeMul))
+            row("flow×", String(format: "%.2f", s.flowMul))
+            row("dab", "\(s.dabIndex)")
+        }
+        .padding(8)
+        .background(.black.opacity(0.6))
+        .foregroundStyle(.white)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .font(.caption2.monospaced())
+    }
+    private func row(_ k: String, _ v: String) -> some View {
+        HStack(spacing: 6) {
+            Text(k).frame(width: 64, alignment: .leading).foregroundStyle(.white.opacity(0.7))
+            Text(v)
         }
     }
 }

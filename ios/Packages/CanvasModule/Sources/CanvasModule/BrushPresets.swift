@@ -1,22 +1,16 @@
 import CoreGraphics
 
-// MARK: - Brush presets (Krita-grade dynamics, curated)
+// MARK: - Brush presets / control-isolation test brushes
 //
-// A small curated set of brushes that exercise the sensor+curve engine
-// (`BrushDynamics.swift`) — the "curated preset library, not an on-device Brush Studio"
-// posture from `feedback_ipad_dev_toggles`. Each preset is the keystone made tangible:
-// pressure/speed/tilt/angle driving size/flow/rotation through response curves.
-//
-// A preset preserves the user's active color + baseWidth + opacity; it only sets the
-// dynamics + tip-shape parameters. The dynamics math for each was verified offline
-// (OfflineTests + a preset prototype harness) before authoring here.
-//
-// Tuning note (for Donald): the exact curve points / min-max below are sensible starting
-// values — the *feel* is best dialed in on device. Per `feedback_direct_params`, these are
-// concrete values, not abstracted sliders.
+// TEMPORARY (dev): while tuning the sensor+curve engine (`BrushDynamics.swift`), the catalog is a
+// set of CONTROL-ISOLATION TEST brushes — each varies exactly ONE control (pressure→size,
+// speed→size, tilt→size, scatter, …) with everything else pinned to neutral, so each part of the
+// engine can be unit-tested + tuned against the live input HUD. Real curated presets return once
+// the engine is verified. See documents/research/krita-brush/IMPLEMENTATION-LOG.md.
 
-/// One curated brush preset: a dynamics bundle + tip parameters, applied onto the user's
-/// current brush.
+/// A brush preset / test: a dynamics bundle + tip params, plus optional hard pins for
+/// baseWidth/opacity/flow so an isolation test fully specifies the brush (no stray pressure/tilt
+/// response leaking in from the legacy scalars).
 public struct BrushPreset: Identifiable, Sendable {
     public let id: String
     public let name: String
@@ -24,24 +18,32 @@ public struct BrushPreset: Identifiable, Sendable {
     public let hardness: CGFloat
     public let spacing: CGFloat
     public let shapeID: String?
+    /// Pins (nil = keep the user's current value). Test brushes set these so the test is reproducible.
+    public let baseWidth: CGFloat?
+    public let opacity: CGFloat?
+    public let flow: CGFloat?
+    /// One-line instruction shown in the Brush Studio when this is active (gesture + what to expect).
+    public let note: String?
 
     public init(id: String, name: String, dynamics: BrushDynamics,
-                hardness: CGFloat = 0.5, spacing: CGFloat = 0.3, shapeID: String? = nil) {
-        self.id = id
-        self.name = name
-        self.dynamics = dynamics
-        self.hardness = hardness
-        self.spacing = spacing
-        self.shapeID = shapeID
+                hardness: CGFloat = 0.5, spacing: CGFloat = 0.3, shapeID: String? = nil,
+                baseWidth: CGFloat? = nil, opacity: CGFloat? = nil, flow: CGFloat? = nil,
+                note: String? = nil) {
+        self.id = id; self.name = name; self.dynamics = dynamics
+        self.hardness = hardness; self.spacing = spacing; self.shapeID = shapeID
+        self.baseWidth = baseWidth; self.opacity = opacity; self.flow = flow; self.note = note
     }
 
-    /// Apply this preset onto a base brush, preserving color / baseWidth / opacity / flow.
+    /// Apply onto a base brush. Overrides applied where non-nil; otherwise base is preserved.
     public func applied(to base: BrushConfig) -> BrushConfig {
         var c = base
         c.dynamics = dynamics
         c.hardness = hardness
         c.spacing = spacing
         c.shapeID = shapeID
+        if let baseWidth { c.baseWidth = baseWidth }
+        if let opacity { c.opacity = opacity }
+        if let flow { c.flow = flow }
         return c
     }
 }
@@ -51,77 +53,89 @@ public enum BrushPresetCatalog {
     private static func curve(_ pts: [(Double, Double)]) -> ResponseCurve {
         ResponseCurve(points: pts.map { ResponseCurve.Point($0.0, $0.1) })
     }
-    private static func sizeOpt(_ sensors: [SensorChannel], strength: Double = 1,
-                                min: Double = 0, max: Double = 1, combine: CombineMode = .multiply,
-                                useSameCurve: Bool = true, common: ResponseCurve = .identity) -> CurveOption {
-        CurveOption(sensors: sensors, combineMode: combine, fold: .sizeLike, strength: strength,
+    private static func opt(_ sensors: [SensorChannel], min: Double = 0, max: Double = 1,
+                            fold: BrushFold = .sizeLike, strength: Double = 1,
+                            combine: CombineMode = .multiply, useSameCurve: Bool = true,
+                            common: ResponseCurve = .identity) -> CurveOption {
+        CurveOption(sensors: sensors, combineMode: combine, fold: fold, strength: strength,
                     minValue: min, maxValue: max, useSameCurve: useSameCurve, commonCurve: common)
     }
+    /// Constant size = baseWidth (no legacy pressure/tilt leak), for isolating non-size controls.
+    private static var constSize: CurveOption { opt([], strength: 1) }
 
-    /// Pressure inker — width and deposit both rise firmly with pressure (crisp edge, tight
-    /// spacing). The classic "press harder = bolder" pen.
-    public static let inker = BrushPreset(
-        id: "inker", name: "Inker",
-        dynamics: BrushDynamics(
-            size: sizeOpt([SensorChannel(sensor: .pressure)], min: 0.15),
-            flow: sizeOpt([SensorChannel(sensor: .pressure)], min: 0.4)),
-        hardness: 0.85, spacing: 0.08)
+    // --- The 10 control-isolation test brushes -------------------------------------------------
 
-    /// Soft sketching pencil — size follows pressure through a soft gamma(1.6) ramp (stays
-    /// thin until you lean in), light deposit so build-up reads like graphite.
-    public static let softPencil = BrushPreset(
-        id: "soft_pencil", name: "Soft Pencil",
-        dynamics: BrushDynamics(
-            size: sizeOpt([SensorChannel(sensor: .pressure)], min: 0.1, common: .gamma(1.6)),
-            flow: sizeOpt([SensorChannel(sensor: .pressure)], min: 0.25)),
-        hardness: 0.4, spacing: 0.12)
+    public static let pressureSize = BrushPreset(
+        id: "t_pressure_size", name: "TEST: Pressure→Size",
+        dynamics: BrushDynamics(size: opt([SensorChannel(sensor: .pressure)], min: 0.05)),
+        hardness: 0.5, spacing: 0.1, baseWidth: 36, opacity: 1, flow: 1,
+        note: "Vary pressure → width tracks it. HUD: sizeMul should ≈ pressure.")
 
-    /// Speed-taper pencil — size = pressure × a descending speed curve, so fast strokes
-    /// thin out (calligraphic taper-by-speed) while pressure still governs the body.
-    /// `useSameCurve = false` so the speed channel uses its own descending curve while
-    /// pressure stays linear (the Krita per-sensor-curve subtlety).
-    public static let speedPencil = BrushPreset(
-        id: "speed_pencil", name: "Speed Pencil",
-        dynamics: BrushDynamics(
-            size: sizeOpt(
-                [SensorChannel(sensor: .pressure),
-                 SensorChannel(sensor: .speed, curve: curve([(0, 1.0), (1, 0.4)]))],
-                min: 0.1, combine: .multiply, useSameCurve: false),
-            flow: sizeOpt([SensorChannel(sensor: .pressure)], min: 0.3)),
-        hardness: 0.5, spacing: 0.1)
+    public static let pressureFlow = BrushPreset(
+        id: "t_pressure_flow", name: "TEST: Pressure→Flow",
+        dynamics: BrushDynamics(size: constSize,
+                                flow: opt([SensorChannel(sensor: .pressure)], min: 0.05)),
+        hardness: 0.5, spacing: 0.08, baseWidth: 36, opacity: 0.5, flow: 1,
+        note: "Width fixed; darkness tracks pressure. Press light vs hard, and repeat passes to build up.")
 
-    /// Calligraphy nib — the dab rotates to follow the stroke heading (drawing-angle →
-    /// rotation, the rotation-like fold), so an anisotropic/oriented tip cuts thick-and-thin
-    /// edges. Pressure drives size. Visible only on oriented/anisotropic tips (uses the
-    /// "ink" textured shape, which orients to the stroke).
-    public static let calligraphy = BrushPreset(
-        id: "calligraphy", name: "Calligraphy",
-        dynamics: BrushDynamics(
-            size: sizeOpt([SensorChannel(sensor: .pressure)], min: 0.25),
-            rotation: CurveOption(sensors: [SensorChannel(sensor: .drawingAngle)],
-                                  fold: .rotationLike, strength: 1)),
-        hardness: 0.8, spacing: 0.06, shapeID: "ink")
+    public static let speedSize = BrushPreset(
+        id: "t_speed_size", name: "TEST: Speed→Size",
+        dynamics: BrushDynamics(size: opt([SensorChannel(sensor: .speed, curve: curve([(0, 1.0), (1, 0.2)]))],
+                                          min: 0.05, useSameCurve: false)),
+        hardness: 0.5, spacing: 0.1, baseWidth: 36, opacity: 1, flow: 1,
+        note: "Fast = thin, slow = full. Watch HUD speedRaw and tune maxSpeed (Engine sliders) so your range fills 0→1.")
 
-    /// Stipple — wide spacing + per-dab scatter makes a broken, granular dab field (constant
-    /// scatter 0.7× diameter; pressure drives size). Reads as a dry stamping brush.
-    public static let stipple = BrushPreset(
-        id: "stipple", name: "Stipple",
-        dynamics: BrushDynamics(
-            size: sizeOpt([SensorChannel(sensor: .pressure)], min: 0.3),
-            scatter: CurveOption(sensors: [], fold: .sizeLike, strength: 0.7)),
-        hardness: 0.7, spacing: 0.9)
+    public static let tiltSize = BrushPreset(
+        id: "t_tilt_size", name: "TEST: Tilt→Size",
+        dynamics: BrushDynamics(size: opt([SensorChannel(sensor: .tiltElevation)], min: 0.1)),
+        hardness: 0.5, spacing: 0.1, baseWidth: 40, opacity: 1, flow: 1,
+        note: "Upright pencil = wide, flat = thin (HUD tilt: 1=upright, 0=flat).")
 
-    /// Pastel — soft pressure size + subtle PER-STROKE hue/sat/brightness jitter, so successive
-    /// strokes vary slightly in color like real pastel sticks (high img2img leverage; the model
-    /// reads the color variation). Uses the "pastel" textured tip.
-    public static let pastel = BrushPreset(
-        id: "pastel", name: "Pastel",
-        dynamics: BrushDynamics(
-            size: sizeOpt([SensorChannel(sensor: .pressure)], min: 0.2, common: .gamma(1.3)),
-            flow: sizeOpt([SensorChannel(sensor: .pressure)], min: 0.4),
-            colorJitter: ColorJitter(hue: 0.03, saturation: 0.15, brightness: 0.1)),
-        hardness: 0.3, spacing: 0.1, shapeID: "pastel")
+    public static let azimuthRotation = BrushPreset(
+        id: "t_azimuth_rot", name: "TEST: Azimuth→Rotation",
+        dynamics: BrushDynamics(size: constSize,
+                                rotation: opt([SensorChannel(sensor: .tiltDirection)], fold: .rotationLike)),
+        hardness: 0.7, spacing: 0.08, shapeID: "drybrush", baseWidth: 50, opacity: 1, flow: 1,
+        note: "Draw horizontal strokes, twisting the pencil between them → tip angle changes. HUD: azimuth.")
 
-    /// The ordered curated set, for a future preset picker UI.
-    public static let all: [BrushPreset] = [inker, softPencil, speedPencil, calligraphy, stipple, pastel]
+    public static let angleRotation = BrushPreset(
+        id: "t_angle_rot", name: "TEST: Angle→Rotation",
+        dynamics: BrushDynamics(size: constSize,
+                                rotation: opt([SensorChannel(sensor: .drawingAngle)], fold: .rotationLike)),
+        hardness: 0.7, spacing: 0.08, shapeID: "drybrush", baseWidth: 50, opacity: 1, flow: 1,
+        note: "Draw in varying directions → tip rotates with heading (adds to the tip's built-in orient). HUD: angle.")
+
+    public static let distanceSize = BrushPreset(
+        id: "t_distance_size", name: "TEST: Distance→Size",
+        dynamics: BrushDynamics(size: opt([SensorChannel(sensor: .distance)], min: 0.05,
+                                          common: curve([(0, 0.15), (1, 1.0)]))),
+        hardness: 0.5, spacing: 0.1, baseWidth: 36, opacity: 1, flow: 1,
+        note: "Long stroke → width ramps thin→thick over ~one distance period (tune period in Engine sliders).")
+
+    public static let fadeSize = BrushPreset(
+        id: "t_fade_size", name: "TEST: Fade→Size",
+        dynamics: BrushDynamics(size: opt([SensorChannel(sensor: .fade)], min: 0.05,
+                                          common: curve([(0, 0.15), (1, 1.0)]))),
+        hardness: 0.5, spacing: 0.1, baseWidth: 36, opacity: 1, flow: 1,
+        note: "Continuous stroke → width grows over the first ~[fade period] dabs.")
+
+    public static let scatter = BrushPreset(
+        id: "t_scatter", name: "TEST: Scatter",
+        dynamics: BrushDynamics(size: opt([SensorChannel(sensor: .pressure)], min: 0.3),
+                                scatter: opt([], strength: 0.6)),
+        hardness: 0.6, spacing: 0.9, baseWidth: 28, opacity: 1, flow: 1,
+        note: "Scribble → dabs scatter around the path (wide spacing makes each dab visible).")
+
+    public static let colorJitter = BrushPreset(
+        id: "t_color_jitter", name: "TEST: Color jitter",
+        dynamics: BrushDynamics(size: constSize,
+                                colorJitter: ColorJitter(hue: 0.1, saturation: 0.2, brightness: 0.15)),
+        hardness: 0.5, spacing: 0.1, baseWidth: 36, opacity: 1, flow: 1,
+        note: "Draw SEPARATE strokes → each a slightly different shade (per-stroke, not within a stroke).")
+
+    /// The ordered set of control-isolation test brushes.
+    public static let all: [BrushPreset] = [
+        pressureSize, pressureFlow, speedSize, tiltSize, azimuthRotation, angleRotation,
+        distanceSize, fadeSize, scatter, colorJitter,
+    ]
 }
