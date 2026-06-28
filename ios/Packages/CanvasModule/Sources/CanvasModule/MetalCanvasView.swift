@@ -2869,7 +2869,7 @@ public final class MetalCanvasView: UIView {
         cb(BrushInputSample(
             pressure: input.pressure, speedRaw: rawSpeed, speedNorm: input.speedNorm,
             tiltElevation: input.tiltElevationNorm, azimuth: input.azimuthNorm,
-            drawingAngle: input.drawingAngleNorm,
+            drawingAngle: input.drawingAngleNorm, distanceNorm: input.distanceNorm, fadeNorm: input.fadeNorm,
             sizeMul: dyn?.size?.value(input) ?? 1, flowMul: dyn?.flow?.value(input) ?? 1,
             dabIndex: Int(st.dabIndex)))
     }

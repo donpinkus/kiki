@@ -15,7 +15,6 @@ import CanvasModule
 
 struct BrushStudioView: View {
     @Environment(AppCoordinator.self) private var coordinator
-    @Environment(\.dismiss) private var dismiss
     @State private var dyn: BrushDynamics
 
     init(initial: BrushDynamics?) {
@@ -23,7 +22,16 @@ struct BrushStudioView: View {
     }
 
     var body: some View {
-        NavigationStack {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Brush Studio").font(.headline)
+                Spacer()
+                Button { coordinator.showBrushStudio = false } label: {
+                    Image(systemName: "xmark.circle.fill").font(.title3).foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 14).padding(.vertical, 10)
+            Divider()
             Form {
                 Section("Control-isolation test brushes") {
                     ScrollView(.horizontal, showsIndicators: false) {
@@ -68,9 +76,6 @@ struct BrushStudioView: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
-            .navigationTitle("Brush Studio (dev)")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
             .onChange(of: dyn) { _, new in
                 coordinator.toolDynamics = new.isInert ? nil : new
             }
@@ -196,7 +201,8 @@ private struct CurveOptionEditor: View {
                     }
                     return option.commonCurve
                 },
-                set: { option.commonCurve = $0; option.useSameCurve = true }))
+                set: { option.commonCurve = $0; option.useSameCurve = true }),
+                sensor: option.sensors.first?.sensor)
         }
 
         sliderRow("Strength", value: $option.strength, range: 0...2)
@@ -254,13 +260,16 @@ private struct ColorJitterSection: View {
 // MARK: - Draggable response-curve editor (5 fixed-x control points, y-draggable)
 
 private struct ResponseCurveEditor: View {
+    @Environment(AppCoordinator.self) private var coordinator
     @Binding var curve: ResponseCurve
+    let sensor: BrushSensor?
     private static let xs: [Double] = [0, 0.25, 0.5, 0.75, 1.0]
     @State private var ys: [Double]
     @State private var dragging = false
 
-    init(curve: Binding<ResponseCurve>) {
+    init(curve: Binding<ResponseCurve>, sensor: BrushSensor?) {
         _curve = curve
+        self.sensor = sensor
         // Sample the incoming curve at the fixed x positions to seed the editable points.
         _ys = State(initialValue: ResponseCurveEditor.xs.map { curve.wrappedValue.value($0) })
     }
@@ -287,6 +296,16 @@ private struct ResponseCurveEditor: View {
                     Circle().fill(Color.accentColor)
                         .frame(width: 12, height: 12)
                         .position(x: x * w, y: (1 - ys[i]) * h)
+                }
+                // LIVE input marker: where the current sensor value lands on the curve (moves as
+                // you draw). Reading liveBrushInput scopes the ~20 Hz re-render to this editor only.
+                if let sensor, let sx = coordinator.liveBrushInput?.value(for: sensor) {
+                    let sy = curve.value(sx)
+                    Path { p in
+                        p.move(to: CGPoint(x: sx * w, y: h)); p.addLine(to: CGPoint(x: sx * w, y: (1 - sy) * h))
+                    }.stroke(Color.red.opacity(0.6), lineWidth: 1)
+                    Circle().fill(Color.red).frame(width: 11, height: 11)
+                        .position(x: sx * w, y: (1 - sy) * h)
                 }
             }
             .contentShape(Rectangle())

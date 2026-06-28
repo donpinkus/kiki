@@ -571,16 +571,35 @@ public struct BrushInputSample: Sendable, Equatable {
     public var tiltElevation: Double   // [0,1] (1 = perpendicular)
     public var azimuth: Double         // [0,1] (tilt direction / 2π)
     public var drawingAngle: Double    // [0,1] (stroke heading)
+    public var distanceNorm: Double    // [0,1] (arc length / distance period)
+    public var fadeNorm: Double        // [0,1] (dab count / fade period)
     public var sizeMul: Double         // active size CurveOption value (1 if none)
     public var flowMul: Double         // active flow CurveOption value (1 if none)
     public var dabIndex: Int
 
     public init(pressure: Double = 0, speedRaw: Double = 0, speedNorm: Double = 0,
                 tiltElevation: Double = 0, azimuth: Double = 0, drawingAngle: Double = 0,
+                distanceNorm: Double = 0, fadeNorm: Double = 0,
                 sizeMul: Double = 1, flowMul: Double = 1, dabIndex: Int = 0) {
         self.pressure = pressure; self.speedRaw = speedRaw; self.speedNorm = speedNorm
         self.tiltElevation = tiltElevation; self.azimuth = azimuth; self.drawingAngle = drawingAngle
+        self.distanceNorm = distanceNorm; self.fadeNorm = fadeNorm
         self.sizeMul = sizeMul; self.flowMul = flowMul; self.dabIndex = dabIndex
+    }
+
+    /// The live normalized value for a given sensor (for plotting a marker on its curve). nil for
+    /// sensors with no meaningful instantaneous position (the random Fuzzy sensors).
+    public func value(for sensor: BrushSensor) -> Double? {
+        switch sensor {
+        case .pressure: return pressure
+        case .speed: return speedNorm
+        case .tiltElevation: return tiltElevation
+        case .tiltDirection: return azimuth
+        case .drawingAngle: return drawingAngle
+        case .distance: return distanceNorm
+        case .fade: return fadeNorm
+        case .fuzzyPerDab, .fuzzyPerStroke: return nil
+        }
     }
 }
 

@@ -132,6 +132,21 @@ struct DrawingView: View {
                             .zIndex(5)
                     }
 
+                    // DEV: Brush Studio docked to the left (non-modal) — tune while drawing on the
+                    // canvas to the right. Empty regions pass touches through (sidebar + canvas).
+                    if coordinator.showBrushStudio {
+                        BrushStudioView(initial: coordinator.toolDynamics)
+                            .environment(coordinator)
+                            .frame(width: 340)
+                            .background(.regularMaterial)
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                            .padding(.leading, 96)
+                            .padding(.vertical, 8)
+                            .zIndex(4)
+                            .transition(.move(edge: .leading))
+                    }
+
                     CanvasSidebar()
                         .frame(maxHeight: .infinity, alignment: .leading)
                         .zIndex(3)

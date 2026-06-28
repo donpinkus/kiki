@@ -60,12 +60,8 @@ struct CanvasSidebar: View {
                     .environment(coordinator)
                     .presentationCompactAdaptation(.popover)
             }
-            // Brush Studio sheet is owned here (a stable parent), not by the popover, so it
-            // opens reliably after the popover dismisses.
-            .sheet(isPresented: $coordinator.showBrushStudio) {
-                BrushStudioView(initial: coordinator.toolDynamics)
-                    .environment(coordinator)
-            }
+            // Brush Studio is now a docked left panel owned by DrawingView (non-modal, so you can
+            // tune while drawing). The popover button just sets `coordinator.showBrushStudio`.
 
             Divider().frame(width: 24)
 
