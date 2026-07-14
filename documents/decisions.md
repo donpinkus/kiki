@@ -14,6 +14,16 @@ Record implementation decisions here as they are made. Newest first. This preven
 
 ---
 
+### 2026-07-13 — Retraction: `CGColorSpaceCreateDeviceRGB()` is NOT Display P3 on iOS
+
+**Context:** A deep color-pipeline review flagged the two remaining `CGColorSpaceCreateDeviceRGB()` call sites (`EyedropperRing.sampleColor`, `DiskColorPicker.generateSBImage`) as bugs, based on the 2026-06-08 claim that DeviceRGB resolves to Display P3 on iPads. Double-checking that premise empirically overturned it.
+
+**Decision:** Retract the claim. A standalone CG test binary (run on macOS AND in the iPad Pro 13-inch (M4) simulator's iOS 26.5 runtime) shows DeviceRGB bitmap contexts are **byte-identical sRGB pass-throughs** in both directions, while an explicit Display P3 context really converts (sRGB 255,0,0 → 234,51,35). The 2026-06-08 eyedropper drift was fully explained by the *other* fixes in `968a454` (CALayer.render capturing nothing, a Y-flip, the sRGB-vs-linearSRGB re-decode); the DeviceRGB→sRGB switch rode along as a no-op. Also verified: `UIGraphicsImageRendererFormat` defaults to `.standard` (sRGB) in the iOS-runtime simulator, and `.extended` is value-preserving for in-gamut sRGB — the "renderer defaults to P3" claim was likewise unsupported. Docs corrected (root + CanvasModule CLAUDE.md, `UIImage+PixelColor.swift` comment). Convention unchanged: still write explicit `CGColorSpace(name: CGColorSpace.sRGB)!` for intent-auditability; existing DeviceRGB call sites left as-is (behaviorally identical).
+
+**Alternatives considered:** Leaving the docs alone (rejected — the false premise already produced two false-positive "bugs" in one review and would keep doing so). "Fixing" the DeviceRGB call sites anyway (rejected — a no-op code change implies a behavior change that doesn't exist).
+
+**Consequences:** DeviceRGB call sites must not be cited as color-drift root causes. The one *untested* residue: how CoreAnimation composites a DeviceRGB-tagged image on a physical P3 panel (all measured CG paths treat it as sRGB; device compositing very likely the same but unverified). Lesson (per the debugging-rigor rules): the P3 attribution was bundled into a multi-fix commit and never isolated — when several fixes land together, attribute the symptom only to the ones you can isolate.
+
 ### 2026-06-08 — Canvas color pipeline: linear at every Metal boundary, sRGB only at image outputs
 
 **Context:** A new eyedropper exposed that colors round-tripped through the canvas were wrong, and a long-standing "gallery thumbnails look darker + more saturated than drawn" bug had the same root. Diagnosis (4 parallel agents + manual adjudication) found **two opposite gamma bugs that had been cancelling each other**, plus the eyedropper's own read bug — so the canvas looked roughly right until the eyedropper made the full loop visible. Our initial intuition ("the texture is `_srgb`, so use sRGB everywhere"; "`brush.color` is the sRGB color I picked, so pack it straight in") was wrong on **both** the read and write sides.
@@ -21,7 +31,7 @@ Record implementation decisions here as they are made. Newest first. This preven
 **Decision:** Codify one model: a `.bgra8Unorm_srgb` texture makes **Metal hardware own the sRGB↔linear gamma at every texture boundary** (sampler decodes on read, render target encodes on store). So **texture-side ops must speak linear; standalone image/file outputs must speak sRGB.** Concretely fixed:
 - `CanvasRenderer.textureToCIImage` read: `.colorSpace` sRGB → **linearSRGB** (was re-decoding → darkened every snapshot/thumbnail/**save**, compounding to black on each save/reopen).
 - `MetalCanvasView.premultipliedColor` write: pack **`s2l(brush.color)`** (sRGB→linear) before the stamp, matching the wet brush (was double-encoding → strokes a shade too light).
-- Eyedropper read path: sample a **Metal snapshot** (`opaqueImageSnapshot`) not `CALayer.render` (which captures nothing from a `CAMetalLayer`); sample in explicit **sRGB**, not `CGColorSpaceCreateDeviceRGB()` (= Display P3 on iPads); fix a Y-flip in the 1×1 readback.
+- Eyedropper read path: sample a **Metal snapshot** (`opaqueImageSnapshot`) not `CALayer.render` (which captures nothing from a `CAMetalLayer`); sample in explicit **sRGB**; fix a Y-flip in the 1×1 readback. ~~not `CGColorSpaceCreateDeviceRGB()` (= Display P3 on iPads)~~ *(retracted — see 2026-07-13 entry: DeviceRGB is an sRGB pass-through on iOS; that part of this fix was a no-op)*.
 
 **Alternatives considered:** Setting `CAMetalLayer.colorspace = sRGB` (Agent 2's lead theory) — **rejected**, the color-picker swatch already matched the canvas, proving the *display* was correct and the canvas was ground truth; the bugs were in the CPU read/write paths, not presentation. A double-`linearSRGB` "tidy story" blaming only the read path — rejected; the cumulative *lightening* after the read fix proved a second, paint-side bug existed.
 
