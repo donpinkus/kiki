@@ -55,3 +55,19 @@ CREATE TABLE IF NOT EXISTS drawings (
   video_key     TEXT                      -- reserved: video storage/export (later)
 );
 CREATE INDEX IF NOT EXISTS drawings_user ON drawings (user_id, updated_at DESC);
+
+-- Brush-dev stroke fixtures (Brush Studio → "Record strokes" → Upload). The fixture
+-- JSON (replayable in BrushHarness) + a PNG snapshot of the canvas live in the
+-- BlobStore; rows here are the index `BrushHarness/fetch-fixtures.sh` lists.
+-- Dev tooling — doubles as a lightweight brush bug-report channel.
+CREATE TABLE IF NOT EXISTS fixtures (
+  id            BIGSERIAL PRIMARY KEY,
+  user_id       TEXT NOT NULL,
+  name          TEXT,
+  note          TEXT,
+  stroke_count  INT,
+  fixture_key   TEXT NOT NULL,
+  snapshot_key  TEXT,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS fixtures_time ON fixtures (created_at DESC);

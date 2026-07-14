@@ -48,6 +48,18 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
 
     gated.get('/admin/api/me', async () => ({ ok: true }));
 
+    // Brush-dev stroke fixtures (newest first) — consumed by
+    // `BrushHarness/fetch-fixtures.sh`, which downloads the keys via /blobs/*.
+    gated.get('/admin/api/fixtures', async (request) => {
+      const limit = Math.min(Number((request.query as { limit?: string }).limit) || 25, 200);
+      const { rows } = await query(
+        `SELECT id, user_id, name, note, stroke_count, fixture_key, snapshot_key, created_at
+         FROM fixtures ORDER BY created_at DESC LIMIT $1`,
+        [limit],
+      );
+      return { fixtures: rows };
+    });
+
     // Users list. Source of truth is the BACKEND's `users` table (identity +
     // subscription + test flag) and `monthly_usage` (this month's fal spend);
     // Insights-owned events/sessions/drawings contribute the activity rollups.
@@ -140,7 +152,10 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
       if (!key) return reply.code(404).send({ error: 'not found' });
       try {
         const buf = await blobStore.get(key);
-        const type = key.endsWith('.mp4') ? 'video/mp4' : 'image/jpeg';
+        const type = key.endsWith('.mp4') ? 'video/mp4'
+          : key.endsWith('.png') ? 'image/png'
+          : key.endsWith('.json') ? 'application/json'
+          : 'image/jpeg';
         return reply.header('Content-Type', type).header('Cache-Control', 'private, max-age=3600').send(buf);
       } catch {
         return reply.code(404).send({ error: 'not found' });

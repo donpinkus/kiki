@@ -52,10 +52,12 @@ three tables — it never touches the backend's.
 |---|---|---|---|
 | POST | `/ingest` | Bearer (iOS) **or** `x-insights-key` (backend) | Batch events `{ events: [...] }` |
 | POST | `/ingest/drawing` | same | multipart: drawing metadata + `thumbnail`/`generated` files |
+| POST | `/ingest/fixture` | same | multipart: brush-dev stroke fixture (`fixture` JSON + optional `snapshot` PNG) — see `ios/Packages/CanvasModule/BrushHarness/README.md` |
 | POST | `/admin/login` | password body | Set admin cookie |
 | POST | `/admin/logout` | — | Clear cookie |
 | GET | `/admin/api/users?q=` | cookie | User list + counts |
 | GET | `/admin/api/users/:id` | cookie | Full per-user view |
+| GET | `/admin/api/fixtures?limit=` | cookie | Brush-dev fixture list (newest first; `fetch-fixtures.sh`) |
 | GET | `/blobs/*` | cookie | Serve a blob |
 | GET | `/health` | — | DB health |
 

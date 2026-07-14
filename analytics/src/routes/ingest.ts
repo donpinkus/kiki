@@ -212,6 +212,70 @@ export const ingestRoute: FastifyPluginAsync = async (app) => {
     // so there's no counter to maintain here.
     return reply.send({ ok: true, drawing_id: drawingId });
   });
+
+  // ─── Brush fixture upload (multipart) ─────────────────────────────────────
+  // Brush Studio's "Record strokes → Upload": the BrushFixture JSON (replayable in
+  // BrushHarness) + an optional PNG snapshot of the canvas at capture time. Dev
+  // tooling / brush bug-report channel — see BrushHarness/README.md.
+  // Fields: name, note, stroke_count, user_id (only for service-key callers).
+  // Files:  fixture (application/json, required), snapshot (PNG, optional).
+  app.post('/ingest/fixture', async (request, reply) => {
+    let principal;
+    try {
+      principal = await authenticateIngest(request);
+    } catch (err) {
+      request.log.warn({ err: (err as Error).message }, 'fixture ingest auth failed');
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+
+    const fields: Record<string, string> = {};
+    let fixtureBuf: Buffer | null = null;
+    let snapshotBuf: Buffer | null = null;
+
+    const parts = (request as unknown as { parts: () => AsyncIterableIterator<MultipartPart> }).parts();
+    for await (const part of parts) {
+      if (part.type === 'field') {
+        fields[part.fieldname] = String(part.value);
+      } else {
+        const buf = await part.toBuffer();
+        if (part.fieldname === 'fixture') fixtureBuf = buf;
+        else if (part.fieldname === 'snapshot') snapshotBuf = buf;
+      }
+    }
+
+    const userId = principal.source === 'ios' ? principal.userId : fields['user_id'];
+    if (!userId) return reply.code(400).send({ error: 'user_id required' });
+    if (!fixtureBuf) return reply.code(400).send({ error: 'fixture file required' });
+    if (fixtureBuf.length > 32 * 1024 * 1024) return reply.code(400).send({ error: 'fixture too large' });
+
+    // Sanity-parse so a corrupt upload fails loudly here, not at harness replay.
+    let strokeCount = Number(fields['stroke_count']);
+    try {
+      const parsed = JSON.parse(fixtureBuf.toString('utf8')) as { strokes?: unknown[] };
+      if (!Array.isArray(parsed.strokes)) throw new Error('no strokes[]');
+      if (!Number.isFinite(strokeCount)) strokeCount = parsed.strokes.length;
+    } catch (err) {
+      return reply.code(400).send({ error: `fixture is not valid BrushFixture JSON: ${(err as Error).message}` });
+    }
+
+    const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const fixtureKey = `fixtures/${stamp}/fixture.json`;
+    await blobStore.put(fixtureKey, fixtureBuf);
+    let snapshotKey: string | null = null;
+    if (snapshotBuf) {
+      snapshotKey = `fixtures/${stamp}/snapshot.png`;
+      await blobStore.put(snapshotKey, snapshotBuf);
+    }
+
+    const inserted = await query<{ id: string }>(
+      `INSERT INTO fixtures (user_id, name, note, stroke_count, fixture_key, snapshot_key)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id`,
+      [userId, fields['name'] ?? null, fields['note'] ?? null, strokeCount, fixtureKey, snapshotKey],
+    );
+
+    return reply.send({ ok: true, id: inserted.rows[0]?.id, fixture_key: fixtureKey, snapshot_key: snapshotKey });
+  });
 };
 
 // Minimal shape of @fastify/multipart parts we consume.
