@@ -156,6 +156,50 @@ actor InsightsSink {
         req.httpBody = body
         _ = try? await URLSession.shared.data(for: req)
     }
+
+    /// Upload a brush-dev stroke fixture: the BrushFixture JSON (replayable in
+    /// BrushHarness) + an optional PNG snapshot of the canvas. Brush Studio's
+    /// "Record strokes → Upload". Unlike the fire-and-forget event/drawing mirrors,
+    /// this RETURNS success — it's an explicit user action (doubles as a brush
+    /// bug-report), so a failed upload must not silently look uploaded.
+    func uploadFixture(name: String?, note: String?, strokeCount: Int,
+                       fixtureJSON: Data, snapshotPNG: Data?) async -> Bool {
+        guard let baseURL else { return false }
+        guard let token = await tokenProvider?() else { return false }
+
+        let boundary = "kiki-\(UUID().uuidString)"
+        var body = Data()
+        func appendField(_ name: String, _ value: String) {
+            body.append("--\(boundary)\r\n")
+            body.append("Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n")
+            body.append("\(value)\r\n")
+        }
+        func appendFilePart(_ name: String, filename: String, contentType: String, _ data: Data) {
+            body.append("--\(boundary)\r\n")
+            body.append("Content-Disposition: form-data; name=\"\(name)\"; filename=\"\(filename)\"\r\n")
+            body.append("Content-Type: \(contentType)\r\n\r\n")
+            body.append(data)
+            body.append("\r\n")
+        }
+
+        if let name, !name.isEmpty { appendField("name", name) }
+        if let note, !note.isEmpty { appendField("note", note) }
+        appendField("stroke_count", String(strokeCount))
+        appendFilePart("fixture", filename: "fixture.json", contentType: "application/json", fixtureJSON)
+        if let snapshotPNG {
+            appendFilePart("snapshot", filename: "snapshot.png", contentType: "image/png", snapshotPNG)
+        }
+        body.append("--\(boundary)--\r\n")
+
+        var req = URLRequest(url: baseURL.appendingPathComponent("ingest/fixture"))
+        req.httpMethod = "POST"
+        req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        req.httpBody = body
+        guard let (_, resp) = try? await URLSession.shared.data(for: req),
+              (resp as? HTTPURLResponse)?.statusCode == 200 else { return false }
+        return true
+    }
 }
 
 private extension Data {

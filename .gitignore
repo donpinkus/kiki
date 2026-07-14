@@ -45,3 +45,7 @@ __pycache__/
 
 # Claude Code session state (per-checkout, don't commit)
 .claude/
+
+# BrushHarness transient artifacts (fetched fixtures + rendered PNGs)
+ios/Packages/CanvasModule/BrushHarness/fixtures/
+ios/Packages/CanvasModule/BrushHarness/output/

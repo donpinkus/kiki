@@ -159,6 +159,53 @@ check("hsv gray roundtrip", grayRT.r, 0.5); check("hsv gray s=0", rgbToHSV((0.5,
 let blackRT = hsvToRGB(rgbToHSV((0, 0, 0)))
 check("hsv black roundtrip r", blackRT.r, 0); check("hsv black v=0", rgbToHSV((0, 0, 0)).v, 0)
 
+// --- WetKM: premultiplied-_srgb texel recovery (CanvasRenderer.sampleLayerColor) ---
+// The texture stores sRGB_encode(linear × alpha); recovery must DECODE first, THEN
+// un-premultiply. The reverse order shipped as a bug (wet pickup read semi-transparent
+// paint up to ~3× too light; fixed 2026-07-14) — the last check pins that regression.
+func l2s(_ c: Double) -> Double { c <= 0.0031308 ? c*12.92 : 1.055*pow(c, 1/2.4)-0.055 }
+func encodeTexel(lin: Double, a: Double) -> (v: UInt8, a: UInt8) {
+    (UInt8((l2s(lin * a) * 255).rounded()), UInt8((a * 255).rounded()))
+}
+for (lin, a) in [(0.20, 0.5), (0.50, 0.5), (0.05, 0.3), (0.80, 0.25), (0.50, 1.0)] {
+    let t = encodeTexel(lin: lin, a: a)
+    let rec = WetKM.straightLinear(b: t.v, g: t.v, r: t.v, a: t.a)
+    // Tolerance: one 8-bit step in encoded space, amplified by 1/alpha after decode.
+    check("texel recovery lin=\(lin) a=\(a)", Double(rec.color.x), lin, tol: 0.02 / a)
+    check("texel recovery alpha a=\(a)", Double(rec.alpha), a, tol: 1/255.0 + 1e-6)
+}
+checkBool("texel recovery: a=0 → (0, alpha 0)", {
+    let r = WetKM.straightLinear(b: 120, g: 120, r: 120, a: 0)
+    return r.alpha == 0 && r.color == SIMD3<Float>(0, 0, 0)
+}())
+checkBool("divide-then-decode (the old order) would read ≥1.9× too light", {
+    let t = encodeTexel(lin: 0.2, a: 0.5)
+    let wrong = pow((min(Double(t.v)/255.0/0.5, 1) + 0.055)/1.055, 2.4)   // old order, mirrored
+    let right = Double(WetKM.straightLinear(b: t.v, g: t.v, r: t.v, a: t.a).color.x)
+    return wrong / right >= 1.9
+}())
+
+// --- WetKM: spectral Kubelka-Munk mix (CanvasRenderer.kmMixCPU / wetStampFragment) ---
+let kmTables = WetKM.buildTables()
+func km(_ a: SIMD3<Float>, _ b: SIMD3<Float>, _ t: Float) -> SIMD3<Float> {
+    WetKM.mix(a, b, t, basis: kmTables.basis, mat: kmTables.mat)
+}
+let kmRed = SIMD3<Float>(0.8, 0.1, 0.1), kmBlue = SIMD3<Float>(0.1, 0.1, 0.9)
+// Endpoint-exact residual correction: t=0 → a, t=1 → b (the property the residual exists for).
+check("KM endpoint t=0", Double(km(kmRed, kmBlue, 0).x), Double(kmRed.x), tol: 1e-3)
+check("KM endpoint t=1", Double(km(kmRed, kmBlue, 1).z), Double(kmBlue.z), tol: 1e-3)
+// The reason spectral KM exists at all: blue + yellow → GREEN (per-channel KM collapses
+// this to ~black; see pro-brush-roadmap Phase 4 + the wet-paint-color-spike).
+let by = km(SIMD3<Float>(0.1, 0.1, 0.9), SIMD3<Float>(0.9, 0.9, 0.1), 0.5)
+checkBool("KM blue+yellow → green dominant (g>r, g>b)", by.y > by.x && by.y > by.z)
+checkBool("KM blue+yellow green is meaningfully green (g > 0.15)", by.y > 0.15)
+// KS-space interpolation at t=0.5 is symmetric in its endpoints.
+let ab = km(kmRed, kmBlue, 0.5), ba = km(kmBlue, kmRed, 0.5)
+checkBool("KM mix symmetric at t=0.5", abs(ab.x - ba.x) < 1e-5 && abs(ab.y - ba.y) < 1e-5 && abs(ab.z - ba.z) < 1e-5)
+// White load over white canvas stays white (no drift toward gray).
+let ww = km(SIMD3<Float>(1, 1, 1), SIMD3<Float>(1, 1, 1), 0.5)
+checkBool("KM white+white ≈ white", ww.x > 0.97 && ww.y > 0.97 && ww.z > 0.97)
+
 // --- per-dab timing (the PLAN's P1 exit-gate; informational, not a hard assert) ---
 // Worst-case dynamic brush: multi-sensor size + flow + rotation + scatter, all non-identity.
 // Measures the per-dab CPU cost the dynamics path adds on top of the legacy effectiveWidth call.

@@ -1,5 +1,12 @@
-import UIKit
+// Deliberately UIKit-free (Foundation + CoreGraphics + ImageIO instead) so the
+// BrushHarness can compile this file for macOS and run the real engine headless —
+// see BrushHarness/README.md. Keep it that way: UIImage/UIColor conversions belong
+// in MetalCanvasView / CanvasViewModel, not here.
+import Foundation
+import CoreGraphics
+import ImageIO
 import Metal
+import QuartzCore
 import CoreImage
 import simd
 
@@ -33,6 +40,11 @@ public final class CanvasRenderer {
     /// Phase 4). nil if pipeline creation failed (e.g. on the Simulator, which doesn't
     /// support framebuffer fetch) — callers must guard on it.
     private let wetStampPSO: MTLRenderPipelineState?
+
+    /// False where framebuffer fetch is unsupported (the Simulator), i.e. the wet PSO
+    /// failed to build. Callers use this to skip wet-stroke bookkeeping (undo snapshot,
+    /// dirty/stroke count) so an invisible no-op stroke doesn't create undo entries.
+    var isWetRenderingAvailable: Bool { wetStampPSO != nil }
     private let compositorPSO: MTLRenderPipelineState
 
     /// Debug toggle for the Phase-4 draw-order experiment: when true, wet stamps are
@@ -641,106 +653,50 @@ public final class CanvasRenderer {
         cmdBuf.commit()
     }
 
+    /// Block until every command buffer submitted so far on the renderer's queue has
+    /// completed (empty buffer + same-queue ordering). **BrushHarness-only**: on device,
+    /// touch batches arrive ~8 ms apart so the GPU keeps up with the wet brush's CPU
+    /// pickup reads; a headless loop submits batches back-to-back and would sample a much
+    /// staler canvas without draining. NEVER call this on the app's interactive path
+    /// (see Performance invariants in CLAUDE.md).
+    func waitUntilQueueDrained() {
+        guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
+        cmdBuf.commit()
+        cmdBuf.waitUntilCompleted()
+    }
+
     // MARK: - Wet Kubelka-Munk setup + CPU helpers (pro-brush Phase 4 Step 2)
 
-    /// Build the spectral-mixing tables once: the 7 Mallett-Yuksel basis reflectance
-    /// spectra (locked tuning) and the per-band spectrum→linear-RGB matrix (Wyman CMF
-    /// approx + D65). Ported from the km_tune_final spike. CPU copies are kept for
-    /// per-stroke brush upsampling; Float buffers are uploaded for the fragment shader.
+    /// Build the spectral-mixing tables once. The math lives in `WetKM` (UIKit/Metal-free
+    /// so OfflineTests can assert the shipped tables + mix on macOS); this keeps the CPU
+    /// copies for per-stroke brush upsampling and uploads Float buffers for the shader.
     private func setupWetKMTables() {
         let NB = Self.wetNB
-        let wl: [Double] = (0..<NB).map { 400.0 + Double($0) * (300.0 / Double(NB - 1)) }
-        func g(_ x: Double, _ mu: Double, _ s1: Double, _ s2: Double) -> Double {
-            let t = (x - mu) * (x < mu ? 1/s1 : 1/s2); return exp(-0.5 * t * t)
-        }
-        func xbar(_ l: Double) -> Double { 1.056*g(l,599.8,37.9,31.0) + 0.362*g(l,442.0,16.0,26.7) - 0.065*g(l,501.1,20.4,26.2) }
-        func ybar(_ l: Double) -> Double { 0.821*g(l,568.8,46.9,40.5) + 0.286*g(l,530.9,16.3,31.1) }
-        func zbar(_ l: Double) -> Double { 1.217*g(l,437.0,11.8,36.0) + 0.681*g(l,459.0,26.0,13.8) }
-        func d65(_ l: Double) -> Double { 100.0*exp(-0.5*pow((l-470)/260,2)) + 12.0*exp(-0.5*pow((l-600)/90,2)) }
-        let ill = wl.map(d65), xb = wl.map(xbar), yb = wl.map(ybar), zb = wl.map(zbar)
-        var knorm = 0.0; for i in 0..<NB { knorm += ill[i]*yb[i] }
-
-        var mat = [SIMD3<Double>](repeating: .zero, count: NB)
-        for i in 0..<NB {
-            let e = ill[i] / knorm
-            let X = e*xb[i], Y = e*yb[i], Z = e*zb[i]
-            mat[i] = SIMD3<Double>(
-                 3.2406*X - 1.5372*Y - 0.4986*Z,
-                -0.9689*X + 1.8758*Y + 0.0415*Z,
-                 0.0557*X - 0.2040*Y + 1.0570*Z)
-        }
-
-        func clampS(_ v: Double) -> Double { max(0.004, min(1.0, v)) }
-        func sig(_ x: Double) -> Double { 1/(1+exp(-x)) }
-        func bump(_ l: Double, _ mu: Double, _ w: Double) -> Double { exp(-0.5*pow((l-mu)/w,2)) }
-        let aS = 0.32, wS = 26.0, aR = 0.32   // locked blue-basis tuning
-        func basis(_ k: Int, _ l: Double) -> Double {
-            switch k {
-            case 0: return clampS(0.985)                                              // white
-            case 1: return clampS(0.02 + 0.96*sig((555 - l)/20))                      // cyan
-            case 2: return clampS(0.02 + 0.96*(sig((465 - l)/18) + sig((l-595)/18)))  // magenta
-            case 3: return clampS(0.02 + 0.96*sig((l - 520)/16))                      // yellow
-            case 4: return clampS(0.02 + 0.96*sig((l - 595)/10))                      // red
-            case 5: return clampS(0.02 + 0.96*bump(l,540,42))                         // green
-            default: return clampS(0.02 + 0.96*(bump(l,458,32) + aS*bump(l,520,wS) + aR*bump(l,660,30)) * sig((l-415)/12)) // blue
-            }
-        }
-        var basisD = [[Double]]()
-        for k in 0..<7 { basisD.append(wl.map { basis(k, $0) }) }
-        wetBasisD = basisD
-        wetMat = mat
+        let tables = WetKM.buildTables()
+        wetBasisD = tables.basis
+        wetMat = tables.mat
 
         var basisF = [Float](repeating: 0, count: 7*NB)
-        for k in 0..<7 { for i in 0..<NB { basisF[k*NB+i] = Float(basisD[k][i]) } }
+        for k in 0..<7 { for i in 0..<NB { basisF[k*NB+i] = Float(tables.basis[k][i]) } }
         var matF = [Float](repeating: 0, count: NB*3)
-        for i in 0..<NB { matF[i*3+0] = Float(mat[i].x); matF[i*3+1] = Float(mat[i].y); matF[i*3+2] = Float(mat[i].z) }
+        for i in 0..<NB { matF[i*3+0] = Float(tables.mat[i].x); matF[i*3+1] = Float(tables.mat[i].y); matF[i*3+2] = Float(tables.mat[i].z) }
         wetBasisBuffer = device.makeBuffer(bytes: basisF, length: basisF.count * MemoryLayout<Float>.size, options: .storageModeShared)
         wetMatBuffer = device.makeBuffer(bytes: matF, length: matF.count * MemoryLayout<Float>.size, options: .storageModeShared)
     }
-
-    /// Mallett-Yuksel sorted-channel upsample: linear RGB → 36-band reflectance spectrum.
-    private func wetUpsample(_ lin: SIMD3<Double>) -> [Double] {
-        let NB = Self.wetNB
-        let r = max(0, lin.x), gc = max(0, lin.y), b = max(0, lin.z)
-        var w = [Double](repeating: 0, count: 7)   // white,cyan,magenta,yellow,red,green,blue
-        let mn = min(r, min(gc, b)); w[0] = mn
-        let rr = r - mn, gg = gc - mn, bb = b - mn
-        if rr <= gg && rr <= bb { w[1] = min(gg, bb); if gg > bb { w[5] = gg - bb } else { w[6] = bb - gg } }
-        else if gg <= rr && gg <= bb { w[2] = min(rr, bb); if rr > bb { w[4] = rr - bb } else { w[6] = bb - rr } }
-        else { w[3] = min(rr, gg); if rr > gg { w[4] = rr - gg } else { w[5] = gg - rr } }
-        var spec = [Double](repeating: 0, count: NB)
-        for k in 0..<7 where w[k] > 0 { let bs = wetBasisD[k]; for i in 0..<NB { spec[i] += w[k]*bs[i] } }
-        for i in 0..<NB { spec[i] = max(0.004, min(1.0, spec[i])) }
-        return spec
-    }
-
-    private static func ksD(_ R: Double) -> Double { let r = max(1e-4, min(1.0-1e-6, R)); return (1-r)*(1-r)/(2*r) }
-    private static func rFromKSD(_ ks: Double) -> Double { max(0, min(1, 1 + ks - sqrt(ks*ks + 2*ks))) }
 
     /// Spectral Kubelka-Munk mix of two linear-RGB colors on the CPU (same model as the
     /// wet shader). Used to evolve the brush's carried LOAD as it picks up canvas color
     /// (Step 3 smear). Endpoint-exact: t=0 → a, t=1 → b.
     func kmMixCPU(_ a: SIMD3<Float>, _ b: SIMD3<Float>, _ t: Float) -> SIMD3<Float> {
-        let td = Double(t)
-        let aD = SIMD3<Double>(Double(a.x), Double(a.y), Double(a.z))
-        let bD = SIMD3<Double>(Double(b.x), Double(b.y), Double(b.z))
-        let sa = wetUpsample(aD), sb = wetUpsample(bD)
-        var mixLin = SIMD3<Double>.zero, aRT = SIMD3<Double>.zero, bRT = SIMD3<Double>.zero
-        for i in 0..<Self.wetNB {
-            let A = wetMat[i]
-            aRT += sa[i] * A; bRT += sb[i] * A
-            let ksm = Self.ksD(sa[i]) * (1 - td) + Self.ksD(sb[i]) * td
-            mixLin += Self.rFromKSD(ksm) * A
-        }
-        func cl(_ v: SIMD3<Double>) -> SIMD3<Double> { SIMD3(max(0,min(1,v.x)), max(0,min(1,v.y)), max(0,min(1,v.z))) }
-        let m = cl(mixLin), ar = cl(aRT), br = cl(bRT)
-        let out = m + (1 - td) * (aD - ar) + td * (bD - br)
-        return SIMD3<Float>(Float(max(0, min(1, out.x))), Float(max(0, min(1, out.y))), Float(max(0, min(1, out.z))))
+        WetKM.mix(a, b, t, basis: wetBasisD, mat: wetMat)
     }
 
     /// Sample the active layer at a canvas-pixel position as a STRAIGHT LINEAR color +
     /// alpha (1×1 getBytes on .shared storage — cheap, coherent for committed paint).
-    /// Used by the wet brush to pick up the canvas color it crosses. Returns nil out of bounds.
+    /// Used by the wet brush to pick up the canvas color it crosses. Returns nil out of
+    /// bounds. Recovery order (decode THEN un-premultiply) is load-bearing — see
+    /// `WetKM.straightLinear` (the old divide-then-decode returned semi-transparent
+    /// paint up to ~3× too light; fixed 2026-07-14).
     func sampleLayerColor(x: Int, y: Int) -> (color: SIMD3<Float>, alpha: Float)? {
         guard let tex = activeLayerTexture, x >= 0, y >= 0, x < canvasWidth, y < canvasHeight else { return nil }
         var bgra = [UInt8](repeating: 0, count: 4)
@@ -748,14 +704,37 @@ public final class CanvasRenderer {
             tex.getBytes(ptr.baseAddress!, bytesPerRow: 4,
                          from: MTLRegionMake2D(x, y, 1, 1), mipmapLevel: 0)
         }
-        let a = Float(bgra[3]) / 255.0
-        guard a > 1e-4 else { return (SIMD3<Float>(0, 0, 0), 0) }
-        // BGRA, sRGB-encoded, premultiplied → straight sRGB → linear.
-        func s2l(_ c: Float) -> Float { c <= 0.04045 ? c/12.92 : pow((c+0.055)/1.055, 2.4) }
-        let b = Float(bgra[0]) / 255.0 / a
-        let g = Float(bgra[1]) / 255.0 / a
-        let r = Float(bgra[2]) / 255.0 / a
-        return (SIMD3<Float>(s2l(min(r,1)), s2l(min(g,1)), s2l(min(b,1))), a)
+        return WetKM.straightLinear(b: bgra[0], g: bgra[1], r: bgra[2], a: bgra[3])
+    }
+
+    /// Like `sampleLayerColor`, but averages a (2·radius+1)² neighborhood (clamped at the
+    /// canvas edge) in the PREMULTIPLIED-LINEAR domain — decode each texel, sum premult +
+    /// alpha, un-premultiply the sums — so semi-transparent texels contribute in proportion
+    /// to their coverage instead of biasing the straight color. Used to seed the smudge
+    /// load: a single texel makes the seed jittery on noisy/textured paint, while the GPU
+    /// deposit sees a soft-coverage footprint.
+    func sampleLayerColorAveraged(x: Int, y: Int, radius: Int = 1) -> (color: SIMD3<Float>, alpha: Float)? {
+        guard let tex = activeLayerTexture, x >= 0, y >= 0, x < canvasWidth, y < canvasHeight else { return nil }
+        let x0 = max(0, x - radius), x1 = min(canvasWidth - 1, x + radius)
+        let y0 = max(0, y - radius), y1 = min(canvasHeight - 1, y + radius)
+        let w = x1 - x0 + 1, h = y1 - y0 + 1
+        var bytes = [UInt8](repeating: 0, count: w * h * 4)
+        bytes.withUnsafeMutableBytes { ptr in
+            tex.getBytes(ptr.baseAddress!, bytesPerRow: w * 4,
+                         from: MTLRegionMake2D(x0, y0, w, h), mipmapLevel: 0)
+        }
+        var sumPremult = SIMD3<Float>.zero
+        var sumA: Float = 0
+        for i in 0..<(w * h) {
+            let o = i * 4
+            sumPremult += SIMD3<Float>(WetKM.s2l(Float(bytes[o + 2]) / 255.0),
+                                       WetKM.s2l(Float(bytes[o + 1]) / 255.0),
+                                       WetKM.s2l(Float(bytes[o]) / 255.0))
+            sumA += Float(bytes[o + 3]) / 255.0
+        }
+        guard sumA > 1e-4 else { return (SIMD3<Float>(0, 0, 0), 0) }
+        let straight = simd_clamp(sumPremult / sumA, SIMD3<Float>(repeating: 0), SIMD3<Float>(repeating: 1))
+        return (straight, sumA / Float(w * h))
     }
 
     /// Render a batch of brush stamps directly into the canvas texture (source-over).
@@ -1564,15 +1543,31 @@ public final class CanvasRenderer {
         var out: [String: MTLTexture] = [:]
         for descriptor in BrushShapeCatalog.all {
             guard let resourceName = descriptor.resourceName,
-                  let url = Bundle.module.url(forResource: resourceName, withExtension: "png", subdirectory: "BrushShapes"),
-                  let data = try? Data(contentsOf: url),
-                  let cgImage = UIImage(data: data)?.cgImage,
+                  let data = shapePNGData(resourceName: resourceName),
+                  let source = CGImageSourceCreateWithData(data as CFData, nil),
+                  let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil),
                   let texture = makeGrayscaleMaskTexture(device: device, queue: queue, cgImage: cgImage) else {
                 continue
             }
             out[descriptor.id] = texture
         }
         return out
+    }
+
+    /// Shape-PNG bytes. SwiftPM builds read from the module resource bundle; the
+    /// standalone BrushHarness build (swiftc, no generated `Bundle.module`) reads from
+    /// the directory in the `BRUSH_SHAPES_DIR` env var instead (no textures → shaped
+    /// brushes fall back to the procedural round tip, same as a missing resource).
+    private static func shapePNGData(resourceName: String) -> Data? {
+        #if BRUSH_HARNESS
+        guard let dir = ProcessInfo.processInfo.environment["BRUSH_SHAPES_DIR"] else { return nil }
+        let url = URL(fileURLWithPath: dir).appendingPathComponent("\(resourceName).png")
+        return try? Data(contentsOf: url)
+        #else
+        guard let url = Bundle.module.url(forResource: resourceName, withExtension: "png",
+                                          subdirectory: "BrushShapes") else { return nil }
+        return try? Data(contentsOf: url)
+        #endif
     }
 
     /// Rasterize a (grayscale) PNG into a mipmapped single-channel R8Unorm mask. The

@@ -79,6 +79,9 @@ public struct CanvasView: UIViewRepresentable {
         canvasView.onSnapEvent = { [weak viewModel] event in
             viewModel?.handleSnapEvent(event)
         }
+        canvasView.onStrokeCompleted = { [weak viewModel] stroke in
+            viewModel?.handleStrokeCompleted(stroke)
+        }
 
         // Wire container callbacks.
         container.onTransformChanged = { [weak viewModel] in

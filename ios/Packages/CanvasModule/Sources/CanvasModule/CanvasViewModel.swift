@@ -76,6 +76,15 @@ public final class CanvasViewModel {
     public var onFirstBrushStrokeCommitted: (() -> Void)?
     private var hasFiredFirstBrushStrokeThisSession: Bool = false
 
+    /// Forwarded from `MetalCanvasView.onStrokeCompleted`: every completed brush stroke
+    /// (dry + wet), already normalized to canvas pixels. Used by the dev stroke recorder
+    /// (Brush Studio → "Record strokes" → BrushHarness fixture).
+    public var onStrokeCompleted: ((Stroke) -> Void)?
+
+    func handleStrokeCompleted(_ stroke: Stroke) {
+        onStrokeCompleted?(stroke)
+    }
+
     // MARK: - Lifecycle
 
     public init() {

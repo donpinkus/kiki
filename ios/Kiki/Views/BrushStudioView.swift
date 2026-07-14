@@ -16,6 +16,9 @@ import CanvasModule
 struct BrushStudioView: View {
     @Environment(AppCoordinator.self) private var coordinator
     @State private var dyn: BrushDynamics
+    @State private var recordingShareItem: RecordingShareItem?
+    @State private var uploadNote = ""
+    @State private var uploadState: FixtureUploadState = .idle
 
     init(initial: BrushDynamics?) {
         _dyn = State(initialValue: initial ?? BrushDynamics())
@@ -61,6 +64,54 @@ struct BrushStudioView: View {
                               range: 8...512, fmt: "%.0f")
                 }
 
+                Section("Stroke recorder (BrushHarness fixtures)") {
+                    Toggle("Record strokes", isOn: Binding(
+                        get: { coordinator.isRecordingStrokes }, set: { coordinator.isRecordingStrokes = $0 }))
+                    TextField("Note (what's wrong / what to look at)", text: $uploadNote)
+                        .font(.caption)
+                        .textFieldStyle(.roundedBorder)
+                    HStack {
+                        Text("\(coordinator.recordedStrokes.count) stroke\(coordinator.recordedStrokes.count == 1 ? "" : "s") recorded")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Clear") {
+                            coordinator.recordedStrokes.removeAll()
+                            uploadState = .idle
+                        }
+                            .font(.caption)
+                            .disabled(coordinator.recordedStrokes.isEmpty)
+                        Button("Share…") {
+                            if let url = coordinator.exportRecordedStrokesURL() {
+                                recordingShareItem = RecordingShareItem(url: url)
+                            }
+                        }
+                            .font(.caption)
+                            .disabled(coordinator.recordedStrokes.isEmpty)
+                        Button(uploadState == .uploading ? "Uploading…" : "Upload") {
+                            uploadState = .uploading
+                            let note = uploadNote
+                            Task {
+                                let ok = await coordinator.uploadRecordedFixture(note: note.isEmpty ? nil : note)
+                                uploadState = ok ? .done : .failed
+                            }
+                        }
+                            .font(.caption.weight(.medium))
+                            .disabled(coordinator.recordedStrokes.isEmpty || uploadState == .uploading)
+                    }
+                    switch uploadState {
+                    case .idle: EmptyView()
+                    case .uploading: EmptyView()
+                    case .done:
+                        Text("Uploaded ✓ — strokes + canvas snapshot are in Insights (fetch-fixtures.sh)")
+                            .font(.caption2).foregroundStyle(.green)
+                    case .failed:
+                        Text("Upload failed — check network / sign-in, or use Share… as fallback")
+                            .font(.caption2).foregroundStyle(.red)
+                    }
+                    Text("Upload sends the stroke data (for exact replay) + a PNG of the canvas to Kiki Insights — a one-tap brush bug report. Share… is the offline AirDrop fallback.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+
                 curveSection("Size", option: $dyn.size, fold: .sizeLike, defaultSensor: .pressure)
                 curveSection("Flow", option: $dyn.flow, fold: .sizeLike, defaultSensor: .pressure)
                 curveSection("Rotation", option: $dyn.rotation, fold: .rotationLike, defaultSensor: .drawingAngle)
@@ -78,6 +129,9 @@ struct BrushStudioView: View {
             }
             .onChange(of: dyn) { _, new in
                 coordinator.toolDynamics = new.isInert ? nil : new
+            }
+            .sheet(item: $recordingShareItem) { item in
+                ShareSheet(activityItems: [item.url])
             }
         }
     }
@@ -353,3 +407,11 @@ private struct FlowChips: View {
         }
     }
 }
+
+/// Identifiable URL wrapper for `.sheet(item:)` (same pattern as ReplayShareItem).
+private struct RecordingShareItem: Identifiable {
+    let url: URL
+    var id: URL { url }
+}
+
+private enum FixtureUploadState { case idle, uploading, done, failed }

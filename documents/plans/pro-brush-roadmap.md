@@ -26,10 +26,24 @@ Shipped to `origin/main` and verified on device:
 
 Wet-paint follow-ups / known tradeoffs:
 - The per-stamp canvas read sees **committed** paint only, not the in-flight current stroke →
-  smearing your *own* just-laid paint within one stroke is approximate. The "truer" fix is a
+  smearing your *own* just-laid paint within one stroke is approximate. It is also
+  **timing-dependent**: stamps commit async (no waitUntilCompleted), so whether earlier
+  batches of the same stroke have landed when the CPU samples depends on GPU scheduling —
+  the same gesture can smear slightly differently run to run. The "truer" fix for both is a
   **GPU reservoir** (carry the load in a small texture updated in the wet pass).
+- **Low-Mix strokes still opacify + tint soft edges** (chosen tradeoff, 2026-07-14 review):
+  alpha builds by *coverage* regardless of deposit, and `dstLin = mix(brushLin, under, dst.a)`
+  leaks the load color into any semi-transparent pixel even at near-zero Mix. So a wet pass
+  over an AA fringe fills it toward the load color and hardens it opaque — and smudge's
+  "no new ink" contract bends at soft edges. This is the cost of the deliberate "no white
+  halo" design (opaque wet paint); revisit only alongside the GPU reservoir.
+- Wet ignores Shape/Flow/Taper and Brush Studio dynamics (round tip, own deposit model);
+  the popover grays these out while wet is on. Honoring size dynamics is a cheap later add.
 - A **Smudge preset** (Mix low / Smear high) is a trivial add once presets exist.
 - KM gotcha: clamp integrated linear RGB to [0,1] **before** the endpoint-residual correction.
+- KM/recovery math lives in `WetKM.swift` (UIKit-free) so `OfflineTests` asserts the shipped
+  tables, mix, and premult-texel recovery on macOS (the 2026-07-14 decode-order fix is
+  regression-pinned there).
 
 ## Context
 

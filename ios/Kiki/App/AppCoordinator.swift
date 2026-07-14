@@ -198,6 +198,44 @@ final class AppCoordinator {
     /// The active test brush's instruction note (shown in Brush Studio).
     var activeTestNote: String?
 
+    /// DEV stroke recorder (Brush Studio → "Record strokes"): while on, every completed
+    /// brush stroke (dry + wet, canvas-pixel-normalized by MetalCanvasView) is appended
+    /// here, exportable as a BrushHarness fixture JSON via the share sheet. See
+    /// `ios/Packages/CanvasModule/BrushHarness/README.md`.
+    var isRecordingStrokes = false
+    var recordedStrokes: [Stroke] = []
+
+    /// Write the recording as a BrushFixture JSON to a temp file for sharing
+    /// (AirDrop/Files → replay with `brushharness --fixtures <file>`).
+    func exportRecordedStrokesURL() -> URL? {
+        guard let data = recordedFixtureJSON() else { return nil }
+        let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("brush-strokes-\(stamp).json")
+        do { try data.write(to: url) } catch { return nil }
+        return url
+    }
+
+    private func recordedFixtureJSON() -> Data? {
+        guard !recordedStrokes.isEmpty else { return nil }
+        let fixture = BrushFixture(name: nil, canvasSide: 2048, strokes: recordedStrokes)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return try? encoder.encode(fixture)
+    }
+
+    /// One-tap fixture upload to Kiki Insights: the stroke JSON (for BrushHarness
+    /// replay) plus a PNG snapshot of the current canvas (so a verbal description
+    /// has a picture to point at — the "brush bug report" button). Returns success
+    /// for UI confirmation. Fetched Mac-side via `BrushHarness/fetch-fixtures.sh`.
+    func uploadRecordedFixture(note: String?) async -> Bool {
+        guard let json = recordedFixtureJSON() else { return false }
+        let snapshot = canvasViewModel.generateThumbnail(maxDimension: 1024)?.pngData()
+        return await InsightsSink.shared.uploadFixture(
+            name: nil, note: note, strokeCount: recordedStrokes.count,
+            fixtureJSON: json, snapshotPNG: snapshot)
+    }
+
     // MARK: - Per-tool stored settings
 
     /// While true, toolSize / toolOpacity / toolFlow / toolStreamline didSet should skip
@@ -594,6 +632,11 @@ final class AppCoordinator {
         // Eyedropper: commit picked colors to currentColor
         canvasViewModel.onColorPicked = { [weak self] uiColor in
             self?.currentColor = Color(uiColor: uiColor)
+        }
+        // DEV stroke recorder: capture completed strokes while recording is on.
+        canvasViewModel.onStrokeCompleted = { [weak self] stroke in
+            guard let self, self.isRecordingStrokes else { return }
+            self.recordedStrokes.append(stroke)
         }
         // Supply the current brush color to the canvas ring preview
         canvasViewModel.currentBrushColorProvider = { [weak self] in

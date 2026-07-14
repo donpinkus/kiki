@@ -10,15 +10,32 @@ struct BrushSettingsPopover: View {
     var body: some View {
         @Bindable var coordinator = coordinator
 
+        // Controls the wet path doesn't consume (it's a procedural round tip with its own
+        // deposit model — no shape texture, no per-dab flow, no taper). Gray them out while
+        // Wet paint is on rather than letting them silently do nothing.
+        let wet = coordinator.toolWetEnabled
+
         VStack(alignment: .leading, spacing: 18) {
-            BrushShapePicker(selection: $coordinator.toolShapeID)
+            Group {
+                BrushShapePicker(selection: $coordinator.toolShapeID)
+            }
+            .disabled(wet)
+            .opacity(wet ? 0.35 : 1)
 
             BrushSliderRow("Opacity", value: $coordinator.toolOpacity, range: 0.05...1.0, help: Self.help["Opacity"]!)
-            BrushSliderRow("Flow", value: $coordinator.toolFlow, range: 0.05...1.0, help: Self.help["Flow"]!)
+            Group {
+                BrushSliderRow("Flow", value: $coordinator.toolFlow, range: 0.05...1.0, help: Self.help["Flow"]!)
+            }
+            .disabled(wet)
+            .opacity(wet ? 0.35 : 1)
             BrushSliderRow("Stabilize", value: $coordinator.toolStreamline, range: 0.0...1.0, help: Self.help["Stabilize"]!)
             BrushSliderRow("Hardness", value: $coordinator.toolHardness, range: 0.0...1.0, help: Self.help["Hardness"]!)
             BrushSliderRow("Spacing", value: $coordinator.toolSpacing, range: 0.02...1.0, help: Self.help["Spacing"]!)
-            BrushSliderRow("Taper", value: $coordinator.toolTaper, range: 0.0...1.0, help: Self.help["Taper"]!)
+            Group {
+                BrushSliderRow("Taper", value: $coordinator.toolTaper, range: 0.0...1.0, help: Self.help["Taper"]!)
+            }
+            .disabled(wet)
+            .opacity(wet ? 0.35 : 1)
 
             Divider()
             Toggle(isOn: $coordinator.toolWetEnabled) {
@@ -26,6 +43,9 @@ struct BrushSettingsPopover: View {
                 + Text("  (experimental)").font(.caption).foregroundColor(.secondary)
             }
             if coordinator.toolWetEnabled {
+                Text("Wet paint uses a round tip — Shape, Flow, Taper and Brush Studio dynamics don't apply. Opacity scales the deposit.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
                 BrushSliderRow("Mix", value: $coordinator.toolWetStrength, range: 0.05...1.0, help: Self.help["Mix"]!)
                 BrushSliderRow("Smear", value: $coordinator.toolWetPickup, range: 0.0...1.0, help: Self.help["Smear"]!)
             }
@@ -41,7 +61,8 @@ struct BrushSettingsPopover: View {
                     .font(.subheadline.weight(.medium))
             }
             if coordinator.toolDynamics != nil {
-                Text("Dynamics active").font(.caption).foregroundColor(.secondary)
+                Text(wet ? "Dynamics active (ignored while Wet paint is on)" : "Dynamics active")
+                    .font(.caption).foregroundColor(.secondary)
             }
         }
         .padding(20)

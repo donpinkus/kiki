@@ -1,5 +1,15 @@
 # CanvasModule — Metal Drawing Engine
 
+## Dev loop: BrushHarness (headless macOS rendering)
+
+Brush/color-mixing work does NOT need an iPad round-trip: `BrushHarness/` compiles the
+real engine (CanvasRenderer + StrokeStampGenerator + WetStrokeWalker) into a macOS CLI
+that renders synthetic strokes and recorded fixtures to PNGs — **including the wet brush**
+(Apple-silicon Macs have framebuffer fetch; the iOS Simulator does not). Run instructions:
+`BrushHarness/README.md`. Recorded fixtures come from the app: Brush Studio → "Record
+strokes" → share the JSON → `brushharness --fixtures <file>`. Device testing remains for
+feel/latency/input only.
+
 ## Critical Rules (NEVER violate)
 
 ### Color pipeline — the one correct mental model (read this BEFORE touching color)
@@ -22,8 +32,9 @@ Our intuition here was wrong repeatedly and shipped real bugs: washed-out export
 - ❌ "The texture is `_srgb`, so read it back with `CIImage(mtlTexture:, colorSpace: .sRGB)`." → re-decodes already-linear texels → darkens every snapshot/thumbnail/save, compounding to black. ✅ **linearSRGB.**
 - ❌ "`brush.color` is the sRGB color I picked, so pack it straight into the stamp." → the `_srgb` store re-encodes it → strokes land a shade too light (and eyedropper sample→repaint compounds *lighter*). ✅ **convert sRGB→linear (`s2l`) first.**
 - ❌ "To read a canvas pixel, render the view/layer into a CGContext (`CALayer.render`/`drawHierarchy`)." → a `CAMetalLayer`'s pixels live in a GPU drawable; `CALayer.render` captures **nothing** (you read the white background). ✅ **read a Metal snapshot** (`opaqueImageSnapshot`/`flattenedCGImage`), then sample it.
-- ❌ "`CGColorSpaceCreateDeviceRGB()` is the neutral default RGB." → it's **Display P3** on iPads; it gamut-shifts sRGB data a shade darker/desaturated. ✅ explicit `CGColorSpace(name: CGColorSpace.sRGB)!`.
+- ⚠️ Retracted (2026-07-13): we previously listed "`CGColorSpaceCreateDeviceRGB()` is Display P3 on iPads" here as a shipped bug. **Empirically false** — in iOS bitmap contexts DeviceRGB is an sRGB pass-through (byte-identical in both directions; verified with a standalone CG binary in the iOS-runtime simulator). The 2026-06-08 eyedropper drift came from the other bugs fixed in the same commit (`968a454`): `CALayer.render` capturing nothing, a Y-flip, and the sRGB-vs-linearSRGB re-decode. Still prefer explicit `CGColorSpace(name: CGColorSpace.sRGB)!` — it states intent — but existing DeviceRGB call sites are not color bugs.
 - ❌ "Both color paths looked fine, so the pipeline is fine." → a lighten bug and a darken bug **cancel out** until one side is touched. The eyedropper round-trip is what exposed both. ✅ **always test the full loop: pick → paint → eyedrop → repaint → save → reopen.** A single hop proves nothing.
+- ❌ "To recover a straight color from a premultiplied `_srgb` texel, divide the byte by alpha, then decode." → premultiplication lives in **LINEAR** space (`stored = sRGB_encode(linear × α)`), and s2l is nonlinear, so the order is load-bearing. ✅ **decode FIRST, then un-premultiply** (`s2l(byte)/α`). The reverse order shipped in the wet brush's `sampleLayerColor` — the smear picked up semi-transparent paint up to ~3× too light (fixed 2026-07-14; see `WetKM.straightLinear` + the OfflineTests regression check). The GPU never had the bug: framebuffer fetch of an `_srgb` attachment is already linear.
 
 The detailed rules below expand each of these.
 
@@ -46,7 +57,7 @@ CIContext is cached on `CanvasRenderer` (created once at init, backed by the sam
 
 ### Color Space — Always Explicit sRGB
 
-**NEVER use `CGColorSpaceCreateDeviceRGB()`** — on modern iPads it returns Display P3 (wider gamut). The canvas texture is `.bgra8Unorm_srgb` (sRGB). If CIContext/CGImage operations use P3 while the data is sRGB, colors appear more saturated in UIKit views (UIImageView, UIGraphicsImageRenderer) vs the Metal canvas (which correctly presents as sRGB via CAMetalLayer).
+Use explicit sRGB, not `CGColorSpaceCreateDeviceRGB()`, so color intent is auditable at every call site. **Correction (2026-07-13):** this section used to claim DeviceRGB "returns Display P3 on modern iPads" — that is false. Verified empirically (standalone CG binary in the iOS-runtime simulator): drawing an sRGB-tagged image into a DeviceRGB bitmap context is byte-identical (no gamut conversion), and DeviceRGB-tagged sources are treated as sRGB; an explicit Display P3 context, by contrast, really converts (sRGB 255,0,0 → 234,51,35). So the existing DeviceRGB call sites (`DiskColorPicker.generateSBImage`, `EyedropperRing.sampleColor`, the `DrawingVideoRecorder` fallback) behave identically to sRGB — don't "fix" them expecting a visible change, and don't cite DeviceRGB as a root cause for color drift.
 
 **ALWAYS use `CGColorSpace(name: CGColorSpace.sRGB)!`** for:
 - `CIContext` working color space
@@ -58,11 +69,11 @@ CIContext is cached on `CanvasRenderer` (created once at init, backed by the sam
 
 The only sRGB tags in this round-trip are on CGImage/PNG *outputs* (a CGImage that leaves the Metal world should be sRGB-tagged so UIKit/SwiftUI display it correctly) and on a CGImage *input* being loaded (`CIImage(cgImage:)` of an sRGB PNG). The `_srgb`-texture endpoints are always linearSRGB.
 
-### UIGraphicsImageRenderer — Always Force sRGB
+### UIGraphicsImageRenderer — Force `.standard` Range (convention)
 
-`UIGraphicsImageRenderer(size:)` defaults to the display's color space — **Display P3** on modern iPads. Any image produced by a default renderer will be P3-tagged, causing a saturation mismatch when displayed alongside the sRGB Metal canvas (via CAMetalLayer).
+**Correction (2026-07-13):** this section used to claim the default renderer produces **Display P3**-tagged images. Unsupported — in the iOS-runtime simulator the default `preferredRange` is `.standard` (sRGB) and a rendered pixel round-trips losslessly; on wide-color hardware the default may resolve to `.extended`, which is *extended sRGB* — in-gamut sRGB values are preserved exactly, so no saturation mismatch either way. Forcing `.standard` costs nothing and pins the format explicitly (plus avoids extended-range surprises for out-of-gamut inputs), so keep the convention — just don't expect it to change colors.
 
-**ALWAYS create renderers with explicit sRGB format:**
+**Create renderers with explicit sRGB format:**
 ```swift
 let format = UIGraphicsImageRendererFormat()
 format.preferredRange = .standard  // sRGB
@@ -161,8 +172,12 @@ MetalCanvasView (UIView, CAMetalLayer)
 
 | File | Role |
 |------|------|
-| `MetalCanvasView.swift` | UIView, touch handling, CADisplayLink render loop, stamp generation, undo, lasso |
-| `CanvasRenderer.swift` | Metal device/queue/pipelines, Layer struct, texture management, render passes, CIContext, shaders (embedded MSL) |
+| `MetalCanvasView.swift` | UIView, touch handling, CADisplayLink render loop, undo, lasso |
+| `CanvasRenderer.swift` | Metal device/queue/pipelines, Layer struct, texture management, render passes, CIContext, shaders (embedded MSL). **UIKit-free** (compiles on macOS for BrushHarness) — keep it that way |
+| `StrokeStampGenerator.swift` | The pure stroke→stamps dab pipeline (dynamics, jitter, scatter, taper). Extracted from MetalCanvasView so BrushHarness runs the identical shipped code headless |
+| `WetStrokeWalker.swift` | The wet brush's incremental stroke walk + carried-load smear (pure; canvas access injected as closures) |
+| `WetKM.swift` | Spectral KM tables/mix + premult-`_srgb`-texel recovery (pure; asserted by OfflineTests) |
+| `BrushFixture.swift` | Recorded-stroke JSON contract between the iPad recorder (Brush Studio) and BrushHarness |
 | `CanvasViewModel.swift` | @Observable bridge between AppCoordinator and MetalCanvasView, snapshot/thumbnail compositing |
 | `CanvasView.swift` | UIViewRepresentable wrapper, callback wiring |
 | `RotatableCanvasContainer.swift` | Gesture handling (zoom/rotate/pan), cursor overlay, background image, lasso selection view. Also hosts app-overlay hooks: `externalTransformRegionProvider`/`onExternalTransform` (forward a two-finger gesture that starts over a registered rect — e.g. the fullscreen result panel — instead of transforming the canvas) and `onContactPointChanged` (reports the live single-touch contact point + brush diameter in pane space for the panel transparency-hole effect). |

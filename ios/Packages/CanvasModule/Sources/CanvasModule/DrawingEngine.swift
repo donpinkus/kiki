@@ -1,4 +1,10 @@
+// UIKit is optional here (macOS BrushHarness compiles this file too); only the
+// `CodableColor.uiColor` convenience needs it.
+import Foundation
+import CoreGraphics
+#if canImport(UIKit)
 import UIKit
+#endif
 
 // MARK: - Layer Info
 
@@ -69,9 +75,11 @@ public struct CodableColor: Codable, Sendable, Equatable {
     public static let black = CodableColor(red: 0, green: 0, blue: 0)
     public static let white = CodableColor(red: 1, green: 1, blue: 1)
 
+    #if canImport(UIKit)
     public var uiColor: UIColor {
         UIColor(red: red, green: green, blue: blue, alpha: alpha)
     }
+    #endif
 }
 
 // MARK: - Brush Configuration
