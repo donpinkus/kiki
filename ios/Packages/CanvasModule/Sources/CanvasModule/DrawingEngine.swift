@@ -185,7 +185,9 @@ public struct BrushConfig: Codable, Sendable {
     public static let defaultPen = BrushConfig(color: .black, baseWidth: 5, pressureGamma: 0.7)
 
     /// Valid width range for the pen and eraser tools.
-    public static let widthRange: ClosedRange<CGFloat> = 1...100
+    // Floor is 2.5, not 1: on the log-scale size slider sub-2.5 px sizes ate 20% of the
+    // travel and aren't useful strokes at 2048² document resolution.
+    public static let widthRange: ClosedRange<CGFloat> = 2.5...100
 
     /// Compute effective stroke width for a given pressure and tilt.
     public func effectiveWidth(force: CGFloat, altitude: CGFloat = .pi / 2) -> CGFloat {
