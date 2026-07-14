@@ -1,17 +1,21 @@
 # iOS TestFlight release
 
-How to ship a new Kiki build to TestFlight. There is **no fastlane/CI** — releases are a single
-script driven by an App Store Connect API key.
+**This script is the standard, repeatable way to ship *every* TestFlight build — now and going
+forward.** It is not a one-off; run it for every release. There is **no fastlane/CI** — releases are
+this single script, driven by an App Store Connect API key. If someone asks "how do I push a new
+build to testers?", the answer is always: run the script below.
 
-## TL;DR
+## TL;DR — always use this
 
 ```bash
 cd ios && ./scripts/testflight-release.sh
 ```
 
-That picks the next build number (highest on TestFlight + 1), bumps it, archives, exports with
-App Store distribution signing, uploads, waits for processing, and pushes the build to the
-External public-link group (+ submits Beta App Review). Then commit the build-number bump:
+Safe to run any time you want to cut a build; re-runnable and idempotent (it derives the next build
+number from TestFlight each time, and attaching/submitting an already-distributed build is a no-op).
+It picks the next build number (highest on TestFlight + 1), bumps it, archives, exports with App
+Store distribution signing, uploads, waits for processing, and pushes the build to the External
+public-link group (+ submits Beta App Review). Then commit the build-number bump:
 
 ```bash
 git add ios/Kiki.xcodeproj/project.pbxproj && git commit -m "chore(ios): bump build to <N>"
