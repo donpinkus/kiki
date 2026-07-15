@@ -9,13 +9,15 @@
  * `urlFor` returns an app-relative URL served by the /blobs route (admin-gated).
  */
 
-import { mkdir, writeFile, readFile } from 'node:fs/promises';
+import { mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { dirname, join, normalize, resolve, sep } from 'node:path';
 import { config } from './config.js';
 
 export interface BlobStore {
   put(key: string, bytes: Buffer): Promise<void>;
   get(key: string): Promise<Buffer>;
+  /** Idempotent — deleting a missing key is a no-op (retention pruning). */
+  delete(key: string): Promise<void>;
   urlFor(key: string): string;
 }
 
@@ -45,6 +47,10 @@ class VolumeBlobStore implements BlobStore {
 
   async get(key: string): Promise<Buffer> {
     return readFile(safeResolve(this.root, key));
+  }
+
+  async delete(key: string): Promise<void> {
+    await rm(safeResolve(this.root, key), { force: true });
   }
 
   urlFor(key: string): string {

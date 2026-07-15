@@ -81,6 +81,65 @@ async function rollUpSession(
 }
 
 export const ingestRoute: FastifyPluginAsync = async (app) => {
+  // Raw JPEG bodies for /ingest/capture (events are JSON; drawings are
+  // multipart — capture frames arrive at ~1/s/kind per active stream, so the
+  // lean raw-body path beats multipart overhead).
+  app.addContentTypeParser('image/jpeg', { parseAs: 'buffer' }, (_req, body, done) => {
+    done(null, body);
+  });
+
+  // ─── Session replay frame (raw JPEG body) ─────────────────────────────────
+  // Backend-only (service key): mirrors a throttled sample of a live drawing
+  // session. Query params: stream_id, user_id, kind (sketch|generated),
+  // seq (int, per-kind), ts (epoch ms at relay time).
+  app.post('/ingest/capture', async (request, reply) => {
+    let principal;
+    try {
+      principal = await authenticateIngest(request);
+    } catch (err) {
+      request.log.warn({ err: (err as Error).message }, 'capture ingest auth failed');
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    if (principal.source === 'ios') {
+      return reply.code(403).send({ error: 'capture ingest is backend-only' });
+    }
+
+    const q = request.query as Record<string, string | undefined>;
+    const streamId = q['stream_id'];
+    const userId = q['user_id'];
+    const kind = q['kind'];
+    const seq = Number(q['seq']);
+    const ts = Number(q['ts']);
+    const jpeg = request.body as Buffer | undefined;
+
+    if (!streamId || !userId || (kind !== 'sketch' && kind !== 'generated')) {
+      return reply.code(400).send({ error: 'stream_id, user_id, kind=sketch|generated required' });
+    }
+    if (!Number.isInteger(seq) || seq < 1 || !Number.isFinite(ts)) {
+      return reply.code(400).send({ error: 'seq (int ≥1) and ts (epoch ms) required' });
+    }
+    if (!Buffer.isBuffer(jpeg) || jpeg.length === 0) {
+      return reply.code(400).send({ error: 'JPEG body required (Content-Type: image/jpeg)' });
+    }
+    if (jpeg.length > 2 * 1024 * 1024) {
+      return reply.code(400).send({ error: 'frame too large (max 2MB)' });
+    }
+    // stream_id lands in blob paths — reject anything path-shaped.
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(streamId)) {
+      return reply.code(400).send({ error: 'invalid stream_id' });
+    }
+
+    const key = `captures/${streamId}/${kind}-${String(seq).padStart(5, '0')}.jpg`;
+    await blobStore.put(key, jpeg);
+    await query(
+      `INSERT INTO capture_frames (stream_id, user_id, kind, seq, captured_at, blob_key)
+       VALUES ($1, $2, $3, $4, to_timestamp($5 / 1000.0), $6)
+       ON CONFLICT (stream_id, kind, seq) DO NOTHING`,
+      [streamId, userId, kind, seq, ts, key],
+    );
+    return reply.send({ ok: true });
+  });
+
   app.post('/ingest', async (request, reply) => {
     let principal;
     try {

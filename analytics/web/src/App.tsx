@@ -1,9 +1,12 @@
 import { useEffect, useState } from 'react';
-import { Navigate, Route, Routes, useNavigate } from 'react-router-dom';
+import { Link, Navigate, Route, Routes, useNavigate } from 'react-router-dom';
 import { checkAuth, isAuthError, logout } from './api';
 import { Login } from './pages/Login';
 import { Users } from './pages/Users';
 import { UserDetail } from './pages/UserDetail';
+import { Ops } from './pages/Ops';
+import { Gallery } from './pages/Gallery';
+import { Replay } from './pages/Replay';
 
 type AuthState = 'loading' | 'authed' | 'anon';
 
@@ -37,6 +40,11 @@ export function App() {
     <>
       <div className="topbar">
         <h1>Kiki Insights</h1>
+        <nav style={{ display: 'flex', gap: 16, flex: 1, marginLeft: 24 }}>
+          <Link to="/">Users</Link>
+          <Link to="/gallery">Gallery</Link>
+          <Link to="/ops">Ops</Link>
+        </nav>
         <button className="ghost" onClick={onLogout}>
           Sign out
         </button>
@@ -44,6 +52,9 @@ export function App() {
       <Routes>
         <Route path="/" element={<Users />} />
         <Route path="/users/:id" element={<UserDetail />} />
+        <Route path="/gallery" element={<Gallery />} />
+        <Route path="/gallery/:streamId" element={<Replay />} />
+        <Route path="/ops" element={<Ops />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </>

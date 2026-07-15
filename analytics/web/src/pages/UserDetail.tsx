@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
+import { CaptureGrid } from './Gallery';
 import { getUser, type UserDetail as Detail } from '../api';
 
 const fmt = (iso: string | null) => (iso ? new Date(iso).toLocaleString() : '—');
@@ -87,6 +88,10 @@ export function UserDetail() {
           ))}
         </div>
       )}
+
+      {/* Session replays (captured sketch/generated frame streams) */}
+      <div className="section-title">Session replays</div>
+      <CaptureGrid userId={id} />
 
       {/* Drawings gallery */}
       <div className="section-title">Drawings ({drawings.length})</div>

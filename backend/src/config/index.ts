@@ -67,6 +67,43 @@ export interface AppConfig {
    * Only beneficial if fal bills actual connection duration (verify first).
    * A few seconds (e.g. 2000-4000) balances savings vs reconnect churn. */
   readonly FAL_IDLE_CLOSE_MS: number;
+  /** fal keep-warm loop (modules/fal/falWarmer.ts) — env values are only the
+   * SEED for the `admin_config.fal_warmer` row (created at boot if absent);
+   * after that, the row is the runtime truth and is edited live from Kiki
+   * Insights → Ops. fal's marketplace pool for klein/realtime scales to zero
+   * and takes ~2-3.5 min to spin up (measured 2026-07-13), so without warming
+   * the first stroke of a session waits minutes for its first image. */
+  readonly FAL_WARMER_ENABLED: boolean;
+  /** Ping cadence. Binary-searched 2026-07-14: warmth holds at <=120s gaps
+   * (0% cold across 61 pings at 60/90/120s) and collapses at 150s (60% cold).
+   * Default 90s, NOT 120s: the warmer's 30s tick granularity stretches real
+   * gaps up to interval+30s, and 120+30=150s is exactly the cold boundary
+   * (observed in production 2026-07-15: a 150s effective gap → 111s cold
+   * start). 90+30=120s keeps worst-case gaps inside proven-warm territory.
+   * Cost is a non-factor between cadences — fal doesn't bill the cold
+   * spin-up/enqueue wait, only warm-runner-attached time. */
+  readonly FAL_WARMER_INTERVAL_MS: number;
+  /** Daily no-warm window, hours in America/Los_Angeles local time (handles
+   * PST/PDT). Pings are skipped from OFF_START (inclusive) to OFF_END
+   * (exclusive). Default 2→8 (2am-8am Pacific). Equal values = no window. */
+  readonly FAL_WARMER_OFF_START_HOUR: number;
+  readonly FAL_WARMER_OFF_END_HOUR: number;
+
+  // ─── Session capture (admin replay in Kiki Insights) ──────────────────
+  /** When true (default), the stream route mirrors a throttled sample of each
+   * session's sketch JPEGs (iPad→provider) and generated JPEGs (provider→iPad)
+   * to Insights /ingest/capture for admin replay (Insights → Gallery).
+   * PRIVACY: this persists user drawings server-side — it supersedes the old
+   * "sketches are ephemeral" rule (owner decision 2026-07-15). The privacy
+   * policy + App Store data disclosure must reflect it before external users.
+   * No-op unless INSIGHTS_URL + INSIGHTS_INGEST_KEY are also set. */
+  readonly SESSION_CAPTURE_ENABLED: boolean;
+  /** Per-kind capture floor: at most one sketch + one generated frame per this
+   * many ms per stream (default 1000 → ≤2 frames/s stored vs ~4 generated). */
+  readonly SESSION_CAPTURE_MIN_INTERVAL_MS: number;
+  /** Per-kind, per-stream frame cap — bounds storage per session (default 600
+   * ≈ 10 min of active drawing at the 1s floor; ~50 MB worst case). */
+  readonly SESSION_CAPTURE_MAX_FRAMES: number;
 
   // ─── Network volumes (pre-populated with weights, venv, app code) ────
   /** Map of RunPod datacenter ID → network volume ID for IMAGE pods (FLUX
@@ -269,6 +306,13 @@ function validateConfig(): AppConfig {
     IMAGE_PROVIDER: imageProvider,
     FAL_KEY: falKey,
     FAL_IDLE_CLOSE_MS: Number(process.env['FAL_IDLE_CLOSE_MS'] ?? 0),
+    FAL_WARMER_ENABLED: process.env['FAL_WARMER_ENABLED'] !== 'false',
+    FAL_WARMER_INTERVAL_MS: Number(process.env['FAL_WARMER_INTERVAL_MS'] ?? 90_000),
+    FAL_WARMER_OFF_START_HOUR: Number(process.env['FAL_WARMER_OFF_START_HOUR'] ?? 2),
+    FAL_WARMER_OFF_END_HOUR: Number(process.env['FAL_WARMER_OFF_END_HOUR'] ?? 8),
+    SESSION_CAPTURE_ENABLED: process.env['SESSION_CAPTURE_ENABLED'] !== 'false',
+    SESSION_CAPTURE_MIN_INTERVAL_MS: Number(process.env['SESSION_CAPTURE_MIN_INTERVAL_MS'] ?? 1000),
+    SESSION_CAPTURE_MAX_FRAMES: Number(process.env['SESSION_CAPTURE_MAX_FRAMES'] ?? 600),
     ONDEMAND_ONLY_MODE: process.env['ONDEMAND_ONLY_MODE'] === 'true',
     NETWORK_VOLUMES_BY_DC: parseVolumesMap(process.env['NETWORK_VOLUMES_BY_DC'], 'NETWORK_VOLUMES_BY_DC'),
     NETWORK_VOLUMES_BY_DC_VIDEO: parseVolumesMap(

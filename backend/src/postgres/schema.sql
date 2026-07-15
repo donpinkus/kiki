@@ -58,3 +58,59 @@ CREATE TABLE IF NOT EXISTS revoked_refresh_tokens (
   revoked_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS revoked_refresh_tokens_expires ON revoked_refresh_tokens (expires_at);
+
+-- Runtime ops dials, editable from Kiki Insights (which shares this database)
+-- without a backend redeploy. One row per dial, JSONB value. The backend seeds
+-- a dial from its env defaults at boot if the row is absent and re-reads it on
+-- every consumer tick, so an Insights write takes effect within one tick.
+-- Current keys: 'fal_warmer' → {enabled, intervalMs, offStartHour, offEndHour}.
+CREATE TABLE IF NOT EXISTS admin_config (
+  key        TEXT PRIMARY KEY,
+  value      JSONB NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- fal keep-warm ping history (see modules/fal/falWarmer.ts). One row per ping;
+-- `found_warm` = first frame arrived fast (the pool was already warm) vs. the
+-- ping had to sit through a cold spin-up. `open_ms` is total WS-open time (the
+-- billed quantity, ~$0.00194/s) so Insights can chart actual warmer spend.
+-- Pruned to ~14 days by the warmer itself on insert.
+CREATE TABLE IF NOT EXISTS fal_warmer_pings (
+  id                 BIGSERIAL PRIMARY KEY,
+  ts                 TIMESTAMPTZ NOT NULL DEFAULT now(),
+  found_warm         BOOLEAN,             -- NULL when the ping errored/timed out
+  ms_to_first_frame  INTEGER,             -- NULL when no frame ever arrived
+  open_ms            INTEGER NOT NULL DEFAULT 0,
+  error              TEXT
+);
+CREATE INDEX IF NOT EXISTS fal_warmer_pings_ts ON fal_warmer_pings (ts);
+
+-- Every fal realtime CONNECTION, from both real users (source='user') and the
+-- keep-warm loop (source='warmer') — one row per WS open→close span, emitted
+-- by FalImageRelay via modules/fal/falConnectionLog.ts. Lets us compare the
+-- cold-start experience of real users vs warmer pings (by user, time of day)
+-- from the same table. `wait_ms` is the user-perceived metric: time from the
+-- first unanswered frame SEND to the first frame received, spanning fal's
+-- ~30s cold-window closes/reconnects (a cold sequence looks like N rows with
+-- frames_received=0 then a final row whose wait_ms ≈ the full cold start).
+-- `found_warm` = wait_ms under the shared 6s threshold. Pruned to ~30 days by
+-- the warmer tick.
+CREATE TABLE IF NOT EXISTS fal_connections (
+  id              BIGSERIAL PRIMARY KEY,
+  opened_at       TIMESTAMPTZ NOT NULL,
+  source          TEXT NOT NULL,            -- 'user' | 'warmer'
+  user_id         UUID,                     -- NULL for warmer
+  stream_id       TEXT,
+  connect_ms      INTEGER,
+  first_frame_ms  INTEGER,                  -- open→first frame on THIS conn
+  wait_ms         INTEGER,                  -- send-epoch→first frame, spans reconnects
+  found_warm      BOOLEAN,                  -- NULL when no frame arrived on this conn
+  frames_sent     INTEGER NOT NULL DEFAULT 0,
+  frames_received INTEGER NOT NULL DEFAULT 0,
+  open_ms         INTEGER NOT NULL DEFAULT 0,
+  close_reason    TEXT,                     -- 'session_end' | 'idle_close' | 'upstream_close'
+  close_code      INTEGER
+);
+CREATE INDEX IF NOT EXISTS fal_connections_opened ON fal_connections (opened_at);
+CREATE INDEX IF NOT EXISTS fal_connections_source_opened ON fal_connections (source, opened_at);
+CREATE INDEX IF NOT EXISTS fal_connections_user ON fal_connections (user_id, opened_at);

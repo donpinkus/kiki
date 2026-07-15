@@ -80,6 +80,27 @@ interface FalImageRelayOpts {
    * lazily reconnect on the next stroke). 0 = disabled (let fal's ~30s idle
    * timeout close it). Cost lever; see FAL_IDLE_CLOSE_MS. */
   idleCloseMs?: number;
+  /** Fired once per connection when it closes, with that connection's
+   * latency/volume record. Consumers persist it (falConnectionLog.ts) for the
+   * cold-start-by-user/time analysis. Optional — the relay works without it. */
+  onConnection?: (rec: FalConnectionRecord) => void;
+}
+
+/** One WS open→close span. `waitMs` is the user-perceived first-result wait:
+ * from the first unanswered frame SEND to the first frame received — it spans
+ * reconnects (fal clean-closes the socket ~30s into a cold spin-up while it
+ * silently drops inputs), so on the connection where the first frame finally
+ * lands, waitMs ≈ the full cold start the user just sat through. */
+export interface FalConnectionRecord {
+  openedAt: number;
+  connectMs: number;
+  firstFrameMs: number | null;
+  waitMs: number | null;
+  framesSent: number;
+  framesReceived: number;
+  openMs: number;
+  closeReason: 'session_end' | 'idle_close' | 'upstream_close';
+  closeCode: number | null;
 }
 
 export class FalImageRelay implements ImageRelay {
@@ -130,6 +151,19 @@ export class FalImageRelay implements ImageRelay {
 
   private connectMs = 0;
 
+  // ─── Per-connection record (for fal_connections) ───────────────────────
+  private readonly connectionHandler?: (rec: FalConnectionRecord) => void;
+  private connOpenedAt: number | null = null;
+  private connFramesSent = 0;
+  private connFramesReceived = 0;
+  private connFirstFrameMs: number | null = null;
+  private connWaitMs: number | null = null;
+  /** Start of the current "frames sent, zero results yet" epoch. Relay-level
+   * (survives reconnects) and cleared on every received frame — so at the
+   * moment a first frame lands, `now - awaitingSince` is how long the user
+   * has been staring at nothing, including fal's cold-window closes. */
+  private awaitingSince: number | null = null;
+
   // ─── Usage accounting (for the fal-spend cap) ──────────────────────────
   /** Sum of fully-closed connection spans (ms). Excludes idle gaps between
    * reconnects — only time the socket was actually open, matching fal billing. */
@@ -147,6 +181,7 @@ export class FalImageRelay implements ImageRelay {
     this.logger = opts?.logger;
     this.logContext = opts?.ctx ?? {};
     this.idleCloseMs = opts?.idleCloseMs ?? 0;
+    this.connectionHandler = opts?.onConnection;
   }
 
   setLogContext(ctx: Record<string, unknown>): void {
@@ -197,6 +232,11 @@ export class FalImageRelay implements ImageRelay {
         this.opened = true;
         this.openedAt = Date.now();
         this.connectMs = Date.now() - start;
+        this.connOpenedAt = Date.now();
+        this.connFramesSent = 0;
+        this.connFramesReceived = 0;
+        this.connFirstFrameMs = null;
+        this.connWaitMs = null;
         // A fresh connection has no carried-over in-flight work; old seqs from
         // a dropped socket will never return, so don't let them skew queueEmpty.
         this.inFlightSeqs = [];
@@ -259,6 +299,15 @@ export class FalImageRelay implements ImageRelay {
       }
       const jpeg = Buffer.isBuffer(content) ? content : Buffer.from(content);
 
+      const now = Date.now();
+      this.connFramesReceived += 1;
+      if (this.connFirstFrameMs === null && this.connOpenedAt !== null) {
+        this.connFirstFrameMs = now - this.connOpenedAt;
+        this.connWaitMs =
+          this.awaitingSince !== null ? now - this.awaitingSince : this.connFirstFrameMs;
+      }
+      this.awaitingSince = null;
+
       // Match this result to the oldest outstanding send (FIFO; fal returns
       // one result per input at our ~2 FPS cadence). queueEmpty ⇔ nothing
       // newer is still pending after removing it — same semantics as the pod.
@@ -307,13 +356,17 @@ export class FalImageRelay implements ImageRelay {
       this.cumulativeClosedMs += Date.now() - this.openedAt;
       this.openedAt = null;
     }
+    const wasIdleClose = this.idleClosed;
+    this.idleClosed = false;
+    this.emitConnectionRecord(
+      code,
+      this.closedByUs ? 'session_end' : wasIdleClose ? 'idle_close' : 'upstream_close',
+    );
     if (this.closedByUs) return; // session teardown — stream.ts cleanup does the final spend flush
     // Never call closeHandler: there's no pod to replace, and stream.ts's
     // handleUpstreamClose would kick a RunPod replaceSession. fal closes are
     // expected (our idle-close, fal's ~30s timeout, or a transient drop) —
     // recover by reconnecting on the next frame.
-    const wasIdleClose = this.idleClosed;
-    this.idleClosed = false;
     this.log('info', wasIdleClose ? 'fal.idle_closed' : 'fal.upstream_closed', { code, reason });
     this.emitUsage(); // a span just closed — let the consumer persist it
     if (this.pendingFrame) {
@@ -422,6 +475,8 @@ export class FalImageRelay implements ImageRelay {
     const msg = { ...this.params, image_url: dataUri, sync_mode: true };
     try {
       this.ws.send(this.packr.pack(msg));
+      this.connFramesSent += 1;
+      if (this.awaitingSince === null) this.awaitingSince = Date.now();
       this.armIdleTimer(); // Lever B: (re)start the no-new-frame countdown
       // Bound continuous-draw spend overshoot: report usage at most every
       // USAGE_REPORT_THROTTLE_MS of open time, riding this per-frame path.
@@ -450,6 +505,40 @@ export class FalImageRelay implements ImageRelay {
   private emitUsage(): void {
     this.lastUsageAt = Date.now();
     this.usageHandler?.();
+  }
+
+  /** One record per connection, emitted from the close chokepoint (every
+   * close path — idle-close, fal's cold-window close, teardown — lands in
+   * handleUpstreamClose via the ws 'close' event). */
+  private emitConnectionRecord(closeCode: number, closeReason: FalConnectionRecord['closeReason']): void {
+    if (this.connOpenedAt === null) return;
+    const rec: FalConnectionRecord = {
+      openedAt: this.connOpenedAt,
+      connectMs: this.connectMs,
+      firstFrameMs: this.connFirstFrameMs,
+      waitMs: this.connWaitMs,
+      framesSent: this.connFramesSent,
+      framesReceived: this.connFramesReceived,
+      openMs: Date.now() - this.connOpenedAt,
+      closeReason,
+      closeCode,
+    };
+    this.connOpenedAt = null;
+    // Sentry-visible mirror of the row (queryable as event:fal.connection_closed).
+    this.log('info', 'fal.connection_closed', {
+      waitMs: rec.waitMs,
+      firstFrameMs: rec.firstFrameMs,
+      framesSent: rec.framesSent,
+      framesReceived: rec.framesReceived,
+      connOpenMs: rec.openMs,
+      closeReason,
+      closeCode,
+    });
+    try {
+      this.connectionHandler?.(rec);
+    } catch {
+      /* recording must never break the relay */
+    }
   }
 
   onClose(_cb: (code: number, reason: string) => void): void {

@@ -22,6 +22,8 @@ import {
 } from '../modules/orchestrator/orchestrator.js';
 import { StreamRelay, WireRelayError, type WireRelayPhaseTimings, type RelevantHttpHeaders } from '../modules/relay/streamRelay.js';
 import { FalImageRelay, type ImageRelay } from '../modules/fal/falImageRelay.js';
+import { recordFalConnection } from '../modules/fal/falConnectionLog.js';
+import { FrameCapture } from '../modules/insights/frameCapture.js';
 import { getPod } from '../modules/orchestrator/runpodClient.js';
 import {
   checkProvisionQuota,
@@ -118,6 +120,16 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       // on a successful DB write, so a failed write is retried, not lost).
       let falMeteringEnabled = false;
       let lastBilledMs = 0;
+      // Admin session replay: throttled sketch/generated frame mirror to
+      // Insights (see modules/insights/frameCapture.ts). Created lazily once
+      // identity + streamId exist; null when capture is disabled/unconfigured.
+      let frameCapture: FrameCapture | null = null;
+      const captureFrame = (kind: 'sketch' | 'generated', jpeg: Buffer): void => {
+        if (!frameCapture && userId && streamId) {
+          frameCapture = new FrameCapture(streamId, userId, request.log);
+        }
+        frameCapture?.capture(kind, jpeg);
+      };
       let unsubscribeState: (() => void) | null = null;
       let clientDisconnected = false;
       const sessionStartMs = Date.now();
@@ -278,6 +290,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         if (isBinary) {
           if (relay) {
             relay.sendFrame(buf);
+            captureFrame('sketch', buf);
             // A new sketch from the iPad supersedes any in-flight video.
             // Send video_cancel on EVERY iPad frame while a video request
             // is in flight; the pod treats it idempotently. Once the
@@ -510,6 +523,10 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
                 logger: request.log,
                 ctx: { userId, connId, streamId, role: 'image' },
                 idleCloseMs: config.FAL_IDLE_CLOSE_MS,
+                // Per-connection cold-start/latency record → fal_connections
+                // (source='user'), comparable 1:1 against warmer pings.
+                onConnection: (rec) =>
+                  recordFalConnection('user', { userId, streamId }, rec, request.log),
               })
             : new StreamRelay(podUrl);
         newRelay.setLogContext({ userId, connId, streamId, role: 'image' });
@@ -520,6 +537,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             const buf = data as Buffer;
             const base64 = buf.toString('base64');
             socket.send(JSON.stringify({ type: 'frame', data: base64 }));
+            captureFrame('generated', buf);
 
             // Video trigger: the immediately preceding frame_meta said
             // queueEmpty:true, so this JPEG is the just-completed

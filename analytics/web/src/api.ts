@@ -92,3 +92,108 @@ export const listUsers = (q: string) =>
   api<{ users: UserSummary[] }>(`/admin/api/users?q=${encodeURIComponent(q)}`);
 
 export const getUser = (id: string) => api<UserDetail>(`/admin/api/users/${encodeURIComponent(id)}`);
+
+// ─── Ops: fal keep-warm dial ────────────────────────────────────────────────
+
+export interface WarmerConfig {
+  enabled: boolean;
+  intervalMs: number;
+  offStartHour: number;
+  offEndHour: number;
+}
+
+export interface WarmerPing {
+  ts: string;
+  found_warm: boolean | null;
+  ms_to_first_frame: number | null;
+  open_ms: number;
+  error: string | null;
+}
+
+export interface SourceStats {
+  source: 'user' | 'warmer';
+  conns: number;
+  answered: number;
+  cold: number;
+  wait_p50: number | null;
+  wait_p90: number | null;
+  wait_max: number | null;
+}
+
+export interface ConnectionRow {
+  opened_at: string;
+  source: 'user' | 'warmer';
+  user_id: string | null;
+  email: string | null;
+  wait_ms: number | null;
+  found_warm: boolean | null;
+  frames_sent: number;
+  frames_received: number;
+  open_ms: number;
+  close_reason: string | null;
+}
+
+export type SourceFilter = 'all' | 'user' | 'warmer';
+
+export interface WarmerStatus {
+  schemaReady: boolean;
+  config: WarmerConfig | null;
+  configUpdatedAt: string | null;
+  pings: WarmerPing[];
+  stats24h: {
+    pings: number;
+    cold_encounters: number;
+    failures: number;
+    billed_ms: number;
+  } | null;
+  sources24h: SourceStats[];
+}
+
+export const getWarmer = () => api<WarmerStatus>('/admin/api/ops/warmer');
+
+// ─── Session replays (capture gallery) ──────────────────────────────────────
+
+export interface CaptureStreamSummary {
+  stream_id: string;
+  user_id: string;
+  email: string | null;
+  started_at: string;
+  ended_at: string;
+  sketch_count: number;
+  generated_count: number;
+  poster_url: string | null;
+}
+
+export interface CaptureFrame {
+  kind: 'sketch' | 'generated';
+  seq: number;
+  captured_at: string;
+  url: string;
+}
+
+export interface CaptureDetail {
+  stream_id: string;
+  user_id: string | null;
+  email: string | null;
+  frames: CaptureFrame[];
+}
+
+export const listCaptures = (userId?: string) =>
+  api<{ captures: CaptureStreamSummary[] }>(
+    `/admin/api/captures${userId ? `?user_id=${encodeURIComponent(userId)}` : ''}`,
+  );
+
+export const getCapture = (streamId: string) =>
+  api<CaptureDetail>(`/admin/api/captures/${encodeURIComponent(streamId)}`);
+
+export const getConnections = (source: SourceFilter) =>
+  api<{ schemaReady: boolean; connections: ConnectionRow[] }>(
+    `/admin/api/ops/connections${source === 'all' ? '' : `?source=${source}`}`,
+  );
+
+export const putWarmer = (config: WarmerConfig) =>
+  api<{ ok: boolean; config: WarmerConfig }>('/admin/api/ops/warmer', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(config),
+  });

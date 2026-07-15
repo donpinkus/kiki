@@ -87,6 +87,7 @@ import { opsRoute } from './routes/ops.js';
 import { installAuth } from './modules/auth/index.js';
 import { start as startOrchestrator } from './modules/orchestrator/orchestrator.js';
 import { start as startCostMonitor } from './modules/orchestrator/costMonitor.js';
+import { start as startFalWarmer, stop as stopFalWarmer } from './modules/fal/falWarmer.js';
 import { shutdownAnalytics } from './modules/analytics/index.js';
 import { ensureDb, pool as pgPool } from './postgres/client.js';
 import { migrate } from './postgres/migrate.js';
@@ -184,6 +185,8 @@ const start = async () => {
     // orphan pods from a prior run and arms the idle reaper.
     await startOrchestrator(app.log);
     startCostMonitor(app.log);
+    // Keep the fal realtime pool warm (no-op unless IMAGE_PROVIDER=fal).
+    startFalWarmer(app.log);
 
     await app.listen({ port: config.PORT, host: config.HOST });
     app.log.info(`Server listening on ${config.HOST}:${config.PORT}`);
@@ -199,6 +202,7 @@ start();
 // analytics when Railway restarts the container.
 async function gracefulShutdown(signal: string): Promise<void> {
   app.log.info({ signal }, 'Shutting down — flushing analytics');
+  stopFalWarmer();
   try {
     await shutdownAnalytics();
   } catch (err) {

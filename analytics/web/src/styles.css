@@ -55,6 +55,20 @@ tr:hover td { background: var(--panel-2); }
 .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; background: var(--panel-2); border: 1px solid var(--border); }
 .pill.app { color: var(--accent); }
 .pill.drawing { color: var(--accent-2); }
+/* Ops page status pills. Dedicated classes — never reuse `.app`/`.drawing`
+   here (`.app` is also the root layout class; a `pill app` pill inherits
+   min-height:100vh and stretches the table row to viewport height). */
+.pill.warm { color: var(--accent-2); }
+.pill.cold { color: #f0b429; }
+.pill.fail { color: #ff7b72; }
+.pill.src-user { color: var(--accent); }
+
+/* Ops stat tiles */
+.stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.stat { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+.stat .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 6px; }
+.stat .value { font-size: 22px; font-weight: 600; }
+.stat .sub { color: var(--muted); font-size: 12px; margin-top: 4px; }
 
 .section-title { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 28px 0 12px; }
 

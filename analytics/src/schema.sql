@@ -71,3 +71,24 @@ CREATE TABLE IF NOT EXISTS fixtures (
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS fixtures_time ON fixtures (created_at DESC);
+
+-- Session replay frames (admin Gallery). The backend mirrors a throttled
+-- sample of each drawing session's frames here via POST /ingest/capture:
+-- kind='sketch' (canvas JPEG the iPad sent to the image provider) and
+-- kind='generated' (the JPEG that came back). Blobs live in the BlobStore
+-- (captures/<stream_id>/...); rows are the replay index. captured_at is the
+-- BACKEND's clock at relay time (frame ordering source of truth). Pruned to
+-- CAPTURE_RETENTION_DAYS (blobs + rows) by the daily loop in index.ts.
+CREATE TABLE IF NOT EXISTS capture_frames (
+  id          BIGSERIAL PRIMARY KEY,
+  stream_id   TEXT NOT NULL,
+  user_id     TEXT NOT NULL,
+  kind        TEXT NOT NULL,               -- 'sketch' | 'generated'
+  seq         INT NOT NULL,
+  captured_at TIMESTAMPTZ NOT NULL,
+  blob_key    TEXT NOT NULL,
+  UNIQUE (stream_id, kind, seq)
+);
+CREATE INDEX IF NOT EXISTS capture_frames_stream ON capture_frames (stream_id, captured_at);
+CREATE INDEX IF NOT EXISTS capture_frames_user   ON capture_frames (user_id, captured_at DESC);
+CREATE INDEX IF NOT EXISTS capture_frames_time   ON capture_frames (captured_at);

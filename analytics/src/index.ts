@@ -75,6 +75,27 @@ if (existsSync(webDist)) {
   app.log.warn({ webDist }, 'web/dist not found — SPA not served (run npm run build:web)');
 }
 
+// --- Session-replay retention ---
+// Capture frames are the only unbounded-growth blobs (a busy day can add
+// hundreds of MB); prune rows + blobs past CAPTURE_RETENTION_DAYS daily.
+// Batched so a large backlog can't hold a connection for minutes.
+async function pruneCaptures(): Promise<void> {
+  const { query } = await import('./db.js');
+  const { blobStore } = await import('./blobStore.js');
+  for (;;) {
+    const { rows } = await query<{ id: string; blob_key: string }>(
+      `SELECT id, blob_key FROM capture_frames
+       WHERE captured_at < now() - make_interval(days => $1)
+       ORDER BY captured_at LIMIT 500`,
+      [config.CAPTURE_RETENTION_DAYS],
+    );
+    if (rows.length === 0) return;
+    for (const r of rows) await blobStore.delete(r.blob_key);
+    await query(`DELETE FROM capture_frames WHERE id = ANY($1::bigint[])`, [rows.map((r) => r.id)]);
+    app.log.info({ pruned: rows.length }, 'capture retention prune batch');
+  }
+}
+
 // --- Boot ---
 try {
   await migrate();
@@ -82,6 +103,11 @@ try {
   app.log.info('Postgres ready, schema applied');
   await app.listen({ port: config.PORT, host: config.HOST });
   app.log.info(`Kiki Insights listening on ${config.HOST}:${config.PORT}`);
+  void pruneCaptures().catch((err) => app.log.warn({ err }, 'capture prune failed'));
+  setInterval(
+    () => void pruneCaptures().catch((err) => app.log.warn({ err }, 'capture prune failed')),
+    24 * 60 * 60 * 1000,
+  ).unref();
 } catch (err) {
   app.log.error(err, 'failed to start Kiki Insights');
   process.exit(1);
