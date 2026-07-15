@@ -12,6 +12,8 @@ export interface UserSummary {
   session_count: number;
   drawing_count: number;
   fal_spend_usd_month: number;
+  /** In-app minutes per Pacific day, oldest→today, exactly 14 entries. */
+  activity14d: number[];
 }
 
 export interface SessionRow {
@@ -61,6 +63,8 @@ export interface UserDetail {
     updated_at: string;
   };
   usage: MonthlyUsageRow[];
+  /** In-app minutes per Pacific day since first session (zero days omitted). */
+  daily_activity: { day: string; minutes: number }[];
   sessions: SessionRow[];
   events: EventRow[];
   drawings: DrawingRow[];

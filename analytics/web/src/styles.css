@@ -22,7 +22,9 @@ body {
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
 
-.app { display: flex; min-height: 100vh; }
+/* (removed) a former `.app { min-height: 100vh }` layout rule lived here and
+   collided with `pill app` badges (test-account, session-source), stretching
+   them to viewport height. No element uses a bare `app` layout class. */
 
 .topbar {
   display: flex; align-items: center; justify-content: space-between;

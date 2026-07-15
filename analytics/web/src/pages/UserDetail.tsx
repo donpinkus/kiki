@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { CaptureGrid } from './Gallery';
+import { ActivityChart } from '../ActivityBars';
 import { getUser, type UserDetail as Detail } from '../api';
 
 const fmt = (iso: string | null) => (iso ? new Date(iso).toLocaleString() : '—');
@@ -69,6 +70,9 @@ export function UserDetail() {
       </div>
 
       {/* Session / login timeline */}
+      <div className="section-title">Activity by day</div>
+      <ActivityChart data={data.daily_activity ?? []} />
+
       <div className="section-title">Login & session timeline</div>
       {sessions.length === 0 ? (
         <div className="muted">No sessions recorded yet.</div>

@@ -60,6 +60,12 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
       return { fixtures: rows };
     });
 
+    // Day key in the admin's timezone (America/Los_Angeles) — matches the SQL
+    // `AT TIME ZONE 'America/Los_Angeles'` bucketing below so a session at
+    // 11pm Pacific lands on the same bar the admin expects.
+    const laDay = (d: Date): string =>
+      new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles' }).format(d);
+
     // Users list. Source of truth is the BACKEND's `users` table (identity +
     // subscription + test flag) and `monthly_usage` (this month's fal spend);
     // Insights-owned events/sessions/drawings contribute the activity rollups.
@@ -92,7 +98,34 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
          LIMIT 200`,
         [q],
       );
-      return { users: rows };
+
+      // Per-user daily in-app minutes for the row sparklines (last 14 Pacific
+      // days). One aggregate query, merged in JS — avoids a lateral join per
+      // user row. source='app' = foregrounded time (drawing sessions overlap
+      // app sessions; summing both would double-count).
+      const act = await query<{ user_id: string; day: string; minutes: number }>(
+        `SELECT user_id,
+                to_char(started_at AT TIME ZONE 'America/Los_Angeles', 'YYYY-MM-DD') AS day,
+                ceil(sum(duration_ms) / 60000.0)::int AS minutes
+         FROM sessions
+         WHERE source = 'app' AND started_at > now() - interval '15 days'
+         GROUP BY 1, 2`,
+      );
+      const actByUser = new Map<string, Record<string, number>>();
+      for (const r of act.rows) {
+        const m = actByUser.get(r.user_id) ?? {};
+        m[r.day] = r.minutes;
+        actByUser.set(r.user_id, m);
+      }
+      const days = Array.from({ length: 14 }, (_, i) =>
+        laDay(new Date(Date.now() - (13 - i) * 86_400_000)),
+      );
+      return {
+        users: rows.map((u) => ({
+          ...u,
+          activity14d: days.map((d) => actByUser.get(u['user_id'] as string)?.[d] ?? 0),
+        })),
+      };
     });
 
     // Full per-user view: profile + sessions + recent events + drawings.
@@ -108,7 +141,7 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
       );
       if (userRes.rowCount === 0) return reply.code(404).send({ error: 'user not found' });
 
-      const [sessions, events, drawings, usage] = await Promise.all([
+      const [sessions, events, drawings, usage, dailyActivity] = await Promise.all([
         query(
           `SELECT id, source, started_at, ended_at, duration_ms::int AS duration_ms, drawing_id
            FROM sessions WHERE user_id = $1 ORDER BY started_at DESC LIMIT 500`,
@@ -131,11 +164,22 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
            FROM monthly_usage WHERE user_id::text = $1 ORDER BY month DESC LIMIT 24`,
           [id],
         ),
+        // Full-history daily in-app minutes (Pacific days) for the activity
+        // bar chart. Gaps (zero days) are filled client-side.
+        query(
+          `SELECT to_char(started_at AT TIME ZONE 'America/Los_Angeles', 'YYYY-MM-DD') AS day,
+                  ceil(sum(duration_ms) / 60000.0)::int AS minutes
+           FROM sessions
+           WHERE user_id = $1 AND source = 'app'
+           GROUP BY 1 ORDER BY 1`,
+          [id],
+        ),
       ]);
 
       return {
         user: userRes.rows[0],
         usage: usage.rows,
+        daily_activity: dailyActivity.rows,
         sessions: sessions.rows,
         events: events.rows,
         drawings: drawings.rows.map((d) => ({
