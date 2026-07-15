@@ -109,13 +109,12 @@ public final class MetalCanvasView: UIView {
     private var activeStroke: Stroke?
     private var activeStrokeStamps: [CanvasRenderer.StampInstance] = []
 
-    /// Running smoothed cursor for StreamLine stabilization (brush only). Reset to the
-    /// first touch position at `touchesBegan`; each subsequent point is low-pass filtered
-    /// toward the raw pencil position. See `smoothedStrokePoint`. nil when not stabilizing.
-    private var streamlineCursor: CGPoint?
-    /// Timestamp of the last point fed to the streamline low-pass, for the frame-rate-independent
-    /// (dt-derived) smoothing factor. nil at stroke start.
-    private var streamlineLastTime: TimeInterval?
+    /// Stroke stabilization pipeline (P3 rebuild): StreamLine low-pass + Gaussian
+    /// arc-length smoothing + pressure smoothing, one instance per brush stroke
+    /// (`StrokeStabilizer` — pure, shared with BrushHarness/OfflineTests). All-zero
+    /// settings make `feed` a strict passthrough, so the default pen is unchanged.
+    /// `finish()` provides catch-up-on-lift so lagged strokes end at the pencil tip.
+    private var stabilizer: StrokeStabilizer?
 
     /// For eraser: tracks the last stroke-point index that was applied to the canvas.
     /// Eraser stamps are applied incrementally (each touchesMoved renders only NEW
@@ -579,11 +578,13 @@ public final class MetalCanvasView: UIView {
 
         switch currentTool {
         case .brush(let config):
-            activeStroke = Stroke(points: [makeStrokePoint(from: touch)], brush: config)
+            stabilizer = StrokeStabilizer(streamline: config.streamline,
+                                          stabilization: config.stabilization,
+                                          pressureSmoothing: config.pressureSmoothing)
+            let firstRaw = makeStrokePoint(from: touch)
+            let firstPoint = stabilizer?.feed(firstRaw) ?? firstRaw
+            activeStroke = Stroke(points: [firstPoint], brush: config)
             activeStrokeStamps = []
-            // Seed the StreamLine cursor at the true start so the first point isn't lagged.
-            streamlineCursor = touch.location(in: self)
-            streamlineLastTime = touch.timestamp
             // DEV input-HUD state for a dynamic brush (fresh per stroke).
             hudState = (config.dynamics?.isInert == false)
                 ? StrokeDynamicsState(seed: strokeSeed(activeStroke!.id),
@@ -703,12 +704,13 @@ public final class MetalCanvasView: UIView {
 
         switch currentTool {
         case .brush(let config):
-            // Append coalesced points (StreamLine-smoothed) and rebuild all stamps
-            // for live preview. Smoothing is baked into the stored points.
+            // Append coalesced points (stabilized) and rebuild all stamps for live
+            // preview. Stabilization is baked into the stored points, so replay, undo,
+            // persistence, and the recorder all see the same path.
             let coalesced = event?.coalescedTouches(for: touch) ?? [touch]
-            let streamline = activeStroke?.brush.streamline ?? 0
             for ct in coalesced {
-                activeStroke?.points.append(smoothedStrokePoint(from: ct, streamline: streamline))
+                let raw = makeStrokePoint(from: ct)
+                activeStroke?.points.append(stabilizer?.feed(raw) ?? raw)
             }
             emitBrushInputSample(brush: config)
             if config.wetEnabled {
@@ -930,6 +932,7 @@ public final class MetalCanvasView: UIView {
         drawingTouch = nil
         lastEraserPointIndex = 0
         wetWalker = nil
+        stabilizer = nil
         lassoPoints.removeAll()
         lassoPath = nil
         hideLassoPreview()
@@ -1052,10 +1055,23 @@ public final class MetalCanvasView: UIView {
             lastEraserStampPos = .zero
             lastEraserSpacing = 0.5
             wetWalker = nil
+            stabilizer = nil
             onInteractionEnded?()
         }
 
-        guard let stroke = activeStroke, !stroke.points.isEmpty else { return }
+        guard var stroke = activeStroke, !stroke.points.isEmpty else { return }
+
+        // P3 catch-up-on-lift: StreamLine/Gaussian smoothing lag the pencil by design;
+        // emit the tail from the lagged cursor to the true raw endpoint so the stroke
+        // ends exactly where the pencil lifted. Baked into the stroke BEFORE the final
+        // stamp regen / wet flush / recorder callback, so every consumer sees it.
+        if let tail = stabilizer?.finish(), !tail.isEmpty {
+            stroke.points.append(contentsOf: tail)
+            activeStroke = stroke
+            if case .brush(let cfg) = currentTool, !cfg.wetEnabled {
+                activeStrokeStamps = generateStampsForStroke(stroke, scale: canvasScale)
+            }
+        }
 
         logStrokeDynamicsDiagnostic(stroke)
 
@@ -2496,42 +2512,6 @@ public final class MetalCanvasView: UIView {
             shapeID = nil
         }
         return renderer.shapeTexture(for: shapeID)
-    }
-
-    /// StreamLine stabilization: low-pass the drawn position toward the raw pencil
-    /// position. `streamline` 0 → follow exactly (no change); higher → more lag/steadier
-    /// lines. Updates `streamlineCursor` and bakes the smoothed position into the returned
-    /// point so live preview, replay, undo, and persistence all see the same path.
-    /// Only `position` is smoothed; pressure/altitude/timestamp pass through raw.
-    private func smoothedStrokePoint(from touch: UITouch, streamline: CGFloat) -> StrokePoint {
-        var point = makeStrokePoint(from: touch)
-        guard streamline > 0 else {
-            streamlineCursor = point.position
-            streamlineLastTime = point.timestamp
-            return point
-        }
-        let prev = streamlineCursor ?? point.position
-        // FRAME-RATE-INDEPENDENT low-pass: the pull factor is derived from a time constant
-        // (`tau`) and the elapsed `dt`, NOT applied per-event. Previously a fixed per-event
-        // factor smoothed ~2× harder at 120 Hz than 60 Hz and gave a flick and a crawl the
-        // same lag (the bug the Krita-stabilization research flagged). `tau` scales with
-        // `streamline` so higher = more lag; `dt`-derived `factor = 1−e^(−dt/tau)` makes the
-        // convergence depend on elapsed TIME, so the steady-state lag is the same at any
-        // event rate. (The streamline→tau mapping + the velocity-aware Bézier upgrade are
-        // device-tuning follow-ups — see PLAN.md P3 / IMPLEMENTATION-LOG.)
-        // Clamp dt so a long stall (missed frames / app hitch) can't drive factor→1 and snap the
-        // cursor to the raw position in one step (a catch-up jerk); cap at ~4 frames. P3-review.
-        let dt = min(4.0 / 120.0, streamlineLastTime.map { max(0, point.timestamp - $0) } ?? (1.0 / 120.0))
-        let tau = max(0.004, Double(streamline) * 0.12) // seconds
-        let factor = CGFloat(min(1.0, max(0.04, 1.0 - exp(-dt / tau))))
-        let smoothed = CGPoint(
-            x: prev.x + (point.position.x - prev.x) * factor,
-            y: prev.y + (point.position.y - prev.y) * factor
-        )
-        streamlineCursor = smoothed
-        streamlineLastTime = point.timestamp
-        point.position = smoothed
-        return point
     }
 
     private func makeStrokePoint(from touch: UITouch) -> StrokePoint {

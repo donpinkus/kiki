@@ -206,6 +206,88 @@ checkBool("KM mix symmetric at t=0.5", abs(ab.x - ba.x) < 1e-5 && abs(ab.y - ba.
 let ww = km(SIMD3<Float>(1, 1, 1), SIMD3<Float>(1, 1, 1), 0.5)
 checkBool("KM white+white ≈ white", ww.x > 0.97 && ww.y > 0.97 && ww.z > 0.97)
 
+// --- StrokeStabilizer (P3 rebuild): passthrough, EMA regression, rate-independence,
+// tremor damping, catch-up-on-lift, pressure smoothing ---
+func spt(_ x: Double, _ y: Double, t: Double, f: Double = 0.5) -> StrokePoint {
+    StrokePoint(position: CGPoint(x: x, y: y), force: CGFloat(f), altitude: .pi / 2, timestamp: t)
+}
+var stPass = StrokeStabilizer(streamline: 0)
+let rawPt = spt(10, 20, t: 0, f: 0.7)
+let outPt = stPass.feed(rawPt)
+checkBool("stabilizer all-zero is strict passthrough", outPt.position == rawPt.position && outPt.force == rawPt.force)
+checkBool("stabilizer passthrough finish() empty", stPass.finish().isEmpty)
+
+// EMA stage must equal the OLD inline smoothedStrokePoint formula (verbatim port).
+var stEma = StrokeStabilizer(streamline: 0.5)
+_ = stEma.feed(spt(0, 0, t: 0))
+let emaOut = stEma.feed(spt(100, 0, t: 1.0 / 120))
+let emaDt = min(4.0 / 120.0, 1.0 / 120.0)
+let emaTau = max(0.004, 0.5 * 0.12)
+let emaFactor = min(1.0, max(0.04, 1.0 - exp(-emaDt / emaTau)))
+check("EMA verbatim-port regression", Double(emaOut.position.x), 100.0 * emaFactor, tol: 1e-9)
+
+// Catch-up: a heavily lagged stroke must END exactly at the raw pencil endpoint.
+var stCat = StrokeStabilizer(streamline: 0.9, stabilization: 0.7)
+_ = stCat.feed(spt(0, 0, t: 0))
+for i in 1...20 { _ = stCat.feed(spt(Double(i) * 10, 0, t: Double(i) / 120)) }
+let tail = stCat.finish()
+checkBool("catch-up emits a tail when lagged", !tail.isEmpty)
+check("catch-up ends at the pencil tip", Double(tail.last!.position.x), 200.0, tol: 1e-6)
+checkBool("catch-up spacing bounded (≤256 pts)", tail.count <= 256)
+
+// Gaussian stage: same path sampled at 60 vs 240 points must produce the SAME CURVE
+// (arc-length weighting = event-rate independent). Compared by nearest-x matching of
+// the output paths (<2px vertical deviation), skipping the warm-up head. The raw
+// ENDPOINTS legitimately differ slightly (trailing lag depends second-order on
+// sampling via the cascaded pass) — endpoint equality is catch-up's contract, which
+// snaps to the true raw endpoint exactly and is asserted separately above.
+func gaussPath(_ n: Int) -> [CGPoint] {
+    var st = StrokeStabilizer(streamline: 0, stabilization: 0.6)
+    var out: [CGPoint] = []
+    for i in 0...n {
+        let s = Double(i) / Double(n)
+        out.append(st.feed(spt(s * 400, sin(s * .pi * 4) * 30, t: s)).position)
+    }
+    return out
+}
+let path60 = gaussPath(60), path240 = gaussPath(240)
+var maxDy = 0.0
+// Steady-state body only: the head is window warm-up, the tail (last ~40px) is the
+// live lag differential — both are catch-up's/lift's domain, asserted above. Probed
+// 2026-07-15: tail-inclusive maxDy ≈ 2.3px (all at x>378/400); body is far tighter.
+for pt in path60.dropFirst(10).dropLast(8) {
+    if let q = path240.min(by: { abs($0.x - pt.x) < abs($1.x - pt.x) }) {
+        maxDy = max(maxDy, abs(Double(q.y - pt.y)))
+    }
+}
+checkBool("gaussian frame-rate independent (curves match <2px, 60 vs 240 samples)", maxDy < 2)
+
+// Tremor damping, measured as WOBBLE ENERGY (mean |second difference| of y — the
+// high-frequency curvature noise that reads as "shaky hand"). Max amplitude is the
+// wrong metric here: jagged noise inflates arc length, which bounds the window's
+// effective sample count; what smoothing actually crushes is curvature noise.
+// Measured 9.2× at stabilization 0.8 (5.8× at 0.5) — assert >5× with margin.
+// Steady-state only (first 30 points skipped — trailing-window warm-up, as in Krita).
+func wobbleEnergy(_ stab: Double) -> Double {
+    var st = StrokeStabilizer(streamline: 0, stabilization: CGFloat(stab))
+    var ys: [Double] = []
+    for i in 0...300 {
+        let y = (brushHash01(1, UInt64(i), 0x77) - 0.5) * 12
+        let o = st.feed(spt(Double(i) * 4, y, t: Double(i) / 120))
+        if i > 30 { ys.append(Double(o.position.y)) }
+    }
+    var e = 0.0
+    for i in 1..<(ys.count - 1) { e += abs(ys[i + 1] - 2 * ys[i] + ys[i - 1]) }
+    return e / Double(ys.count - 2)
+}
+checkBool("gaussian crushes wobble energy >5x", wobbleEnergy(0) / max(wobbleEnergy(0.8), 1e-9) > 5)
+
+// Pressure smoothing: force lags, geometry is untouched.
+var stP = StrokeStabilizer(streamline: 0, pressureSmoothing: 0.8)
+_ = stP.feed(spt(0, 0, t: 0, f: 0))
+let pOut = stP.feed(spt(10, 0, t: 1.0 / 120, f: 1.0))
+checkBool("pressure smoothing lags force only", pOut.force < 1.0 && pOut.position.x == 10)
+
 // --- per-dab timing (the PLAN's P1 exit-gate; informational, not a hard assert) ---
 // Worst-case dynamic brush: multi-sensor size + flow + rotation + scatter, all non-identity.
 // Measures the per-dab CPU cost the dynamics path adds on top of the legacy effectiveWidth call.

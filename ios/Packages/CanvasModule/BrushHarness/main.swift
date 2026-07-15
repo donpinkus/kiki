@@ -118,6 +118,29 @@ func loopStroke(id: Int, brush: BrushConfig, center: CGPoint, radius: CGFloat) -
     return Stroke(id: fixedUUID(id), points: pts, brush: brush)
 }
 
+/// A stroke with deterministic hand-tremor: base path + per-point noise (±amp px),
+/// seeded by brushHash01 so runs are identical. Simulates shaky raw pencil input.
+func tremorStroke(id: Int, brush: BrushConfig, from a: CGPoint, to b: CGPoint,
+                  bow: CGFloat = 0, amp: CGFloat = 6, points n: Int = 140) -> Stroke {
+    var st = synthStroke(id: id, brush: brush, from: a, to: b, bow: bow, points: n, force: { _ in 0.7 })
+    for i in st.points.indices {
+        let nx = CGFloat(brushHash01(UInt64(id), UInt64(i), 0x7E01) - 0.5) * 2 * amp
+        let ny = CGFloat(brushHash01(UInt64(id), UInt64(i), 0x7E02) - 0.5) * 2 * amp
+        st.points[i].position.x += nx
+        st.points[i].position.y += ny
+    }
+    return st
+}
+
+/// Run a stroke's points through the P3 StrokeStabilizer exactly like the device does
+/// (feed per point + catch-up tail on lift), returning the stabilized stroke.
+func stabilized(_ stroke: Stroke, streamline: CGFloat, stabilization: CGFloat) -> Stroke {
+    var st = StrokeStabilizer(streamline: streamline, stabilization: stabilization)
+    var pts = stroke.points.map { st.feed($0) }
+    pts.append(contentsOf: st.finish())
+    return Stroke(id: stroke.id, points: pts, brush: stroke.brush)
+}
+
 // MARK: - Scene runner
 
 /// Paints strokes into a fresh document and writes the flattened result.
@@ -382,6 +405,30 @@ runScene("dry-06-calligraphy-rotation",
     s.paint(synthStroke(id: 76, brush: spinner,
                         from: CGPoint(x: 120, y: 720), to: CGPoint(x: 904, y: 720),
                         force: { _ in 0.9 }))
+}
+
+runScene("dry-07-stabilization",
+         """
+         P3 stabilization on identical shaky input (deterministic ±6px hand tremor on an S-curve).
+         - Row 1: raw input — every wobble shows.
+         - Row 2: Stabilize 0.6 (StreamLine low-pass) — steadier, slight corner-cutting lag.
+         - Row 3: Smoothing 0.7 (Gaussian over drawn distance) — clean, confident curvature.
+         - Row 4: both together — the inking setup.
+         All four rows END at the same right edge: catch-up-on-lift walks the lagged cursor to
+         the true pencil-up position (before P3, smoothed strokes stopped short).
+         """) { s in
+    let base = pen(.black, width: 14)
+    func row(_ id: Int, _ y: CGFloat) -> Stroke {
+        tremorStroke(id: id, brush: base, from: CGPoint(x: 120, y: y), to: CGPoint(x: 904, y: y), bow: 70)
+    }
+    s.label("raw tremor input", y: 110)
+    s.paint(row(90, 200))
+    s.label("stabilize 0.6 (StreamLine)", y: 350)
+    s.paint(stabilized(row(91, 440), streamline: 0.6, stabilization: 0))
+    s.label("smoothing 0.7 (Gaussian arc-length)", y: 590)
+    s.paint(stabilized(row(92, 680), streamline: 0, stabilization: 0.7))
+    s.label("both (0.6 + 0.7)", y: 830)
+    s.paint(stabilized(row(93, 920), streamline: 0.6, stabilization: 0.7))
 }
 
 runScene("wet-01-blue-into-yellow",

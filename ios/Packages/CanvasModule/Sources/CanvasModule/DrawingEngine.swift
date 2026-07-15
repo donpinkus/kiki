@@ -105,6 +105,13 @@ public struct BrushConfig: Codable, Sendable {
     /// steadier, more confident lines. Applied at input time and baked into the stored
     /// stroke points (see `MetalCanvasView.smoothedStrokePoint`). See pro-brush-roadmap Phase 1.
     public var streamline: CGFloat
+    /// Gaussian arc-length smoothing [0,1] (P3, Procreate "Stabilization"): a trailing
+    /// Gaussian-weighted average over the DISTANCE drawn — frame-rate independent, gives
+    /// clean curvature instead of a lagged polyline. 0 = off. See `StrokeStabilizer`.
+    public var stabilization: CGFloat
+    /// Pressure smoothing [0,1] (P3, Procreate "StreamLine → Pressure"): low-pass on force
+    /// only; geometry untouched. 0 = off.
+    public var pressureSmoothing: CGFloat
     /// Edge hardness [0,1]. 0 = soft, feathered edge; 1 = crisp edge (thin AA rim only).
     /// Applied procedurally in the brush fragment shader from per-stamp distance.
     public var hardness: CGFloat
@@ -162,6 +169,8 @@ public struct BrushConfig: Codable, Sendable {
         pressureGamma: CGFloat = 0.7,
         tiltSensitivity: CGFloat = 0.0,
         streamline: CGFloat = 0.0,
+        stabilization: CGFloat = 0.0,
+        pressureSmoothing: CGFloat = 0.0,
         hardness: CGFloat = 0.5,
         spacing: CGFloat = 0.3,
         taper: CGFloat = 0.0,
@@ -180,6 +189,8 @@ public struct BrushConfig: Codable, Sendable {
         self.pressureGamma = pressureGamma
         self.tiltSensitivity = tiltSensitivity
         self.streamline = streamline
+        self.stabilization = stabilization
+        self.pressureSmoothing = pressureSmoothing
         self.hardness = hardness
         self.spacing = spacing
         self.taper = taper
@@ -222,7 +233,7 @@ public struct BrushConfig: Codable, Sendable {
         case color, baseWidth, opacity, flow, pressureGamma, pressureOpacity
         case streamline, taperIn, taperOut, tiltSensitivity
         case hardness, spacing, taper, wetEnabled, wetStrength, wetPickup, shapeID
-        case dynamics, wetSmudge, aspectRatio
+        case dynamics, wetSmudge, aspectRatio, stabilization, pressureSmoothing
     }
 
     public init(from decoder: Decoder) throws {
@@ -238,6 +249,9 @@ public struct BrushConfig: Codable, Sendable {
         // Default streamline to 0.0 so configs saved without it decode to "no smoothing"
         // (matches pre-Phase-1 behavior). The key already existed as a legacy no-op.
         streamline = try container.decodeIfPresent(CGFloat.self, forKey: .streamline) ?? 0.0
+        // P3 stabilization rebuild — default 0 (off) so earlier configs decode unchanged.
+        stabilization = try container.decodeIfPresent(CGFloat.self, forKey: .stabilization) ?? 0.0
+        pressureSmoothing = try container.decodeIfPresent(CGFloat.self, forKey: .pressureSmoothing) ?? 0.0
         // Phase 2 fields — default to the init defaults so configs saved before them
         // decode unchanged.
         hardness = try container.decodeIfPresent(CGFloat.self, forKey: .hardness) ?? 0.5
@@ -269,6 +283,8 @@ public struct BrushConfig: Codable, Sendable {
         try container.encode(pressureGamma, forKey: .pressureGamma)
         try container.encode(tiltSensitivity, forKey: .tiltSensitivity)
         try container.encode(streamline, forKey: .streamline)
+        try container.encode(stabilization, forKey: .stabilization)
+        try container.encode(pressureSmoothing, forKey: .pressureSmoothing)
         try container.encode(hardness, forKey: .hardness)
         try container.encode(spacing, forKey: .spacing)
         try container.encode(taper, forKey: .taper)

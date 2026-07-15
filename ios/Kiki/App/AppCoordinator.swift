@@ -127,6 +127,14 @@ final class AppCoordinator {
             applyTool()
         }
     }
+    /// Gaussian arc-length smoothing ("Smoothing", P3). 0 = off; higher = steadier
+    /// curvature with more trailing lag (catch-up-on-lift covers the tail).
+    var toolStabilization: CGFloat = 0.0 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
     /// Tip aspect ratio ("Aspect", P4b anisotropy). 1 = round; lower flattens the tip
     /// into a chisel/calligraphy nib (combine with a Rotation dynamics option or a
     /// stroke-oriented shape to steer the nib angle).
@@ -1746,6 +1754,7 @@ final class AppCoordinator {
                 pressureGamma: 0.35,
                 tiltSensitivity: 1.0,
                 streamline: toolStreamline,
+                stabilization: toolStabilization,
                 hardness: toolHardness,
                 spacing: toolSpacing,
                 taper: toolTaper,

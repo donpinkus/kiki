@@ -29,6 +29,7 @@ struct BrushSettingsPopover: View {
             .disabled(wet)
             .opacity(wet ? 0.35 : 1)
             BrushSliderRow("Stabilize", value: $coordinator.toolStreamline, range: 0.0...1.0, help: Self.help["Stabilize"]!)
+            BrushSliderRow("Smoothing", value: $coordinator.toolStabilization, range: 0.0...1.0, help: Self.help["Smoothing"]!)
             BrushSliderRow("Hardness", value: $coordinator.toolHardness, range: 0.0...1.0, help: Self.help["Hardness"]!)
             BrushSliderRow("Aspect", value: $coordinator.toolAspect, range: 0.1...1.0, help: Self.help["Aspect"]!)
             BrushSliderRow("Spacing", value: $coordinator.toolSpacing, range: 0.02...1.0, help: Self.help["Spacing"]!)
@@ -81,6 +82,9 @@ struct BrushSettingsPopover: View {
         "Stabilize": BrushHelp(summary: "Smooths shaky lines by letting the drawn line lag behind the pencil.",
             low: "Follows your hand exactly — every wobble shows.",
             high: "Very smooth and confident, but the line trails behind the pencil."),
+        "Smoothing": BrushHelp(summary: "Averages the path over the distance drawn for clean, steady curves.",
+            low: "No averaging — the path is exactly what Stabilize produces.",
+            high: "Very clean curvature; tremors vanish. The stroke still ends where the pencil lifts."),
         "Hardness": BrushHelp(summary: "How crisp or soft the brush edge is.",
             low: "Soft, feathered airbrush edge.",
             high: "Crisp, sharp edge."),

@@ -11,7 +11,7 @@ the app build. Run it by hand:
 
 ```bash
 cd ios/Packages/CanvasModule/OfflineTests
-swiftc ../Sources/CanvasModule/BrushDynamics.swift ../Sources/CanvasModule/WetKM.swift main.swift -o /tmp/bdtest && /tmp/bdtest
+swiftc ../Sources/CanvasModule/BrushDynamics.swift ../Sources/CanvasModule/WetKM.swift ../Sources/CanvasModule/DrawingEngine.swift ../Sources/CanvasModule/StrokeStabilizer.swift main.swift -o /tmp/bdtest && /tmp/bdtest
 ```
 
 Expect `ALL PASSED`. Re-run after any change to the fold math, combine modes, sensor
