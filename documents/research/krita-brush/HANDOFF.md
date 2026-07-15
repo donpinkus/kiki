@@ -54,6 +54,14 @@ Recorded fixtures come from the app: **Brush Studio → "Record strokes" → Upl
 - BrushHarness headless loop + stroke recorder.
 
 ## What's NEXT (open threads, roughly prioritized)
+
+> **SUPERSEDED 2026-07-15 by `13-procreate-parity.md`** — a fresh Procreate Brush Studio
+> parameter-parity analysis (full handbook inventory in `14-…`) re-prioritized this list:
+> **1) P3 stabilization rebuild → 2) P8 grain → 3) cheap-knobs batch (aspect-as-CurveOption,
+> count/jitters, barrel-roll sensor, …) → 4) P4a lightness tips → 5) P7 wet rework wearing
+> Procreate's Wet Mix vocabulary → 6) preset library.** Strategy: Krita mechanisms inside,
+> Procreate vocabulary outside. Items below remain for context; maxSpeed (item 2) is still
+> Donald-gated and unpins all Speed dynamics.
 1. ~~Finish the control-isolation validation~~ **DONE 2026-07-15 (via BrushHarness, no device needed):** all outputs now visually confirmed — `size` ✓, `flow` ✓, **scatter ✓ + color jitter ✓** (`dry-03-dynamics` scene), **rotation ✓** (`dry-06-calligraphy-rotation`: fixed-45° nib gives classic thick/thin; Distance-driven rotation visibly spins the tip).
 2. **Tune `maxSpeed`.** Default is **1500** everywhere, but measured device speeds are **12,000–33,000 px/s**, so the Speed sensor is pinned at 1.0 (no variation). Use the **Max speed** slider (Brush Studio → Dev tools) to find the right value live, then bake it as the default in `BrushDynamics.swift` (~:493), `MetalCanvasView.swift` (~:63), `AppCoordinator.swift` (~:195), `CanvasView.swift` (~:29), `StrokeStampGenerator.swift` (~:20). (Verify these line numbers — they drift.) **Note:** recorded fixtures store canvas-pixel positions (~2.7× view points), so Speed-sensor brushes see faster speeds in harness replay than on device — tune on device, not from fixtures.
 3. **Wet-brush refinement** (use BrushHarness): the low-Mix "opacify + tint soft edges" tradeoff (pro-brush-roadmap tail), and the **GPU-reservoir** "truer fix" for in-flight self-smear + the async-timing nondeterminism (`sampleLayerColor` sees committed paint only).
