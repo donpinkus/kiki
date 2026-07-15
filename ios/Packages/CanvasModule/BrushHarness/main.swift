@@ -245,10 +245,10 @@ let teal = CodableColor(red: 0.05, green: 0.55, blue: 0.55)
 runScene("dry-01-pressure",
          """
          How the tip responds to pressure, taper, and hardness — one control per row.
-         • Row 1: pressure ramps 0→1 along the stroke → width should grow left to right.
-         • Row 2: pressure rises then falls (bell) → thin–thick–thin.
-         • Row 3: pulsing pressure + Taper 0.5 → wavy width with both tips tapered to points.
-         • Row 4 left: Hardness 0 → soft, feathered airbrush edge. Right: Hardness 1 → crisp edge.
+         - Row 1: pressure ramps 0→1 along the stroke → width should grow left to right.
+         - Row 2: pressure rises then falls (bell) → thin–thick–thin.
+         - Row 3: pulsing pressure + Taper 0.5 → wavy width with both tips tapered to points.
+         - Row 4 left: Hardness 0 → soft, feathered airbrush edge. Right: Hardness 1 → crisp edge.
          """) { s in
     s.label("pressure ramp 0 → 1", y: 160)
     s.label("pressure bell (0 → 1 → 0)", y: 380)
@@ -268,9 +268,9 @@ runScene("dry-01-pressure",
 runScene("dry-02-flow-vs-opacity",
          """
          The Glaze split — Flow builds up WITHIN a stroke, Opacity is a per-stroke ceiling.
-         • Left loop: Flow 0.25, Opacity 1 — the loop crosses itself, so the overlap darkens (flow builds).
-         • Right loop: Flow 1, Opacity 0.25 — same self-crossing, but the overlap must stay FLAT (ceiling).
-         • Bottom cross: two SEPARATE Flow-0.25 strokes — separate strokes always build where they cross.
+         - Left loop: Flow 0.25, Opacity 1 — the loop crosses itself, so the overlap darkens (flow builds).
+         - Right loop: Flow 1, Opacity 0.25 — same self-crossing, but the overlap must stay FLAT (ceiling).
+         - Bottom cross: two SEPARATE Flow-0.25 strokes — separate strokes always build where they cross.
          """) { s in
     s.label("flow 0.25 / opacity 1 — overlap builds", y: 205)
     s.label("flow 1 / op 0.25 — overlap stays flat", x: 560, y: 205)
@@ -288,9 +288,9 @@ runScene("dry-03-dynamics",
          """
          Brush dynamics stack: dab size driven by pressure (gamma 2), constant scatter, per-STROKE color jitter.
          All three rows use the IDENTICAL brush — only the stroke changes, so:
-         • each row's dabs swell mid-stroke (pressure bell → size),
-         • dabs spray around the path (scatter 0.55),
-         • each row is a visibly different red (jitter is seeded per stroke, stable on replay).
+         - each row's dabs swell mid-stroke (pressure bell → size),
+         - dabs spray around the path (scatter 0.55),
+         - each row is a visibly different red (jitter is seeded per stroke, stable on replay).
          """) { s in
     s.label("same brush, stroke #1 — note this row's red", y: 165)
     s.label("stroke #2 — different jittered red", y: 415)
@@ -328,9 +328,9 @@ runScene("dry-04-shapes",
 runScene("dry-05-aspect",
          """
          Tip aspect ratio (anisotropy): the SAME dab row three times, only Aspect changes.
-         • Row 1: Aspect 1.0 — round dabs (the default tip).
-         • Row 2: Aspect 0.4 — squashed ellipses.
-         • Row 3: Aspect 0.15 — flat blades (the calligraphy-nib footprint).
+         - Row 1: Aspect 1.0 — round dabs (the default tip).
+         - Row 2: Aspect 0.4 — squashed ellipses.
+         - Row 3: Aspect 0.15 — flat blades (the calligraphy-nib footprint).
          Spacing is set wide on purpose so each individual dab footprint is visible.
          """) { s in
     for (i, a) in ["aspect 1.0 (round)", "aspect 0.4 (ellipse)", "aspect 0.15 (blade)"].enumerated() {
@@ -352,9 +352,9 @@ runScene("dry-05-aspect",
 runScene("dry-06-calligraphy-rotation",
          """
          Proves per-dab ROTATION reaches the GPU, using a flat nib (Aspect 0.2) to make it visible.
-         • Row 1: nib held at a FIXED 45° — a real calligraphy pen: the S-curve goes THICK where the
+         - Row 1: nib held at a FIXED 45° — a real calligraphy pen: the S-curve goes THICK where the
            path crosses the nib and razor-THIN where it runs parallel to it.
-         • Row 2: rotation driven by the Distance sensor — the nib angle keeps turning as the stroke
+         - Row 2: rotation driven by the Distance sensor — the nib angle keeps turning as the stroke
            travels, so the dabs fan through every orientation (the "spinning" proof).
          """) { s in
     s.label("flat nib fixed at 45° — thick/thin from direction", y: 130)

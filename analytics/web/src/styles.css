@@ -119,7 +119,6 @@ select:focus { outline: 1px solid var(--accent); }
   color: var(--muted); font-size: 12px; line-height: 1.45; margin: 3px 0 9px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.scene-card:hover .scene-desc { white-space: pre-line; }
 .tests-img {
   width: 100%; aspect-ratio: 1; object-fit: contain; background: #fff;
   display: block; border-radius: 7px; border: 1px solid var(--border);
@@ -151,7 +150,13 @@ select:focus { outline: 1px solid var(--accent); }
   line-height: 1; padding: 4px 8px; cursor: pointer; align-self: flex-start;
 }
 .lightbox-close:hover { color: var(--text); }
-.lightbox-desc { color: var(--muted); font-size: 13px; line-height: 1.55; padding: 6px 18px 12px; white-space: pre-line; }
+.lightbox-desc { color: var(--muted); font-size: 13px; line-height: 1.55; padding: 6px 18px 12px; }
+.lightbox-desc p { margin: 0 0 6px; }
+.lightbox-desc p:last-child { margin-bottom: 0; }
+.lightbox-desc ul { margin: 4px 0 0; padding-left: 20px; }
+.lightbox-desc li { margin: 3px 0; }
+.lightbox-desc strong { color: var(--text); font-weight: 600; }
+.lightbox-desc code { background: var(--panel-2); border-radius: 4px; padding: 1px 5px; font-size: 12px; }
 .lightbox-img-wrap { position: relative; background: #fff; min-height: 0; flex: 1; }
 .lightbox-img-wrap img { display: block; width: 100%; height: 100%; max-height: 64vh; object-fit: contain; }
 .lightbox-nav {

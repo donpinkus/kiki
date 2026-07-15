@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import Markdown from 'react-markdown';
 import { listTestRuns, type TestRun } from '../api';
 
 // Brush-test battery gallery. Deliberately NO pass/fail semantics (per Donald
@@ -54,7 +55,11 @@ function Lightbox({ items, index, onClose, onIndex }: {
           <span className="spacer" />
           <button className="lightbox-close" onClick={onClose} aria-label="Close">×</button>
         </div>
-        {item.description && <div className="lightbox-desc">{item.description}</div>}
+        {item.description && (
+          <div className="lightbox-desc">
+            <Markdown>{item.description}</Markdown>
+          </div>
+        )}
         <div className="lightbox-img-wrap">
           <img src={`/blobs/${item.blobKey}`} alt={item.title} />
           <button className="lightbox-nav prev" onClick={prev} disabled={index === 0} aria-label="Previous">‹</button>
@@ -81,13 +86,16 @@ function SceneImage({ blobKey, caption, onClick }: { blobKey: string; caption?: 
   );
 }
 
-/** Scene title + one-line description that expands on hover (title attr as backup). */
+/** Scene title + the description's SUMMARY line (descriptions are markdown; line 1
+ * is a plain sentence by authoring convention). The full structured description
+ * renders in the lightbox — click through for it; title attr gives a quick peek. */
 function SceneHeader({ name, description }: { name: string; description: string | null }) {
+  const summary = description?.split('\n')[0] ?? null;
   return (
     <div>
       <div className="scene-name">{name}</div>
-      {description ? (
-        <div className="scene-desc" title={description}>{description}</div>
+      {summary ? (
+        <div className="scene-desc" title={description ?? undefined}>{summary}</div>
       ) : (
         <div className="scene-desc">&nbsp;</div>
       )}
@@ -118,7 +126,9 @@ export function Tests() {
     return [...names].sort();
   }, [runs]);
 
-  // Newest available description per scene (runs arrive newest-first).
+  // Prefer the NEWEST description per scene (runs arrive newest-first), falling
+  // back to the run's own copy — keeps rendering consistent across old runs as
+  // description formatting evolves (e.g. the markdown switch).
   const descFor = useMemo(() => {
     const m = new Map<string, string>();
     for (const r of runs ?? []) {
@@ -126,7 +136,7 @@ export function Tests() {
         if (img.description && !m.has(img.scene)) m.set(img.scene, img.description);
       }
     }
-    return (sceneName: string, own?: string | null) => own ?? m.get(sceneName) ?? null;
+    return (sceneName: string, own?: string | null) => m.get(sceneName) ?? own ?? null;
   }, [runs]);
 
   if (!runs) return <div className="container muted">Loading…</div>;
