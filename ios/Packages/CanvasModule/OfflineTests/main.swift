@@ -288,6 +288,14 @@ _ = stP.feed(spt(0, 0, t: 0, f: 0))
 let pOut = stP.feed(spt(10, 0, t: 1.0 / 120, f: 1.0))
 checkBool("pressure smoothing lags force only", pOut.force < 1.0 && pOut.position.x == 10)
 
+// --- BarrelRotation sensor (cheap-knobs batch): additive, mirrors tiltDirection ---
+checkBool("barrelRotation is additive", BrushSensor.barrelRotation.isAdditive)
+let rollOpt = sizeOpt(sensors: [press, SensorChannel(sensor: .barrelRotation)])
+check("size + roll=0.5 (additive no-op)", rollOpt.value(SensorInput(pressure: 1, rollNorm: 0.5)), 0.5)
+var rollState = StrokeDynamicsState(seed: 3)
+let rollIn = rollState.advance(x: 0, y: 0, force: 1, altitude: .pi/2, azimuth: 0, dx: 0, dy: 0, dt: 0, roll: .pi)
+check("advance normalizes roll π → 0.5", rollIn.rollNorm, 0.5, tol: 1e-9)
+
 // --- P8 grain: composite-time carve (Swift mirror of grainCompositorFragment) ---
 // a' = clamp(a − src·depth, 0, 1), applied ONCE to the scratch's accumulated alpha
 // (per-dab carving was rejected: overlapping stamps refill the tooth — see the P8

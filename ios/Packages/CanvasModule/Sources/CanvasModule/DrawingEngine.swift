@@ -33,25 +33,32 @@ public struct StrokePoint: Codable, Sendable {
     /// sensor (chisel/flat-pencil shape — high img2img leverage). Defaults to 0 for inputs
     /// and saved strokes that predate azimuth capture (backward-compatible decode below).
     public var azimuth: CGFloat
+    /// Apple Pencil Pro barrel-roll angle in radians (UITouch.rollAngle, iOS 17.5+).
+    /// 0 for non-Pro pencils, fingers, and recordings that predate capture. Feeds the
+    /// BarrelRotation sensor. Added 2026-07-15 (backward-compatible decode below).
+    public var rollAngle: CGFloat
     public var timestamp: TimeInterval
 
-    public init(position: CGPoint, force: CGFloat, altitude: CGFloat, timestamp: TimeInterval, azimuth: CGFloat = 0) {
+    public init(position: CGPoint, force: CGFloat, altitude: CGFloat, timestamp: TimeInterval,
+                azimuth: CGFloat = 0, rollAngle: CGFloat = 0) {
         self.position = position
         self.force = force
         self.altitude = altitude
         self.azimuth = azimuth
+        self.rollAngle = rollAngle
         self.timestamp = timestamp
     }
 
-    // Explicit CodingKeys + decoder so saved strokes without `azimuth` still load (→ 0).
-    // `encode(to:)` is synthesized from these keys.
-    enum CodingKeys: String, CodingKey { case position, force, altitude, azimuth, timestamp }
+    // Explicit CodingKeys + decoder so saved strokes without `azimuth`/`rollAngle` still
+    // load (→ 0). `encode(to:)` is synthesized from these keys.
+    enum CodingKeys: String, CodingKey { case position, force, altitude, azimuth, rollAngle, timestamp }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         position = try c.decode(CGPoint.self, forKey: .position)
         force = try c.decode(CGFloat.self, forKey: .force)
         altitude = try c.decode(CGFloat.self, forKey: .altitude)
         azimuth = try c.decodeIfPresent(CGFloat.self, forKey: .azimuth) ?? 0
+        rollAngle = try c.decodeIfPresent(CGFloat.self, forKey: .rollAngle) ?? 0
         timestamp = try c.decode(TimeInterval.self, forKey: .timestamp)
     }
 }
@@ -118,6 +125,10 @@ public struct BrushConfig: Codable, Sendable {
     /// Stamp spacing as a fraction of the (pressure-modulated) stamp width. Lower =
     /// denser/smoother strokes; higher = spaced-out dabs. Default 0.3.
     public var spacing: CGFloat
+    /// Spacing jitter [0,1] (Procreate "Spacing Jitter"): per-gap deterministic random
+    /// multiplier on the spacing (seeded by stroke id + stamp index — replay-identical).
+    /// 0 = even gaps. Dry path only.
+    public var spacingJitter: CGFloat
     /// Stroke-end taper [0,1]. 0 = no taper; higher tapers the stamp radius toward the
     /// start and end of the stroke (the taper length is this fraction of the half-stroke).
     public var taper: CGFloat
@@ -182,6 +193,7 @@ public struct BrushConfig: Codable, Sendable {
         pressureSmoothing: CGFloat = 0.0,
         hardness: CGFloat = 0.5,
         spacing: CGFloat = 0.3,
+        spacingJitter: CGFloat = 0.0,
         taper: CGFloat = 0.0,
         wetEnabled: Bool = false,
         wetStrength: CGFloat = 0.4,
@@ -205,6 +217,7 @@ public struct BrushConfig: Codable, Sendable {
         self.pressureSmoothing = pressureSmoothing
         self.hardness = hardness
         self.spacing = spacing
+        self.spacingJitter = spacingJitter
         self.taper = taper
         self.wetEnabled = wetEnabled
         self.wetStrength = wetStrength
@@ -249,7 +262,7 @@ public struct BrushConfig: Codable, Sendable {
         case streamline, taperIn, taperOut, tiltSensitivity
         case hardness, spacing, taper, wetEnabled, wetStrength, wetPickup, shapeID
         case dynamics, wetSmudge, aspectRatio, stabilization, pressureSmoothing
-        case grainID, grainDepth, grainScale
+        case grainID, grainDepth, grainScale, spacingJitter
     }
 
     public init(from decoder: Decoder) throws {
@@ -272,6 +285,7 @@ public struct BrushConfig: Codable, Sendable {
         // decode unchanged.
         hardness = try container.decodeIfPresent(CGFloat.self, forKey: .hardness) ?? 0.5
         spacing = try container.decodeIfPresent(CGFloat.self, forKey: .spacing) ?? 0.3
+        spacingJitter = try container.decodeIfPresent(CGFloat.self, forKey: .spacingJitter) ?? 0.0
         taper = try container.decodeIfPresent(CGFloat.self, forKey: .taper) ?? 0.0
         wetEnabled = try container.decodeIfPresent(Bool.self, forKey: .wetEnabled) ?? false
         wetStrength = try container.decodeIfPresent(CGFloat.self, forKey: .wetStrength) ?? 0.4
@@ -307,6 +321,7 @@ public struct BrushConfig: Codable, Sendable {
         try container.encode(pressureSmoothing, forKey: .pressureSmoothing)
         try container.encode(hardness, forKey: .hardness)
         try container.encode(spacing, forKey: .spacing)
+        try container.encode(spacingJitter, forKey: .spacingJitter)
         try container.encode(taper, forKey: .taper)
         try container.encode(wetEnabled, forKey: .wetEnabled)
         try container.encode(wetStrength, forKey: .wetStrength)

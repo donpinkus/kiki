@@ -70,8 +70,17 @@ enum StrokeStampGenerator {
         let brush = stroke.brush
         let color = premultipliedColor(brush)
         let hardness = Float(brush.hardness)
-        // P4b: constant per stroke for now (a dynamics CurveOption can drive it later).
+        // P4b base aspect; the `ratio` CurveOption (cheap-knobs batch) multiplies it
+        // per dab in `dabAttrs` (Procreate Pressure/Tilt Roundness).
         let aspect = Float(min(max(brush.aspectRatio, 0.05), 1))
+        // Spacing jitter: deterministic per-gap multiplier (stroke seed + stamp index).
+        let spacingJitter = min(max(brush.spacingJitter, 0), 1)
+        let spacingSeed = strokeSeed(stroke.id)
+        func jitteredSpacing(_ base: CGFloat, _ index: Int) -> CGFloat {
+            guard spacingJitter > 0 else { return base }
+            let r = CGFloat(brushHash01(spacingSeed, UInt64(index), 0x5AC3)) // [0,1)
+            return max(0.5, base * (1 + spacingJitter * (2 * r - 1)))
+        }
         // Spacing as a fraction of stamp width; clamped so a tiny value can't generate
         // a runaway number of stamps (the renderer also caps per-frame stamp count).
         let spacingFraction = max(brush.spacing, 0.02)
@@ -130,14 +139,14 @@ enum StrokeStampGenerator {
         /// exact behavior; the dynamics branch advances stroke state and evaluates the curve
         /// options. `dt` is the seconds across the segment this dab sits on (for the Speed sensor).
         func dabAttrs(x: CGFloat, y: CGFloat, force: CGFloat, altitude: CGFloat, azimuth: CGFloat,
-                      dx: CGFloat, dy: CGFloat, dt: Double)
-            -> (width: CGFloat, color: SIMD4<Float>, rotation: Float, offset: CGPoint) {
+                      dx: CGFloat, dy: CGFloat, dt: Double, roll: CGFloat = 0)
+            -> (width: CGFloat, color: SIMD4<Float>, rotation: Float, offset: CGPoint, aspect: Float) {
             guard hasDyn, var st = dynState else {
-                return (brush.effectiveWidth(force: force, altitude: altitude), color, strokeRotation(dx: dx, dy: dy), .zero)
+                return (brush.effectiveWidth(force: force, altitude: altitude), color, strokeRotation(dx: dx, dy: dy), .zero, aspect)
             }
             let input = st.advance(
                 x: Double(x), y: Double(y), force: Double(force), altitude: Double(altitude),
-                azimuth: Double(azimuth), dx: Double(dx), dy: Double(dy), dt: dt)
+                azimuth: Double(azimuth), dx: Double(dx), dy: Double(dy), dt: dt, roll: Double(roll))
             dynState = st
             let w: CGFloat = dyn?.size != nil
                 ? brush.baseWidth * CGFloat(dyn!.size!.value(input))
@@ -157,14 +166,20 @@ enum StrokeStampGenerator {
                 offset = CGPoint(x: w * CGFloat((2 * input.randScatterX - 1) * mag),
                                  y: w * CGFloat((2 * input.randScatterY - 1) * mag))
             }
-            return (w, col, rot, offset)
+            // Roundness/ratio (Procreate Pressure/Tilt Roundness): per-dab aspect multiplier.
+            var dabAspect = aspect
+            if let ratioOpt = dyn?.ratio {
+                dabAspect = Float(min(max(CGFloat(aspect) * CGFloat(ratioOpt.value(input)), 0.05), 1))
+            }
+            return (w, col, rot, offset, dabAspect)
         }
         // ---------------------------------------------------------------------------------
 
         let first = stroke.points[0]
         let firstDt = stroke.points.count > 1 ? max(0, Double(stroke.points[1].timestamp - first.timestamp)) : 0
         let firstAttr = dabAttrs(x: first.position.x, y: first.position.y, force: first.force, altitude: first.altitude,
-                                 azimuth: first.azimuth, dx: firstDir.0, dy: firstDir.1, dt: firstDt)
+                                 azimuth: first.azimuth, dx: firstDir.0, dy: firstDir.1, dt: firstDt,
+                                 roll: first.rollAngle)
         let firstWidth = firstAttr.width
         if clipPath.map({ $0.contains(CGPoint(x: first.position.x + firstAttr.offset.x,
                                               y: first.position.y + firstAttr.offset.y)) }) ?? true {
@@ -175,12 +190,12 @@ enum StrokeStampGenerator {
                 rotation: firstAttr.rotation,
                 color: firstAttr.color,
                 hardness: hardness,
-                aspect: aspect
+                aspect: firstAttr.aspect
             ))
         }
 
         var lastStampPos = first.position
-        var currentSpacing = max(firstWidth * spacingFraction, 0.5)
+        var currentSpacing = jitteredSpacing(max(firstWidth * spacingFraction, 0.5), 0)
 
         for i in 1..<stroke.points.count {
             let prev = stroke.points[i - 1]
@@ -208,8 +223,10 @@ enum StrokeStampGenerator {
                 // Per-dab step (fraction of the segment) so the Speed sensor sees this dab's own
                 // dt/displacement instead of the whole segment's reused N times. P1-review fix.
                 let stepFrac = min(1, currentSpacing / segmentDist)
+                let roll = prev.rollAngle + (curr.rollAngle - prev.rollAngle) * t
                 let attr = dabAttrs(x: x, y: y, force: force, altitude: altitude, azimuth: azimuth,
-                                    dx: dx * stepFrac, dy: dy * stepFrac, dt: segDt * Double(stepFrac))
+                                    dx: dx * stepFrac, dy: dy * stepFrac, dt: segDt * Double(stepFrac),
+                                    roll: roll)
                 let width = attr.width
 
                 let pos = CGPoint(x: x, y: y)
@@ -221,12 +238,12 @@ enum StrokeStampGenerator {
                         rotation: attr.rotation,
                         color: attr.color,
                         hardness: hardness,
-                        aspect: aspect
+                        aspect: attr.aspect
                     ))
                 }
 
                 lastStampPos = pos
-                currentSpacing = max(width * spacingFraction, 0.5)
+                currentSpacing = jitteredSpacing(max(width * spacingFraction, 0.5), stamps.count)
                 traveled += currentSpacing
             }
         }
@@ -240,7 +257,8 @@ enum StrokeStampGenerator {
                 : firstDir
             let lastDt = n > 1 ? max(0, Double(last.timestamp - stroke.points[n - 2].timestamp)) : 0
             let attr = dabAttrs(x: last.position.x, y: last.position.y, force: last.force, altitude: last.altitude,
-                                azimuth: last.azimuth, dx: lastDir.0, dy: lastDir.1, dt: lastDt)
+                                azimuth: last.azimuth, dx: lastDir.0, dy: lastDir.1, dt: lastDt,
+                                roll: last.rollAngle)
             let width = attr.width
             if clipPath.map({ $0.contains(CGPoint(x: last.position.x + attr.offset.x,
                                                   y: last.position.y + attr.offset.y)) }) ?? true {
@@ -251,7 +269,7 @@ enum StrokeStampGenerator {
                     rotation: attr.rotation,
                     color: attr.color,
                     hardness: hardness,
-                    aspect: aspect
+                    aspect: attr.aspect
                 ))
             }
         }

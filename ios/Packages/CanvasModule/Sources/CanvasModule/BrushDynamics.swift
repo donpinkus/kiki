@@ -217,11 +217,13 @@ public enum BrushSensor: String, Codable, CaseIterable, Sendable {
     case fade              // dab count, normalized by a period
     case fuzzyPerDab       // per-dab random — ADDITIVE
     case fuzzyPerStroke    // one random draw per stroke — ADDITIVE
+    // Append-only (rawValues live in saved brush JSON). Added 2026-07-15:
+    case barrelRotation    // Apple Pencil Pro roll angle — ADDITIVE (like tiltDirection)
 
     /// Additive sensors sum into the additive bucket (Krita `isAdditive()`).
     public var isAdditive: Bool {
         switch self {
-        case .tiltDirection, .fuzzyPerDab, .fuzzyPerStroke: return true
+        case .tiltDirection, .fuzzyPerDab, .fuzzyPerStroke, .barrelRotation: return true
         default: return false
         }
     }
@@ -237,6 +239,7 @@ public enum BrushSensor: String, Codable, CaseIterable, Sendable {
         case .speed:          return clamp01(input.speedNorm)
         case .tiltElevation:  return clamp01(input.tiltElevationNorm)
         case .tiltDirection:  return scalingToAdditive(clamp01(input.azimuthNorm)) // [0,1]→[-1,1] additive
+        case .barrelRotation: return scalingToAdditive(clamp01(input.rollNorm))    // Pencil Pro roll, additive
         case .drawingAngle:   return clamp01(input.drawingAngleNorm)               // absolute
         case .distance:       return clamp01(input.distanceNorm)
         case .fade:           return clamp01(input.fadeNorm)
@@ -421,6 +424,7 @@ public struct SensorInput: Sendable {
     public var pressure: Double          // [0,1]
     public var tiltElevationNorm: Double // [0,1] — 0 perpendicular … 1 fully tilted
     public var azimuthNorm: Double       // [0,1] — tilt direction / (2π)
+    public var rollNorm: Double          // [0,1] — Pencil Pro barrel roll / (2π); 0 when absent
     public var drawingAngleNorm: Double  // [0,1] — stroke heading 0.5 + angle/2π
     public var speedNorm: Double         // [0,1]
     public var distanceNorm: Double      // [0,1]
@@ -434,6 +438,7 @@ public struct SensorInput: Sendable {
         pressure: Double = 1,
         tiltElevationNorm: Double = 0,
         azimuthNorm: Double = 0,
+        rollNorm: Double = 0,
         drawingAngleNorm: Double = 0,
         speedNorm: Double = 0,
         distanceNorm: Double = 0,
@@ -446,6 +451,7 @@ public struct SensorInput: Sendable {
         self.pressure = pressure
         self.tiltElevationNorm = tiltElevationNorm
         self.azimuthNorm = azimuthNorm
+        self.rollNorm = rollNorm
         self.drawingAngleNorm = drawingAngleNorm
         self.speedNorm = speedNorm
         self.distanceNorm = distanceNorm
@@ -503,7 +509,7 @@ public struct StrokeDynamicsState {
     /// seconds since the previous point; returns the `SensorInput` for this dab.
     public mutating func advance(
         x: Double, y: Double, force: Double, altitude: Double, azimuth: Double,
-        dx: Double, dy: Double, dt: Double
+        dx: Double, dy: Double, dt: Double, roll: Double = 0
     ) -> SensorInput {
         if let lx = lastX, let ly = lastY {
             arcLength += hypotD(x - lx, y - ly)
@@ -530,6 +536,8 @@ public struct StrokeDynamicsState {
         let elevation = clamp01(altitude / (Double.pi / 2))
         // Azimuth → [0,1).
         let azNorm = wrapValue(azimuth / (2 * Double.pi), 0, 1)
+        // Pencil Pro barrel roll → [0,1) (0 for non-Pro input / older recordings).
+        let rollN = wrapValue(roll / (2 * Double.pi), 0, 1)
         // Heading → [0,1): 0.5 + angle/2π (Krita DrawingAngle).
         let heading = (dx == 0 && dy == 0) ? 0.5 : wrapValue(0.5 + atan2(dy, dx) / (2 * Double.pi), 0, 1)
 
@@ -544,6 +552,7 @@ public struct StrokeDynamicsState {
             pressure: clamp01(force),
             tiltElevationNorm: elevation,
             azimuthNorm: azNorm,
+            rollNorm: rollN,
             drawingAngleNorm: heading,
             speedNorm: speedNorm,
             distanceNorm: distNorm,
@@ -595,6 +604,7 @@ public struct BrushInputSample: Sendable, Equatable {
         case .speed: return speedNorm
         case .tiltElevation: return tiltElevation
         case .tiltDirection: return azimuth
+        case .barrelRotation: return nil // roll marker not shown in the HUD curve strip (dev HUD predates it)
         case .drawingAngle: return drawingAngle
         case .distance: return distanceNorm
         case .fade: return fadeNorm
@@ -626,6 +636,11 @@ public struct BrushDynamics: Codable, Equatable, Sendable {
     /// Scatter: per-dab random center displacement, magnitude = value × dab diameter. Size-like
     /// fold (so scatter can itself be pressure/speed-driven). Krita `KisScatterOption`.
     public var scatter: CurveOption?
+    /// Tip roundness/aspect multiplier (Procreate "Pressure/Tilt Roundness"): per-dab
+    /// multiplier on `BrushConfig.aspectRatio`, size-like fold, result clamped to
+    /// [0.05, 1]. Drive with pressure for a nib that squashes as you press. Added
+    /// 2026-07-15 (cheap-knobs batch on the P4b aspect plumbing).
+    public var ratio: CurveOption?
     /// Per-stroke HSV jitter of the ink color (one random shift per stroke). High img2img
     /// leverage (the model reads color). nil = no jitter.
     public var colorJitter: ColorJitter?
@@ -635,27 +650,30 @@ public struct BrushDynamics: Codable, Equatable, Sendable {
     // per-stroke resolution (e.g. driven by a stroke-level sensor) wired into currentStrokeOpacity().
 
     public init(size: CurveOption? = nil, flow: CurveOption? = nil,
-                rotation: CurveOption? = nil, scatter: CurveOption? = nil, colorJitter: ColorJitter? = nil) {
+                rotation: CurveOption? = nil, scatter: CurveOption? = nil,
+                ratio: CurveOption? = nil, colorJitter: ColorJitter? = nil) {
         self.size = size
         self.flow = flow
         self.rotation = rotation
         self.scatter = scatter
+        self.ratio = ratio
         self.colorJitter = colorJitter
     }
 
     /// True if no parameter has a non-identity dynamic — the legacy path can run unchanged.
     public var isInert: Bool {
         size == nil && flow == nil && rotation == nil
-            && scatter == nil && (colorJitter?.isInert ?? true)
+            && scatter == nil && ratio == nil && (colorJitter?.isInert ?? true)
     }
 
-    enum CodingKeys: String, CodingKey { case size, flow, rotation, scatter, colorJitter }
+    enum CodingKeys: String, CodingKey { case size, flow, rotation, scatter, ratio, colorJitter }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         size = try c.decodeIfPresent(CurveOption.self, forKey: .size)
         flow = try c.decodeIfPresent(CurveOption.self, forKey: .flow)
         rotation = try c.decodeIfPresent(CurveOption.self, forKey: .rotation)
         scatter = try c.decodeIfPresent(CurveOption.self, forKey: .scatter)
+        ratio = try c.decodeIfPresent(CurveOption.self, forKey: .ratio)
         colorJitter = try c.decodeIfPresent(ColorJitter.self, forKey: .colorJitter)
     }
 }

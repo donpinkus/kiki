@@ -116,6 +116,7 @@ struct BrushStudioView: View {
                 curveSection("Flow", option: $dyn.flow, fold: .sizeLike, defaultSensor: .pressure)
                 curveSection("Rotation", option: $dyn.rotation, fold: .rotationLike, defaultSensor: .drawingAngle)
                 curveSection("Scatter", option: $dyn.scatter, fold: .sizeLike, defaultSensor: .pressure)
+                curveSection("Roundness", option: $dyn.ratio, fold: .sizeLike, defaultSensor: .pressure)
 
                 ColorJitterSection(jitter: $dyn.colorJitter)
 

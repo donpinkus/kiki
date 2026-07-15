@@ -2549,12 +2549,18 @@ public final class MetalCanvasView: UIView {
         } else {
             azimuth = 0
         }
+        // Pencil Pro barrel roll (iOS 17.5+); 0 for other pencils/fingers/older OS.
+        var roll: CGFloat = 0
+        if #available(iOS 17.5, *), touch.type == .pencil {
+            roll = touch.rollAngle
+        }
         return StrokePoint(
             position: location,
             force: force,
             altitude: touch.altitudeAngle,
             timestamp: touch.timestamp,
-            azimuth: azimuth
+            azimuth: azimuth,
+            rollAngle: roll
         )
     }
 

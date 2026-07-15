@@ -465,6 +465,49 @@ runScene("dry-08-grain",
     s.paint(chalkStroke(106, 905, depth: 0.7, from: 380))
 }
 
+runScene("dry-09-knobs",
+         """
+         Cheap-knobs batch (Procreate parity, 2026-07-15): three small controls on existing machinery.
+         - Row 1: Spacing Jitter 0 vs 0.9 on identical dab rows — even gaps vs organically uneven gaps.
+         - Row 2: Pressure Roundness (ratio: pressure): the flat nib squashes with the pressure bell —
+           round where pressed hard mid-stroke, blade-thin at the light tips.
+         - Row 3: BarrelRotation sensor: the roll angle sweeps half a turn along the stroke and the
+           nib visibly follows it (synthesized roll — on device this is Pencil Pro barrel roll).
+         """) { s in
+    // Row 1: spacing jitter A/B.
+    var even = pen(.black, width: 44); even.spacing = 0.9
+    var jit = even; jit.spacingJitter = 0.9
+    s.label("spacing jitter 0", y: 110)
+    s.paint(synthStroke(id: 110, brush: even, from: CGPoint(x: 120, y: 170), to: CGPoint(x: 904, y: 170), force: { _ in 1 }))
+    s.label("spacing jitter 0.9", y: 270)
+    s.paint(synthStroke(id: 111, brush: jit, from: CGPoint(x: 120, y: 330), to: CGPoint(x: 904, y: 330), force: { _ in 1 }))
+
+    // Row 2: pressure roundness — ratio driven by pressure on a flat nib.
+    var nib = pen(teal, width: 56)
+    nib.aspectRatio = 1.0
+    nib.spacing = 0.8
+    nib.dynamics = BrushDynamics(
+        ratio: CurveOption(sensors: [SensorChannel(sensor: .pressure)], minValue: 0.12))
+    s.label("pressure roundness — squashes at the light ends, round when pressed", y: 450)
+    s.paint(synthStroke(id: 112, brush: nib, from: CGPoint(x: 120, y: 530), to: CGPoint(x: 904, y: 530),
+                        force: { sin($0 * .pi) }))
+
+    // Row 3: barrel-roll → rotation (synthesized roll ramp over the stroke).
+    var roller = pen(.black, width: 56)
+    roller.aspectRatio = 0.18
+    roller.spacing = 0.7
+    roller.dynamics = BrushDynamics(
+        rotation: CurveOption(sensors: [SensorChannel(sensor: .barrelRotation)], fold: .rotationLike, strength: 1.0))
+    var rollerStroke = synthStroke(id: 113, brush: roller, from: CGPoint(x: 120, y: 780), to: CGPoint(x: 904, y: 780),
+                                   force: { _ in 0.9 })
+    for i in rollerStroke.points.indices {
+        let t = CGFloat(i) / CGFloat(rollerStroke.points.count - 1)
+        rollerStroke.points[i].rollAngle = t * .pi   // half a turn across the stroke
+    }
+    s.label("barrel roll sweeps 0 → π along the stroke — nib follows", y: 700)
+    s.paint(rollerStroke)
+}
+
 runScene("wet-01-blue-into-yellow",
          """
          Spectral pigment mixing (Kubelka-Munk): a WET blue stroke dragged left-to-right through a
