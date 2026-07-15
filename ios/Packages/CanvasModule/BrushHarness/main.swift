@@ -390,8 +390,12 @@ runScene("wet-01-blue-into-yellow",
          yellow patch. Expected: blue entering, a GREEN transition band where blue meets yellow
          (per-channel RGB mixing would give gray/black), then the brush's carried load converges to
          yellow — it exits the patch depositing yellow, not blue.
+         The patch is built from three overlapping passes; the wet stroke runs along the MIDDLE band
+         only — the outer bands are untouched paint, there as a before/after reference.
          """) { s in
-    s.label("wet blue stroke →  enters left, exits right", y: 250)
+    s.label("wet blue stroke dragged along the MIDDLE band →", y: 250)
+    s.label("untouched", y: 377)
+    s.label("untouched", y: 537)
     // Yellow base patch (full-pressure passes so effectiveWidth == baseWidth — at the
     // default force 0.5 the rows shrink ~40% and leave white gaps), then a wet blue
     // stroke dragged through the patch: the trail should turn GREEN (spectral KM),
@@ -412,10 +416,12 @@ runScene("wet-02-smudge",
          a red patch, across the white gap, into a blue patch. Expected: red gets dragged into the gap
          as a tail that thins and dies (the carried load depletes over blank canvas), then a small red
          contamination appears where the smudge enters the blue.
+         Each patch is three overlapping passes; the smudge runs along the MIDDLE band only — the top
+         and bottom bands are untouched paint for comparison.
          """) { s in
     s.label("red patch", y: 305)
     s.label("blue patch", x: 620, y: 305)
-    s.label("one smudge stroke dragged left → right through both patches", y: 690)
+    s.label("smudge runs along the MIDDLE band only — outer bands are untouched reference", y: 690)
     // Red + blue patches with a gap; a smudge (no new ink) dragged through both:
     // it should push red into the gap, then contaminate toward blue crossing the patch.
     for i in 0..<3 {
@@ -438,9 +444,14 @@ runScene("wet-04-smudge-translucent",
          translucent. The patch is 40%-opacity red; a smudge drags through it and off the right edge.
          Expected: inside the patch the smudge is nearly invisible (40% pushed through 40%), and the
          drag-off tail is a translucent wisp that fades out. BROKEN would be: an opaque dark-red track.
+         The patch is three overlapping passes; the smudge runs along the MIDDLE band only. Judge the
+         result by comparing the smudged middle band against the untouched outer bands beside it —
+         identical pink = the 40% opacity was preserved.
          """) { s in
     s.label("40%-opacity red patch", y: 305)
-    s.label("smudge enters the patch, drags off the right edge", y: 690)
+    s.label("untouched (reference)", x: 640, y: 383)
+    s.label("untouched (reference)", x: 640, y: 543)
+    s.label("smudge runs along the MIDDLE band, then drags off the right edge", y: 690)
     // Donald's 2026-07-15 report: smudging 40%-opacity red turned it fully opaque
     // instead of pushing translucent paint. The smudge crosses the 40% patch and
     // drags off onto blank canvas. CORRECT behavior: the smudged area stays ~40%
