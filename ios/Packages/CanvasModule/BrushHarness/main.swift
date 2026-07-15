@@ -317,6 +317,22 @@ runScene("wet-02-smudge") { s in
                         from: CGPoint(x: 200, y: 460), to: CGPoint(x: 860, y: 460)))
 }
 
+runScene("wet-04-smudge-translucent") { s in
+    // Donald's 2026-07-15 report: smudging 40%-opacity red turned it fully opaque
+    // instead of pushing translucent paint. The smudge crosses the 40% patch and
+    // drags off onto blank canvas. CORRECT behavior: the smudged area stays ~40%
+    // (light pink over white), and the drag-off tail is translucent and fades out.
+    // BROKEN behavior: the stroke path turns deep opaque red.
+    for i in 0..<3 {
+        s.paint(synthStroke(id: 80 + i, brush: pen(red, width: 120, opacity: 0.4),
+                            from: CGPoint(x: 140, y: 380 + CGFloat(i) * 80),
+                            to: CGPoint(x: 560, y: 380 + CGFloat(i) * 80),
+                            force: { _ in 1 }))
+    }
+    s.paint(synthStroke(id: 84, brush: wet(.black, width: 70, mix: 0.6, smear: 0.85, smudge: true),
+                        from: CGPoint(x: 220, y: 460), to: CGPoint(x: 900, y: 460)))
+}
+
 runScene("wet-03-mix-sweep") { s in
     // Wet blue over yellow at Mix 0.2 / 0.5 / 0.9 (same smear) — a tuning contact row.
     for (i, mixV) in [CGFloat(0.2), 0.5, 0.9].enumerated() {

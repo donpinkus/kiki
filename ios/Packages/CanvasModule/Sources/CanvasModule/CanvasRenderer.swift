@@ -183,6 +183,12 @@ public final class CanvasRenderer {
         // the 12 bytes of tail padding after `hardness` (SIMD4 16-byte alignment), so the
         // stride stays 48 and the MSL struct matches — keep both declarations in sync.
         var aspect: Float = 1.0
+        // Smudge alpha-carry (2026-07-15): the target alpha the wet fragment moves dst.a
+        // toward at the deposit rate. -1 = legacy coverage mode (wet INK builds opaque
+        // by coverage — unchanged). Smudge packs its carried load's alpha here, so
+        // smudging 40%-opacity paint keeps it ~40% instead of opacifying, and the
+        // drag-off tail thins as the load depletes. Also in padding; stride stays 48.
+        var wetTargetAlpha: Float = -1.0
     }
 
     /// Maximum stamps per frame. 240 Hz pencil × ~6 interpolated steps per touch
@@ -1625,7 +1631,8 @@ public final class CanvasRenderer {
         float  rotation;
         float4 color;
         float  hardness;
-        float  aspect;   // P4b: local-Y quad scale (pre-rotation); 1 = round
+        float  aspect;         // P4b: local-Y quad scale (pre-rotation); 1 = round
+        float  wetTargetAlpha; // smudge alpha-carry; -1 = legacy coverage mode
     };
 
     struct StampVaryings {
@@ -1633,6 +1640,7 @@ public final class CanvasRenderer {
         float2 texCoord;
         float4 color;
         float  hardness;
+        float  wetTargetAlpha; // consumed by wetStampFragment only
     };
 
     vertex StampVaryings brushStampVertex(
@@ -1672,6 +1680,7 @@ public final class CanvasRenderer {
         out.texCoord = q.texCoord;
         out.color = inst.color;
         out.hardness = inst.hardness;
+        out.wetTargetAlpha = inst.wetTargetAlpha;
         return out;
     }
 
@@ -1807,8 +1816,21 @@ public final class CanvasRenderer {
         // Endpoint-exact residual correction (linear): unmixed dst & full-deposit load stay faithful.
         float3 corrected = max(mixLin + (1.0 - w) * (dstLin - dstRT) + w * (brushLin - brushRT), 0.0);
 
-        // Alpha builds by COVERAGE (opaque wet paint; no translucent fringe → no white halo).
-        float outA = dst.a + cov * (1.0 - dst.a);
+        // Alpha semantics, two modes:
+        //  • wetTargetAlpha < 0 (wet INK, legacy): builds by COVERAGE toward opaque
+        //    (opaque wet paint; no translucent fringe → no white halo). Byte-identical
+        //    to the pre-2026-07-15 behavior.
+        //  • wetTargetAlpha ≥ 0 (SMUDGE alpha-carry): dst.a moves toward the CARRIED
+        //    load's alpha at the deposit rate w — smudging 40%-opacity paint keeps it
+        //    ~40% instead of hardening it opaque, dragging onto blank lays a translucent
+        //    tail that thins as the load depletes, and dragging a thin load across dense
+        //    paint genuinely thins it (real smudge displaces paint, not just color).
+        float outA;
+        if (in.wetTargetAlpha < 0.0) {
+            outA = dst.a + cov * (1.0 - dst.a);
+        } else {
+            outA = clamp(dst.a + (in.wetTargetAlpha - dst.a) * w, 0.0, 1.0);
+        }
         return float4(corrected * outA, outA);
     }
 

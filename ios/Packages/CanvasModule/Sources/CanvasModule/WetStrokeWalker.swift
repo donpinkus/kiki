@@ -19,6 +19,13 @@ struct WetStrokeWalker {
     /// (or the canvas color under the first dab in smudge mode) and contaminates toward
     /// the canvas colors the stroke crosses.
     private(set) var load: SIMD3<Float> = .zero
+    /// The load's carried ALPHA (smudge mode only; wet ink is the opaque-paint model).
+    /// Seeded from the paint under the first dab and pulled toward each sampled alpha at
+    /// the pickup rate — crossing blank canvas depletes it, so a smudge drag-off tail
+    /// thins and dies instead of laying opaque paint forever. Packed per stamp as
+    /// `StampInstance.wetTargetAlpha`; the wet fragment moves dst.a toward it (2026-07-15
+    /// fix: smudging 40%-opacity paint used to harden it fully opaque).
+    private(set) var loadAlpha: Float = 0
 
     private var lastPointIndex = 0
     private var lastStampPos: CGPoint
@@ -53,20 +60,22 @@ struct WetStrokeWalker {
         let spacingFrac = max(brush.spacing, 0.02)
         let pickup = Float(max(0, min(1, brush.wetPickup)))   // how fast the load picks up canvas color
 
-        // Fresh paint load at the start of a stroke. SMUDGE seeds the load from the CANVAS
-        // color under the first dab (push existing color, introduce no new ink); a normal wet
-        // brush seeds from the brush ink. On blank canvas (no paint under the first dab) smudge
-        // falls back to the ink — a v1 limitation (Procreate smudges nothing on blank canvas).
+        // Fresh paint load at the start of a stroke. SMUDGE seeds the load (color AND
+        // alpha) from the CANVAS under the first dab — push existing paint, introduce no
+        // new ink; starting on blank canvas seeds alpha ≈ 0, so the stroke deposits
+        // nearly nothing (Procreate smudges nothing on blank canvas). A normal wet brush
+        // seeds from the brush ink with the legacy opaque-paint alpha model.
         if lastPointIndex == 0 {
-            // 3×3-averaged seed: one texel is jittery on noisy paint (the GPU deposit
-            // sees a soft-coverage footprint, the seed shouldn't hinge on a single pixel).
             if brush.wetSmudge,
                let p0 = stroke.points.first,
-               let s = sampleAveraged(Int(p0.position.x * scale), Int(p0.position.y * scale)),
-               s.alpha > 0.02 {
-                load = s.color
+               let s = sampleAveraged(Int(p0.position.x * scale), Int(p0.position.y * scale)) {
+                // 3×3-averaged seed: one texel is jittery on noisy paint (the GPU deposit
+                // sees a soft-coverage footprint, the seed shouldn't hinge on one pixel).
+                load = s.alpha > 0.02 ? s.color : baseColor
+                loadAlpha = s.alpha
             } else {
                 load = baseColor
+                loadAlpha = brush.wetSmudge ? 0 : 1
             }
         }
 
@@ -75,16 +84,24 @@ struct WetStrokeWalker {
         var spacing = lastSpacing
 
         // Place a stamp carrying the CURRENT load, then contaminate the load toward the
-        // canvas color under it (the smear: deposited color evolves & travels).
+        // canvas under it (the smear: deposited color evolves & travels). In smudge mode
+        // the load's ALPHA also tracks the sampled alpha — including alpha ≈ 0 over blank
+        // canvas, which is what makes a drag-off tail deplete and die.
         func emit(_ pos: CGPoint, _ width: CGFloat) {
             guard clipPath.map({ $0.contains(pos) }) ?? true else { return }
             let cx = Int(pos.x * scale), cy = Int(pos.y * scale)
             newStamps.append(CanvasRenderer.StampInstance(
                 center: SIMD2<Float>(Float(pos.x * scale), Float(pos.y * scale)),
                 radius: Float(width * 0.5 * scale), rotation: 0,
-                color: SIMD4<Float>(load.x, load.y, load.z, dep), hardness: hardness, aspect: aspect))
-            if let s = sample(cx, cy), s.alpha > 0.05 {
-                load = mix(load, s.color, pickup * s.alpha)
+                color: SIMD4<Float>(load.x, load.y, load.z, dep), hardness: hardness, aspect: aspect,
+                wetTargetAlpha: brush.wetSmudge ? loadAlpha : -1))
+            if let s = sample(cx, cy) {
+                if s.alpha > 0.05 {
+                    load = mix(load, s.color, pickup * s.alpha)
+                }
+                if brush.wetSmudge {
+                    loadAlpha += (s.alpha - loadAlpha) * pickup
+                }
             }
         }
 
