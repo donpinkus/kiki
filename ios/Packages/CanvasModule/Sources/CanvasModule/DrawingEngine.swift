@@ -153,6 +153,15 @@ public struct BrushConfig: Codable, Sendable {
     /// quad, so it applies to procedural, textured, AND wet dabs with no fragment cost.
     /// Clamped to [0.05, 1] at stamp packing.
     public var aspectRatio: CGFloat
+    /// Grain texture id (P8; see `GrainCatalog`). nil = no grain. Grain carves the dab
+    /// coverage with a soft-HEIGHT composite in DOCUMENT space (tooth stays put under
+    /// the stroke, dry-media style). Ignored by the wet path (v1).
+    public var grainID: String?
+    /// Grain depth [0,1]: 0 = grain off (identity), higher = tooth valleys carve the
+    /// dab away more aggressively (soft-HEIGHT: clamp(cov/(1−0.99·d) − src·d, 0, 1)).
+    public var grainDepth: CGFloat
+    /// Grain scale multiplier on the 256px tile (× the grain's nativeScale). >1 = coarser.
+    public var grainScale: CGFloat
     /// Krita-grade brush dynamics: per-parameter sensor→curve→combine→remap options
     /// (`BrushDynamics`). `nil` (the default) means "no dynamics" — the legacy
     /// `pressureGamma`/`tiltSensitivity` scalars drive size and everything else is a flat
@@ -180,6 +189,9 @@ public struct BrushConfig: Codable, Sendable {
         wetSmudge: Bool = false,
         shapeID: String? = nil,
         aspectRatio: CGFloat = 1.0,
+        grainID: String? = nil,
+        grainDepth: CGFloat = 0.5,
+        grainScale: CGFloat = 1.0,
         dynamics: BrushDynamics? = nil
     ) {
         self.color = color
@@ -200,6 +212,9 @@ public struct BrushConfig: Codable, Sendable {
         self.wetSmudge = wetSmudge
         self.shapeID = shapeID
         self.aspectRatio = aspectRatio
+        self.grainID = grainID
+        self.grainDepth = grainDepth
+        self.grainScale = grainScale
         self.dynamics = dynamics
     }
 
@@ -234,6 +249,7 @@ public struct BrushConfig: Codable, Sendable {
         case streamline, taperIn, taperOut, tiltSensitivity
         case hardness, spacing, taper, wetEnabled, wetStrength, wetPickup, shapeID
         case dynamics, wetSmudge, aspectRatio, stabilization, pressureSmoothing
+        case grainID, grainDepth, grainScale
     }
 
     public init(from decoder: Decoder) throws {
@@ -265,6 +281,10 @@ public struct BrushConfig: Codable, Sendable {
         shapeID = try container.decodeIfPresent(String.self, forKey: .shapeID)
         // P4b — default 1 (round) so configs saved before aspect decode unchanged.
         aspectRatio = try container.decodeIfPresent(CGFloat.self, forKey: .aspectRatio) ?? 1.0
+        // P8 grain — defaults keep earlier configs grain-free.
+        grainID = try container.decodeIfPresent(String.self, forKey: .grainID)
+        grainDepth = try container.decodeIfPresent(CGFloat.self, forKey: .grainDepth) ?? 0.5
+        grainScale = try container.decodeIfPresent(CGFloat.self, forKey: .grainScale) ?? 1.0
         // Krita-grade dynamics — default nil (legacy scalar behavior) so configs saved before
         // it decode to today's pen unchanged.
         dynamics = try container.decodeIfPresent(BrushDynamics.self, forKey: .dynamics)
@@ -293,6 +313,12 @@ public struct BrushConfig: Codable, Sendable {
         try container.encode(wetPickup, forKey: .wetPickup)
         try container.encode(wetSmudge, forKey: .wetSmudge)
         try container.encodeIfPresent(shapeID, forKey: .shapeID)
+        // aspectRatio was decoded-but-never-encoded from P4b (2026-07-15 fix): saved
+        // brushes / recorded fixtures silently lost their aspect on round-trip.
+        try container.encode(aspectRatio, forKey: .aspectRatio)
+        try container.encodeIfPresent(grainID, forKey: .grainID)
+        try container.encode(grainDepth, forKey: .grainDepth)
+        try container.encode(grainScale, forKey: .grainScale)
         try container.encodeIfPresent(dynamics, forKey: .dynamics)
     }
 }

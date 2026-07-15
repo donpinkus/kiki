@@ -207,7 +207,8 @@ final class Scene {
             let stamps = StrokeStampGenerator.stamps(for: stroke, scale: 1)
             renderer.commitStampsToCanvas(stamps,
                                           strokeOpacity: Float(stroke.brush.opacity),
-                                          shapeTexture: renderer.shapeTexture(for: stroke.brush.shapeID))
+                                          shapeTexture: renderer.shapeTexture(for: stroke.brush.shapeID),
+                                          grain: renderer.grainSettings(for: stroke.brush))
         }
     }
 
@@ -429,6 +430,39 @@ runScene("dry-07-stabilization",
     s.paint(stabilized(row(92, 680), streamline: 0, stabilization: 0.7))
     s.label("both (0.6 + 0.7)", y: 830)
     s.paint(stabilized(row(93, 920), streamline: 0.6, stabilization: 0.7))
+}
+
+runScene("dry-08-grain",
+         """
+         P8 grain: document-space paper tooth carving the dab coverage (soft-HEIGHT composite).
+         - Rows 1-3: the same charcoal-flow stroke with PAPER grain at depth 0 / 0.5 / 0.9 —
+           more depth = tooth valleys eat more of the paint; pressure (right side) fills them.
+         - Row 4: Canvas weave vs Speckle grains side by side (depth 0.7).
+         - Row 5: two OVERLAPPING strokes — the tooth pattern is continuous across both because
+           grain lives in DOCUMENT space, not stroke space (the dry-media invariant).
+         """) { s in
+    func chalkStroke(_ id: Int, _ y: CGFloat, depth: CGFloat, grain: String? = "paper",
+                     from x0: CGFloat = 120, to x1: CGFloat = 904) -> Stroke {
+        var b = pen(.black, width: 56, flow: 0.75)
+        b.hardness = 0.7
+        b.grainID = grain
+        b.grainDepth = depth
+        return synthStroke(id: id, brush: b, from: CGPoint(x: x0, y: y), to: CGPoint(x: x1, y: y),
+                           force: { 0.25 + 0.7 * $0 })
+    }
+    s.label("paper, depth 0 (identity)", y: 90)
+    s.paint(chalkStroke(100, 150, depth: 0))
+    s.label("paper, depth 0.5", y: 270)
+    s.paint(chalkStroke(101, 330, depth: 0.5))
+    s.label("paper, depth 0.9 (heavier tooth; light starts break up first)", y: 450)
+    s.paint(chalkStroke(102, 510, depth: 0.9))
+    s.label("canvas weave 0.7", y: 630)
+    s.paint(chalkStroke(103, 690, depth: 0.7, grain: "canvasWeave", to: 490))
+    s.label("speckle 0.7", x: 540, y: 630)
+    s.paint(chalkStroke(104, 690, depth: 0.7, grain: "speckle", from: 540))
+    s.label("overlapping strokes — tooth is continuous (document space)", y: 810)
+    s.paint(chalkStroke(105, 890, depth: 0.7, to: 640))
+    s.paint(chalkStroke(106, 905, depth: 0.7, from: 380))
 }
 
 runScene("wet-01-blue-into-yellow",

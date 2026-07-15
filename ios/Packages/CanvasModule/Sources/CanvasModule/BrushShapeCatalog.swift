@@ -45,3 +45,28 @@ public enum BrushShapeCatalog {
         !descriptor(for: id).isProcedural
     }
 }
+
+// MARK: - Grain catalog (P8)
+
+/// One selectable grain texture. All grains are PROCEDURAL (generated at renderer init
+/// from deterministic hash noise, tileable 256²) — no bundle resources, so the
+/// BrushHarness gets them for free. `nativeScale` is the default UV multiplier applied
+/// on top of `BrushConfig.grainScale` (bigger = coarser features on canvas; the plan's
+/// guidance is to stay in the COARSE value-grain band that survives img2img).
+public struct GrainDescriptor: Identifiable, Equatable, Sendable {
+    public let id: String
+    public let displayName: String
+    public let nativeScale: CGFloat
+}
+
+public enum GrainCatalog {
+    public static let all: [GrainDescriptor] = [
+        GrainDescriptor(id: "paper", displayName: "Paper", nativeScale: 1.0),
+        GrainDescriptor(id: "canvasWeave", displayName: "Canvas", nativeScale: 1.2),
+        GrainDescriptor(id: "speckle", displayName: "Speckle", nativeScale: 1.6),
+    ]
+    public static func descriptor(for id: String?) -> GrainDescriptor? {
+        guard let id else { return nil }
+        return all.first { $0.id == id }
+    }
+}

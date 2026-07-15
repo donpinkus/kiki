@@ -452,6 +452,7 @@ public final class MetalCanvasView: UIView {
 
         renderer.activeStrokeOpacity = currentStrokeOpacity()
         renderer.activeShapeTexture = isErasing ? nil : currentShapeTexture()
+        renderer.activeGrain = isErasing ? nil : currentGrain()
         renderer.renderFrame(drawable: drawable, isErasing: isErasing)
         NSLog("%@", "🔬OVL MCV.renderFrame main renderFrame returned")
 
@@ -2360,7 +2361,8 @@ public final class MetalCanvasView: UIView {
                     renderer.commitStampsToCanvas(
                         stamps,
                         strokeOpacity: Float(stroke.brush.opacity),
-                        shapeTexture: renderer.shapeTexture(for: stroke.brush.shapeID)
+                        shapeTexture: renderer.shapeTexture(for: stroke.brush.shapeID),
+                        grain: renderer.grainSettings(for: stroke.brush)
                     )
                 }
             }
@@ -2497,6 +2499,21 @@ public final class MetalCanvasView: UIView {
         if let brush = activeStroke?.brush { return Float(brush.opacity) }
         if case .brush(let config) = currentTool { return Float(config.opacity) }
         return 1.0
+    }
+
+    /// Grain settings (P8) for the active/current brush, or nil. Resolved per frame
+    /// alongside the shape texture; the wet path ignores grain (v1).
+    private func currentGrain() -> (texture: MTLTexture, depth: Float, invScale: Float)? {
+        let brush: BrushConfig?
+        if let b = activeStroke?.brush {
+            brush = b
+        } else if case .brush(let config) = currentTool {
+            brush = config
+        } else {
+            brush = nil
+        }
+        guard let brush, !brush.wetEnabled else { return nil }
+        return renderer.grainSettings(for: brush)
     }
 
     /// The brush-tip stamp texture for the active/current brush, or nil for the procedural

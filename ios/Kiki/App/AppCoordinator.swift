@@ -135,6 +135,20 @@ final class AppCoordinator {
             applyTool()
         }
     }
+    /// Grain texture id ("Grain", P8). nil = none.
+    var toolGrainID: String? = nil {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    /// Grain depth ("Depth", P8): how aggressively the paper tooth carves the dab.
+    var toolGrainDepth: CGFloat = 0.5 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
     /// Tip aspect ratio ("Aspect", P4b anisotropy). 1 = round; lower flattens the tip
     /// into a chisel/calligraphy nib (combine with a Rotation dynamics option or a
     /// stroke-oriented shape to steer the nib angle).
@@ -1764,6 +1778,8 @@ final class AppCoordinator {
                 wetSmudge: toolWetSmudge,
                 shapeID: toolShapeID,
                 aspectRatio: toolAspect,
+                grainID: toolGrainID,
+                grainDepth: toolGrainDepth,
                 dynamics: toolDynamics
             )
             canvasViewModel.selectBrush(config)

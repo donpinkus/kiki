@@ -18,6 +18,10 @@ struct BrushSettingsPopover: View {
         VStack(alignment: .leading, spacing: 18) {
             Group {
                 BrushShapePicker(selection: $coordinator.toolShapeID)
+                GrainPicker(selection: $coordinator.toolGrainID)
+                if coordinator.toolGrainID != nil {
+                    BrushSliderRow("Grain depth", value: $coordinator.toolGrainDepth, range: 0.0...1.0, help: Self.help["Grain depth"]!)
+                }
             }
             .disabled(wet)
             .opacity(wet ? 0.35 : 1)
@@ -88,6 +92,9 @@ struct BrushSettingsPopover: View {
         "Hardness": BrushHelp(summary: "How crisp or soft the brush edge is.",
             low: "Soft, feathered airbrush edge.",
             high: "Crisp, sharp edge."),
+        "Grain depth": BrushHelp(summary: "How strongly the paper tooth shows through the stroke.",
+            low: "No texture — solid paint.",
+            high: "Heavy dry-media break-up; press harder (more flow) to fill the tooth."),
         "Aspect": BrushHelp(summary: "How flat the brush tip is — a calligraphy/chisel nib at low values.",
             low: "A thin flat blade (pair with Rotation dynamics in Brush Studio to steer the nib).",
             high: "Fully round tip."),
@@ -145,6 +152,48 @@ private struct BrushShapePicker: View {
                 }
             }
         }
+    }
+}
+
+/// Grain texture selector (P8). "None" = no grain; the rest are the procedural
+/// document-space grains from `GrainCatalog`.
+private struct GrainPicker: View {
+    @Binding var selection: String?
+
+    private let columns = [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Grain").font(.subheadline.weight(.medium))
+            LazyVGrid(columns: columns, spacing: 8) {
+                chip(nil, "None")
+                ForEach(GrainCatalog.all) { grain in
+                    chip(grain.id, grain.displayName)
+                }
+            }
+        }
+    }
+
+    private func chip(_ id: String?, _ label: String) -> some View {
+        let selected = selection == id
+        return Button {
+            selection = id
+        } label: {
+            Text(label)
+                .font(.caption)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+                .background(selected ? Color.accentColor.opacity(0.18) : Color.gray.opacity(0.12))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .strokeBorder(selected ? Color.accentColor : .clear, lineWidth: 1.5)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .foregroundStyle(selected ? Color.accentColor : .primary)
+        }
+        .buttonStyle(.plain)
     }
 }
 

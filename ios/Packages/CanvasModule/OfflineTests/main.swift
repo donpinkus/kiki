@@ -288,6 +288,18 @@ _ = stP.feed(spt(0, 0, t: 0, f: 0))
 let pOut = stP.feed(spt(10, 0, t: 1.0 / 120, f: 1.0))
 checkBool("pressure smoothing lags force only", pOut.force < 1.0 && pOut.position.x == 10)
 
+// --- P8 grain: composite-time carve (Swift mirror of grainCompositorFragment) ---
+// a' = clamp(a − src·depth, 0, 1), applied ONCE to the scratch's accumulated alpha
+// (per-dab carving was rejected: overlapping stamps refill the tooth — see the P8
+// commit). depth 0 is an exact identity.
+func grainCarve(_ a: Double, _ src: Double, _ depth: Double) -> Double {
+    min(1, max(0, a - src * depth))
+}
+check("grain depth 0 is identity (a .37)", grainCarve(0.37, 0.8, 0), 0.37)
+checkBool("grain valleys die first at light coverage", grainCarve(0.1, 0.9, 0.7) == 0 && grainCarve(0.1, 0.05, 0.7) > 0)
+checkBool("grain monotonic in coverage", grainCarve(0.8, 0.5, 0.7) > grainCarve(0.3, 0.5, 0.7))
+checkBool("tooth persists even at full coverage (Procreate Depth semantics)", grainCarve(1.0, 1.0, 0.7) < 1.0)
+
 // --- per-dab timing (the PLAN's P1 exit-gate; informational, not a hard assert) ---
 // Worst-case dynamic brush: multi-sensor size + flow + rotation + scatter, all non-identity.
 // Measures the per-dab CPU cost the dynamics path adds on top of the legacy effectiveWidth call.
