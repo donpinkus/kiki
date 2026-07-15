@@ -27,6 +27,15 @@ BRUSH_SHAPES_DIR=$PWD/$S/Resources/BrushShapes /tmp/brushharness --out /tmp/brus
 open /tmp/brush-out   # or Read the PNGs directly
 ```
 
+### Publishing runs to the Tests tab
+
+`./publish-run.sh ["note"]` renders the full battery fresh (+ any fixtures in
+`./fixtures/`) and uploads every PNG to Kiki Insights as a **test run** tagged
+with the git SHA. The dashboard's **Tests** tab shows each run as a grid, any
+two runs side-by-side per scene, and any one scene as a progression across all
+runs. No pass/fail — visual inspection only, by design. Publish when a change
+is worth recording (engine change, tuning milestone), not on every render.
+
 Options:
 - `--out <dir>` — PNG output directory (default `./output`).
 - `--filter <substring>` — only run scenes/fixtures whose name contains the substring.
@@ -40,9 +49,12 @@ Options:
 | `dry-02-flow-vs-opacity` | the Glaze split: self-crossing loops at flow 0.25/opacity 1 vs flow 1/opacity 0.25; overlapping separate strokes build |
 | `dry-03-dynamics` | size-from-pressure (gamma), scatter, per-stroke color jitter (3 ids → 3 jitters) |
 | `dry-04-shapes` | chalk/charcoal/drybrush/pastel/ink tips (needs `BRUSH_SHAPES_DIR`; falls back to round without it) |
+| `dry-05-aspect` | P4b anisotropy: dab footprints at aspect 1.0 / 0.4 / 0.15 (round → ellipse → blade) |
+| `dry-06-calligraphy-rotation` | fixed-45° flat nib (classic thick/thin S-curve) + Distance-driven rotation visibly spinning the tip |
 | `wet-01-blue-into-yellow` | spectral KM: wet blue dragged over yellow → green trail |
 | `wet-02-smudge` | smudge (no new ink) pushing red into a gap, contaminating toward blue |
 | `wet-03-mix-sweep` | Mix 0.2/0.5/0.9 contact rows for tuning |
+| `wet-04-smudge-translucent` | smudge over 40%-opacity paint stays 40% (alpha-carry); drag-off tail depletes and dies |
 
 ## Fixtures (recorded strokes from the iPad)
 

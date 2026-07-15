@@ -92,3 +92,22 @@ CREATE TABLE IF NOT EXISTS capture_frames (
 CREATE INDEX IF NOT EXISTS capture_frames_stream ON capture_frames (stream_id, captured_at);
 CREATE INDEX IF NOT EXISTS capture_frames_user   ON capture_frames (user_id, captured_at DESC);
 CREATE INDEX IF NOT EXISTS capture_frames_time   ON capture_frames (captured_at);
+
+-- Brush-test battery runs (BrushHarness → publish-run.sh). One row per published
+-- render of the synthetic scene battery (+ any fixture replays), keyed to the git
+-- SHA it was rendered from. PNGs live in the BlobStore; the Tests tab renders
+-- side-by-sides/progressions across runs. Dev tooling — no pass/fail semantics
+-- by design (visual inspection only, per Donald 2026-07-15).
+CREATE TABLE IF NOT EXISTS test_runs (
+  id          BIGSERIAL PRIMARY KEY,
+  git_sha     TEXT,
+  note        TEXT,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS test_run_images (
+  id          BIGSERIAL PRIMARY KEY,
+  run_id      BIGINT NOT NULL REFERENCES test_runs(id) ON DELETE CASCADE,
+  scene       TEXT NOT NULL,
+  blob_key    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS test_run_images_run ON test_run_images (run_id);

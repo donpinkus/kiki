@@ -201,3 +201,20 @@ export const putWarmer = (config: WarmerConfig) =>
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(config),
   });
+
+// ─── Brush-test battery runs (Tests tab) ────────────────────────────────────
+
+export interface TestRunImage {
+  scene: string;
+  blob_key: string;
+}
+
+export interface TestRun {
+  id: string;
+  git_sha: string | null;
+  note: string | null;
+  created_at: string;
+  images: TestRunImage[];
+}
+
+export const listTestRuns = () => api<{ runs: TestRun[] }>('/admin/api/test-runs');

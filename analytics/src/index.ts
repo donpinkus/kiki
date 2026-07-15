@@ -44,7 +44,10 @@ const app = Fastify({
 await app.register(cookie);
 await app.register(cors, { origin: true, credentials: true });
 await app.register(multipart, {
-  limits: { fileSize: 25 * 1024 * 1024, files: 4 }, // headroom for generated images / small clips
+  // fileSize: headroom for generated images / small clips. files: a brush test
+  // run (/ingest/test-run) uploads the whole scene battery + fixture replays in
+  // one request (~10–30 PNGs today).
+  limits: { fileSize: 25 * 1024 * 1024, files: 64 },
 });
 
 // --- API routes ---

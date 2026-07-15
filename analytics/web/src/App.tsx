@@ -7,6 +7,7 @@ import { UserDetail } from './pages/UserDetail';
 import { Ops } from './pages/Ops';
 import { Gallery } from './pages/Gallery';
 import { Replay } from './pages/Replay';
+import { Tests } from './pages/Tests';
 
 type AuthState = 'loading' | 'authed' | 'anon';
 
@@ -43,6 +44,7 @@ export function App() {
         <nav style={{ display: 'flex', gap: 16, flex: 1, marginLeft: 24 }}>
           <Link to="/">Users</Link>
           <Link to="/gallery">Gallery</Link>
+          <Link to="/tests">Tests</Link>
           <Link to="/ops">Ops</Link>
         </nav>
         <button className="ghost" onClick={onLogout}>
@@ -54,6 +56,7 @@ export function App() {
         <Route path="/users/:id" element={<UserDetail />} />
         <Route path="/gallery" element={<Gallery />} />
         <Route path="/gallery/:streamId" element={<Replay />} />
+        <Route path="/tests" element={<Tests />} />
         <Route path="/ops" element={<Ops />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

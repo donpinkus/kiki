@@ -48,6 +48,28 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
 
     gated.get('/admin/api/me', async () => ({ ok: true }));
 
+    // Brush-test battery runs (newest first), images nested per run. Feeds the
+    // Tests tab (visual gallery + cross-run side-by-sides; no pass/fail).
+    gated.get('/admin/api/test-runs', async (request) => {
+      const limit = Math.min(Number((request.query as { limit?: string }).limit) || 30, 200);
+      const { rows: runs } = await query<{ id: string; git_sha: string | null; note: string | null; created_at: string }>(
+        `SELECT id, git_sha, note, created_at FROM test_runs ORDER BY created_at DESC LIMIT $1`,
+        [limit],
+      );
+      if (runs.length === 0) return { runs: [] };
+      const { rows: images } = await query<{ run_id: string; scene: string; blob_key: string }>(
+        `SELECT run_id, scene, blob_key FROM test_run_images WHERE run_id = ANY($1::bigint[]) ORDER BY scene`,
+        [runs.map((r) => r.id)],
+      );
+      const byRun = new Map<string, { scene: string; blob_key: string }[]>();
+      for (const img of images) {
+        const list = byRun.get(String(img.run_id)) ?? [];
+        list.push({ scene: img.scene, blob_key: img.blob_key });
+        byRun.set(String(img.run_id), list);
+      }
+      return { runs: runs.map((r) => ({ ...r, images: byRun.get(String(r.id)) ?? [] })) };
+    });
+
     // Brush-dev stroke fixtures (newest first) — consumed by
     // `BrushHarness/fetch-fixtures.sh`, which downloads the keys via /blobs/*.
     gated.get('/admin/api/fixtures', async (request) => {

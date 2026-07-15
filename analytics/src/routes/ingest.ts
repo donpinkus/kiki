@@ -335,6 +335,58 @@ export const ingestRoute: FastifyPluginAsync = async (app) => {
 
     return reply.send({ ok: true, id: inserted.rows[0]?.id, fixture_key: fixtureKey, snapshot_key: snapshotKey });
   });
+
+  // ─── Brush-test battery run (multipart) ───────────────────────────────────
+  // BrushHarness → publish-run.sh: one run = the rendered synthetic-scene battery
+  // (+ any fixture replays) for one git SHA. Service-key only (published from the
+  // dev Mac, no user identity). Fields: git_sha, note (must precede files).
+  // Files: any number of `image` parts; each part's FILENAME (minus .png) is the
+  // scene name, e.g. "wet-02-smudge.png". No pass/fail semantics — the Tests tab
+  // is a visual-inspection gallery by design.
+  app.post('/ingest/test-run', async (request, reply) => {
+    let principal;
+    try {
+      principal = await authenticateIngest(request);
+    } catch (err) {
+      request.log.warn({ err: (err as Error).message }, 'test-run ingest auth failed');
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    if (principal.source === 'ios') {
+      return reply.code(403).send({ error: 'test-run ingest is service-key only' });
+    }
+
+    const fields: Record<string, string> = {};
+    const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const images: { scene: string; key: string }[] = [];
+
+    const parts = (request as unknown as { parts: () => AsyncIterableIterator<MultipartPart & { filename?: string } > }).parts();
+    for await (const part of parts) {
+      if (part.type === 'field') {
+        fields[part.fieldname] = String(part.value);
+      } else {
+        const buf = await part.toBuffer();
+        const scene = (part.filename ?? `image-${images.length}`).replace(/\.png$/i, '');
+        if (!/^[A-Za-z0-9._-]{1,128}$/.test(scene)) continue; // scene lands in blob paths
+        if (buf.length > 16 * 1024 * 1024) continue;
+        const key = `testruns/${stamp}/${scene}.png`;
+        await blobStore.put(key, buf);
+        images.push({ scene, key });
+      }
+    }
+
+    if (images.length === 0) return reply.code(400).send({ error: 'at least one image part required' });
+
+    const run = await query<{ id: string }>(
+      `INSERT INTO test_runs (git_sha, note) VALUES ($1, $2) RETURNING id`,
+      [fields['git_sha'] ?? null, fields['note'] ?? null],
+    );
+    const runId = run.rows[0]!.id;
+    for (const img of images) {
+      await query(`INSERT INTO test_run_images (run_id, scene, blob_key) VALUES ($1, $2, $3)`, [runId, img.scene, img.key]);
+    }
+
+    return reply.send({ ok: true, id: runId, images: images.length });
+  });
 };
 
 // Minimal shape of @fastify/multipart parts we consume.
