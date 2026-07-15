@@ -93,6 +93,23 @@ CREATE INDEX IF NOT EXISTS capture_frames_stream ON capture_frames (stream_id, c
 CREATE INDEX IF NOT EXISTS capture_frames_user   ON capture_frames (user_id, captured_at DESC);
 CREATE INDEX IF NOT EXISTS capture_frames_time   ON capture_frames (captured_at);
 
+-- Prompt timeline for session replays: one row each time the user's prompt
+-- text changed mid-drawing (deduped backend-side; seq 1 is the prompt the
+-- session opened with). Rendered in the Gallery player as the prompt that was
+-- live at the playhead + change markers on the scrubber. Same retention as
+-- capture_frames.
+CREATE TABLE IF NOT EXISTS capture_prompts (
+  id          BIGSERIAL PRIMARY KEY,
+  stream_id   TEXT NOT NULL,
+  user_id     TEXT NOT NULL,
+  seq         INT NOT NULL,
+  captured_at TIMESTAMPTZ NOT NULL,
+  prompt      TEXT NOT NULL,
+  UNIQUE (stream_id, seq)
+);
+CREATE INDEX IF NOT EXISTS capture_prompts_stream ON capture_prompts (stream_id, captured_at);
+CREATE INDEX IF NOT EXISTS capture_prompts_time   ON capture_prompts (captured_at);
+
 -- Brush-test battery runs (BrushHarness → publish-run.sh). One row per published
 -- render of the synthetic scene battery (+ any fixture replays), keyed to the git
 -- SHA it was rendered from. PNGs live in the BlobStore; the Tests tab renders

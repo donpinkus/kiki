@@ -92,11 +92,16 @@ async function pruneCaptures(): Promise<void> {
        ORDER BY captured_at LIMIT 500`,
       [config.CAPTURE_RETENTION_DAYS],
     );
-    if (rows.length === 0) return;
+    if (rows.length === 0) break;
     for (const r of rows) await blobStore.delete(r.blob_key);
     await query(`DELETE FROM capture_frames WHERE id = ANY($1::bigint[])`, [rows.map((r) => r.id)]);
     app.log.info({ pruned: rows.length }, 'capture retention prune batch');
   }
+  // Prompt rows have no blobs — one bulk delete on the same retention window.
+  await query(
+    `DELETE FROM capture_prompts WHERE captured_at < now() - make_interval(days => $1)`,
+    [config.CAPTURE_RETENTION_DAYS],
+  );
 }
 
 // --- Boot ---

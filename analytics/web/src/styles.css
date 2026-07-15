@@ -65,6 +65,12 @@ tr:hover td { background: var(--panel-2); }
 .pill.fail { color: #ff7b72; }
 .pill.src-user { color: var(--accent); }
 
+/* Replay player: brief highlight when the active prompt changes mid-playback. */
+.prompt-flash { animation: prompt-flash 1.2s ease-out; }
+@keyframes prompt-flash {
+  from { background: #33405e; }
+}
+
 /* Ops stat tiles */
 .stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
 .stat { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }

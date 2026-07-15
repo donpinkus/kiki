@@ -36,11 +36,16 @@ export function captureEnabled(): boolean {
   );
 }
 
+const MAX_PROMPTS_PER_STREAM = 200;
+const MAX_PROMPT_CHARS = 2000;
+
 export class FrameCapture {
   private readonly seq = { sketch: 0, generated: 0 };
   private readonly lastAt = { sketch: 0, generated: 0 };
   private inflight = 0;
   private warnedOnce = false;
+  private promptSeq = 0;
+  private lastPrompt: string | null = null;
 
   constructor(
     private readonly streamId: string,
@@ -83,6 +88,43 @@ export class FrameCapture {
           );
         }
       })
+      .catch(() => {
+        /* unreachable Insights must never surface into the relay */
+      })
+      .finally(() => {
+        this.inflight -= 1;
+      });
+  }
+
+  /** Record the prompt whenever the iPad's config changes it (deduped against
+   * the last captured value — config messages repeat the prompt on every
+   * settings tweak). Timestamped on the same clock as frame captures, so the
+   * replay can show which prompt was live for each generated frame. */
+  capturePrompt(prompt: string): void {
+    if (!captureEnabled()) return;
+    const p = prompt.slice(0, MAX_PROMPT_CHARS);
+    if (p === this.lastPrompt) return;
+    if (this.promptSeq >= MAX_PROMPTS_PER_STREAM) return;
+    if (this.inflight >= MAX_INFLIGHT) return;
+    this.lastPrompt = p;
+    const seq = ++this.promptSeq;
+
+    this.inflight += 1;
+    void fetch(`${config.INSIGHTS_URL.replace(/\/$/, '')}/ingest/capture-prompt`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-insights-key': config.INSIGHTS_INGEST_KEY,
+      },
+      body: JSON.stringify({
+        stream_id: this.streamId,
+        user_id: this.userId,
+        seq,
+        ts: Date.now(),
+        prompt: p,
+      }),
+      signal: AbortSignal.timeout(10_000),
+    })
       .catch(() => {
         /* unreachable Insights must never surface into the relay */
       })

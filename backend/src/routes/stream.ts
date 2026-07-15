@@ -324,6 +324,14 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             const parsed = JSON.parse(text) as Record<string, unknown>;
             if (parsed.type === 'config') {
               lastConfig = parsed;
+              // Replay: record prompt changes (deduped in FrameCapture) so
+              // the Gallery player can show which prompt drove each frame.
+              if (typeof parsed['prompt'] === 'string') {
+                if (!frameCapture && userId && streamId) {
+                  frameCapture = new FrameCapture(streamId, userId, request.log);
+                }
+                frameCapture?.capturePrompt(parsed['prompt']);
+              }
               if (relay) {
                 relay.sendConfig(parsed);
               } else {

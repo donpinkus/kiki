@@ -53,6 +53,15 @@ export function CaptureGrid({ userId }: { userId?: string }) {
             )}
             <div className="meta">
               <p className="prompt">{c.email ?? <span className="mono">{c.user_id.slice(0, 8)}</span>}</p>
+              {c.last_prompt && (
+                <div
+                  className="muted"
+                  style={{ fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                  title={c.last_prompt}
+                >
+                  “{c.last_prompt}”
+                </div>
+              )}
               <div className="muted" style={{ fontSize: 12 }}>
                 {fmtAgo(c.ended_at)} · {fmtDuration(c.started_at, c.ended_at)} ·{' '}
                 {c.generated_count} frames

@@ -140,6 +140,49 @@ export const ingestRoute: FastifyPluginAsync = async (app) => {
     return reply.send({ ok: true });
   });
 
+  // ─── Session replay prompt change (JSON) ───────────────────────────────────
+  // Backend-only: the prompt text that was live from `ts` onward in a stream.
+  app.post('/ingest/capture-prompt', async (request, reply) => {
+    let principal;
+    try {
+      principal = await authenticateIngest(request);
+    } catch (err) {
+      request.log.warn({ err: (err as Error).message }, 'capture-prompt ingest auth failed');
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    if (principal.source === 'ios') {
+      return reply.code(403).send({ error: 'capture-prompt ingest is backend-only' });
+    }
+
+    const b = (request.body ?? {}) as Record<string, unknown>;
+    const streamId = b['stream_id'];
+    const userId = b['user_id'];
+    const seq = Number(b['seq']);
+    const ts = Number(b['ts']);
+    const prompt = b['prompt'];
+    if (
+      typeof streamId !== 'string' ||
+      !/^[A-Za-z0-9_-]{1,128}$/.test(streamId) ||
+      typeof userId !== 'string' ||
+      !userId ||
+      typeof prompt !== 'string' ||
+      prompt.length > 4000 ||
+      !Number.isInteger(seq) ||
+      seq < 1 ||
+      !Number.isFinite(ts)
+    ) {
+      return reply.code(400).send({ error: 'stream_id, user_id, seq, ts, prompt required' });
+    }
+
+    await query(
+      `INSERT INTO capture_prompts (stream_id, user_id, seq, captured_at, prompt)
+       VALUES ($1, $2, $3, to_timestamp($4 / 1000.0), $5)
+       ON CONFLICT (stream_id, seq) DO NOTHING`,
+      [streamId, userId, seq, ts, prompt],
+    );
+    return reply.send({ ok: true });
+  });
+
   app.post('/ingest', async (request, reply) => {
     let principal;
     try {

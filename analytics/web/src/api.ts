@@ -166,6 +166,13 @@ export interface CaptureStreamSummary {
   sketch_count: number;
   generated_count: number;
   poster_url: string | null;
+  last_prompt: string | null;
+}
+
+export interface CapturePrompt {
+  seq: number;
+  captured_at: string;
+  prompt: string;
 }
 
 export interface CaptureFrame {
@@ -180,6 +187,7 @@ export interface CaptureDetail {
   user_id: string | null;
   email: string | null;
   frames: CaptureFrame[];
+  prompts: CapturePrompt[];
 }
 
 export const listCaptures = (userId?: string) =>

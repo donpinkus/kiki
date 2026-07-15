@@ -218,21 +218,29 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
     gated.get('/admin/api/captures', async (request) => {
       const userId = (request.query as { user_id?: string }).user_id?.trim() || null;
       const { rows } = await query(
-        `SELECT c.stream_id,
-                c.user_id,
-                u.email,
-                min(c.captured_at)                                 AS started_at,
-                max(c.captured_at)                                 AS ended_at,
-                count(*) FILTER (WHERE c.kind = 'sketch')::int     AS sketch_count,
-                count(*) FILTER (WHERE c.kind = 'generated')::int  AS generated_count,
-                (array_agg(c.blob_key ORDER BY c.seq DESC)
-                   FILTER (WHERE c.kind = 'generated'))[1]         AS poster_key
-         FROM capture_frames c
-         LEFT JOIN users u ON u.user_id::text = c.user_id
-         WHERE ($1::text IS NULL OR c.user_id = $1)
-         GROUP BY c.stream_id, c.user_id, u.email
-         ORDER BY max(c.captured_at) DESC
-         LIMIT 100`,
+        `SELECT s.*, lp.prompt AS last_prompt
+         FROM (
+           SELECT c.stream_id,
+                  c.user_id,
+                  u.email,
+                  min(c.captured_at)                                 AS started_at,
+                  max(c.captured_at)                                 AS ended_at,
+                  count(*) FILTER (WHERE c.kind = 'sketch')::int     AS sketch_count,
+                  count(*) FILTER (WHERE c.kind = 'generated')::int  AS generated_count,
+                  (array_agg(c.blob_key ORDER BY c.seq DESC)
+                     FILTER (WHERE c.kind = 'generated'))[1]         AS poster_key
+           FROM capture_frames c
+           LEFT JOIN users u ON u.user_id::text = c.user_id
+           WHERE ($1::text IS NULL OR c.user_id = $1)
+           GROUP BY c.stream_id, c.user_id, u.email
+           ORDER BY max(c.captured_at) DESC
+           LIMIT 100
+         ) s
+         LEFT JOIN LATERAL (
+           SELECT prompt FROM capture_prompts p
+           WHERE p.stream_id = s.stream_id
+           ORDER BY p.captured_at DESC LIMIT 1
+         ) lp ON true`,
         [userId],
       );
       return {
@@ -247,14 +255,21 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
     // kinds by captured_at (latest sketch left, latest generated right).
     gated.get('/admin/api/captures/:streamId', async (request, reply) => {
       const { streamId } = request.params as { streamId: string };
-      const { rows } = await query(
-        `SELECT c.kind, c.seq, c.captured_at, c.blob_key, c.user_id, u.email
-         FROM capture_frames c
-         LEFT JOIN users u ON u.user_id::text = c.user_id
-         WHERE c.stream_id = $1
-         ORDER BY c.captured_at ASC, c.seq ASC`,
-        [streamId],
-      );
+      const [{ rows }, prompts] = await Promise.all([
+        query(
+          `SELECT c.kind, c.seq, c.captured_at, c.blob_key, c.user_id, u.email
+           FROM capture_frames c
+           LEFT JOIN users u ON u.user_id::text = c.user_id
+           WHERE c.stream_id = $1
+           ORDER BY c.captured_at ASC, c.seq ASC`,
+          [streamId],
+        ),
+        query(
+          `SELECT seq, captured_at, prompt FROM capture_prompts
+           WHERE stream_id = $1 ORDER BY captured_at ASC, seq ASC`,
+          [streamId],
+        ),
+      ]);
       if (rows.length === 0) return reply.code(404).send({ error: 'capture not found' });
       return {
         stream_id: streamId,
@@ -266,6 +281,7 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
           captured_at: r['captured_at'],
           url: blobStore.urlFor(r['blob_key'] as string),
         })),
+        prompts: prompts.rows,
       };
     });
 

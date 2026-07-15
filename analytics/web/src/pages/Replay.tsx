@@ -9,12 +9,12 @@ const fmtClock = (ms: number) => {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 };
 
-/** Latest frame of `frames` (ascending by time) at or before `t` ms-from-start. */
-function frameAt(frames: { t: number; url: string }[], t: number): string | null {
-  let found: string | null = null;
-  for (const f of frames) {
+/** Latest item of `items` (ascending by .t) at or before `t` ms-from-start. */
+function lastAt<T extends { t: number }>(items: T[], t: number): T | null {
+  let found: T | null = null;
+  for (const f of items) {
     if (f.t > t) break;
-    found = f.url;
+    found = f;
   }
   return found;
 }
@@ -29,6 +29,10 @@ export function Replay() {
   const [playhead, setPlayhead] = useState(0);
   const [playing, setPlaying] = useState(true);
   const [speed, setSpeed] = useState(4);
+  // 'stitch' (default): frames play as a uniform flipbook — one captured
+  // event per tick, idle time gone entirely. 'real': faithful wall-clock
+  // playback from the timestamps (pauses and generation latency preserved).
+  const [mode, setMode] = useState<'stitch' | 'real'>('stitch');
   const lastTickRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -46,15 +50,50 @@ export function Replay() {
     if (!detail || detail.frames.length === 0) return null;
     const t0 = new Date(detail.frames[0].captured_at).getTime();
     const rel = (f: CaptureFrame) => ({ t: new Date(f.captured_at).getTime() - t0, url: f.url });
-    const sketches = detail.frames.filter((f) => f.kind === 'sketch').map(rel);
-    const generated = detail.frames.filter((f) => f.kind === 'generated').map(rel);
+    let sketches = detail.frames.filter((f) => f.kind === 'sketch').map(rel);
+    let generated = detail.frames.filter((f) => f.kind === 'generated').map(rel);
+    // Prompts before the first frame (the session-open config) clamp to t=0 —
+    // no dead intro while the user hadn't drawn yet.
+    let prompts = (detail.prompts ?? []).map((p) => ({
+      t: Math.max(0, new Date(p.captured_at).getTime() - t0),
+      prompt: p.prompt,
+    }));
+
+    if (mode === 'stitch') {
+      // Skip-idle flipbook: merge every captured event (both frame kinds +
+      // prompt changes) into one sequence ordered by real time, then respace
+      // uniformly — one event per STEP. Real timestamps only decide ORDER, so
+      // prompts still flip at the right moment relative to the frames, but
+      // idle gaps contribute nothing to playback time.
+      const STEP = 1000; // per event at 1× — the default 4× ≈ 4 events/s
+      type Ev =
+        | { kind: 'sketch' | 'generated'; t: number; url: string }
+        | { kind: 'prompt'; t: number; prompt: string };
+      const events: Ev[] = [
+        ...sketches.map((s) => ({ kind: 'sketch' as const, ...s })),
+        ...generated.map((g) => ({ kind: 'generated' as const, ...g })),
+        ...prompts.map((p) => ({ kind: 'prompt' as const, ...p })),
+      ].sort((a, b) => a.t - b.t);
+      const stitched = events.map((e, i) => ({ ...e, t: i * STEP }));
+      sketches = stitched.filter((e) => e.kind === 'sketch') as typeof sketches;
+      generated = stitched.filter((e) => e.kind === 'generated') as typeof generated;
+      prompts = stitched.filter((e) => e.kind === 'prompt') as typeof prompts;
+      return { sketches, generated, prompts, duration: events.length * STEP };
+    }
+
     const duration = Math.max(
       sketches[sketches.length - 1]?.t ?? 0,
       generated[generated.length - 1]?.t ?? 0,
+      prompts[prompts.length - 1]?.t ?? 0,
       1,
     );
-    return { sketches, generated, duration };
-  }, [detail]);
+    return { sketches, generated, prompts, duration };
+  }, [detail, mode]);
+
+  // Mode switch rebuilds the timeline with different timebases — restart.
+  useEffect(() => {
+    setPlayhead(0);
+  }, [mode]);
 
   useEffect(() => {
     if (!playing || !timeline) return;
@@ -80,8 +119,9 @@ export function Replay() {
   if (error) return <div className="container" style={{ color: '#ff7b72' }}>{error}</div>;
   if (!detail || !timeline) return <div className="container muted">Loading…</div>;
 
-  const sketchUrl = frameAt(timeline.sketches, playhead);
-  const generatedUrl = frameAt(timeline.generated, playhead);
+  const sketchUrl = lastAt(timeline.sketches, playhead)?.url ?? null;
+  const generatedUrl = lastAt(timeline.generated, playhead)?.url ?? null;
+  const currentPrompt = lastAt(timeline.prompts, playhead);
   const atEnd = playhead >= timeline.duration;
 
   return (
@@ -91,6 +131,20 @@ export function Replay() {
         {detail.email ?? <span className="mono">{detail.user_id?.slice(0, 8)}</span>} ·{' '}
         {new Date(detail.frames[0].captured_at).toLocaleString()}
       </div>
+
+      {currentPrompt && (
+        // key remount on each prompt change → the flash animation replays,
+        // making mid-drawing prompt edits pop during playback.
+        <div key={currentPrompt.t} className="card prompt-flash" style={{ marginBottom: 16, padding: '10px 14px', fontSize: 13 }}>
+          <span
+            className="muted"
+            style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '.04em', marginRight: 10 }}
+          >
+            Prompt
+          </span>
+          “{currentPrompt.prompt}”
+        </div>
+      )}
 
       <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
         {(
@@ -124,14 +178,34 @@ export function Replay() {
         >
           {playing ? 'Pause' : atEnd ? 'Replay' : 'Play'}
         </button>
-        <input
-          type="range"
-          min={0}
-          max={timeline.duration}
-          value={playhead}
-          onChange={(e) => setPlayhead(Number(e.target.value))}
-          style={{ flex: 1, minWidth: 200 }}
-        />
+        <div style={{ flex: 1, minWidth: 200, position: 'relative' }}>
+          <input
+            type="range"
+            min={0}
+            max={timeline.duration}
+            value={playhead}
+            onChange={(e) => setPlayhead(Number(e.target.value))}
+            style={{ width: '100%', display: 'block' }}
+          />
+          {/* Amber diamonds mark mid-session prompt changes (first prompt is
+              the baseline, not a change). Hover shows the new text. */}
+          {timeline.prompts.slice(1).map((p) => (
+            <div
+              key={p.t}
+              title={p.prompt}
+              style={{
+                position: 'absolute',
+                left: `${(p.t / timeline.duration) * 100}%`,
+                top: -5,
+                width: 7,
+                height: 7,
+                background: '#f0b429',
+                transform: 'translateX(-50%) rotate(45deg)',
+                borderRadius: 1,
+              }}
+            />
+          ))}
+        </div>
         <span className="mono muted" style={{ minWidth: 90 }}>
           {fmtClock(playhead)} / {fmtClock(timeline.duration)}
         </span>
@@ -145,6 +219,18 @@ export function Replay() {
             {s}×
           </button>
         ))}
+        <span style={{ width: 1, height: 18, background: 'var(--border)' }} />
+        <label
+          title="On: uniform flipbook — one captured frame per tick, idle time removed. Off: real-time playback from timestamps — pauses and generation latency preserved."
+          style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 13, cursor: 'pointer' }}
+        >
+          <input
+            type="checkbox"
+            checked={mode === 'stitch'}
+            onChange={(e) => setMode(e.target.checked ? 'stitch' : 'real')}
+          />
+          Skip idle
+        </label>
       </div>
     </div>
   );
