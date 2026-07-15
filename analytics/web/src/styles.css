@@ -126,3 +126,47 @@ select:focus { outline: 1px solid var(--accent); }
 }
 .tests-img-caption { color: var(--muted); font-size: 12px; margin-top: 5px; }
 .tests-note { color: var(--muted); font-size: 13px; margin: -10px 0 18px; }
+
+/* Tests-tab lightbox */
+.lightbox-backdrop {
+  position: fixed; inset: 0; z-index: 50;
+  background: rgba(8, 10, 14, 0.82);
+  display: flex; align-items: center; justify-content: center;
+  padding: 28px;
+}
+.lightbox-panel {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+  max-width: 920px; width: 100%; max-height: calc(100vh - 56px);
+  display: flex; flex-direction: column; overflow: hidden;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5);
+}
+.lightbox-head {
+  display: flex; align-items: baseline; gap: 12px;
+  padding: 14px 18px 0;
+}
+.lightbox-head .scene-name { font-size: 15px; }
+.lightbox-head .spacer { flex: 1; }
+.lightbox-close {
+  background: none; border: none; color: var(--muted); font-size: 22px;
+  line-height: 1; padding: 4px 8px; cursor: pointer; align-self: flex-start;
+}
+.lightbox-close:hover { color: var(--text); }
+.lightbox-desc { color: var(--muted); font-size: 13px; line-height: 1.55; padding: 6px 18px 12px; }
+.lightbox-img-wrap { position: relative; background: #fff; min-height: 0; flex: 1; }
+.lightbox-img-wrap img { display: block; width: 100%; height: 100%; max-height: 64vh; object-fit: contain; }
+.lightbox-nav {
+  position: absolute; top: 50%; transform: translateY(-50%);
+  background: rgba(15, 17, 21, 0.55); color: #fff; border: none; border-radius: 999px;
+  width: 42px; height: 42px; font-size: 20px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+.lightbox-nav:hover { background: rgba(15, 17, 21, 0.8); }
+.lightbox-nav:disabled { opacity: 0.25; cursor: default; }
+.lightbox-nav.prev { left: 12px; }
+.lightbox-nav.next { right: 12px; }
+.lightbox-foot {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 18px 12px; color: var(--muted); font-size: 12px;
+}
+.lightbox-foot .spacer { flex: 1; }
+.tests-img-button { all: unset; cursor: zoom-in; display: block; width: 100%; }
