@@ -1,5 +1,6 @@
 import Foundation
 import CoreGraphics
+import CoreText
 import ImageIO
 import Metal
 
@@ -40,6 +41,32 @@ try? FileManager.default.createDirectory(atPath: outDir, withIntermediateDirecto
 /// Deterministic UUID from a small integer (stroke ids seed scatter/jitter).
 func fixedUUID(_ n: Int) -> UUID {
     UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", n))!
+}
+
+/// Burn row labels into a render so every thumbnail/side-by-side/progression is
+/// self-documenting ("which stroke is which setting"). Gray Menlo text, drawn via
+/// CoreText into an sRGB context (identity for the sRGB-tagged render — no color
+/// shift on the paint pixels). Labels sit in the whitespace between rows, never on
+/// the strokes. Deterministic like the rest of the render.
+func annotate(_ image: CGImage, labels: [(x: CGFloat, y: CGFloat, text: String)]) -> CGImage {
+    guard !labels.isEmpty else { return image }
+    let w = image.width, h = image.height
+    let cs = CGColorSpace(name: CGColorSpace.sRGB)!
+    guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8,
+                              bytesPerRow: 0, space: cs,
+                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return image }
+    ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+    let font = CTFontCreateWithName("Menlo" as CFString, 19, nil)
+    let color = CGColor(srgbRed: 0.44, green: 0.47, blue: 0.53, alpha: 1)
+    for l in labels {
+        let attrs: [CFString: Any] = [kCTFontAttributeName: font, kCTForegroundColorAttributeName: color]
+        let str = CFAttributedStringCreate(nil, l.text as CFString, attrs as CFDictionary)!
+        let line = CTLineCreateWithAttributedString(str)
+        // CG bitmap contexts are bottom-left origin; label coords are top-left canvas px.
+        ctx.textPosition = CGPoint(x: l.x, y: CGFloat(h) - l.y)
+        CTLineDraw(line, ctx)
+    }
+    return ctx.makeImage() ?? image
 }
 
 func writePNG(_ image: CGImage, name: String) {
@@ -161,12 +188,21 @@ final class Scene {
         }
     }
 
+    /// Row labels burnt into the render at snapshot time (top-left canvas coords).
+    private var labels: [(x: CGFloat, y: CGFloat, text: String)] = []
+
+    /// Label a row/region of the scene. `y` is the text BASELINE in canvas px —
+    /// place it in the whitespace above the row it describes.
+    func label(_ text: String, x: CGFloat = 24, y: CGFloat) {
+        labels.append((x: x, y: y, text: text))
+    }
+
     func snapshot(name: String) {
         renderer.waitUntilQueueDrained()
         guard let image = renderer.flattenedOpaqueCGImage(backgroundImage: nil) else {
             print("FAIL  no snapshot for \(name)"); exit(1)
         }
-        writePNG(image, name: name)
+        writePNG(annotate(image, labels: labels), name: name)
     }
 }
 
@@ -207,7 +243,18 @@ let teal = CodableColor(red: 0.05, green: 0.55, blue: 0.55)
 // MARK: - Synthetic battery
 
 runScene("dry-01-pressure",
-         "Pressure response: ramp 0→1, bell, wavy pulses with taper 0.5, then hardness 0 (soft) vs 1 (crisp).") { s in
+         """
+         How the tip responds to pressure, taper, and hardness — one control per row.
+         • Row 1: pressure ramps 0→1 along the stroke → width should grow left to right.
+         • Row 2: pressure rises then falls (bell) → thin–thick–thin.
+         • Row 3: pulsing pressure + Taper 0.5 → wavy width with both tips tapered to points.
+         • Row 4 left: Hardness 0 → soft, feathered airbrush edge. Right: Hardness 1 → crisp edge.
+         """) { s in
+    s.label("pressure ramp 0 → 1", y: 160)
+    s.label("pressure bell (0 → 1 → 0)", y: 380)
+    s.label("pulsing pressure + taper 0.5", y: 545)
+    s.label("hardness 0 (soft)", y: 795)
+    s.label("hardness 1 (crisp)", x: 560, y: 795)
     s.paint(synthStroke(id: 1, brush: pen(.black, width: 34), from: CGPoint(x: 100, y: 200), to: CGPoint(x: 924, y: 200),
                         force: { $0 }))                                     // ramp 0→1
     s.paint(synthStroke(id: 2, brush: pen(.black, width: 34), from: CGPoint(x: 100, y: 420), to: CGPoint(x: 924, y: 420),
@@ -219,7 +266,15 @@ runScene("dry-01-pressure",
 }
 
 runScene("dry-02-flow-vs-opacity",
-         "The Glaze split: self-crossing loops at flow 0.25/opacity 1 vs flow 1/opacity 0.25 must stay flat; separate overlapping flow-0.25 passes must build where they cross.") { s in
+         """
+         The Glaze split — Flow builds up WITHIN a stroke, Opacity is a per-stroke ceiling.
+         • Left loop: Flow 0.25, Opacity 1 — the loop crosses itself, so the overlap darkens (flow builds).
+         • Right loop: Flow 1, Opacity 0.25 — same self-crossing, but the overlap must stay FLAT (ceiling).
+         • Bottom cross: two SEPARATE Flow-0.25 strokes — separate strokes always build where they cross.
+         """) { s in
+    s.label("flow 0.25 / opacity 1 — overlap builds", y: 205)
+    s.label("flow 1 / op 0.25 — overlap stays flat", x: 560, y: 205)
+    s.label("two separate flow-0.25 strokes — cross builds", y: 632)
     // Self-crossing loops: flow builds within a stroke, opacity is the per-stroke ceiling.
     s.paint(loopStroke(id: 10, brush: pen(teal, width: 40, opacity: 1.0, flow: 0.25), center: CGPoint(x: 260, y: 400), radius: 150))
     s.paint(loopStroke(id: 11, brush: pen(teal, width: 40, opacity: 0.25, flow: 1.0), center: CGPoint(x: 700, y: 400), radius: 150))
@@ -230,7 +285,16 @@ runScene("dry-02-flow-vs-opacity",
 }
 
 runScene("dry-03-dynamics",
-         "Krita dynamics: size from pressure (gamma 2), constant scatter 0.55, per-stroke hue/sat/value jitter — three stroke ids → three visibly different reds.") { s in
+         """
+         Brush dynamics stack: dab size driven by pressure (gamma 2), constant scatter, per-STROKE color jitter.
+         All three rows use the IDENTICAL brush — only the stroke changes, so:
+         • each row's dabs swell mid-stroke (pressure bell → size),
+         • dabs spray around the path (scatter 0.55),
+         • each row is a visibly different red (jitter is seeded per stroke, stable on replay).
+         """) { s in
+    s.label("same brush, stroke #1 — note this row's red", y: 165)
+    s.label("stroke #2 — different jittered red", y: 415)
+    s.label("stroke #3 — different again", y: 665)
     let dyn = BrushDynamics(
         size: CurveOption(sensors: [SensorChannel(sensor: .pressure, curve: .gamma(2.0))], minValue: 0.15),
         scatter: CurveOption(sensors: [], strength: 0.55),
@@ -244,7 +308,14 @@ runScene("dry-03-dynamics",
 }
 
 runScene("dry-04-shapes",
-         "Textured tips (chalk, charcoal, dry brush, pastel, spray) orienting to the stroke direction, width ramping with pressure.") { s in
+         """
+         The five textured tip shapes, one per row (top to bottom): chalk, charcoal, dry brush, pastel, spray.
+         Each stroke ramps pressure 0.3→0.9 (width grows rightward) and the anisotropic tips rotate to
+         follow the stroke direction — texture streaks should run ALONG the curve, not across it.
+         """) { s in
+    for (i, name) in ["chalk", "charcoal", "dry brush", "pastel", "spray"].enumerated() {
+        s.label(name, y: CGFloat(150 + i * 180) - 62)
+    }
     // Requires BRUSH_SHAPES_DIR (see README); without it, shaped strokes fall back to round.
     for (i, shape) in ["chalk", "charcoal", "drybrush", "pastel", "ink"].enumerated() {
         let y = CGFloat(150 + i * 180)
@@ -255,7 +326,16 @@ runScene("dry-04-shapes",
 }
 
 runScene("dry-05-aspect",
-         "P4b anisotropy: identical dab rows at aspect 1.0 / 0.4 / 0.15 — round → ellipse → flat blade footprints (wide spacing so each dab is visible).") { s in
+         """
+         Tip aspect ratio (anisotropy): the SAME dab row three times, only Aspect changes.
+         • Row 1: Aspect 1.0 — round dabs (the default tip).
+         • Row 2: Aspect 0.4 — squashed ellipses.
+         • Row 3: Aspect 0.15 — flat blades (the calligraphy-nib footprint).
+         Spacing is set wide on purpose so each individual dab footprint is visible.
+         """) { s in
+    for (i, a) in ["aspect 1.0 (round)", "aspect 0.4 (ellipse)", "aspect 0.15 (blade)"].enumerated() {
+        s.label(a, y: CGFloat(230 + i * 280) - 60)
+    }
     // P4b anisotropy: same stroke at aspect 1.0 / 0.4 / 0.15, wide spacing so the
     // individual dab footprints are visible (round → ellipse → blade).
     for (i, aspect) in [CGFloat(1.0), 0.4, 0.15].enumerated() {
@@ -270,7 +350,15 @@ runScene("dry-05-aspect",
 }
 
 runScene("dry-06-calligraphy-rotation",
-         "Rotation output: a fixed-45° flat nib (aspect 0.2) gives the classic thick/thin italic S-curve; below it, Distance-driven rotation visibly spins the nib along a straight stroke.") { s in
+         """
+         Proves per-dab ROTATION reaches the GPU, using a flat nib (Aspect 0.2) to make it visible.
+         • Row 1: nib held at a FIXED 45° — a real calligraphy pen: the S-curve goes THICK where the
+           path crosses the nib and razor-THIN where it runs parallel to it.
+         • Row 2: rotation driven by the Distance sensor — the nib angle keeps turning as the stroke
+           travels, so the dabs fan through every orientation (the "spinning" proof).
+         """) { s in
+    s.label("flat nib fixed at 45° — thick/thin from direction", y: 130)
+    s.label("nib rotation driven by distance — spins along the stroke", y: 640)
     // The rotation OUTPUT check (handoff item 1): with a flat tip (aspect 0.2), the
     // dabs must visibly rotate. Row 1: classic calligraphy — nib held at a FIXED 45°
     // (no-sensor rotationLike folds to its constant strength; 0.25 turns = π/4), so the
@@ -297,7 +385,13 @@ runScene("dry-06-calligraphy-rotation",
 }
 
 runScene("wet-01-blue-into-yellow",
-         "Spectral KM mixing: a wet blue stroke dragged through a yellow patch turns green at entry, converges toward yellow as the load picks up, and exits yellow.") { s in
+         """
+         Spectral pigment mixing (Kubelka-Munk): a WET blue stroke dragged left-to-right through a
+         yellow patch. Expected: blue entering, a GREEN transition band where blue meets yellow
+         (per-channel RGB mixing would give gray/black), then the brush's carried load converges to
+         yellow — it exits the patch depositing yellow, not blue.
+         """) { s in
+    s.label("wet blue stroke →  enters left, exits right", y: 250)
     // Yellow base patch (full-pressure passes so effectiveWidth == baseWidth — at the
     // default force 0.5 the rows shrink ~40% and leave white gaps), then a wet blue
     // stroke dragged through the patch: the trail should turn GREEN (spectral KM),
@@ -313,7 +407,15 @@ runScene("wet-01-blue-into-yellow",
 }
 
 runScene("wet-02-smudge",
-         "Smudge (no new ink): pushes red into the gap with a depleting tail, then contaminates into the blue patch.") { s in
+         """
+         Smudge = push existing paint, add NO new ink. One smudge stroke dragged left-to-right through
+         a red patch, across the white gap, into a blue patch. Expected: red gets dragged into the gap
+         as a tail that thins and dies (the carried load depletes over blank canvas), then a small red
+         contamination appears where the smudge enters the blue.
+         """) { s in
+    s.label("red patch", y: 305)
+    s.label("blue patch", x: 620, y: 305)
+    s.label("one smudge stroke dragged left → right through both patches", y: 690)
     // Red + blue patches with a gap; a smudge (no new ink) dragged through both:
     // it should push red into the gap, then contaminate toward blue crossing the patch.
     for i in 0..<3 {
@@ -331,7 +433,14 @@ runScene("wet-02-smudge",
 }
 
 runScene("wet-04-smudge-translucent",
-         "Alpha-carry regression (Donald 2026-07-15): smudging 40%-opacity red must keep it ~40% (not harden opaque), and the drag-off tail must thin and die.") { s in
+         """
+         Regression guard for the 2026-07-15 device bug: smudging TRANSLUCENT paint must keep it
+         translucent. The patch is 40%-opacity red; a smudge drags through it and off the right edge.
+         Expected: inside the patch the smudge is nearly invisible (40% pushed through 40%), and the
+         drag-off tail is a translucent wisp that fades out. BROKEN would be: an opaque dark-red track.
+         """) { s in
+    s.label("40%-opacity red patch", y: 305)
+    s.label("smudge enters the patch, drags off the right edge", y: 690)
     // Donald's 2026-07-15 report: smudging 40%-opacity red turned it fully opaque
     // instead of pushing translucent paint. The smudge crosses the 40% patch and
     // drags off onto blank canvas. CORRECT behavior: the smudged area stays ~40%
@@ -348,7 +457,14 @@ runScene("wet-04-smudge-translucent",
 }
 
 runScene("wet-03-mix-sweep",
-         "Tuning rows: wet blue over yellow at Mix 0.2 / 0.5 / 0.9, same Smear — deposit strength comparison.") { s in
+         """
+         Tuning sweep for the Mix knob (deposit strength): the same wet-blue-over-yellow drag three
+         times, only Mix changes — 0.2 / 0.5 / 0.9 top to bottom (Smear fixed at 0.5). Higher Mix
+         should deposit more blue per dab and show a stronger/longer green transition band.
+         """) { s in
+    for (i, m) in ["mix 0.2", "mix 0.5", "mix 0.9"].enumerated() {
+        s.label(m, y: CGFloat(220 + i * 280) - 80)
+    }
     // Wet blue over yellow at Mix 0.2 / 0.5 / 0.9 (same smear) — a tuning contact row.
     for (i, mixV) in [CGFloat(0.2), 0.5, 0.9].enumerated() {
         let y = CGFloat(220 + i * 280)
