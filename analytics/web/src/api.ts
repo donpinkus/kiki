@@ -207,6 +207,7 @@ export const putWarmer = (config: WarmerConfig) =>
 export interface TestRunImage {
   scene: string;
   blob_key: string;
+  description: string | null;
 }
 
 export interface TestRun {

@@ -376,13 +376,27 @@ export const ingestRoute: FastifyPluginAsync = async (app) => {
 
     if (images.length === 0) return reply.code(400).send({ error: 'at least one image part required' });
 
+    // Optional scene → description map (harness manifest.json, shipped by publish-run.sh).
+    let descriptions: Record<string, string> = {};
+    if (fields['descriptions']) {
+      try {
+        const parsed = JSON.parse(fields['descriptions']) as Record<string, unknown>;
+        for (const [k, v] of Object.entries(parsed)) if (typeof v === 'string') descriptions[k] = v.slice(0, 500);
+      } catch {
+        request.log.warn('test-run descriptions field is not valid JSON — ignored');
+      }
+    }
+
     const run = await query<{ id: string }>(
       `INSERT INTO test_runs (git_sha, note) VALUES ($1, $2) RETURNING id`,
       [fields['git_sha'] ?? null, fields['note'] ?? null],
     );
     const runId = run.rows[0]!.id;
     for (const img of images) {
-      await query(`INSERT INTO test_run_images (run_id, scene, blob_key) VALUES ($1, $2, $3)`, [runId, img.scene, img.key]);
+      await query(
+        `INSERT INTO test_run_images (run_id, scene, blob_key, description) VALUES ($1, $2, $3, $4)`,
+        [runId, img.scene, img.key, descriptions[img.scene] ?? null],
+      );
     }
 
     return reply.send({ ok: true, id: runId, images: images.length });

@@ -57,14 +57,14 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
         [limit],
       );
       if (runs.length === 0) return { runs: [] };
-      const { rows: images } = await query<{ run_id: string; scene: string; blob_key: string }>(
-        `SELECT run_id, scene, blob_key FROM test_run_images WHERE run_id = ANY($1::bigint[]) ORDER BY scene`,
+      const { rows: images } = await query<{ run_id: string; scene: string; blob_key: string; description: string | null }>(
+        `SELECT run_id, scene, blob_key, description FROM test_run_images WHERE run_id = ANY($1::bigint[]) ORDER BY scene`,
         [runs.map((r) => r.id)],
       );
-      const byRun = new Map<string, { scene: string; blob_key: string }[]>();
+      const byRun = new Map<string, { scene: string; blob_key: string; description: string | null }[]>();
       for (const img of images) {
         const list = byRun.get(String(img.run_id)) ?? [];
-        list.push({ scene: img.scene, blob_key: img.blob_key });
+        list.push({ scene: img.scene, blob_key: img.blob_key, description: img.description });
         byRun.set(String(img.run_id), list);
       }
       return { runs: runs.map((r) => ({ ...r, images: byRun.get(String(r.id)) ?? [] })) };

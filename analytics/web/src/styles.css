@@ -100,3 +100,29 @@ tr:hover td { background: var(--panel-2); }
 
 .filter-bar { display: flex; gap: 10px; margin-bottom: 16px; }
 .error { color: #ff7b72; }
+
+/* ─── Tests tab (brush-battery run gallery) ─── */
+select {
+  font: inherit; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--panel-2); color: var(--text); padding: 8px 32px 8px 10px;
+  appearance: none;
+  background-image: url("data:image/svg+xml;charset=utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%239aa3b2' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 12px center;
+  cursor: pointer;
+}
+select:focus { outline: 1px solid var(--accent); }
+.tests-controls { display: flex; gap: 18px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 22px; }
+.tests-controls label { display: flex; flex-direction: column; gap: 5px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+.scene-card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px 12px 10px; }
+.scene-name { font-weight: 600; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+.scene-desc {
+  color: var(--muted); font-size: 12px; line-height: 1.45; margin: 3px 0 9px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.scene-card:hover .scene-desc { white-space: normal; }
+.tests-img {
+  width: 100%; aspect-ratio: 1; object-fit: contain; background: #fff;
+  display: block; border-radius: 7px; border: 1px solid var(--border);
+}
+.tests-img-caption { color: var(--muted); font-size: 12px; margin-top: 5px; }
+.tests-note { color: var(--muted); font-size: 13px; margin: -10px 0 18px; }

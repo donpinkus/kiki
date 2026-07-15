@@ -108,6 +108,9 @@ CREATE TABLE IF NOT EXISTS test_run_images (
   id          BIGSERIAL PRIMARY KEY,
   run_id      BIGINT NOT NULL REFERENCES test_runs(id) ON DELETE CASCADE,
   scene       TEXT NOT NULL,
-  blob_key    TEXT NOT NULL
+  blob_key    TEXT NOT NULL,
+  description TEXT
 );
+-- Added after first deploy; harmless on fresh tables.
+ALTER TABLE test_run_images ADD COLUMN IF NOT EXISTS description TEXT;
 CREATE INDEX IF NOT EXISTS test_run_images_run ON test_run_images (run_id);

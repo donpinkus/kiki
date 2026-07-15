@@ -42,6 +42,8 @@ fi
 CURL_ARGS=(-s -X POST "$BASE/ingest/test-run" -H "x-insights-key: $INSIGHTS_INGEST_KEY"
            -F "git_sha=$SHA")
 [ -n "$NOTE" ] && CURL_ARGS+=(-F "note=$NOTE")
+# Scene descriptions (scene → one-liner), written by the harness next to the PNGs.
+[ -f "$OUT/render/manifest.json" ] && CURL_ARGS+=(-F "descriptions=<$OUT/render/manifest.json")
 COUNT=0
 for png in "$OUT"/render/*.png; do
   CURL_ARGS+=(-F "image=@$png;type=image/png")

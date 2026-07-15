@@ -170,11 +170,16 @@ final class Scene {
     }
 }
 
-func runScene(_ name: String, _ body: (Scene) -> Void) {
+/// scene name → one-line description, written to manifest.json alongside the PNGs.
+/// publish-run.sh ships it with the run so the Tests tab can explain each scene.
+var sceneDescriptions: [String: String] = [:]
+
+func runScene(_ name: String, _ description: String, _ body: (Scene) -> Void) {
     if let filter, !name.contains(filter) { return }
     guard let scene = Scene() else {
         print("FAIL  could not create Metal scene (no GPU?)"); exit(1)
     }
+    sceneDescriptions[name] = description
     body(scene)
     scene.snapshot(name: name)
 }
@@ -201,7 +206,8 @@ let teal = CodableColor(red: 0.05, green: 0.55, blue: 0.55)
 
 // MARK: - Synthetic battery
 
-runScene("dry-01-pressure") { s in
+runScene("dry-01-pressure",
+         "Pressure response: ramp 0→1, bell, wavy pulses with taper 0.5, then hardness 0 (soft) vs 1 (crisp).") { s in
     s.paint(synthStroke(id: 1, brush: pen(.black, width: 34), from: CGPoint(x: 100, y: 200), to: CGPoint(x: 924, y: 200),
                         force: { $0 }))                                     // ramp 0→1
     s.paint(synthStroke(id: 2, brush: pen(.black, width: 34), from: CGPoint(x: 100, y: 420), to: CGPoint(x: 924, y: 420),
@@ -212,7 +218,8 @@ runScene("dry-01-pressure") { s in
     s.paint(synthStroke(id: 5, brush: pen(.black, width: 34, hardness: 1.0), from: CGPoint(x: 560, y: 840), to: CGPoint(x: 924, y: 840)))
 }
 
-runScene("dry-02-flow-vs-opacity") { s in
+runScene("dry-02-flow-vs-opacity",
+         "The Glaze split: self-crossing loops at flow 0.25/opacity 1 vs flow 1/opacity 0.25 must stay flat; separate overlapping flow-0.25 passes must build where they cross.") { s in
     // Self-crossing loops: flow builds within a stroke, opacity is the per-stroke ceiling.
     s.paint(loopStroke(id: 10, brush: pen(teal, width: 40, opacity: 1.0, flow: 0.25), center: CGPoint(x: 260, y: 400), radius: 150))
     s.paint(loopStroke(id: 11, brush: pen(teal, width: 40, opacity: 0.25, flow: 1.0), center: CGPoint(x: 700, y: 400), radius: 150))
@@ -222,7 +229,8 @@ runScene("dry-02-flow-vs-opacity") { s in
     s.paint(synthStroke(id: 14, brush: pen(teal, width: 40, flow: 0.25), from: CGPoint(x: 512, y: 660), to: CGPoint(x: 512, y: 900)))
 }
 
-runScene("dry-03-dynamics") { s in
+runScene("dry-03-dynamics",
+         "Krita dynamics: size from pressure (gamma 2), constant scatter 0.55, per-stroke hue/sat/value jitter — three stroke ids → three visibly different reds.") { s in
     let dyn = BrushDynamics(
         size: CurveOption(sensors: [SensorChannel(sensor: .pressure, curve: .gamma(2.0))], minValue: 0.15),
         scatter: CurveOption(sensors: [], strength: 0.55),
@@ -235,7 +243,8 @@ runScene("dry-03-dynamics") { s in
     }
 }
 
-runScene("dry-04-shapes") { s in
+runScene("dry-04-shapes",
+         "Textured tips (chalk, charcoal, dry brush, pastel, spray) orienting to the stroke direction, width ramping with pressure.") { s in
     // Requires BRUSH_SHAPES_DIR (see README); without it, shaped strokes fall back to round.
     for (i, shape) in ["chalk", "charcoal", "drybrush", "pastel", "ink"].enumerated() {
         let y = CGFloat(150 + i * 180)
@@ -245,7 +254,8 @@ runScene("dry-04-shapes") { s in
     }
 }
 
-runScene("dry-05-aspect") { s in
+runScene("dry-05-aspect",
+         "P4b anisotropy: identical dab rows at aspect 1.0 / 0.4 / 0.15 — round → ellipse → flat blade footprints (wide spacing so each dab is visible).") { s in
     // P4b anisotropy: same stroke at aspect 1.0 / 0.4 / 0.15, wide spacing so the
     // individual dab footprints are visible (round → ellipse → blade).
     for (i, aspect) in [CGFloat(1.0), 0.4, 0.15].enumerated() {
@@ -259,7 +269,8 @@ runScene("dry-05-aspect") { s in
     }
 }
 
-runScene("dry-06-calligraphy-rotation") { s in
+runScene("dry-06-calligraphy-rotation",
+         "Rotation output: a fixed-45° flat nib (aspect 0.2) gives the classic thick/thin italic S-curve; below it, Distance-driven rotation visibly spins the nib along a straight stroke.") { s in
     // The rotation OUTPUT check (handoff item 1): with a flat tip (aspect 0.2), the
     // dabs must visibly rotate. Row 1: classic calligraphy — nib held at a FIXED 45°
     // (no-sensor rotationLike folds to its constant strength; 0.25 turns = π/4), so the
@@ -285,7 +296,8 @@ runScene("dry-06-calligraphy-rotation") { s in
                         force: { _ in 0.9 }))
 }
 
-runScene("wet-01-blue-into-yellow") { s in
+runScene("wet-01-blue-into-yellow",
+         "Spectral KM mixing: a wet blue stroke dragged through a yellow patch turns green at entry, converges toward yellow as the load picks up, and exits yellow.") { s in
     // Yellow base patch (full-pressure passes so effectiveWidth == baseWidth — at the
     // default force 0.5 the rows shrink ~40% and leave white gaps), then a wet blue
     // stroke dragged through the patch: the trail should turn GREEN (spectral KM),
@@ -300,7 +312,8 @@ runScene("wet-01-blue-into-yellow") { s in
                         from: CGPoint(x: 150, y: 450), to: CGPoint(x: 874, y: 450)))
 }
 
-runScene("wet-02-smudge") { s in
+runScene("wet-02-smudge",
+         "Smudge (no new ink): pushes red into the gap with a depleting tail, then contaminates into the blue patch.") { s in
     // Red + blue patches with a gap; a smudge (no new ink) dragged through both:
     // it should push red into the gap, then contaminate toward blue crossing the patch.
     for i in 0..<3 {
@@ -317,7 +330,8 @@ runScene("wet-02-smudge") { s in
                         from: CGPoint(x: 200, y: 460), to: CGPoint(x: 860, y: 460)))
 }
 
-runScene("wet-04-smudge-translucent") { s in
+runScene("wet-04-smudge-translucent",
+         "Alpha-carry regression (Donald 2026-07-15): smudging 40%-opacity red must keep it ~40% (not harden opaque), and the drag-off tail must thin and die.") { s in
     // Donald's 2026-07-15 report: smudging 40%-opacity red turned it fully opaque
     // instead of pushing translucent paint. The smudge crosses the 40% patch and
     // drags off onto blank canvas. CORRECT behavior: the smudged area stays ~40%
@@ -333,7 +347,8 @@ runScene("wet-04-smudge-translucent") { s in
                         from: CGPoint(x: 220, y: 460), to: CGPoint(x: 900, y: 460)))
 }
 
-runScene("wet-03-mix-sweep") { s in
+runScene("wet-03-mix-sweep",
+         "Tuning rows: wet blue over yellow at Mix 0.2 / 0.5 / 0.9, same Smear — deposit strength comparison.") { s in
     // Wet blue over yellow at Mix 0.2 / 0.5 / 0.9 (same smear) — a tuning contact row.
     for (i, mixV) in [CGFloat(0.2), 0.5, 0.9].enumerated() {
         let y = CGFloat(220 + i * 280)
@@ -358,7 +373,9 @@ func replayFixture(at url: URL) {
     }
     guard let scene = Scene(side: fixture.canvasSide ?? 2048) else { print("FAIL  Metal scene"); return }
     for stroke in fixture.strokes { scene.paint(stroke) }
-    scene.snapshot(name: "fixture-\(fixture.name ?? base)")
+    let sceneName = "fixture-\(fixture.name ?? base)"
+    sceneDescriptions[sceneName] = "Recorded on-device fixture (\(fixture.strokes.count) strokes) replayed through the current engine."
+    scene.snapshot(name: sceneName)
 }
 
 for path in fixturePaths {
@@ -374,6 +391,11 @@ for path in fixturePaths {
     } else {
         replayFixture(at: URL(fileURLWithPath: path))
     }
+}
+
+// Scene manifest for publish-run.sh → the Tests tab's per-scene descriptions.
+if let manifest = try? JSONEncoder().encode(sceneDescriptions) {
+    try? manifest.write(to: URL(fileURLWithPath: outDir).appendingPathComponent("manifest.json"))
 }
 
 print("DONE")
