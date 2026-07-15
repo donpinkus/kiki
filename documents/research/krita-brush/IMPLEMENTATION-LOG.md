@@ -201,3 +201,27 @@ Third review round verdicts: **GO (non-regression/e2e/rebase) · GO-WITH-FIXES (
 6. **Perf:** dynamic brushes (esp. Stipple/scatter) must hold 120 Hz / <8 ms — watch for hitching.
    The per-stroke LUT-cache fix should keep it cheap; confirm on the oldest target iPad.
 7. **Determinism:** draw a scatter stroke, undo, redo — the scattered dabs must land identically.
+
+## P4b (aspect half) + rotation-output validation — 2026-07-15
+
+**Aspect-ratio tips shipped** (`BrushConfig.aspectRatio`, default 1, backward-compatible
+Codable): packed as `StampInstance.aspect` — it fits in the struct's existing 12-byte tail
+padding (SIMD4 alignment), so the stride stays 48 and no buffer plumbing changed — and
+applied as a **vertex-stage local-Y squash before rotation** in `brushStampVertex`.
+Because texCoord is untouched, every fragment (procedural falloff, shape mask, wet KM)
+lands on an elliptical footprint with zero fragment cost; eraser defaults to 1 (unchanged).
+"Aspect" slider (0.1–1.0) added to the brush settings popover. The falloff-LUT half of P4b
+(generality, explicitly not perf) remains unbuilt.
+
+**Rotation output validated visually** (the last unverified dynamics output, closing the
+handoff's item 1) — via BrushHarness, no device round-trip:
+- `dry-05-aspect`: round → ellipse → blade footprints at aspect 1.0/0.4/0.15.
+- `dry-06-calligraphy-rotation`: a fixed-45° flat nib (no-sensor rotationLike folds to its
+  constant strength; 0.25 turns = π/4) produces the classic thick/thin italic S-curve, and
+  a Distance-driven rotation visibly spins the nib along a straight stroke.
+Scatter + color jitter were already confirmed by `dry-03-dynamics` (2026-07-14).
+
+Verified: offline suite ALL PASSED, full 9-scene harness battery renders, app builds
+(iPad sim). Fixture-replay caveat recorded in HANDOFF item 2: fixtures store canvas-pixel
+positions (~2.7× view points), so Speed-sensor brushes replay faster in the harness than
+they felt on device — tune maxSpeed on device.

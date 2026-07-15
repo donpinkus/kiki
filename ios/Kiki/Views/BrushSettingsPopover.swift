@@ -30,6 +30,7 @@ struct BrushSettingsPopover: View {
             .opacity(wet ? 0.35 : 1)
             BrushSliderRow("Stabilize", value: $coordinator.toolStreamline, range: 0.0...1.0, help: Self.help["Stabilize"]!)
             BrushSliderRow("Hardness", value: $coordinator.toolHardness, range: 0.0...1.0, help: Self.help["Hardness"]!)
+            BrushSliderRow("Aspect", value: $coordinator.toolAspect, range: 0.1...1.0, help: Self.help["Aspect"]!)
             BrushSliderRow("Spacing", value: $coordinator.toolSpacing, range: 0.02...1.0, help: Self.help["Spacing"]!)
             Group {
                 BrushSliderRow("Taper", value: $coordinator.toolTaper, range: 0.0...1.0, help: Self.help["Taper"]!)
@@ -83,6 +84,9 @@ struct BrushSettingsPopover: View {
         "Hardness": BrushHelp(summary: "How crisp or soft the brush edge is.",
             low: "Soft, feathered airbrush edge.",
             high: "Crisp, sharp edge."),
+        "Aspect": BrushHelp(summary: "How flat the brush tip is — a calligraphy/chisel nib at low values.",
+            low: "A thin flat blade (pair with Rotation dynamics in Brush Studio to steer the nib).",
+            high: "Fully round tip."),
         "Spacing": BrushHelp(summary: "How far apart the stamped dabs are along the stroke.",
             low: "Dense — a smooth, continuous line.",
             high: "Far apart — you see individual dabs."),

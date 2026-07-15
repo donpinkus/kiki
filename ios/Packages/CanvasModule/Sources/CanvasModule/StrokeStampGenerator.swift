@@ -70,6 +70,8 @@ enum StrokeStampGenerator {
         let brush = stroke.brush
         let color = premultipliedColor(brush)
         let hardness = Float(brush.hardness)
+        // P4b: constant per stroke for now (a dynamics CurveOption can drive it later).
+        let aspect = Float(min(max(brush.aspectRatio, 0.05), 1))
         // Spacing as a fraction of stamp width; clamped so a tiny value can't generate
         // a runaway number of stamps (the renderer also caps per-frame stamp count).
         let spacingFraction = max(brush.spacing, 0.02)
@@ -172,7 +174,8 @@ enum StrokeStampGenerator {
                 radius: Float(firstWidth * 0.5 * scale),
                 rotation: firstAttr.rotation,
                 color: firstAttr.color,
-                hardness: hardness
+                hardness: hardness,
+                aspect: aspect
             ))
         }
 
@@ -217,7 +220,8 @@ enum StrokeStampGenerator {
                         radius: Float(width * 0.5 * scale),
                         rotation: attr.rotation,
                         color: attr.color,
-                        hardness: hardness
+                        hardness: hardness,
+                        aspect: aspect
                     ))
                 }
 
@@ -246,7 +250,8 @@ enum StrokeStampGenerator {
                     radius: Float(width * 0.5 * scale),
                     rotation: attr.rotation,
                     color: attr.color,
-                    hardness: hardness
+                    hardness: hardness,
+                    aspect: aspect
                 ))
             }
         }

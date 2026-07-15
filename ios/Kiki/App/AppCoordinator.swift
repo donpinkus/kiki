@@ -127,6 +127,15 @@ final class AppCoordinator {
             applyTool()
         }
     }
+    /// Tip aspect ratio ("Aspect", P4b anisotropy). 1 = round; lower flattens the tip
+    /// into a chisel/calligraphy nib (combine with a Rotation dynamics option or a
+    /// stroke-oriented shape to steer the nib angle).
+    var toolAspect: CGFloat = 1.0 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
 
     /// Wet-paint mode (pro-brush Phase 4, experimental). Brush only.
     var toolWetEnabled = false {
@@ -1745,6 +1754,7 @@ final class AppCoordinator {
                 wetPickup: toolWetPickup,
                 wetSmudge: toolWetSmudge,
                 shapeID: toolShapeID,
+                aspectRatio: toolAspect,
                 dynamics: toolDynamics
             )
             canvasViewModel.selectBrush(config)

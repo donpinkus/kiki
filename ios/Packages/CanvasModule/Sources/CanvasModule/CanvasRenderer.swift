@@ -178,6 +178,11 @@ public final class CanvasRenderer {
         var rotation: Float         // pencil azimuth
         var color: SIMD4<Float>     // premultiplied RGBA
         var hardness: Float = 1.0   // edge hardness [0,1]; 1 = crisp. Default hard for shapes/eraser.
+        // P4b anisotropy: local-Y scale of the stamp quad, applied BEFORE rotation.
+        // 1 = round (all legacy stamps); <1 flattens the tip into a chisel/nib. Lives in
+        // the 12 bytes of tail padding after `hardness` (SIMD4 16-byte alignment), so the
+        // stride stays 48 and the MSL struct matches — keep both declarations in sync.
+        var aspect: Float = 1.0
     }
 
     /// Maximum stamps per frame. 240 Hz pencil × ~6 interpolated steps per touch
@@ -1620,6 +1625,7 @@ public final class CanvasRenderer {
         float  rotation;
         float4 color;
         float  hardness;
+        float  aspect;   // P4b: local-Y quad scale (pre-rotation); 1 = round
     };
 
     struct StampVaryings {
@@ -1639,12 +1645,17 @@ public final class CanvasRenderer {
         QuadVertex q = quads[vertexId];
         StampInstance inst = instances[instanceId];
 
+        // P4b anisotropy: squash the quad's local Y BEFORE rotation (aspect 1 = round).
+        // texCoord is untouched, so every fragment (procedural falloff, shape mask, wet
+        // KM) sees its usual unit space and simply lands on an elliptical footprint.
+        float2 local = float2(q.position.x, q.position.y * max(inst.aspect, 0.05));
+
         // Rotate quad corner by pencil azimuth.
         float c = cos(inst.rotation);
         float s = sin(inst.rotation);
         float2 rotated = float2(
-            q.position.x * c - q.position.y * s,
-            q.position.x * s + q.position.y * c
+            local.x * c - local.y * s,
+            local.x * s + local.y * c
         );
 
         // Scale by radius and translate to stamp center (in canvas pixels).

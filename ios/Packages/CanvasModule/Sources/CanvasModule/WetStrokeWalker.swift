@@ -49,6 +49,7 @@ struct WetStrokeWalker {
         let dep = Float(max(0, min(1, brush.wetStrength)) * max(0, min(1, brush.opacity)))
         let baseColor = SIMD3<Float>(s2l(brush.color.red), s2l(brush.color.green), s2l(brush.color.blue))
         let hardness = Float(brush.hardness)
+        let aspect = Float(min(max(brush.aspectRatio, 0.05), 1))
         let spacingFrac = max(brush.spacing, 0.02)
         let pickup = Float(max(0, min(1, brush.wetPickup)))   // how fast the load picks up canvas color
 
@@ -81,7 +82,7 @@ struct WetStrokeWalker {
             newStamps.append(CanvasRenderer.StampInstance(
                 center: SIMD2<Float>(Float(pos.x * scale), Float(pos.y * scale)),
                 radius: Float(width * 0.5 * scale), rotation: 0,
-                color: SIMD4<Float>(load.x, load.y, load.z, dep), hardness: hardness))
+                color: SIMD4<Float>(load.x, load.y, load.z, dep), hardness: hardness, aspect: aspect))
             if let s = sample(cx, cy), s.alpha > 0.05 {
                 load = mix(load, s.color, pickup * s.alpha)
             }

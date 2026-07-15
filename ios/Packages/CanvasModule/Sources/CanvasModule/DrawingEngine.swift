@@ -139,6 +139,13 @@ public struct BrushConfig: Codable, Sendable {
     /// circle; other ids bind a grayscale stamp texture. Textured shapes orient to the
     /// stroke direction. See pro-brush-roadmap Phase 3.
     public var shapeID: String?
+    /// Tip aspect ratio (P4b anisotropy): 1 = round (today's tip), <1 flattens the tip
+    /// along its local Y axis (the travel axis for stroke-oriented shapes) — a chisel /
+    /// calligraphy nib once combined with `rotation` (fixed via shape orientation or a
+    /// Rotation dynamics option). Implemented as a vertex-stage Y-scale of the stamp
+    /// quad, so it applies to procedural, textured, AND wet dabs with no fragment cost.
+    /// Clamped to [0.05, 1] at stamp packing.
+    public var aspectRatio: CGFloat
     /// Krita-grade brush dynamics: per-parameter sensor→curve→combine→remap options
     /// (`BrushDynamics`). `nil` (the default) means "no dynamics" — the legacy
     /// `pressureGamma`/`tiltSensitivity` scalars drive size and everything else is a flat
@@ -163,6 +170,7 @@ public struct BrushConfig: Codable, Sendable {
         wetPickup: CGFloat = 0.25,
         wetSmudge: Bool = false,
         shapeID: String? = nil,
+        aspectRatio: CGFloat = 1.0,
         dynamics: BrushDynamics? = nil
     ) {
         self.color = color
@@ -180,6 +188,7 @@ public struct BrushConfig: Codable, Sendable {
         self.wetPickup = wetPickup
         self.wetSmudge = wetSmudge
         self.shapeID = shapeID
+        self.aspectRatio = aspectRatio
         self.dynamics = dynamics
     }
 
@@ -213,7 +222,7 @@ public struct BrushConfig: Codable, Sendable {
         case color, baseWidth, opacity, flow, pressureGamma, pressureOpacity
         case streamline, taperIn, taperOut, tiltSensitivity
         case hardness, spacing, taper, wetEnabled, wetStrength, wetPickup, shapeID
-        case dynamics, wetSmudge
+        case dynamics, wetSmudge, aspectRatio
     }
 
     public init(from decoder: Decoder) throws {
@@ -240,6 +249,8 @@ public struct BrushConfig: Codable, Sendable {
         wetSmudge = try container.decodeIfPresent(Bool.self, forKey: .wetSmudge) ?? false
         // Phase 3 — default nil (procedural round) so pre-Phase-3 configs decode unchanged.
         shapeID = try container.decodeIfPresent(String.self, forKey: .shapeID)
+        // P4b — default 1 (round) so configs saved before aspect decode unchanged.
+        aspectRatio = try container.decodeIfPresent(CGFloat.self, forKey: .aspectRatio) ?? 1.0
         // Krita-grade dynamics — default nil (legacy scalar behavior) so configs saved before
         // it decode to today's pen unchanged.
         dynamics = try container.decodeIfPresent(BrushDynamics.self, forKey: .dynamics)

@@ -245,6 +245,46 @@ runScene("dry-04-shapes") { s in
     }
 }
 
+runScene("dry-05-aspect") { s in
+    // P4b anisotropy: same stroke at aspect 1.0 / 0.4 / 0.15, wide spacing so the
+    // individual dab footprints are visible (round → ellipse → blade).
+    for (i, aspect) in [CGFloat(1.0), 0.4, 0.15].enumerated() {
+        var b = pen(.black, width: 70)
+        b.aspectRatio = aspect
+        b.spacing = 0.9
+        s.paint(synthStroke(id: 70 + i, brush: b,
+                            from: CGPoint(x: 130, y: CGFloat(230 + i * 280)),
+                            to: CGPoint(x: 894, y: CGFloat(230 + i * 280)),
+                            force: { _ in 1 }))
+    }
+}
+
+runScene("dry-06-calligraphy-rotation") { s in
+    // The rotation OUTPUT check (handoff item 1): with a flat tip (aspect 0.2), the
+    // dabs must visibly rotate. Row 1: classic calligraphy — nib held at a FIXED 45°
+    // (no-sensor rotationLike folds to its constant strength; 0.25 turns = π/4), so the
+    // S-curve goes thick where travel crosses the nib and thin where it parallels it.
+    // Row 2: rotation driven by Distance → the nib visibly SPINS along a straight
+    // stroke (unambiguous proof the per-dab rotation reaches the GPU).
+    var nib = pen(.black, width: 60)
+    nib.aspectRatio = 0.2
+    nib.spacing = 0.05
+    nib.dynamics = BrushDynamics(
+        rotation: CurveOption(sensors: [], fold: .rotationLike, strength: 0.25))
+    s.paint(synthStroke(id: 75, brush: nib,
+                        from: CGPoint(x: 120, y: 320), to: CGPoint(x: 904, y: 320),
+                        bow: 140, force: { _ in 0.8 }))
+
+    var spinner = pen(teal, width: 60)
+    spinner.aspectRatio = 0.2
+    spinner.spacing = 0.6
+    spinner.dynamics = BrushDynamics(
+        rotation: CurveOption(sensors: [SensorChannel(sensor: .distance)], fold: .rotationLike, strength: 1.0))
+    s.paint(synthStroke(id: 76, brush: spinner,
+                        from: CGPoint(x: 120, y: 720), to: CGPoint(x: 904, y: 720),
+                        force: { _ in 0.9 }))
+}
+
 runScene("wet-01-blue-into-yellow") { s in
     // Yellow base patch (full-pressure passes so effectiveWidth == baseWidth — at the
     // default force 0.5 the rows shrink ~40% and leave white gaps), then a wet blue
