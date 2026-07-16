@@ -80,6 +80,26 @@ tr:hover td { background: var(--panel-2); }
 
 .section-title { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 28px 0 12px; }
 
+/* Timeline grouped by app session (UserDetail) */
+.session-group {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  margin-bottom: 10px; overflow: hidden;
+}
+.session-group summary {
+  cursor: pointer; padding: 12px 16px; user-select: none; font-size: 13px;
+}
+.session-group summary:hover { background: var(--panel-2); }
+.session-group.gap summary, .session-group.gap summary strong { color: var(--muted); font-weight: 500; }
+.session-group-body { padding: 4px 16px 12px; font-size: 13px; }
+.event-row.expandable { cursor: pointer; }
+.event-row.expandable:hover { background: var(--panel-2); }
+.json-view {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+  padding: 10px 12px; margin: 6px 0 10px; overflow-x: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px; line-height: 1.55; white-space: pre;
+}
+
 /* Timeline */
 .timeline { border-left: 2px solid var(--border); margin-left: 8px; padding-left: 18px; }
 .timeline-item { position: relative; padding: 8px 0; }
