@@ -74,18 +74,20 @@ internals; several of our internals (per-sensor curves, spectral KM) exceed Proc
 
 ## Re-prioritized next work (supersedes the handoff's ordering)
 
-1. **P3 — Stabilization rebuild** (feel-critical, do first). Procreate's signature line quality
-   is StreamLine; ours is a per-event EMA with a known frame-rate-dependence bug and no
-   pressure smoothing. Arc-length speed-adaptive smoothing + velocity-aware Bézier curvature
-   (the shape klein actually reads) + optional pressure smoothing + catch-up-on-lift.
-   Pure CPU, low risk, fully harness-verifiable (synthetic jittery input → smoothed output).
-2. **P8 — Grain** (the biggest visible gap). Texturized/document-space HEIGHT mode first
-   (committed, survives img2img), then the Moving mode (streaky traditional-media look).
-   Procreate's iconic dry-media brushes are shape × grain — we have shape, not grain.
-3. **Cheap-knobs batch** (~a day, closes a dozen Procreate checkboxes on existing machinery):
-   aspect as a CurveOption (pressure/tilt roundness — nib squash!), signed follow-stroke
-   rotation knob, lateral/linear scatter split, spacing jitter + speed→spacing, Flip X/Y,
-   Fall Off knob, barrel-roll sensor input, stamp Count/Count Jitter.
+1. ~~P3 — Stabilization rebuild~~ **DONE 2026-07-15** (`dfec818`): StrokeStabilizer —
+   StreamLine EMA (verbatim port) + two-pass Gaussian arc-length Smoothing (new popover
+   slider) + pressure smoothing (config) + catch-up-on-lift. Offline-asserted (passthrough,
+   rate-independence, wobble energy 9×, catch-up exact); harness scene dry-07.
+   Still open from P3: velocity-aware Bézier emission (curvature upgrade) — deferred.
+2. ~~P8 — Grain~~ **DONE 2026-07-15** (`30a9c59`): three procedural document-space grains
+   (paper/canvas/speckle), carved at scratch-COMPOSITE time (per-dab carving rejected in
+   harness — overlap refills tooth), Grain picker + depth in the popover. Harness dry-08.
+   Still open from P8: Moving-mode grain (streaky), grain strength as a CurveOption.
+3. **Cheap-knobs batch** — PARTIAL 2026-07-15 (`1704690`): DONE — ratio/Roundness
+   CurveOption (pressure nib squash, Studio section), spacing jitter (config), barrel-roll
+   sensor (StrokePoint.rollAngle + BarrelRotation, harness-proven). Harness dry-09.
+   Remaining: signed follow-stroke rotation knob, lateral/linear scatter split,
+   speed→spacing, Flip X/Y, Fall Off knob, stamp Count/Count Jitter.
 4. **P4a — Lightness-map tips** (S effort, HIGH img2img leverage, offline color oracle first).
 5. **P7 — Wet rework**, adopting **Procreate's Wet Mix vocabulary as the control surface**
    (Dilution/Charge/Attack/Pull/Grade/Blur over our KM+reservoir internals). After Donald's
