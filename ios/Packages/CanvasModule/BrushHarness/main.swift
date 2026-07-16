@@ -959,6 +959,57 @@ runScene("wet-07-smear-x-opacity",
     }
 }
 
+runScene("wet-08-overlap-opacity",
+         """
+         Partial-opacity wet strokes OVERLAPPING — the Glaze semantics under test.
+         - Top left: blue 50% crossed by yellow 50% (two separate strokes). The overlap
+           must stack like two watercolor glazes: denser (α 0.5 → 0.75) and KM-tinted
+           green-ish — the second stroke mixes against what the first left behind.
+         - Top right: the same cross at 10% + 10% — the same story, whisper-faint.
+         - Bottom left: ONE 50% blue stroke that crosses ITSELF (a loop). The self-
+           crossing must stay FLAT — same density everywhere (the per-stroke ceiling is
+           applied once at flatten, not per pass). If the loop's crossing darkens, the
+           Glaze split broke.
+         - Bottom right: TWO 50% blue strokes crossing — unlike the loop, this SHOULD
+           darken at the overlap (separate strokes always stack). The pair is the
+           discriminator: flat loop + stacking X = correct; both flat or both stacking
+           = a bug.
+         """) { s in
+    // Top left: blue 50% + yellow 50% cross.
+    var blue50 = wet(blue, width: 44, mix: 0.7, smear: 0.15)
+    blue50.opacity = 0.5
+    var yellow50 = wet(yellow, width: 44, mix: 0.7, smear: 0.15)
+    yellow50.opacity = 0.5
+    s.label("blue 50% × yellow 50% — overlap stacks, KM tint", y: 120)
+    s.paint(synthStroke(id: 400, brush: blue50, from: CGPoint(x: 260, y: 160), to: CGPoint(x: 260, y: 400), force: { _ in 0.8 }))
+    s.paint(synthStroke(id: 401, brush: yellow50, from: CGPoint(x: 100, y: 280), to: CGPoint(x: 420, y: 280), force: { _ in 0.8 }))
+
+    // Top right: same at 10%.
+    var blue10 = blue50; blue10.opacity = 0.1
+    var yellow10 = yellow50; yellow10.opacity = 0.1
+    s.label("10% × 10%", x: 600, y: 120)
+    s.paint(synthStroke(id: 402, brush: blue10, from: CGPoint(x: 760, y: 160), to: CGPoint(x: 760, y: 400), force: { _ in 0.8 }))
+    s.paint(synthStroke(id: 403, brush: yellow10, from: CGPoint(x: 600, y: 280), to: CGPoint(x: 920, y: 280), force: { _ in 0.8 }))
+
+    // Bottom left: ONE self-crossing 50% blue loop — must stay flat.
+    var loopPts: [StrokePoint] = []
+    for i in 0...160 {
+        let t = Double(i) / 160.0
+        let theta = -0.6 * Double.pi + t * 3.0 * Double.pi   // 1.5 turns → guaranteed self-cross
+        loopPts.append(StrokePoint(
+            position: CGPoint(x: 260 + 110 * CGFloat(cos(theta)) + CGFloat(t * 60),
+                              y: 740 + 110 * CGFloat(sin(theta))),
+            force: 0.8, altitude: .pi / 2, timestamp: t, azimuth: 0))
+    }
+    s.label("ONE 50% stroke self-crossing — must stay FLAT", y: 560)
+    s.paint(Stroke(id: fixedUUID(404), points: loopPts, brush: blue50))
+
+    // Bottom right: TWO 50% blue strokes crossing — SHOULD stack.
+    s.label("TWO 50% strokes crossing — should darken", x: 580, y: 560)
+    s.paint(synthStroke(id: 405, brush: blue50, from: CGPoint(x: 640, y: 620), to: CGPoint(x: 900, y: 880), force: { _ in 0.8 }))
+    s.paint(synthStroke(id: 406, brush: blue50, from: CGPoint(x: 900, y: 620), to: CGPoint(x: 640, y: 880), force: { _ in 0.8 }))
+}
+
 // MARK: - Fixture replay (recorded on iPad via Brush Studio → "Record strokes")
 // `BrushFixture` is the module's shared contract type (Sources/CanvasModule/BrushFixture.swift).
 
