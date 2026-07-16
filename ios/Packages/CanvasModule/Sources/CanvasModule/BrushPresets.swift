@@ -189,7 +189,11 @@ public enum CuratedPresetCatalog {
             b.hardness = 0.6
             b.spacing = 0.12
             b.pressureSmoothing = 0.3
-            b.dynamics = BrushDynamics(size: pressureSize(), flow: pressureFlow(min: 0.4))
+            b.dynamics = BrushDynamics(size: pressureSize(), flow: pressureFlow(min: 0.4),
+                                       // The signature 6B move: pressing harder darkens
+                                       // the graphite, not just widens it (cap: never
+                                       // darker than 60% of the ink).
+                                       darkness: CurveOption(sensors: [SensorChannel(sensor: .pressure)], maxValue: 0.4))
             return b
         },
 

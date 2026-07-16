@@ -680,6 +680,8 @@ runScene("dry-15-dab-color-jitter",
          - Row 3: per-DAB jitter (brightness-led) — value sparkle WITHIN a single stroke.
          - Row 4: per-dab, hue+sat cranked (0.05/0.3/0.25) — exaggerated to make the per-dab
            independence unmistakable (not a shipping look).
+         - Row 5: Darkness x pressure (P6): a pressure bell darkens the ink mid-stroke while
+           the width stays constant — the 6B-pencil "press harder, darker graphite" move.
          """) { s in
     let ochre = CodableColor(red: 0.78, green: 0.55, blue: 0.2)
     func dabbed(_ id: Int, _ y: CGFloat, dyn: BrushDynamics?, from x0: CGFloat = 120, to x1: CGFloat = 904) -> Stroke {
@@ -699,6 +701,17 @@ runScene("dry-15-dab-color-jitter",
     s.paint(dabbed(174, 520, dyn: BrushDynamics(dabColorJitter: ColorJitter(hue: 0.008, saturation: 0.1, brightness: 0.18))))
     s.label("per-dab, exaggerated hue+sat (diagnostic, not a look)", y: 640)
     s.paint(dabbed(175, 700, dyn: BrushDynamics(dabColorJitter: ColorJitter(hue: 0.05, saturation: 0.3, brightness: 0.25))))
+    // Darkness: pressure bell → ink darkens toward the middle of the stroke where
+    // pressure peaks (the 6B pencil move), width constant.
+    var dark = pen(ochre, width: 44, flow: 0.95)
+    dark.hardness = 0.75
+    dark.spacing = 0.3
+    dark.dynamics = BrushDynamics(
+        size: CurveOption(sensors: [], strength: 1.0),   // constant width — isolate the color effect
+        darkness: CurveOption(sensors: [SensorChannel(sensor: .pressure)], maxValue: 0.65))
+    s.label("darkness x pressure bell — darker where pressed, width constant", y: 820)
+    s.paint(synthStroke(id: 176, brush: dark, from: CGPoint(x: 120, y: 880), to: CGPoint(x: 904, y: 880),
+                        force: { sin($0 * .pi) }))
 }
 
 runScene("wet-01-blue-into-yellow",

@@ -190,6 +190,16 @@ enum StrokeStampGenerator {
                                      rB: brushHash01(spacingSeed, dab, 0x4023))
                 linRGB = SIMD3<Float>(s2lLocal(CGFloat(jit.r)), s2lLocal(CGFloat(jit.g)), s2lLocal(CGFloat(jit.b)))
             }
+            if let dk = dyn?.darkness {
+                // Device-space darken (multiply in sRGB, like Krita's darken option):
+                // encode each channel back to sRGB, scale, re-linearize. Only paid when
+                // darkness is configured. The curve output is the darkening AMOUNT
+                // (0 none → 1 black), so a plain pressure sensor darkens under pressure.
+                let mul = 1 - Float(min(max(dk.value(input), 0), 1))
+                func l2s(_ x: Float) -> Float { x <= 0.0031308 ? x * 12.92 : 1.055 * pow(x, 1 / 2.4) - 0.055 }
+                func s2f(_ x: Float) -> Float { x <= 0.04045 ? x / 12.92 : pow((x + 0.055) / 1.055, 2.4) }
+                linRGB = SIMD3<Float>(s2f(l2s(linRGB.x) * mul), s2f(l2s(linRGB.y) * mul), s2f(l2s(linRGB.z) * mul))
+            }
             let col = SIMD4<Float>(linRGB.x * a, linRGB.y * a, linRGB.z * a, a)
             var rot = strokeRotation(dx: dx, dy: dy)
             if let rotOpt = dyn?.rotation { rot += Float(rotOpt.value(input) * Double.pi) } // [-1,1] turns → ±π
