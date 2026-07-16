@@ -216,9 +216,10 @@ public enum CuratedPresetCatalog {
             b.flow = 1.0
             b.spacing = 0.05
             b.streamline = 0.3
-            // Fixed 45° nib (dry-06 recipe): no-sensor rotationLike folds to its constant.
-            b.dynamics = BrushDynamics(
-                rotation: CurveOption(sensors: [], fold: .rotationLike, strength: 0.25))
+            // Fixed 45° nib via the STATIC tip angle. (The first cut used a no-sensor
+            // rotationLike CurveOption assuming it folds to its strength — it folds to 0,
+            // so the nib sat horizontal. Caught on device 2026-07-15.)
+            b.tipAngle = .pi / 4
             return b
         },
 

@@ -338,6 +338,10 @@ for zTest in [0.3, 0.5, 0.7] {
     }
     checkBool("lightness quad monotonic (z=\(zTest))", mono)
 }
+// A no-sensor rotationLike CurveOption folds to 0, NOT to its strength — the static nib
+// angle must come from BrushConfig.tipAngle (calligraphy bug, caught on device 2026-07-15).
+check("no-sensor rotationLike folds to 0",
+      CurveOption(sensors: [], fold: .rotationLike, strength: 0.25).value(SensorInput(pressure: 0.8)), 0.0)
 // Recentering (coverage-authored art): mean luma → 0.5 → exact brush color; swings both ways.
 check("recenter(mean)=0.5", LightnessMap.recenter(0.82, mean: 0.82, neighborhood: 1.0), 0.5)
 checkBool("recenter swings both ways",

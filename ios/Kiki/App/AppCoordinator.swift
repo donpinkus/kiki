@@ -159,6 +159,13 @@ final class AppCoordinator {
     /// The last-applied curated preset id (chip highlight in the popover). Purely
     /// informational — manual knob tweaks after applying don't clear it (v1).
     var activeCuratedPresetID: String?
+    /// Static tip angle ("Angle", radians): the nib's base orientation (calligraphy).
+    var toolTipAngle: CGFloat = 0 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
     /// Fall Off ("Fall off"): paint runs out over drawn distance.
     var toolFallOff: CGFloat = 0 {
         didSet {
@@ -1842,6 +1849,7 @@ final class AppCoordinator {
         toolGrainDepth = c.grainDepth
         toolGrainScale = c.grainScale
         toolTipLightness = c.tipLightness
+        toolTipAngle = c.tipAngle
         toolFallOff = c.fallOff
         toolStampCount = CGFloat(c.stampCount)
         toolStampCountJitter = c.stampCountJitter
@@ -1876,6 +1884,7 @@ final class AppCoordinator {
         toolGrainDepth = d.grainDepth
         toolGrainScale = d.grainScale
         toolTipLightness = d.tipLightness
+        toolTipAngle = d.tipAngle
         toolFallOff = d.fallOff
         toolStampCount = CGFloat(d.stampCount)
         toolStampCountJitter = d.stampCountJitter
@@ -1928,6 +1937,7 @@ final class AppCoordinator {
                 grainDepth: toolGrainDepth,
                 grainScale: toolGrainScale,
                 tipLightness: toolTipLightness,
+                tipAngle: toolTipAngle,
                 fallOff: toolFallOff,
                 stampCount: Int(toolStampCount.rounded()),
                 stampCountJitter: toolStampCountJitter,

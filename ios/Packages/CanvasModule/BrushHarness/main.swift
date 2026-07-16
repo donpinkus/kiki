@@ -387,15 +387,16 @@ runScene("dry-06-calligraphy-rotation",
     s.label("nib rotation driven by distance — spins along the stroke", y: 640)
     // The rotation OUTPUT check (handoff item 1): with a flat tip (aspect 0.2), the
     // dabs must visibly rotate. Row 1: classic calligraphy — nib held at a FIXED 45°
-    // (no-sensor rotationLike folds to its constant strength; 0.25 turns = π/4), so the
-    // S-curve goes thick where travel crosses the nib and thin where it parallels it.
+    // via the STATIC tipAngle. (Previously used a no-sensor rotationLike CurveOption
+    // believing it folds to its strength — it folds to 0, so this row actually rendered
+    // a HORIZONTAL blade and the label lied; caught on device 2026-07-15, offline check
+    // pins the real fold semantics now.)
     // Row 2: rotation driven by Distance → the nib visibly SPINS along a straight
     // stroke (unambiguous proof the per-dab rotation reaches the GPU).
     var nib = pen(.black, width: 60)
     nib.aspectRatio = 0.2
     nib.spacing = 0.05
-    nib.dynamics = BrushDynamics(
-        rotation: CurveOption(sensors: [], fold: .rotationLike, strength: 0.25))
+    nib.tipAngle = .pi / 4
     s.paint(synthStroke(id: 75, brush: nib,
                         from: CGPoint(x: 120, y: 320), to: CGPoint(x: 904, y: 320),
                         bow: 140, force: { _ in 0.8 }))

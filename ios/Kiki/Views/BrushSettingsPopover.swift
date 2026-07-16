@@ -47,6 +47,8 @@ struct BrushSettingsPopover: View {
             BrushSliderRow("Smoothing", value: $coordinator.toolStabilization, range: 0.0...1.0, help: Self.help["Smoothing"]!)
             BrushSliderRow("Hardness", value: $coordinator.toolHardness, range: 0.0...1.0, help: Self.help["Hardness"]!)
             BrushSliderRow("Aspect", value: $coordinator.toolAspect, range: 0.1...1.0, help: Self.help["Aspect"]!)
+            BrushSliderRow("Angle", value: $coordinator.toolTipAngle, range: 0...(.pi), help: Self.help["Angle"]!,
+                           format: { "\(Int(($0 * 180 / .pi).rounded()))\u{00B0}" })
             BrushSliderRow("Spacing", value: $coordinator.toolSpacing, range: 0.02...1.0, help: Self.help["Spacing"]!)
             Group {
                 BrushSliderRow("Count", value: $coordinator.toolStampCount, range: 1...8, help: Self.help["Count"]!,
@@ -130,6 +132,9 @@ struct BrushSettingsPopover: View {
         "Grain depth": BrushHelp(summary: "How strongly the paper tooth shows through the stroke.",
             low: "No texture — solid paint.",
             high: "Heavy dry-media break-up; press harder (more flow) to fill the tooth."),
+        "Angle": BrushHelp(summary: "The tip's fixed base angle — a calligraphy nib when Aspect is low.",
+            low: "0°: the flat axis lies horizontal.",
+            high: "180°: rotated through a half turn (90° = vertical)."),
         "Aspect": BrushHelp(summary: "How flat the brush tip is — a calligraphy/chisel nib at low values.",
             low: "A thin flat blade (pair with Rotation dynamics in Brush Studio to steer the nib).",
             high: "Fully round tip."),

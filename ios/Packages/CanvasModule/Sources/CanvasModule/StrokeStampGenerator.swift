@@ -98,9 +98,12 @@ enum StrokeStampGenerator {
             if let f = brush.rotationFollow { return brush.shapeID != nil ? max(-1, min(1, f)) : 0 }
             return orientsToStroke ? 1 : 0
         }()
+        // Static tip angle (calligraphy nib): added to every dab's rotation, before any
+        // follow-stroke or dynamic component.
+        let tipAngle = Float(brush.tipAngle)
         func strokeRotation(dx: CGFloat, dy: CGFloat) -> Float {
-            guard rotationFollow != 0, dx != 0 || dy != 0 else { return 0 }
-            return Float(CGFloat(atan2(-dx, dy)) * rotationFollow)
+            guard rotationFollow != 0, dx != 0 || dy != 0 else { return tipAngle }
+            return tipAngle + Float(CGFloat(atan2(-dx, dy)) * rotationFollow)
         }
         // Direction at the very start/end caps, taken from the first/last real segment.
         let firstDir: (CGFloat, CGFloat) = stroke.points.count > 1
