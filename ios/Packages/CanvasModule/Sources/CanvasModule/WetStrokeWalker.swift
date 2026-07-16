@@ -54,9 +54,11 @@ struct WetStrokeWalker {
 
         let brush = stroke.brush
         func s2l(_ c: CGFloat) -> Float { let x = Float(c); return x <= 0.04045 ? x/12.92 : pow((x+0.055)/1.055, 2.4) }
-        // Per-stamp deposit weight. In wet mode the Opacity slider scales deposit
-        // (build-up rate) — the direct-to-layer path has no scratch ceiling to apply it to.
-        let dep = Float(max(0, min(1, brush.wetStrength)) * max(0, min(1, brush.opacity)))
+        // Per-stamp deposit weight = Mix alone. Opacity is expressed as the ALPHA CEILING
+        // in the wet fragment (2026-07-16) — folding it in here too double-penalized:
+        // translucent wet strokes both capped their alpha AND barely mixed color
+        // (the fixture-3 "poor mixing" report). Opacity 1 is unchanged either way.
+        let dep = Float(max(0, min(1, brush.wetStrength)))
         let baseColor = SIMD3<Float>(s2l(brush.color.red), s2l(brush.color.green), s2l(brush.color.blue))
         let hardness = Float(brush.hardness)
         let aspect = Float(min(max(brush.aspectRatio, 0.05), 1))
@@ -128,12 +130,26 @@ struct WetStrokeWalker {
             var traveled = max(0, spacing - arcSinceLastStamp)
 
             while traveled <= segDist {
-                let t = traveled / segDist
+                var t = traveled / segDist
+                var force = prev.force + (curr.force - prev.force) * t
+                var altitude = prev.altitude + (curr.altitude - prev.altitude) * t
+                var width = brush.effectiveWidth(force: force, altitude: altitude)
+                // The step just taken was sized by the PREVIOUS dab's width. If THIS dab
+                // came out narrower (pressure/tilt dropped — with tiltSensitivity the
+                // width can swing several × within a stroke), the gap overshoots its
+                // coverage and bare canvas shows through (fixture-3's white cracks).
+                // Pull the dab back so its distance from the previous one fits its OWN
+                // spacing. One refinement is enough — width varies smoothly.
+                let ownGap = max(width * spacingFrac, 0.5)
+                if ownGap < spacing {
+                    traveled = max(traveled - (spacing - ownGap), 0)
+                    t = traveled / segDist
+                    force = prev.force + (curr.force - prev.force) * t
+                    altitude = prev.altitude + (curr.altitude - prev.altitude) * t
+                    width = brush.effectiveWidth(force: force, altitude: altitude)
+                }
                 let x = prev.position.x + dx * t
                 let y = prev.position.y + dy * t
-                let force = prev.force + (curr.force - prev.force) * t
-                let altitude = prev.altitude + (curr.altitude - prev.altitude) * t
-                let width = brush.effectiveWidth(force: force, altitude: altitude)
 
                 emit(CGPoint(x: x, y: y), width)
 

@@ -93,8 +93,15 @@ internals; several of our internals (per-sensor curves, spectral KM) exceed Proc
    coarse-mip neighborhood damping for coverage-authored tip art (both failure modes
    caught in dry-10 renders). "Tip lightness" popover slider.
 5. **P7 — Wet rework**, adopting **Procreate's Wet Mix vocabulary as the control surface**
-   (Dilution/Charge/Attack/Pull/Grade/Blur over our KM+reservoir internals). After Donald's
-   device pass on the current wet fixes.
+   (Dilution/Charge/Attack/Pull/Grade/Blur over our KM+reservoir internals). **Device pass
+   DONE 2026-07-16 (fixture-3)** — verdict: mechanics OK, four findings. Fixed same day:
+   opacity alpha-ceiling (was deposit-rate only, imperceptible), wet-walk chord-vs-arc gaps
+   + width-collapse refinement (tiltSensitivity 1.0 swings width 69→325px within a stroke),
+   deposit no longer double-charges opacity. Remaining, THE P7 INPUTS: (a) "white glow" =
+   translucent per-dab coverage build can't hide under-layer gaps + ~half-radius soft rims
+   leave weak-alpha halos — P7 needs a per-stroke coherent wet layer (not per-dab alpha
+   build); (b) reservoir tuning — Donald wants the carried load's persistence/finiteness
+   on a knob = Charge/Dilution exactly; Smear (pickup) already tunes convergence rate.
 6. ~~Preset library v1~~ **DONE 2026-07-15** (`c5ffcf5`): CuratedPresetCatalog — 10
    one-tap recipes (6B Pencil, Ink Pen, Calligraphy, Chalk, Charcoal, Pastel, Dry Brush,
    Airbrush, Spray Paint, Marker) in a Presets grid atop the brush popover; keeps user
