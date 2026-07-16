@@ -715,6 +715,44 @@ runScene("dry-15-dab-color-jitter",
                         force: { sin($0 * .pi) }))
 }
 
+runScene("dry-16-wiggle-deposit",
+         """
+         Regression pin for the arc-carry stamp walk (device bug, 2026-07-15): scribbling
+         inside a radius SMALLER than the stamp gap must still deposit ink. The old walk
+         measured "distance since last stamp" as the straight-line distance from the last
+         stamp point, so an in-place wiggle never crossed the spacing threshold — Spray
+         Paint deposited its first dab and then nothing.
+         - Left: a tight 12px-radius scribble (many oscillations) with a wide-spaced pen —
+           must be a dense PILE of dabs, not a single dot.
+         - Right: the same scribble with the Spray Paint preset — a growing cluster.
+         Both accumulate arc length while barely moving; one dab each = the old bug.
+         """) { s in
+    // Tight wiggle: 60 oscillations within a 12px radius.
+    func wiggle(id: Int, brush: BrushConfig, cx: CGFloat, cy: CGFloat) -> Stroke {
+        var pts: [StrokePoint] = []
+        for i in 0...240 {
+            let t = Double(i) / 240.0
+            let ang = t * 60 * 2 * Double.pi
+            pts.append(StrokePoint(
+                position: CGPoint(x: cx + CGFloat(cos(ang)) * 12 * CGFloat(0.4 + 0.6 * t),
+                                  y: cy + CGFloat(sin(ang * 0.9)) * 12 * CGFloat(0.4 + 0.6 * t)),
+                force: 0.8, altitude: .pi / 2, timestamp: t, azimuth: 0))
+        }
+        return Stroke(id: fixedUUID(id), points: pts, brush: brush)
+    }
+    var wide = pen(.black, width: 40, flow: 0.5)
+    wide.hardness = 0.7
+    wide.spacing = 0.9   // 36px gap >> 12px wiggle radius — the failing regime
+    s.label("wide-spaced pen, 12px wiggle — must PILE UP", y: 330)
+    s.paint(wiggle(id: 180, brush: wide, cx: 280, cy: 500))
+
+    var spray = CuratedPresetCatalog.preset(for: "spraypaint")!.configure(
+        BrushConfig(color: CodableColor(red: 0.16, green: 0.22, blue: 0.45), baseWidth: 34))
+    spray.streamline = 0; spray.stabilization = 0
+    s.label("spray paint preset, same wiggle — growing cluster", x: 560, y: 330)
+    s.paint(wiggle(id: 181, brush: spray, cx: 740, cy: 500))
+}
+
 runScene("wet-01-blue-into-yellow",
          """
          Spectral pigment mixing (Kubelka-Munk): a WET blue stroke dragged left-to-right through a

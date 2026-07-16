@@ -324,8 +324,14 @@ enum StrokeStampGenerator {
         let firstWidth = firstAttr.width
         appendDab(firstAttr, x: first.position.x, y: first.position.y, dx: firstDir.0, dy: firstDir.1)
 
-        var lastStampPos = first.position
         var currentSpacing = jitteredSpacing(max(firstWidth * spacingFraction * firstAttr.spacingMul, 0.5), 0)
+        // TRUE arc length accumulated since the last emitted stamp, carried across
+        // segments. The previous walk re-derived this per segment as the STRAIGHT-LINE
+        // distance from the last stamp point — fine for smooth strokes (chord ≈ arc),
+        // but scribbling inside a radius smaller than the stamp gap never got past the
+        // threshold, so the stroke deposited nothing while wiggling in place (caught on
+        // device with Spray Paint's wide spacing, 2026-07-15).
+        var arcSinceLastStamp: CGFloat = 0
 
         for i in 1..<stroke.points.count {
             let prev = stroke.points[i - 1]
@@ -335,8 +341,7 @@ enum StrokeStampGenerator {
             let segmentDist = hypot(dx, dy)
             guard segmentDist > 0 else { continue }
 
-            let leftover = hypot(prev.position.x - lastStampPos.x, prev.position.y - lastStampPos.y)
-            var traveled = max(0, currentSpacing - leftover)
+            var traveled = max(0, currentSpacing - arcSinceLastStamp)
             let segDt = max(0, Double(curr.timestamp - prev.timestamp))
             // Shortest-arc azimuth delta so interpolation across the 0/2π seam takes the short
             // way (a chisel tip rotating past 0 must not spin ~360° backward). P1-review fix.
@@ -359,13 +364,15 @@ enum StrokeStampGenerator {
                                     roll: roll)
                 let width = attr.width
 
-                let pos = CGPoint(x: x, y: y)
                 appendDab(attr, x: x, y: y, dx: dx, dy: dy)
 
-                lastStampPos = pos
                 currentSpacing = jitteredSpacing(max(width * spacingFraction * attr.spacingMul, 0.5), stamps.count)
                 traveled += currentSpacing
             }
+            // Post-loop, `traveled` sits one gap past the last emitted stamp (or one gap
+            // past the pre-segment arc when nothing emitted) — this recovers the arc
+            // walked since the last stamp in both cases.
+            arcSinceLastStamp = segmentDist - (traveled - currentSpacing)
         }
 
         // End cap.
