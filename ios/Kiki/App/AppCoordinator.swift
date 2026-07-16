@@ -448,7 +448,20 @@ final class AppCoordinator {
     var showLayerPanel = false
     var resultState: ResultState = .empty
     var dividerPosition: CGFloat = 0.5
-    var generationError: String?
+    /// Message for the red error banner in `DrawingView`. Set on stream/auth
+    /// failures; cleared automatically when the condition resolves (successful
+    /// sign-in, stream reaching `.ready`, subscription activation) or manually
+    /// via the banner's ✕. The `didSet` is the single chokepoint that reports
+    /// "user saw an error banner" to analytics — don't add per-site tracking.
+    var generationError: String? {
+        didSet {
+            guard let generationError, generationError != oldValue else { return }
+            Analytics.track(.errorBannerShown, properties: [
+                "message": generationError,
+                "surface": "drawing_banner",
+            ])
+        }
+    }
 
     /// Fullscreen result-panel transform. `panelOffset` is the panel's
     /// translation from its default top-trailing position (in pane points);
@@ -840,6 +853,10 @@ final class AppCoordinator {
         let userId = await authService.userId
         let email = await authService.email
         await MainActor.run {
+            // A stale "Please sign in again" banner (set when the token fetch
+            // failed and forced sign-out) is resolved by this sign-in — clear
+            // it now rather than waiting for the new stream to reach ready.
+            self.generationError = nil
             self.signedInUserId = userId
             if let userId {
                 Analytics.identify(userId: userId, email: email)
@@ -1428,6 +1445,14 @@ final class AppCoordinator {
                 Log.info("stream.reconnecting", attributes: ["event": "stream.reconnecting"])
             }
             self.streamReadiness = readiness
+            if case .ready = readiness {
+                // Stream is demonstrably healthy again — any lingering error
+                // banner (transient failure, stale auth message) is resolved.
+                // The out-of-time/paywall banner never reaches here: a capped
+                // session is rejected at the backend gate and stays .failed
+                // until `subscriptionDidActivate()` clears it.
+                self.generationError = nil
+            }
             if case .failed(let message) = readiness {
                 self.generationError = message
                 // End startup transaction with failure status if we never got a frame.

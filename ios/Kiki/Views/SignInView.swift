@@ -76,7 +76,7 @@ struct SignInView: View {
                 let identityTokenData = credential.identityToken,
                 let identityToken = String(data: identityTokenData, encoding: .utf8)
             else {
-                errorMessage = "Couldn't read Apple credential."
+                showError("Couldn't read Apple credential.")
                 return
             }
             isSigningIn = true
@@ -87,7 +87,7 @@ struct SignInView: View {
                 } catch {
                     await MainActor.run {
                         isSigningIn = false
-                        errorMessage = "Sign in failed: \(error.localizedDescription)"
+                        showError("Sign in failed: \(error.localizedDescription)")
                     }
                 }
             }
@@ -95,7 +95,17 @@ struct SignInView: View {
             if let asError = error as? ASAuthorizationError, asError.code == .canceled {
                 return  // user cancelled, no error to show
             }
-            errorMessage = "Sign in failed: \(error.localizedDescription)"
+            showError("Sign in failed: \(error.localizedDescription)")
         }
+    }
+
+    /// Single chokepoint for surfacing a sign-in error — sets the visible
+    /// message and reports it so error banners stand out in Insights timelines.
+    private func showError(_ message: String) {
+        errorMessage = message
+        Analytics.track(.errorBannerShown, properties: [
+            "message": message,
+            "surface": "sign_in",
+        ])
     }
 }
