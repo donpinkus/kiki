@@ -28,11 +28,14 @@ struct WetStrokeWalker {
     private(set) var loadAlpha: Float = 0
 
     private var lastPointIndex = 0
-    private var lastStampPos: CGPoint
     private var lastSpacing: CGFloat
+    /// TRUE arc length walked since the last emitted stamp, carried across segments AND
+    /// across `advance` batches (same fix as the dry walk, 2026-07-15: measuring this as
+    /// the chord from the last stamp point starves deposit on tight scribbles and opens
+    /// visible gaps on direction changes at speed).
+    private var arcSinceLastStamp: CGFloat = 0
 
     init(startPosition: CGPoint, brush: BrushConfig) {
-        lastStampPos = startPosition
         lastSpacing = max(brush.baseWidth * brush.spacing, 0.5)
     }
 
@@ -80,7 +83,6 @@ struct WetStrokeWalker {
         }
 
         var newStamps: [CanvasRenderer.StampInstance] = []
-        var stampPos = lastStampPos
         var spacing = lastSpacing
 
         // Place a stamp carrying the CURRENT load, then contaminate the load toward the
@@ -94,7 +96,7 @@ struct WetStrokeWalker {
                 center: SIMD2<Float>(Float(pos.x * scale), Float(pos.y * scale)),
                 radius: Float(width * 0.5 * scale), rotation: 0,
                 color: SIMD4<Float>(load.x, load.y, load.z, dep), hardness: hardness, aspect: aspect,
-                wetTargetAlpha: brush.wetSmudge ? loadAlpha : -1))
+                wetTargetAlpha: brush.wetSmudge ? loadAlpha : -(1 + Float(max(0, min(1, brush.opacity))))))
             if let s = sample(cx, cy) {
                 if s.alpha > 0.05 {
                     load = mix(load, s.color, pickup * s.alpha)
@@ -110,7 +112,7 @@ struct WetStrokeWalker {
             let p0 = stroke.points[0]
             let w0 = brush.effectiveWidth(force: p0.force, altitude: p0.altitude)
             emit(p0.position, w0)
-            stampPos = p0.position
+            arcSinceLastStamp = 0
             spacing = max(w0 * spacingFrac, 0.5)
         }
 
@@ -123,8 +125,7 @@ struct WetStrokeWalker {
             let segDist = hypot(dx, dy)
             guard segDist > 0 else { continue }
 
-            let distFromLastStamp = hypot(prev.position.x - stampPos.x, prev.position.y - stampPos.y)
-            var traveled = max(0, spacing - distFromLastStamp)
+            var traveled = max(0, spacing - arcSinceLastStamp)
 
             while traveled <= segDist {
                 let t = traveled / segDist
@@ -136,14 +137,15 @@ struct WetStrokeWalker {
 
                 emit(CGPoint(x: x, y: y), width)
 
-                stampPos = CGPoint(x: x, y: y)
                 spacing = max(width * spacingFrac, 0.5)
                 traveled += spacing
             }
+            // Post-loop `traveled` sits one gap past the last stamp (emitted or carried);
+            // this recovers the arc walked since it either way (see dry-walk fix).
+            arcSinceLastStamp = segDist - (traveled - spacing)
         }
 
         lastPointIndex = stroke.points.count
-        lastStampPos = stampPos
         lastSpacing = spacing
 
         return newStamps

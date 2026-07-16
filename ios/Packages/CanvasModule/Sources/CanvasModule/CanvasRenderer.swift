@@ -2127,7 +2127,13 @@ public final class CanvasRenderer {
         //    paint genuinely thins it (real smudge displaces paint, not just color).
         float outA;
         if (in.wetTargetAlpha < 0.0) {
-            outA = dst.a + cov * (1.0 - dst.a);
+            // Coverage build with a CEILING at the stroke's opacity (packed in the -1..-2
+            // sentinel range as -(1+opacity)): translucent wet ink stays translucent
+            // (device finding, 2026-07-15 — the deposit-rate scaling alone converges to
+            // opaque and reads as "opacity does nothing"). Existing denser paint is
+            // never thinned (max with dst.a). Opacity 1 is byte-identical to the old rule.
+            float ceilA = clamp(-in.wetTargetAlpha - 1.0, 0.0, 1.0);
+            outA = max(dst.a, min(dst.a + cov * (1.0 - dst.a), max(dst.a, ceilA)));
         } else {
             outA = clamp(dst.a + (in.wetTargetAlpha - dst.a) * w, 0.0, 1.0);
         }
