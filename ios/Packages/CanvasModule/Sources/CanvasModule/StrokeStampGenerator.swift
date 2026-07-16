@@ -136,6 +136,25 @@ enum StrokeStampGenerator {
             return SIMD3<Float>(s2lLocal(CGFloat(srgb.r)), s2lLocal(CGFloat(srgb.g)), s2lLocal(CGFloat(srgb.b)))
         }()
         let baseFlow = Float(brush.flow)
+        // Per-dab color jitter (P6 "Stamp Color Jitter"): the base sRGB (already carrying
+        // any per-STROKE jitter) is re-jittered per dab in sRGB-HSV, then s2l. Only pay
+        // the HSV round trip when configured.
+        let dabCJ: ColorJitter? = {
+            guard let cj = dyn?.dabColorJitter, !cj.isInert else { return nil }
+            return cj
+        }()
+        let baseSRGB: (r: Double, g: Double, b: Double) = {
+            guard hasDyn, dabCJ != nil else { return (0, 0, 0) }
+            var srgb = (r: Double(brush.color.red), g: Double(brush.color.green), b: Double(brush.color.blue))
+            if let cj = dyn?.colorJitter, !cj.isInert {
+                let sd = strokeSeed(stroke.id)
+                srgb = cj.applied(toSRGB: srgb,
+                                  rH: brushHash01(sd, 0, 0x4011),
+                                  rS: brushHash01(sd, 0, 0x4012),
+                                  rB: brushHash01(sd, 0, 0x4013))
+            }
+            return srgb
+        }()
         var dynState: StrokeDynamicsState? = hasDyn
             ? StrokeDynamicsState(seed: strokeSeed(stroke.id), distancePeriod: tuning.distancePeriod,
                                   fadePeriod: tuning.fadePeriod, maxSpeed: tuning.maxSpeed)
@@ -162,7 +181,16 @@ enum StrokeStampGenerator {
             // Clamp to [0,1]: a brush authored with flow.maxValue > 1 could otherwise produce
             // premultiplied alpha > 1 (malformed for the _srgb blend). P1-review fix.
             let a = min(1, max(0, baseFlow * Float(flowMul)))
-            let col = SIMD4<Float>(baseLinRGB.x * a, baseLinRGB.y * a, baseLinRGB.z * a, a)
+            var linRGB = baseLinRGB
+            if let cj = dabCJ {
+                let dab = st.dabIndex   // post-advance: unique, monotonically increasing per dab
+                let jit = cj.applied(toSRGB: baseSRGB,
+                                     rH: brushHash01(spacingSeed, dab, 0x4021),
+                                     rS: brushHash01(spacingSeed, dab, 0x4022),
+                                     rB: brushHash01(spacingSeed, dab, 0x4023))
+                linRGB = SIMD3<Float>(s2lLocal(CGFloat(jit.r)), s2lLocal(CGFloat(jit.g)), s2lLocal(CGFloat(jit.b)))
+            }
+            let col = SIMD4<Float>(linRGB.x * a, linRGB.y * a, linRGB.z * a, a)
             var rot = strokeRotation(dx: dx, dy: dy)
             if let rotOpt = dyn?.rotation { rot += Float(rotOpt.value(input) * Double.pi) } // [-1,1] turns → ±π
             // Scatter: per-dab random center displacement, magnitude = value × dab diameter.

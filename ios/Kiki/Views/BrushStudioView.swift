@@ -121,7 +121,9 @@ struct BrushStudioView: View {
                 curveSection("Roundness", option: $dyn.ratio, fold: .sizeLike, defaultSensor: .pressure)
                 curveSection("Spacing", option: $dyn.spacing, fold: .sizeLike, defaultSensor: .speed)
 
-                ColorJitterSection(jitter: $dyn.colorJitter)
+                ColorJitterSection(title: "Color jitter (per stroke)", jitter: $dyn.colorJitter)
+                ColorJitterSection(title: "Color jitter (per dab)", jitter: $dyn.dabColorJitter,
+                                   defaults: ColorJitter(hue: 0.01, saturation: 0.08, brightness: 0.08))
 
                 Section("Smudge") {
                     Toggle("Smudge mode (push canvas color, no new ink)",
@@ -294,12 +296,14 @@ private struct CurveOptionEditor: View {
 // MARK: - Color jitter
 
 private struct ColorJitterSection: View {
+    let title: String
     @Binding var jitter: ColorJitter?
+    var defaults = ColorJitter(hue: 0.05, saturation: 0.15, brightness: 0.1)
     var body: some View {
-        Section("Color jitter (per stroke)") {
+        Section(title) {
             Toggle("Enabled", isOn: Binding(
                 get: { jitter != nil },
-                set: { jitter = $0 ? ColorJitter(hue: 0.05, saturation: 0.15, brightness: 0.1) : nil }))
+                set: { jitter = $0 ? defaults : nil }))
             if jitter != nil {
                 let j = Binding(get: { jitter ?? ColorJitter() }, set: { jitter = $0 })
                 slider("Hue", j.hue); slider("Saturation", j.saturation); slider("Brightness", j.brightness)

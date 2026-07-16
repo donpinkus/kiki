@@ -1944,16 +1944,50 @@ public final class CanvasRenderer {
             c.b <= 0.04045 ? c.b / 12.92 : pow((c.b + 0.055) / 1.055, 2.4));
     }
 
+    static inline float lmL2S1(float x) {
+        return x <= 0.0031308 ? x * 12.92 : 1.055 * pow(x, 1.0 / 2.4) - 0.055;
+    }
+
+    static inline float3 lmL2S(float3 c) {
+        return float3(lmL2S1(c.r), lmL2S1(c.g), lmL2S1(c.b));
+    }
+
+    // sRGB → HSL (matches LightnessMap.hsl on the CPU).
+    static inline float3 lmRGB2HSL(float3 c) {
+        float mx = max(c.r, max(c.g, c.b));
+        float mn = min(c.r, min(c.g, c.b));
+        float l = (mx + mn) * 0.5;
+        float d = mx - mn;
+        if (d < 1e-6) return float3(0.0, 0.0, l);
+        float sat = l > 0.5 ? d / (2.0 - mx - mn) : d / (mx + mn);
+        float h;
+        if (mx == c.r)      h = (c.g - c.b) / d + (c.g < c.b ? 6.0 : 0.0);
+        else if (mx == c.g) h = (c.b - c.r) / d + 2.0;
+        else                h = (c.r - c.g) / d + 4.0;
+        return float3(h / 6.0, sat, l);
+    }
+
     fragment float4 lightnessShapedStampFragment(
         StampVaryings in [[stage_in]],
         texture2d<float> shapeTex [[texture(0)]],
-        constant float4& lm [[buffer(0)]],  // (h, s, z, strength) — brush color as sRGB HSL
+        constant float4& lm [[buffer(0)]],  // (h, s, z, strength) — h/s/z now a FALLBACK; see below
         constant float4& rc [[buffer(1)]]   // (meanLuma, gain, 0, 0) — coverage-art recentering
     ) {
         constexpr sampler shapeSampler(filter::linear, mip_filter::linear, address::clamp_to_zero);
         float m = shapeTex.sample(shapeSampler, in.texCoord).r;
         float gamma = mix(1.8, 0.55, clamp(in.hardness, 0.0, 1.0));
         float cov = pow(max(m, 0.0), gamma);
+        // The working HSL comes from the DAB's own color (un-premultiply the linear
+        // in.color, encode to sRGB, RGB→HSL) — not from the per-stroke uniform — so
+        // per-stroke AND per-dab color dynamics (P6 jitter) survive the lightness map.
+        // The uniform's (h,s,z) is only the a==0 fallback. Deriving z per dab keeps the
+        // oracle invariant per dab: mid-gray tip texel == that dab's exact color.
+        float3 hsl;
+        if (in.color.a > 1e-5) {
+            hsl = lmRGB2HSL(lmL2S(in.color.rgb / in.color.a));
+        } else {
+            hsl = lm.xyz;
+        }
         // Recenter coverage-authored luma so the tip's MEAN maps to the brush color,
         // damping the value swing by the NEIGHBORHOOD coverage (coarse-mip sample):
         // boundary texels fade with the brush color (no dark halo) while interior
@@ -1962,10 +1996,10 @@ public final class CanvasRenderer {
         float mB = shapeTex.sample(shapeSampler, in.texCoord, level(4.0)).r;
         float damp = smoothstep(0.5, 0.9, mB);
         float mc = clamp(0.5 + (m - rc.x) * rc.y * damp, 0.0, 1.0);
-        float z = lm.z;
+        float z = hsl.z;
         float f = clamp((2.0 - 4.0 * z) * mc * mc + (4.0 * z - 1.0) * mc, 0.0, 1.0);
         float L = z + (f - z) * lm.w;
-        float3 lin = lmS2L(lmHSL2RGB(lm.x, lm.y, L));
+        float3 lin = lmS2L(lmHSL2RGB(hsl.x, hsl.y, L));
         float a = in.color.a * cov;   // flow × coverage, premultiplied out
         return float4(lin * a, a);
     }

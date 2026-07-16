@@ -253,7 +253,10 @@ public enum CuratedPresetCatalog {
             b.spacing = 0.14
             b.dynamics = BrushDynamics(
                 flow: pressureFlow(min: 0.45),
-                colorJitter: ColorJitter(hue: 0.015, saturation: 0.08, brightness: 0.06))
+                colorJitter: ColorJitter(hue: 0.015, saturation: 0.08, brightness: 0.06),
+                // Per-dab sparkle (P6): brightness-led, hue barely moves — value texture
+                // survives img2img; hue speckle would average out.
+                dabColorJitter: ColorJitter(hue: 0.008, saturation: 0.06, brightness: 0.1))
             return b
         },
 

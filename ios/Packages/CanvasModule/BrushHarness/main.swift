@@ -670,6 +670,37 @@ runScene("dry-14-presets",
     }
 }
 
+runScene("dry-15-dab-color-jitter",
+         """
+         P6 per-dab color jitter ("Stamp Color Jitter" — the pastel/oil sparkle). Every dab
+         draws its own HSV shift, vs. the per-STROKE jitter that shifts a whole stroke once.
+         - Row 1: no jitter — flat ochre reference.
+         - Row 2: per-STROKE jitter, three separate strokes — each stroke is one coherent
+           shade, no variation within a stroke.
+         - Row 3: per-DAB jitter (brightness-led) — value sparkle WITHIN a single stroke.
+         - Row 4: per-dab, hue+sat cranked (0.05/0.3/0.25) — exaggerated to make the per-dab
+           independence unmistakable (not a shipping look).
+         """) { s in
+    let ochre = CodableColor(red: 0.78, green: 0.55, blue: 0.2)
+    func dabbed(_ id: Int, _ y: CGFloat, dyn: BrushDynamics?, from x0: CGFloat = 120, to x1: CGFloat = 904) -> Stroke {
+        var b = pen(ochre, width: 44, flow: 0.95)
+        b.hardness = 0.75
+        b.spacing = 0.45
+        b.dynamics = dyn
+        return synthStroke(id: id, brush: b, from: CGPoint(x: x0, y: y), to: CGPoint(x: x1, y: y), force: { _ in 0.9 })
+    }
+    s.label("no jitter", y: 100)
+    s.paint(dabbed(170, 160, dyn: nil))
+    s.label("per-STROKE jitter — 3 strokes, one shade each", y: 280)
+    s.paint(dabbed(171, 340, dyn: BrushDynamics(colorJitter: ColorJitter(hue: 0.03, saturation: 0.25, brightness: 0.2)), to: 380))
+    s.paint(dabbed(172, 340, dyn: BrushDynamics(colorJitter: ColorJitter(hue: 0.03, saturation: 0.25, brightness: 0.2)), from: 390, to: 640))
+    s.paint(dabbed(173, 340, dyn: BrushDynamics(colorJitter: ColorJitter(hue: 0.03, saturation: 0.25, brightness: 0.2)), from: 650))
+    s.label("per-DAB jitter — sparkle within one stroke (brightness-led)", y: 460)
+    s.paint(dabbed(174, 520, dyn: BrushDynamics(dabColorJitter: ColorJitter(hue: 0.008, saturation: 0.1, brightness: 0.18))))
+    s.label("per-dab, exaggerated hue+sat (diagnostic, not a look)", y: 640)
+    s.paint(dabbed(175, 700, dyn: BrushDynamics(dabColorJitter: ColorJitter(hue: 0.05, saturation: 0.3, brightness: 0.25))))
+}
+
 runScene("wet-01-blue-into-yellow",
          """
          Spectral pigment mixing (Kubelka-Munk): a WET blue stroke dragged left-to-right through a

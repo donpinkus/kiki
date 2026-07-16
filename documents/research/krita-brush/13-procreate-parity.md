@@ -83,17 +83,27 @@ internals; several of our internals (per-sensor curves, spectral KM) exceed Proc
    (paper/canvas/speckle), carved at scratch-COMPOSITE time (per-dab carving rejected in
    harness — overlap refills tooth), Grain picker + depth in the popover. Harness dry-08.
    Still open from P8: Moving-mode grain (streaky), grain strength as a CurveOption.
-3. **Cheap-knobs batch** — PARTIAL 2026-07-15 (`1704690`): DONE — ratio/Roundness
-   CurveOption (pressure nib squash, Studio section), spacing jitter (config), barrel-roll
-   sensor (StrokePoint.rollAngle + BarrelRotation, harness-proven). Harness dry-09.
-   Remaining: signed follow-stroke rotation knob, lateral/linear scatter split,
-   speed→spacing, Flip X/Y, Fall Off knob, stamp Count/Count Jitter.
-4. **P4a — Lightness-map tips** (S effort, HIGH img2img leverage, offline color oracle first).
+3. ~~Cheap-knobs batch~~ **DONE 2026-07-15** (`1704690` + `c19058a` + `4b5a87c`):
+   ratio/Roundness CurveOption, spacing jitter, barrel-roll sensor (dry-09); stamp
+   Count/Count Jitter, lateral/linear scatter split, signed follow-stroke Rotation knob,
+   Flip X/Y (dry-11/12); Fall Off + grain-scale slider (dry-13); speed→spacing
+   CurveOption (`c5ffcf5`, Studio section — still pinned on device until maxSpeed tuned).
+4. ~~P4a — Lightness-map tips~~ **DONE 2026-07-15** (`cf9b41d`): Schatz quadratic in
+   sRGB space (LightnessMap.swift oracle + MSL mirror), per-shape mean-luma recentering +
+   coarse-mip neighborhood damping for coverage-authored tip art (both failure modes
+   caught in dry-10 renders). "Tip lightness" popover slider.
 5. **P7 — Wet rework**, adopting **Procreate's Wet Mix vocabulary as the control surface**
    (Dilution/Charge/Attack/Pull/Grade/Blur over our KM+reservoir internals). After Donald's
    device pass on the current wet fixes.
-6. **Preset library** (Procreate-style organization; Properties-section behaviors) once 1–4 land
-   — presets are where "feels like Procreate" actually materializes for a user.
+6. ~~Preset library v1~~ **DONE 2026-07-15** (`c5ffcf5`): CuratedPresetCatalog — 10
+   one-tap recipes (6B Pencil, Ink Pen, Calligraphy, Chalk, Charcoal, Pastel, Dry Brush,
+   Airbrush, Spray Paint, Marker) in a Presets grid atop the brush popover; keeps user
+   color/size, writes every other knob back into the tool fields. Gallery scene dry-14.
+   Still open: Procreate-style organization/sets, import, Properties behaviors.
+7. **P6 (partial) — per-dab color jitter DONE 2026-07-15**: `BrushDynamics.dabColorJitter`
+   ("Stamp Color Jitter" — the pastel sparkle; brightness-led defaults so the texture
+   survives img2img), Studio section, in the Pastel preset. Harness dry-15.
+   Remaining P6: Darkness, secondary color, color pressure/tilt wiring.
 
 **Parallel, Donald-gated:** maxSpeed tuning (5 min, unpins ALL Speed dynamics), device feel
 passes, fixture uploads.
