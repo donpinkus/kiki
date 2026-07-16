@@ -873,6 +873,31 @@ runScene("wet-03-mix-sweep",
     }
 }
 
+runScene("wet-05-smear-sweep",
+         """
+         Tuning sweep for the Smear knob (load pickup rate) — the counterpart of wet-03:
+         the same wet-blue-over-yellow drag three times, only Smear changes — 0.1 / 0.4 / 0.8
+         top to bottom (Mix fixed at 0.7 so every row deposits strongly; what changes is how
+         fast the CARRIED LOAD surrenders to the yellow it crosses).
+         - Smear 0.1: the blue survives most of the crossing — long blue→green trail.
+         - Smear 0.4: converges mid-patch — green band in the middle, yellow exit.
+         - Smear 0.8: the load is yellow within a few dabs — blue dies almost immediately.
+         Since the wet-ink rework the load samples the TRUE canvas, so Smear is the honest
+         reservoir-persistence dial (until P7's finite Charge lands).
+         """) { s in
+    for (i, m) in ["smear 0.1", "smear 0.4", "smear 0.8"].enumerated() {
+        s.label(m, y: CGFloat(220 + i * 280) - 80)
+    }
+    for (i, smearV) in [CGFloat(0.1), 0.4, 0.8].enumerated() {
+        let y = CGFloat(220 + i * 280)
+        s.paint(synthStroke(id: 190 + i, brush: pen(yellow, width: 110),
+                            from: CGPoint(x: 180, y: y), to: CGPoint(x: 844, y: y),
+                            force: { _ in 1 }))
+        s.paint(synthStroke(id: 195 + i, brush: wet(blue, width: 55, mix: 0.7, smear: smearV),
+                            from: CGPoint(x: 120, y: y), to: CGPoint(x: 904, y: y)))
+    }
+}
+
 // MARK: - Fixture replay (recorded on iPad via Brush Studio → "Record strokes")
 // `BrushFixture` is the module's shared contract type (Sources/CanvasModule/BrushFixture.swift).
 
