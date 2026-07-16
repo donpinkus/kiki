@@ -160,6 +160,21 @@ final class Scene {
     /// applies the flow/opacity split exactly like a live stroke's flatten); wet strokes
     /// through WetStrokeWalker → applyWetStamps in touchesMoved-sized batches.
     func paint(_ stroke: Stroke) {
+        if stroke.brush.wetEnabled, !stroke.brush.wetSmudge {
+            // Wet INK (P7 core): the whole stroke walks at once (the canvas is pristine
+            // for the stroke's duration — the KM under-color is a texture sample, so
+            // there is no CPU-pickup staleness and no draining), then commits through
+            // the scratch at the opacity ceiling exactly like the device flatten.
+            guard let start = stroke.points.first?.position else { return }
+            var walker = WetStrokeWalker(startPosition: start, brush: stroke.brush)
+            let stamps = walker.advance(
+                stroke: stroke, scale: 1, clipPath: nil,
+                sample: { [renderer] x, y in renderer.sampleLayerColor(x: x, y: y) },
+                sampleAveraged: { [renderer] x, y in renderer.sampleLayerColorAveraged(x: x, y: y) },
+                mix: { [renderer] a, b, t in renderer.kmMixCPU(a, b, t) })
+            renderer.commitStampsToCanvas(stamps, strokeOpacity: Float(stroke.brush.opacity), wetInk: true)
+            return
+        }
         if stroke.brush.wetEnabled {
             guard renderer.isWetRenderingAvailable else {
                 print("SKIP  wet stroke — framebuffer fetch unavailable on this device")
@@ -839,19 +854,21 @@ runScene("wet-04-smudge-translucent",
 runScene("wet-03-mix-sweep",
          """
          Tuning sweep for the Mix knob (deposit strength): the same wet-blue-over-yellow drag three
-         times, only Mix changes — 0.2 / 0.5 / 0.9 top to bottom (Smear fixed at 0.5). Higher Mix
-         should deposit more blue per dab and show a stronger/longer green transition band.
+         times, only Mix changes — 0.2 / 0.5 / 0.9 top to bottom (Smear fixed LOW at 0.12 so the
+         carried load survives the whole crossing — since the wet-ink-through-scratch rework the
+         load picks up the TRUE canvas color, so high Smear converges to yellow within a few dabs
+         and would mask Mix entirely). Higher Mix = stronger blue deposit against the yellow.
          """) { s in
     for (i, m) in ["mix 0.2", "mix 0.5", "mix 0.9"].enumerated() {
         s.label(m, y: CGFloat(220 + i * 280) - 80)
     }
-    // Wet blue over yellow at Mix 0.2 / 0.5 / 0.9 (same smear) — a tuning contact row.
+    // Wet blue over yellow at Mix 0.2 / 0.5 / 0.9 (same LOW smear) — a tuning contact row.
     for (i, mixV) in [CGFloat(0.2), 0.5, 0.9].enumerated() {
         let y = CGFloat(220 + i * 280)
         s.paint(synthStroke(id: 60 + i, brush: pen(yellow, width: 110),
                             from: CGPoint(x: 180, y: y), to: CGPoint(x: 844, y: y),
                             force: { _ in 1 }))
-        s.paint(synthStroke(id: 65 + i, brush: wet(blue, width: 55, mix: mixV, smear: 0.5),
+        s.paint(synthStroke(id: 65 + i, brush: wet(blue, width: 55, mix: mixV, smear: 0.12),
                             from: CGPoint(x: 120, y: y), to: CGPoint(x: 904, y: y)))
     }
 }

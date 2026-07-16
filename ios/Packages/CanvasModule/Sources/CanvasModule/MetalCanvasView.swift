@@ -455,6 +455,7 @@ public final class MetalCanvasView: UIView {
         renderer.activeGrain = isErasing ? nil : currentGrain()
         renderer.activeLightness = isErasing ? nil : currentBrushConfig().flatMap { renderer.lightnessSettings(for: $0) }
         renderer.activeFlip = isErasing ? .zero : (currentBrushConfig().map { renderer.flipSettings(for: $0) } ?? .zero)
+        renderer.activeWetInk = !isErasing && (currentBrushConfig().map { $0.wetEnabled && !$0.wetSmudge } ?? false)
         renderer.renderFrame(drawable: drawable, isErasing: isErasing)
         NSLog("%@", "🔬OVL MCV.renderFrame main renderFrame returned")
 
@@ -594,15 +595,24 @@ public final class MetalCanvasView: UIView {
                                       distancePeriod: devDistancePeriod, fadePeriod: devFadePeriod,
                                       maxSpeed: devMaxSpeed)
                 : nil
-            if config.wetEnabled {
-                // Wet brush writes directly to the layer (eraser-style): snapshot for undo
-                // BEFORE any paint lands, and init cross-batch stamp bookkeeping.
+            if config.wetEnabled, config.wetSmudge {
+                // SMUDGE writes directly to the layer (eraser-style RMW): snapshot for
+                // undo BEFORE any paint lands, and init cross-batch stamp bookkeeping.
                 // No snapshot when wet rendering is unavailable (Simulator) — the stroke
                 // paints nothing, so it must not create an undo entry either.
                 if renderer.isWetRenderingAvailable {
                     wetWalker = WetStrokeWalker(startPosition: touch.location(in: self), brush: config)
                     pushUndoSnapshot()
                     applyNewWetStamps()
+                }
+            } else if config.wetEnabled {
+                // Wet INK (P7 core): renders through the SCRATCH against the pristine
+                // canvas, flattened at the opacity ceiling like a dry stroke — undo comes
+                // from the flatten path, no snapshot here. Works on the Simulator (no
+                // framebuffer fetch).
+                if renderer.isWetInkAvailable {
+                    wetWalker = WetStrokeWalker(startPosition: touch.location(in: self), brush: config)
+                    appendNewWetInkStamps()
                 }
             } else {
                 appendStampsForLatestPoints(touch: touch, event: nil)
@@ -717,8 +727,9 @@ public final class MetalCanvasView: UIView {
             }
             emitBrushInputSample(brush: config)
             if config.wetEnabled {
-                // Wet: apply only NEW stamps directly to the layer (no scratch).
-                applyNewWetStamps()
+                // Smudge: apply only NEW stamps directly to the layer (RMW).
+                // Wet ink: accumulate NEW stamps into the live scratch stroke.
+                if config.wetSmudge { applyNewWetStamps() } else { appendNewWetInkStamps() }
             } else {
                 appendStampsForLatestPoints(touch: touch, event: event)
                 // QuickShape: feed recognizer + drive snap state machine. Only
@@ -908,7 +919,9 @@ public final class MetalCanvasView: UIView {
         }
 
         var wetCancel = false
-        if case .brush(let config) = currentTool, config.wetEnabled {
+        if case .brush(let config) = currentTool, config.wetEnabled, config.wetSmudge {
+            // Only SMUDGE writes the layer mid-stroke (and pushes undo at touch-begin).
+            // Wet INK lives in the scratch until flatten — cancel just discards it.
             // No snapshot was pushed when wet rendering is unavailable (Simulator),
             // so there is nothing to revert — popping here would eat an older entry.
             wetCancel = renderer.isWetRenderingAvailable
@@ -1047,6 +1060,24 @@ public final class MetalCanvasView: UIView {
         renderer.applyWetStamps(newStamps)
     }
 
+    /// Wet INK (P7 core): walk the new points and ACCUMULATE the stamps into
+    /// `activeStrokeStamps` — the frame loop renders them into the scratch through the
+    /// wet-ink PSO (KM vs the pristine canvas) and the flatten applies the opacity
+    /// ceiling. The CPU pickup samples the canvas, which stays untouched for the whole
+    /// stroke, so the smear drags BASE colors along (and no GPU drain is ever needed).
+    private func appendNewWetInkStamps() {
+        guard let stroke = activeStroke, var walker = wetWalker else { return }
+        let newStamps = walker.advance(
+            stroke: stroke, scale: canvasScale, clipPath: lassoClipPath,
+            sample: { [renderer] x, y in renderer.sampleLayerColor(x: x, y: y) },
+            sampleAveraged: { [renderer] x, y in renderer.sampleLayerColorAveraged(x: x, y: y) },
+            mix: { [renderer] a, b, t in renderer.kmMixCPU(a, b, t) })
+        wetWalker = walker
+        guard !newStamps.isEmpty else { return }
+        activeStrokeStamps.append(contentsOf: newStamps)
+        isDirty = true
+    }
+
     // MARK: - Stroke Completion
 
     private func finishStroke() {
@@ -1091,19 +1122,26 @@ public final class MetalCanvasView: UIView {
         }
 
         if case .brush(let config) = currentTool, config.wetEnabled {
-            // Wet brush wrote directly to the layer during the stroke (like the eraser),
-            // with the undo snapshot taken at touchesBegan. Flush any trailing points
-            // (e.g. the StreamLine endpoint), then finish — nothing to flatten. When wet
-            // rendering is unavailable (Simulator) nothing was painted, so don't count
-            // the stroke or dirty/autosave the canvas.
-            if renderer.isWetRenderingAvailable {
-                applyNewWetStamps()
-                strokeCount += 1
-                onDrawingChanged?()
-                onStrokeCompleted?(canvasSpaceStroke(stroke))
-                isDirty = true
+            if config.wetSmudge {
+                // Smudge wrote directly to the layer during the stroke (like the eraser),
+                // with the undo snapshot taken at touchesBegan. Flush any trailing points,
+                // then finish — nothing to flatten. When wet rendering is unavailable
+                // (Simulator) nothing was painted, so no stroke count / autosave either.
+                if renderer.isWetRenderingAvailable {
+                    applyNewWetStamps()
+                    strokeCount += 1
+                    onDrawingChanged?()
+                    onStrokeCompleted?(canvasSpaceStroke(stroke))
+                    isDirty = true
+                }
+                return
             }
-            return
+            // Wet INK: flush the walker's tail into the scratch stamp set, then fall
+            // through to the dry flatten path (undo snapshot + scratch re-render at the
+            // opacity ceiling — the flatten's stamp re-render runs the wet PSO because
+            // activeWetInk is still true for this brush).
+            guard renderer.isWetInkAvailable else { return }
+            appendNewWetInkStamps()
         }
 
         // Brush: push undo snapshot, flatten scratch into canvas.

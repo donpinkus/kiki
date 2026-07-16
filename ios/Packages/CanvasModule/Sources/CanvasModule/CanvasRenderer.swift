@@ -50,11 +50,16 @@ public final class CanvasRenderer {
     /// Phase 4). nil if pipeline creation failed (e.g. on the Simulator, which doesn't
     /// support framebuffer fetch) — callers must guard on it.
     private let wetStampPSO: MTLRenderPipelineState?
+    /// Wet INK via scratch (P7 core) — texture-sampled KM, no framebuffer fetch.
+    private let wetInkScratchPSO: MTLRenderPipelineState?
 
     /// False where framebuffer fetch is unsupported (the Simulator), i.e. the wet PSO
     /// failed to build. Callers use this to skip wet-stroke bookkeeping (undo snapshot,
     /// dirty/stroke count) so an invisible no-op stroke doesn't create undo entries.
     var isWetRenderingAvailable: Bool { wetStampPSO != nil }
+    /// Wet ink (scratch path) has no framebuffer-fetch dependency — true wherever the
+    /// PSO compiled (including the Simulator). Smudge still needs `isWetRenderingAvailable`.
+    var isWetInkAvailable: Bool { wetInkScratchPSO != nil }
     private let compositorPSO: MTLRenderPipelineState
 
     /// Debug toggle for the Phase-4 draw-order experiment: when true, wet stamps are
@@ -159,6 +164,10 @@ public final class CanvasRenderer {
     /// Tip-art mirror for the ACTIVE brush (Flip X/Y, cheap-knobs batch 2): (1,0)/(0,1)
     /// flags fed to the stamp vertex's UV flip. Zero for eraser/wet/round.
     var activeFlip = SIMD2<Float>(0, 0)
+    /// True while the ACTIVE stroke is wet INK (non-smudge): the scratch stamp pass
+    /// routes through `wetInkScratchPSO` (KM vs the pristine canvas) instead of the dry
+    /// brush PSOs. Set per frame by MetalCanvasView alongside activeGrain/activeLightness.
+    var activeWetInk = false
 
     /// Quad vertex buffer: 6 vertices for two triangles covering [-1,1]² with
     /// texcoords [0,1]². Shared by brush stamps and compositor.
@@ -256,6 +265,7 @@ public final class CanvasRenderer {
         // Wet PSO uses framebuffer fetch — unsupported on the Simulator, so this may
         // be nil there; the wet tool guards on it and no-ops if unavailable.
         self.wetStampPSO = Self.makeWetStampPSO(device: device, library: lib)
+        self.wetInkScratchPSO = Self.makeWetInkScratchPSO(device: device, library: lib)
         self.maskedCopyPSO = Self.makeMaskedCopyPSO(device: device, library: lib)
         self.maskedClearPSO = Self.makeMaskedClearPSO(device: device, library: lib)
 
@@ -469,6 +479,14 @@ public final class CanvasRenderer {
     func flattenScratchIntoCanvas() {
         guard let canvas = activeLayerTexture, let scratch = scratchTexture else { return }
         guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
+
+        // Re-render the scratch from the CURRENT stamp buffer before compositing.
+        // Historically flatten only composited the last FRAME's scratch — but both
+        // flatten call sites mutate the stamp set right before flattening (stabilizer
+        // catch-up tail, end cap), and no display frame runs in between, so those final
+        // stamps silently never reached the canvas (found 2026-07-16 during the wet-ink
+        // rework). Re-rendering is idempotent when nothing changed.
+        renderStampsIntoScratch(commandBuffer: cmdBuf, scratch: scratch, isEraser: false)
 
         let rpd = MTLRenderPassDescriptor()
         rpd.colorAttachments[0].texture = canvas
@@ -797,7 +815,8 @@ public final class CanvasRenderer {
     func commitStampsToCanvas(_ stamps: [StampInstance], strokeOpacity: Float = 1.0, shapeTexture: MTLTexture? = nil,
                               grain: (texture: MTLTexture, depth: Float, invScale: Float)? = nil,
                               lightness: (params: SIMD4<Float>, recenter: SIMD4<Float>)? = nil,
-                              flip: SIMD2<Float> = .zero) {
+                              flip: SIMD2<Float> = .zero,
+                              wetInk: Bool = false) {
         guard let canvas = activeLayerTexture, !stamps.isEmpty else { return }
         guard let scratch = scratchTexture else { return }
         guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
@@ -820,7 +839,14 @@ public final class CanvasRenderer {
             enc.setVertexBuffer(stampBuf, offset: 0, index: 1)
             var canvasSizeFlip = SIMD4<Float>(Float(canvasWidth), Float(canvasHeight), flip.x, flip.y)
             enc.setVertexBytes(&canvasSizeFlip, length: MemoryLayout<SIMD4<Float>>.size, index: 2)
-            if let shapeTexture {
+            if wetInk, let wetPSO = wetInkScratchPSO, let basisBuf = wetBasisBuffer, let matBuf = wetMatBuffer {
+                enc.setRenderPipelineState(wetPSO)
+                enc.setFragmentTexture(canvas, index: 0)
+                enc.setFragmentBuffer(basisBuf, offset: 0, index: 0)
+                enc.setFragmentBuffer(matBuf, offset: 0, index: 1)
+                var doc = SIMD2<Float>(Float(canvasWidth), Float(canvasHeight))
+                enc.setFragmentBytes(&doc, length: MemoryLayout<SIMD2<Float>>.size, index: 2)
+            } else if let shapeTexture {
                 if let lm = lightness, let pso = lightnessShapedStampPSO {
                     enc.setRenderPipelineState(pso)
                     enc.setFragmentTexture(shapeTexture, index: 0)
@@ -1369,6 +1395,17 @@ public final class CanvasRenderer {
             var canvasSizeFlip = SIMD4<Float>(Float(canvasWidth), Float(canvasHeight),
                                               isEraser ? 0 : activeFlip.x, isEraser ? 0 : activeFlip.y)
             enc.setVertexBytes(&canvasSizeFlip, length: MemoryLayout<SIMD4<Float>>.size, index: 2)
+            // Wet INK (P7 core): KM against the pristine canvas texture, source-over into
+            // the scratch. Takes priority over every dry PSO; smudge never routes here.
+            if !isEraser, activeWetInk, let wetPSO = wetInkScratchPSO,
+               let canvas = activeLayerTexture, let basisBuf = wetBasisBuffer, let matBuf = wetMatBuffer {
+                enc.setRenderPipelineState(wetPSO)
+                enc.setFragmentTexture(canvas, index: 0)
+                enc.setFragmentBuffer(basisBuf, offset: 0, index: 0)
+                enc.setFragmentBuffer(matBuf, offset: 0, index: 1)
+                var doc = SIMD2<Float>(Float(canvasWidth), Float(canvasHeight))
+                enc.setFragmentBytes(&doc, length: MemoryLayout<SIMD2<Float>>.size, index: 2)
+            } else
             // Textured shape (Phase 3) takes priority for the brush; eraser + round brush
             // keep the procedural path. (Grain applies at scratch-COMPOSITE time, not per
             // dab — per-dab carving is refilled by overlapping stamps; see grainCompositor.)
@@ -1510,6 +1547,24 @@ public final class CanvasRenderer {
     /// Wet-mix PSO: programmable framebuffer read (wetStampFragment reads [[color(0)]],
     /// mixes, returns the final pixel). Fixed-function blending off. Returns nil where
     /// framebuffer fetch is unsupported (Simulator) so the wet tool can degrade gracefully.
+    /// Wet-ink scratch PSO: plain source-over into the scratch; the KM under-color is a
+    /// TEXTURE sample of the pristine canvas (no framebuffer fetch → Simulator-safe).
+    private static func makeWetInkScratchPSO(device: MTLDevice, library: MTLLibrary) -> MTLRenderPipelineState? {
+        let desc = MTLRenderPipelineDescriptor()
+        desc.vertexFunction = library.makeFunction(name: "brushStampVertex")
+        desc.fragmentFunction = library.makeFunction(name: "wetInkScratchFragment")
+        desc.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
+        let ca = desc.colorAttachments[0]!
+        ca.isBlendingEnabled = true
+        ca.rgbBlendOperation = .add
+        ca.alphaBlendOperation = .add
+        ca.sourceRGBBlendFactor = .one
+        ca.destinationRGBBlendFactor = .oneMinusSourceAlpha
+        ca.sourceAlphaBlendFactor = .one
+        ca.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        return try? device.makeRenderPipelineState(descriptor: desc)
+    }
+
     private static func makeWetStampPSO(device: MTLDevice, library: MTLLibrary) -> MTLRenderPipelineState? {
         let desc = MTLRenderPipelineDescriptor()
         desc.vertexFunction = library.makeFunction(name: "brushStampVertex")
@@ -2060,6 +2115,80 @@ public final class CanvasRenderer {
     // unmixed colors stay faithful. Both the canvas color and the load color are upsampled
     // in-shader (the load varies per stamp, so it can't be a per-stroke uniform).
     // Tables: basis (7×36, k-major) buffer(0); spectrum→linRGB matrix (36×3) buffer(1).
+    // Wet INK through the SCRATCH layer (P7 core, 2026-07-16). The old direct-RMW ink
+    // path had a structural flaw: each dab KM-mixed the pixel toward the carried load,
+    // and the fixed point of repeating that is PURE load — dozens of overlapping dabs
+    // fully erased the under-color, then the opacity ceiling blended that pure load with
+    // white paper ("opaque replacement fading to white", fixture-4). Here the KM under-
+    // color comes from the PRISTINE pre-stroke canvas (bound as a texture — the render
+    // target is the scratch), so the mix CANNOT compound: one stroke = one wet glaze of
+    // KM(under → load, Mix), accumulated source-over in scratch and flattened at the
+    // per-stroke opacity ceiling exactly like a dry stroke. No framebuffer fetch, so wet
+    // ink also works on the Simulator. Smudge stays on the RMW path (wetStampFragment).
+    fragment float4 wetInkScratchFragment(
+        StampVaryings in [[stage_in]],
+        texture2d<float> canvasTex [[texture(0)]],
+        constant float* basis [[buffer(0)]],
+        constant float* mat [[buffer(1)]],
+        constant float2& docSize [[buffer(2)]]
+    ) {
+        constexpr int NB = 36;
+        constexpr sampler canvasSampler(filter::nearest, address::clamp_to_edge);
+        float d = length(in.texCoord - 0.5) * 2.0;
+        float aa = max(fwidth(d), 1e-4);
+        float soft = 1.0 - in.hardness;
+        float start = min(in.hardness, 1.0 - aa) - soft * soft * 0.85;
+        float cov = 1.0 - smoothstep(start, 1.0, d);
+        if (cov <= 0.0) { return float4(0.0); }
+
+        // Pre-stroke canvas at this fragment (scratch and document share pixel space).
+        float4 base = canvasTex.sample(canvasSampler, in.position.xy / docSize);
+        float3 brushLin = in.color.rgb;      // carried load (straight linear)
+        float w = in.color.a;                // Mix — KM weight toward the load
+        // The mix partner: what the eye sees (premult-linear over white paper), faded
+        // toward the LOAD itself by paint presence — bare paper mixes with nothing, so
+        // ink on paper stays full-strength ink; Mix only waters down against PAINT.
+        float3 seen = base.rgb + (1.0 - base.a);
+        float3 under = mix(brushLin, seen, base.a);
+
+        float dstW[7], brW[7];
+        { float3 c = max(under, 0.0); float mn = min(c.r, min(c.g, c.b));
+          dstW[0]=mn; dstW[1]=0; dstW[2]=0; dstW[3]=0; dstW[4]=0; dstW[5]=0; dstW[6]=0;
+          float rr=c.r-mn, gg=c.g-mn, bb=c.b-mn;
+          if (rr<=gg && rr<=bb) { dstW[1]=min(gg,bb); if (gg>bb) dstW[5]=gg-bb; else dstW[6]=bb-gg; }
+          else if (gg<=rr && gg<=bb) { dstW[2]=min(rr,bb); if (rr>bb) dstW[4]=rr-bb; else dstW[6]=bb-rr; }
+          else { dstW[3]=min(rr,gg); if (rr>gg) dstW[4]=rr-gg; else dstW[5]=gg-rr; } }
+        { float3 c = max(brushLin, 0.0); float mn = min(c.r, min(c.g, c.b));
+          brW[0]=mn; brW[1]=0; brW[2]=0; brW[3]=0; brW[4]=0; brW[5]=0; brW[6]=0;
+          float rr=c.r-mn, gg=c.g-mn, bb=c.b-mn;
+          if (rr<=gg && rr<=bb) { brW[1]=min(gg,bb); if (gg>bb) brW[5]=gg-bb; else brW[6]=bb-gg; }
+          else if (gg<=rr && gg<=bb) { brW[2]=min(rr,bb); if (rr>bb) brW[4]=rr-bb; else brW[6]=bb-rr; }
+          else { brW[3]=min(rr,gg); if (rr>gg) brW[4]=rr-gg; else brW[5]=gg-rr; } }
+
+        float3 mixLin = float3(0.0), dstRT = float3(0.0), brushRT = float3(0.0);
+        for (int i = 0; i < NB; i++) {
+            float sd = 0.0, sb = 0.0;
+            for (int k = 0; k < 7; k++) { float bk = basis[k * NB + i]; sd += dstW[k]*bk; sb += brW[k]*bk; }
+            sd = clamp(sd, 0.004, 1.0); sb = clamp(sb, 0.004, 1.0);
+            float3 A = float3(mat[i*3+0], mat[i*3+1], mat[i*3+2]);
+            dstRT += sd * A; brushRT += sb * A;
+            float ksd = (1.0 - sd) * (1.0 - sd) / (2.0 * sd);
+            float ksb = (1.0 - sb) * (1.0 - sb) / (2.0 * sb);
+            float ksm = mix(ksd, ksb, w);
+            float Rm = clamp(1.0 + ksm - sqrt(ksm * ksm + 2.0 * ksm), 0.0, 1.0);
+            mixLin += Rm * A;
+        }
+        mixLin = clamp(mixLin, 0.0, 1.0);
+        dstRT = clamp(dstRT, 0.0, 1.0);
+        brushRT = clamp(brushRT, 0.0, 1.0);
+        float3 corrected = clamp(mixLin + (1.0 - w) * (under - dstRT) + w * (brushLin - brushRT), 0.0, 1.0);
+
+        // Deposit source-over into the scratch: coverage-alpha, KM-mixed color. Within-
+        // stroke overlaps saturate coverage (solid wet ink); the OPACITY ceiling applies
+        // once, at the flatten — same Glaze split as the dry brush.
+        return float4(corrected * cov, cov);
+    }
+
     fragment float4 wetStampFragment(
         StampVaryings in [[stage_in]],
         constant float* basis [[buffer(0)]],
