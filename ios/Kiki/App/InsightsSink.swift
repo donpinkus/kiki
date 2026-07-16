@@ -160,12 +160,13 @@ actor InsightsSink {
     /// Upload a brush-dev stroke fixture: the BrushFixture JSON (replayable in
     /// BrushHarness) + an optional PNG snapshot of the canvas. Brush Studio's
     /// "Record strokes → Upload". Unlike the fire-and-forget event/drawing mirrors,
-    /// this RETURNS success — it's an explicit user action (doubles as a brush
-    /// bug-report), so a failed upload must not silently look uploaded.
+    /// this RETURNS the failure reason (nil = success) — it's an explicit user action
+    /// (doubles as a brush bug-report), so a failed upload must say WHY, not just fail
+    /// (device report 2026-07-15: an opaque failure gave nothing to debug with).
     func uploadFixture(name: String?, note: String?, strokeCount: Int,
-                       fixtureJSON: Data, snapshotPNG: Data?) async -> Bool {
-        guard let baseURL else { return false }
-        guard let token = await tokenProvider?() else { return false }
+                       fixtureJSON: Data, snapshotPNG: Data?) async -> String? {
+        guard let baseURL else { return "Insights URL not configured in this build" }
+        guard let token = await tokenProvider?() else { return "not signed in (no auth token)" }
 
         let boundary = "kiki-\(UUID().uuidString)"
         var body = Data()
@@ -196,9 +197,17 @@ actor InsightsSink {
         req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         req.httpBody = body
-        guard let (_, resp) = try? await URLSession.shared.data(for: req),
-              (resp as? HTTPURLResponse)?.statusCode == 200 else { return false }
-        return true
+        do {
+            let (respBody, resp) = try await URLSession.shared.data(for: req)
+            let status = (resp as? HTTPURLResponse)?.statusCode ?? -1
+            guard status == 200 else {
+                let detail = String(data: respBody.prefix(120), encoding: .utf8) ?? ""
+                return "server rejected (HTTP \(status)) \(detail)"
+            }
+            return nil
+        } catch {
+            return "network: \(error.localizedDescription)"
+        }
     }
 }
 

@@ -19,6 +19,7 @@ struct BrushStudioView: View {
     @State private var recordingShareItem: RecordingShareItem?
     @State private var uploadNote = ""
     @State private var uploadState: FixtureUploadState = .idle
+    @State private var uploadError: String = ""
 
     init(initial: BrushDynamics?) {
         _dyn = State(initialValue: initial ?? BrushDynamics())
@@ -91,8 +92,9 @@ struct BrushStudioView: View {
                             uploadState = .uploading
                             let note = uploadNote
                             Task {
-                                let ok = await coordinator.uploadRecordedFixture(note: note.isEmpty ? nil : note)
-                                uploadState = ok ? .done : .failed
+                                let err = await coordinator.uploadRecordedFixture(note: note.isEmpty ? nil : note)
+                                uploadError = err ?? ""
+                                uploadState = err == nil ? .done : .failed
                             }
                         }
                             .font(.caption.weight(.medium))
@@ -105,8 +107,14 @@ struct BrushStudioView: View {
                         Text("Uploaded ✓ — strokes + canvas snapshot are in Insights (fetch-fixtures.sh)")
                             .font(.caption2).foregroundStyle(.green)
                     case .failed:
-                        Text("Upload failed — check network / sign-in, or use Share… as fallback")
+                        Text("Upload failed: \(uploadError). The recording is saved — Share… still works.")
                             .font(.caption2).foregroundStyle(.red)
+                    }
+                    if coordinator.recordedStrokes.isEmpty, let last = coordinator.lastRecordingURL {
+                        Button("Share last recording…") {
+                            recordingShareItem = RecordingShareItem(url: last)
+                        }
+                        .font(.caption)
                     }
                     Text("Upload sends the stroke data (for exact replay) + a PNG of the canvas to Kiki Insights — a one-tap brush bug report. Share… is the offline AirDrop fallback.")
                         .font(.caption2).foregroundStyle(.secondary)

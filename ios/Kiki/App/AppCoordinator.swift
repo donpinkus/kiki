@@ -338,8 +338,16 @@ final class AppCoordinator {
     /// replay) plus a PNG snapshot of the current canvas (so a verbal description
     /// has a picture to point at — the "brush bug report" button). Returns success
     /// for UI confirmation. Fetched Mac-side via `BrushHarness/fetch-fixtures.sh`.
-    func uploadRecordedFixture(note: String?) async -> Bool {
-        guard let json = recordedFixtureJSON() else { return false }
+    /// The last recording written to disk (auto-saved on every Upload attempt BEFORE any
+    /// network I/O, so a failed/interrupted upload can never lose the strokes — Share…
+    /// works from this file even if the in-memory recording is gone).
+    var lastRecordingURL: URL?
+
+    /// Returns nil on success, else a human-readable failure reason for the Studio UI.
+    func uploadRecordedFixture(note: String?) async -> String? {
+        guard let json = recordedFixtureJSON() else { return "no strokes recorded" }
+        // Persist FIRST — losing a recording to a failed upload is unacceptable.
+        if let url = exportRecordedStrokesURL() { lastRecordingURL = url }
         let snapshot = canvasViewModel.generateThumbnail(maxDimension: 1024)?.pngData()
         return await InsightsSink.shared.uploadFixture(
             name: nil, note: note, strokeCount: recordedStrokes.count,
