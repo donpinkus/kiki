@@ -170,6 +170,13 @@ function Json({ v, ind = 0 }: { v: unknown; ind?: number }) {
   );
 }
 
+// Events that represent the user seeing something go wrong. `error.banner_shown`
+// is the explicit iOS "an error banner became visible" event; the name-pattern
+// fallback catches the failure-family events (stream.failed, provision.failed…)
+// from any layer without maintaining a list.
+const isErrorEvent = (name: string): boolean =>
+  name.startsWith('error.') || name.includes('failed') || name.includes('error');
+
 const groupTitle = (g: SessionGroup): string => {
   const d = new Date(g.start);
   const day = d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
@@ -303,6 +310,14 @@ export function UserDetail() {
               {g.drawingSessions.length > 0 && <>{g.drawingSessions.length} drawing{g.drawingSessions.length > 1 ? 's' : ''} · </>}
               {g.events.length} events
             </span>
+            {(() => {
+              const n = g.events.filter((e) => isErrorEvent(e.name)).length;
+              return n > 0 ? (
+                <span className="pill error-pill" style={{ marginLeft: 8 }}>
+                  ⚠ {n} error{n > 1 ? 's' : ''}
+                </span>
+              ) : null;
+            })()}
           </summary>
           <div className="session-group-body">
             {g.drawingSessions.map((s) => (
@@ -320,15 +335,19 @@ export function UserDetail() {
             {g.events.map((e) => {
               const hasProps = Object.keys(e.properties).length > 0;
               const isOpen = expanded.has(e.id);
+              const isError = isErrorEvent(e.name);
               return (
                 <div key={e.id}>
                   <div
-                    className={`event-row${hasProps ? ' expandable' : ''}`}
+                    className={`event-row${hasProps ? ' expandable' : ''}${isError ? ' error-event' : ''}`}
                     title={hasProps ? 'Click to expand properties' : undefined}
                     onClick={hasProps ? () => toggleExpanded(e.id) : undefined}
                   >
                     <span className="ts">{new Date(e.occurred_at).toLocaleTimeString()}</span>
-                    <span className="name">{e.name}</span>
+                    <span className="name">
+                      {isError && <span className="err-icon">⚠ </span>}
+                      {e.name}
+                    </span>
                     <span className="props mono">
                       {hasProps && (
                         <span className="muted" style={{ marginRight: 6 }}>{isOpen ? '▾' : '▸'}</span>
