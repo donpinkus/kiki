@@ -139,3 +139,169 @@ public enum BrushPresetCatalog {
         distanceSize, fadeSize, scatter, colorJitter,
     ]
 }
+
+// MARK: - Curated presets (preset-library v1, 2026-07-15)
+
+/// A user-facing brush preset: a full recipe over the shipped machinery (shape, grain,
+/// lightness map, dynamics, stabilization, Count/scatter, Fall Off). A preset REPLACES
+/// every secondary knob but keeps the user's **color and size** — those are primary tool
+/// state. Distinct from the control-isolation `BrushPreset` test brushes above (dev-only,
+/// each varies exactly one control); these are the "feels like Procreate" deliverable of
+/// `documents/research/krita-brush/13-procreate-parity.md` §6.
+///
+/// NOTE: no preset uses the Speed sensor yet — Speed dynamics stay pinned until
+/// `maxSpeed` is tuned on device (handoff item 2).
+public struct CuratedPreset: Identifiable, Sendable {
+    public let id: String
+    public let displayName: String
+    /// Apply the recipe onto a plain base carrying the user's color/size/opacity.
+    public let configure: @Sendable (_ base: BrushConfig) -> BrushConfig
+
+    public init(id: String, displayName: String,
+                configure: @escaping @Sendable (_ base: BrushConfig) -> BrushConfig) {
+        self.id = id
+        self.displayName = displayName
+        self.configure = configure
+    }
+}
+
+public enum CuratedPresetCatalog {
+
+    /// Pressure→size curve shared by the sketching presets: light touch thins the line
+    /// without ever vanishing.
+    private static func pressureSize(min: Double = 0.35) -> CurveOption {
+        CurveOption(sensors: [SensorChannel(sensor: .pressure)], minValue: min)
+    }
+    private static func pressureFlow(min: Double) -> CurveOption {
+        CurveOption(sensors: [SensorChannel(sensor: .pressure)], minValue: min)
+    }
+
+    public static let all: [CuratedPreset] = [
+
+        CuratedPreset(id: "pencil6b", displayName: "6B Pencil") { base in
+            var b = base
+            b.shapeID = "charcoal"
+            b.grainID = "paper"
+            b.grainDepth = 0.35
+            b.grainScale = 0.8
+            b.tipLightness = 0.3
+            b.flow = 0.75
+            b.hardness = 0.6
+            b.spacing = 0.12
+            b.pressureSmoothing = 0.3
+            b.dynamics = BrushDynamics(size: pressureSize(), flow: pressureFlow(min: 0.4))
+            return b
+        },
+
+        CuratedPreset(id: "inkpen", displayName: "Ink Pen") { base in
+            var b = base
+            b.hardness = 0.9
+            b.flow = 1.0
+            b.spacing = 0.08
+            b.streamline = 0.4
+            b.stabilization = 0.35
+            b.taper = 0.25
+            b.dynamics = BrushDynamics(size: pressureSize(min: 0.3))
+            return b
+        },
+
+        CuratedPreset(id: "calligraphy", displayName: "Calligraphy") { base in
+            var b = base
+            b.aspectRatio = 0.22
+            b.hardness = 0.8
+            b.flow = 1.0
+            b.spacing = 0.05
+            b.streamline = 0.3
+            // Fixed 45° nib (dry-06 recipe): no-sensor rotationLike folds to its constant.
+            b.dynamics = BrushDynamics(
+                rotation: CurveOption(sensors: [], fold: .rotationLike, strength: 0.25))
+            return b
+        },
+
+        CuratedPreset(id: "chalk", displayName: "Chalk") { base in
+            var b = base
+            b.shapeID = "chalk"
+            b.grainID = "paper"
+            b.grainDepth = 0.6
+            b.tipLightness = 0.5
+            b.flow = 0.85
+            b.spacing = 0.15
+            b.spacingJitter = 0.3
+            b.dynamics = BrushDynamics(flow: pressureFlow(min: 0.35))
+            return b
+        },
+
+        CuratedPreset(id: "charcoal", displayName: "Charcoal") { base in
+            var b = base
+            b.shapeID = "charcoal"
+            b.grainID = "paper"
+            b.grainDepth = 0.5
+            b.tipLightness = 0.6
+            b.flow = 0.8
+            b.spacing = 0.15
+            b.dynamics = BrushDynamics(size: pressureSize(min: 0.5), flow: pressureFlow(min: 0.4))
+            return b
+        },
+
+        CuratedPreset(id: "pastel", displayName: "Pastel") { base in
+            var b = base
+            b.shapeID = "pastel"
+            b.grainID = "speckle"
+            b.grainDepth = 0.5
+            b.tipLightness = 0.5
+            b.flow = 0.9
+            b.spacing = 0.14
+            b.dynamics = BrushDynamics(
+                flow: pressureFlow(min: 0.45),
+                colorJitter: ColorJitter(hue: 0.015, saturation: 0.08, brightness: 0.06))
+            return b
+        },
+
+        CuratedPreset(id: "drybrush", displayName: "Dry Brush") { base in
+            var b = base
+            b.shapeID = "drybrush"
+            b.grainID = "canvasWeave"
+            b.grainDepth = 0.4
+            b.flow = 0.8
+            b.spacing = 0.1
+            b.dynamics = BrushDynamics(
+                ratio: CurveOption(sensors: [SensorChannel(sensor: .pressure)], minValue: 0.55))
+            return b
+        },
+
+        CuratedPreset(id: "airbrush", displayName: "Airbrush") { base in
+            var b = base
+            b.hardness = 0.0
+            b.flow = 0.25
+            b.spacing = 0.08
+            b.dynamics = BrushDynamics(size: pressureSize(min: 0.6), flow: pressureFlow(min: 0.2))
+            return b
+        },
+
+        CuratedPreset(id: "spraypaint", displayName: "Spray Paint") { base in
+            var b = base
+            b.shapeID = "ink"
+            b.flow = 0.6
+            b.spacing = 0.5
+            b.spacingJitter = 0.5
+            b.stampCount = 3
+            b.stampCountJitter = 0.4
+            b.dynamics = BrushDynamics(scatter: CurveOption(sensors: [], strength: 0.6))
+            return b
+        },
+
+        CuratedPreset(id: "marker", displayName: "Marker") { base in
+            var b = base
+            b.hardness = 0.75
+            b.flow = 1.0
+            b.opacity = 0.7   // Glaze ceiling: self-crossings stay flat, marker-style
+            b.spacing = 0.08
+            b.fallOff = 0.12  // gentle dry-out on very long strokes
+            return b
+        },
+    ]
+
+    public static func preset(for id: String) -> CuratedPreset? {
+        all.first { $0.id == id }
+    }
+}

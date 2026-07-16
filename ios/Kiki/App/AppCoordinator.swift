@@ -142,6 +142,23 @@ final class AppCoordinator {
             applyTool()
         }
     }
+    /// Spacing jitter (batch 2; no slider yet — written by presets, read by applyTool).
+    var toolSpacingJitter: CGFloat = 0 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    /// Pressure smoothing (P3; no slider — written by presets, read by applyTool).
+    var toolPressureSmoothing: CGFloat = 0 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    /// The last-applied curated preset id (chip highlight in the popover). Purely
+    /// informational — manual knob tweaks after applying don't clear it (v1).
+    var activeCuratedPresetID: String?
     /// Fall Off ("Fall off"): paint runs out over drawn distance.
     var toolFallOff: CGFloat = 0 {
         didSet {
@@ -1802,6 +1819,78 @@ final class AppCoordinator {
         applyTool()
     }
 
+    /// Apply a curated preset: run its recipe on a plain base carrying the user's
+    /// color/size/opacity, then write every resulting knob back into the tool fields so
+    /// the popover sliders reflect the preset. Batched (isSwappingToolValues) so the
+    /// brush rebuilds once.
+    func applyCuratedPreset(_ preset: CuratedPreset) {
+        let base = BrushConfig(color: currentColor.codable, baseWidth: toolSize, opacity: toolOpacity)
+        let c = preset.configure(base)
+        isSwappingToolValues = true
+        toolOpacity = c.opacity
+        toolFlow = c.flow
+        toolStreamline = c.streamline
+        toolStabilization = c.stabilization
+        toolPressureSmoothing = c.pressureSmoothing
+        toolHardness = c.hardness
+        toolSpacing = c.spacing
+        toolSpacingJitter = c.spacingJitter
+        toolTaper = c.taper
+        toolShapeID = c.shapeID
+        toolAspect = c.aspectRatio
+        toolGrainID = c.grainID
+        toolGrainDepth = c.grainDepth
+        toolGrainScale = c.grainScale
+        toolTipLightness = c.tipLightness
+        toolFallOff = c.fallOff
+        toolStampCount = CGFloat(c.stampCount)
+        toolStampCountJitter = c.stampCountJitter
+        toolRotationFollow = c.rotationFollow ?? 1
+        toolFlipX = c.flipX
+        toolFlipY = c.flipY
+        toolDynamics = c.dynamics
+        toolWetEnabled = false
+        toolWetSmudge = false
+        isSwappingToolValues = false
+        activeCuratedPresetID = preset.id
+        activeTestNote = nil
+        applyTool()
+    }
+
+    /// Reset every secondary knob to the engine default (the "None" preset chip),
+    /// keeping color/size/opacity.
+    func clearCuratedPreset() {
+        let d = BrushConfig(color: currentColor.codable, baseWidth: toolSize, opacity: toolOpacity)
+        isSwappingToolValues = true
+        toolFlow = d.flow
+        toolStreamline = d.streamline
+        toolStabilization = d.stabilization
+        toolPressureSmoothing = d.pressureSmoothing
+        toolHardness = d.hardness
+        toolSpacing = d.spacing
+        toolSpacingJitter = d.spacingJitter
+        toolTaper = d.taper
+        toolShapeID = nil
+        toolAspect = d.aspectRatio
+        toolGrainID = nil
+        toolGrainDepth = d.grainDepth
+        toolGrainScale = d.grainScale
+        toolTipLightness = d.tipLightness
+        toolFallOff = d.fallOff
+        toolStampCount = CGFloat(d.stampCount)
+        toolStampCountJitter = d.stampCountJitter
+        toolRotationFollow = 1
+        toolFlipX = false
+        toolFlipY = false
+        toolDynamics = nil
+        toolWetEnabled = false
+        toolWetSmudge = false
+        isSwappingToolValues = false
+        activeCuratedPresetID = nil
+        activeTestNote = nil
+        applyTool()
+    }
+
     /// Reset the live tool to the plain default pen (no dynamics, no smudge).
     func resetBrushDynamics() {
         isSwappingToolValues = true
@@ -1824,8 +1913,10 @@ final class AppCoordinator {
                 tiltSensitivity: 1.0,
                 streamline: toolStreamline,
                 stabilization: toolStabilization,
+                pressureSmoothing: toolPressureSmoothing,
                 hardness: toolHardness,
                 spacing: toolSpacing,
+                spacingJitter: toolSpacingJitter,
                 taper: toolTaper,
                 wetEnabled: toolWetEnabled || toolWetSmudge,
                 wetStrength: toolWetStrength,

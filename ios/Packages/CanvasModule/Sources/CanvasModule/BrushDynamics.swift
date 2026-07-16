@@ -646,6 +646,10 @@ public struct BrushDynamics: Codable, Equatable, Sendable {
     /// Scatter: per-dab random center displacement, magnitude = value × dab diameter. Size-like
     /// fold (so scatter can itself be pressure/speed-driven). Krita `KisScatterOption`.
     public var scatter: CurveOption?
+    /// Spacing multiplier (Procreate Dynamics "Speed → Spacing"): per-dab multiplier on
+    /// the walk gap. Size-like fold. Drive with Speed so fast strokes space out (spray)
+    /// or tighten (default curve inverted). Applied to the NEXT gap after each dab.
+    public var spacing: CurveOption?
     /// Lateral scatter (Procreate "Jitter"⊥): per-dab random displacement PERPENDICULAR
     /// to the stroke direction only, magnitude = value × dab diameter. Size-like fold.
     /// Splits the isotropic `scatter` into the Procreate Stroke-Path components.
@@ -669,7 +673,8 @@ public struct BrushDynamics: Codable, Equatable, Sendable {
     public init(size: CurveOption? = nil, flow: CurveOption? = nil,
                 rotation: CurveOption? = nil, scatter: CurveOption? = nil,
                 scatterLateral: CurveOption? = nil, scatterLinear: CurveOption? = nil,
-                ratio: CurveOption? = nil, colorJitter: ColorJitter? = nil) {
+                ratio: CurveOption? = nil, spacing: CurveOption? = nil,
+                colorJitter: ColorJitter? = nil) {
         self.size = size
         self.flow = flow
         self.rotation = rotation
@@ -677,6 +682,7 @@ public struct BrushDynamics: Codable, Equatable, Sendable {
         self.scatterLateral = scatterLateral
         self.scatterLinear = scatterLinear
         self.ratio = ratio
+        self.spacing = spacing
         self.colorJitter = colorJitter
     }
 
@@ -684,10 +690,10 @@ public struct BrushDynamics: Codable, Equatable, Sendable {
     public var isInert: Bool {
         size == nil && flow == nil && rotation == nil
             && scatter == nil && scatterLateral == nil && scatterLinear == nil
-            && ratio == nil && (colorJitter?.isInert ?? true)
+            && ratio == nil && spacing == nil && (colorJitter?.isInert ?? true)
     }
 
-    enum CodingKeys: String, CodingKey { case size, flow, rotation, scatter, scatterLateral, scatterLinear, ratio, colorJitter }
+    enum CodingKeys: String, CodingKey { case size, flow, rotation, scatter, scatterLateral, scatterLinear, ratio, spacing, colorJitter }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         size = try c.decodeIfPresent(CurveOption.self, forKey: .size)
@@ -697,6 +703,7 @@ public struct BrushDynamics: Codable, Equatable, Sendable {
         scatterLateral = try c.decodeIfPresent(CurveOption.self, forKey: .scatterLateral)
         scatterLinear = try c.decodeIfPresent(CurveOption.self, forKey: .scatterLinear)
         ratio = try c.decodeIfPresent(CurveOption.self, forKey: .ratio)
+        spacing = try c.decodeIfPresent(CurveOption.self, forKey: .spacing)
         colorJitter = try c.decodeIfPresent(ColorJitter.self, forKey: .colorJitter)
     }
 }

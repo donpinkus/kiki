@@ -119,6 +119,7 @@ struct BrushStudioView: View {
                 curveSection("Scatter \u{22A5} (across)", option: $dyn.scatterLateral, fold: .sizeLike, defaultSensor: .pressure)
                 curveSection("Scatter \u{2225} (along)", option: $dyn.scatterLinear, fold: .sizeLike, defaultSensor: .pressure)
                 curveSection("Roundness", option: $dyn.ratio, fold: .sizeLike, defaultSensor: .pressure)
+                curveSection("Spacing", option: $dyn.spacing, fold: .sizeLike, defaultSensor: .speed)
 
                 ColorJitterSection(jitter: $dyn.colorJitter)
 

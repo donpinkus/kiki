@@ -147,9 +147,9 @@ enum StrokeStampGenerator {
         func dabAttrs(x: CGFloat, y: CGFloat, force: CGFloat, altitude: CGFloat, azimuth: CGFloat,
                       dx: CGFloat, dy: CGFloat, dt: Double, roll: CGFloat = 0)
             -> (width: CGFloat, color: SIMD4<Float>, rotation: Float, offset: CGPoint, aspect: Float,
-                scatterMags: SIMD3<Float>) {
+                scatterMags: SIMD3<Float>, spacingMul: CGFloat) {
             guard hasDyn, var st = dynState else {
-                return (brush.effectiveWidth(force: force, altitude: altitude), color, strokeRotation(dx: dx, dy: dy), .zero, aspect, .zero)
+                return (brush.effectiveWidth(force: force, altitude: altitude), color, strokeRotation(dx: dx, dy: dy), .zero, aspect, .zero, 1)
             }
             let input = st.advance(
                 x: Double(x), y: Double(y), force: Double(force), altitude: Double(altitude),
@@ -200,7 +200,9 @@ enum StrokeStampGenerator {
             if let ratioOpt = dyn?.ratio {
                 dabAspect = Float(min(max(CGFloat(aspect) * CGFloat(ratioOpt.value(input)), 0.05), 1))
             }
-            return (w, col, rot, offset, dabAspect, mags)
+            // Speed→Spacing (Procreate Dynamics): per-dab multiplier on the NEXT walk gap.
+            let spacingMul = dyn?.spacing != nil ? CGFloat(dyn!.spacing!.value(input)) : 1
+            return (w, col, rot, offset, dabAspect, mags, max(0.05, spacingMul))
         }
         // ---------------------------------------------------------------------------------
 
@@ -220,7 +222,7 @@ enum StrokeStampGenerator {
         var lastDabPos: CGPoint? = nil    // walk position of the previous dab (un-scattered)
         var dabSerial: UInt64 = 0
         func appendDab(_ attr: (width: CGFloat, color: SIMD4<Float>, rotation: Float, offset: CGPoint,
-                                aspect: Float, scatterMags: SIMD3<Float>),
+                                aspect: Float, scatterMags: SIMD3<Float>, spacingMul: CGFloat),
                        x: CGFloat, y: CGFloat, dx: CGFloat, dy: CGFloat) {
             dabSerial &+= 1
             var attr = attr
@@ -282,7 +284,7 @@ enum StrokeStampGenerator {
         appendDab(firstAttr, x: first.position.x, y: first.position.y, dx: firstDir.0, dy: firstDir.1)
 
         var lastStampPos = first.position
-        var currentSpacing = jitteredSpacing(max(firstWidth * spacingFraction, 0.5), 0)
+        var currentSpacing = jitteredSpacing(max(firstWidth * spacingFraction * firstAttr.spacingMul, 0.5), 0)
 
         for i in 1..<stroke.points.count {
             let prev = stroke.points[i - 1]
@@ -320,7 +322,7 @@ enum StrokeStampGenerator {
                 appendDab(attr, x: x, y: y, dx: dx, dy: dy)
 
                 lastStampPos = pos
-                currentSpacing = jitteredSpacing(max(width * spacingFraction, 0.5), stamps.count)
+                currentSpacing = jitteredSpacing(max(width * spacingFraction * attr.spacingMul, 0.5), stamps.count)
                 traveled += currentSpacing
             }
         }

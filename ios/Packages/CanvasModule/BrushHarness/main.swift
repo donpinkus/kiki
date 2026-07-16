@@ -642,6 +642,34 @@ runScene("dry-13-falloff",
     }
 }
 
+runScene("dry-14-presets",
+         """
+         Curated preset gallery (preset-library v1): each row is one preset from
+         CuratedPresetCatalog drawn with the SAME input stroke (pressure bell, gentle S) —
+         the full recipes users get from the popover's Presets grid. Color/size are the
+         only inputs kept from the "user"; everything else is the preset. Left column ink
+         blue, right column warm sepia, purely for visual variety.
+         """) { s in
+    let inkBlue = CodableColor(red: 0.16, green: 0.22, blue: 0.45)
+    let sepia = CodableColor(red: 0.42, green: 0.28, blue: 0.16)
+    let presets = CuratedPresetCatalog.all
+    for (i, preset) in presets.enumerated() {
+        let col = i % 2, row = i / 2
+        let x0: CGFloat = col == 0 ? 60 : 540
+        let x1: CGFloat = col == 0 ? 480 : 960
+        let y = CGFloat(150 + row * 190)
+        let base = BrushConfig(color: col == 0 ? inkBlue : sepia, baseWidth: 30)
+        var b = preset.configure(base)
+        // Stabilization is a live-input stage (MetalCanvasView), not a stamp-gen stage —
+        // zero it so the gallery shows tip/texture character, not the input filter.
+        b.streamline = 0; b.stabilization = 0
+        s.label(preset.displayName, x: x0 - 30, y: y - 60)
+        s.paint(synthStroke(id: 160 + i, brush: b,
+                            from: CGPoint(x: x0, y: y), to: CGPoint(x: x1, y: y),
+                            bow: 45, force: { 0.25 + 0.7 * sin($0 * .pi) }))
+    }
+}
+
 runScene("wet-01-blue-into-yellow",
          """
          Spectral pigment mixing (Kubelka-Munk): a WET blue stroke dragged left-to-right through a

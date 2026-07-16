@@ -16,6 +16,8 @@ struct BrushSettingsPopover: View {
         let wet = coordinator.toolWetEnabled
 
         VStack(alignment: .leading, spacing: 18) {
+            PresetPicker()
+            Divider()
             Group {
                 BrushShapePicker(selection: $coordinator.toolShapeID)
                 if coordinator.toolShapeID != nil {
@@ -153,6 +155,52 @@ struct BrushSettingsPopover: View {
             low: "No pickup — always lays your color, no blending trail.",
             high: "Soaks up and drags color along the stroke (smudgy, blends).")
     ]
+}
+
+/// Curated preset picker (preset-library v1): one-tap full brush recipes. Keeps the
+/// user's color/size; every secondary knob below reflects the applied preset.
+private struct PresetPicker: View {
+    @Environment(AppCoordinator.self) private var coordinator
+
+    private let columns = [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Presets").font(.subheadline.weight(.medium))
+            LazyVGrid(columns: columns, spacing: 8) {
+                chip(nil, "None")
+                ForEach(CuratedPresetCatalog.all) { preset in
+                    chip(preset.id, preset.displayName)
+                }
+            }
+        }
+    }
+
+    private func chip(_ id: String?, _ label: String) -> some View {
+        let selected = coordinator.activeCuratedPresetID == id
+        return Button {
+            if let id, let preset = CuratedPresetCatalog.preset(for: id) {
+                coordinator.applyCuratedPreset(preset)
+            } else {
+                coordinator.clearCuratedPreset()
+            }
+        } label: {
+            Text(label)
+                .font(.caption)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+                .background(selected ? Color.accentColor.opacity(0.18) : Color.gray.opacity(0.12))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .strokeBorder(selected ? Color.accentColor : .clear, lineWidth: 1.5)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .foregroundStyle(selected ? Color.accentColor : .primary)
+        }
+        .buttonStyle(.plain)
+    }
 }
 
 /// Brush-tip shape selector (pro-brush Phase 3). A grid of labeled chips; "Round" is the

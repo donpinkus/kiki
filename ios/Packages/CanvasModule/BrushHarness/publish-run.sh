@@ -22,7 +22,7 @@ trap 'rm -rf "$OUT"' EXIT
 S=../Sources/CanvasModule
 swiftc -O -D BRUSH_HARNESS \
   $S/DrawingEngine.swift $S/BrushDynamics.swift $S/BrushShapeCatalog.swift \
-  $S/WetKM.swift $S/BrushFixture.swift $S/StrokeStabilizer.swift $S/StrokeStampGenerator.swift $S/WetStrokeWalker.swift $S/LightnessMap.swift \
+  $S/BrushPresets.swift $S/WetKM.swift $S/BrushFixture.swift $S/StrokeStabilizer.swift $S/StrokeStampGenerator.swift $S/WetStrokeWalker.swift $S/LightnessMap.swift \
   $S/CanvasRenderer.swift main.swift -o "$OUT/brushharness"
 
 FIXTURE_ARGS=()
