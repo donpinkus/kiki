@@ -15,6 +15,10 @@ struct BrushSettingsPopover: View {
         // Wet paint is on rather than letting them silently do nothing.
         let wet = coordinator.toolWetEnabled
 
+        // The control stack outgrew the screen once the Presets grid + batch-2 knobs
+        // landed — scroll it. The explicit maxHeight is required: a popover sizes to its
+        // content, so an unbounded ScrollView collapses (or overflows) without one.
+        ScrollView {
         VStack(alignment: .leading, spacing: 18) {
             PresetPicker()
             Divider()
@@ -98,7 +102,9 @@ struct BrushSettingsPopover: View {
             }
         }
         .padding(20)
+        }
         .frame(width: 300)
+        .frame(maxHeight: 620)
     }
 
     // One-sentence summary + what 0% and 100% mean, per control.
