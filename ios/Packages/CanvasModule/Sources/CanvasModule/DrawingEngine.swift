@@ -173,6 +173,11 @@ public struct BrushConfig: Codable, Sendable {
     public var grainDepth: CGFloat
     /// Grain scale multiplier on the 256px tile (× the grain's nativeScale). >1 = coarser.
     public var grainScale: CGFloat
+    /// P4a lightness-map strength [0,1]: reinterpret the shaped tip's grayscale as a VALUE
+    /// map (Krita PreserveLightness / Schatz quadratic) — dark tip pixels darken the ink,
+    /// light ones lighten it, mid-gray = exact brush color. 0 = off (flat ink, today's
+    /// look). Shaped tips only; the round procedural tip has no luma to map.
+    public var tipLightness: CGFloat
     /// Krita-grade brush dynamics: per-parameter sensor→curve→combine→remap options
     /// (`BrushDynamics`). `nil` (the default) means "no dynamics" — the legacy
     /// `pressureGamma`/`tiltSensitivity` scalars drive size and everything else is a flat
@@ -204,6 +209,7 @@ public struct BrushConfig: Codable, Sendable {
         grainID: String? = nil,
         grainDepth: CGFloat = 0.5,
         grainScale: CGFloat = 1.0,
+        tipLightness: CGFloat = 0.0,
         dynamics: BrushDynamics? = nil
     ) {
         self.color = color
@@ -228,6 +234,7 @@ public struct BrushConfig: Codable, Sendable {
         self.grainID = grainID
         self.grainDepth = grainDepth
         self.grainScale = grainScale
+        self.tipLightness = tipLightness
         self.dynamics = dynamics
     }
 
@@ -262,7 +269,7 @@ public struct BrushConfig: Codable, Sendable {
         case streamline, taperIn, taperOut, tiltSensitivity
         case hardness, spacing, taper, wetEnabled, wetStrength, wetPickup, shapeID
         case dynamics, wetSmudge, aspectRatio, stabilization, pressureSmoothing
-        case grainID, grainDepth, grainScale, spacingJitter
+        case grainID, grainDepth, grainScale, spacingJitter, tipLightness
     }
 
     public init(from decoder: Decoder) throws {
@@ -299,6 +306,7 @@ public struct BrushConfig: Codable, Sendable {
         grainID = try container.decodeIfPresent(String.self, forKey: .grainID)
         grainDepth = try container.decodeIfPresent(CGFloat.self, forKey: .grainDepth) ?? 0.5
         grainScale = try container.decodeIfPresent(CGFloat.self, forKey: .grainScale) ?? 1.0
+        tipLightness = try container.decodeIfPresent(CGFloat.self, forKey: .tipLightness) ?? 0.0
         // Krita-grade dynamics — default nil (legacy scalar behavior) so configs saved before
         // it decode to today's pen unchanged.
         dynamics = try container.decodeIfPresent(BrushDynamics.self, forKey: .dynamics)
@@ -334,6 +342,7 @@ public struct BrushConfig: Codable, Sendable {
         try container.encodeIfPresent(grainID, forKey: .grainID)
         try container.encode(grainDepth, forKey: .grainDepth)
         try container.encode(grainScale, forKey: .grainScale)
+        try container.encode(tipLightness, forKey: .tipLightness)
         try container.encodeIfPresent(dynamics, forKey: .dynamics)
     }
 }

@@ -308,6 +308,51 @@ checkBool("grain valleys die first at light coverage", grainCarve(0.1, 0.9, 0.7)
 checkBool("grain monotonic in coverage", grainCarve(0.8, 0.5, 0.7) > grainCarve(0.3, 0.5, 0.7))
 checkBool("tooth persists even at full coverage (Procreate Depth semantics)", grainCarve(1.0, 1.0, 0.7) < 1.0)
 
+// --- P4a lightness-map oracle (mirrors lightnessShapedStampFragment MSL) ---
+let lmBrush = (r: 0.2, g: 0.55, b: 0.8)   // a teal, z well inside (0.25, 0.75)
+let lmZ = LightnessMap.lightness(r: lmBrush.r, g: lmBrush.g, b: lmBrush.b)
+check("lightness quad f(0)=0", LightnessMap.quadratic(0, z: lmZ), 0)
+check("lightness quad f(1)=1", LightnessMap.quadratic(1, z: lmZ), 1)
+check("lightness quad f(0.5)=z", LightnessMap.quadratic(0.5, z: lmZ), lmZ, tol: 1e-12)
+// THE invariant: a mid-gray tip pixel reproduces the brush color EXACTLY.
+let lmMid = LightnessMap.apply(brushSRGB: lmBrush, tipLuma: 0.5, strength: 1)
+check("mid-gray tip == brush color (r)", lmMid.r, lmBrush.r, tol: 1e-9)
+check("mid-gray tip == brush color (g)", lmMid.g, lmBrush.g, tol: 1e-9)
+check("mid-gray tip == brush color (b)", lmMid.b, lmBrush.b, tol: 1e-9)
+// Endpoints: black tip → black, white tip → white (hue collapses at the poles).
+let lmB = LightnessMap.apply(brushSRGB: lmBrush, tipLuma: 0, strength: 1)
+let lmW = LightnessMap.apply(brushSRGB: lmBrush, tipLuma: 1, strength: 1)
+checkBool("black tip → black", lmB.r < 1e-9 && lmB.g < 1e-9 && lmB.b < 1e-9)
+checkBool("white tip → white", lmW.r > 1 - 1e-9 && lmW.g > 1 - 1e-9 && lmW.b > 1 - 1e-9)
+// strength 0 = off.
+let lmOff = LightnessMap.apply(brushSRGB: lmBrush, tipLuma: 0.9, strength: 0)
+check("strength 0 leaves brush color", lmOff.g, lmBrush.g, tol: 1e-9)
+// Monotonic in tip luma for mid-range z (0.3 / 0.5 / 0.7 — Krita's stable band).
+for zTest in [0.3, 0.5, 0.7] {
+    var mono = true
+    var prev = -1.0
+    for i in 0...20 {
+        let v = LightnessMap.quadratic(Double(i) / 20, z: zTest)
+        if v < prev - 1e-9 { mono = false }
+        prev = v
+    }
+    checkBool("lightness quad monotonic (z=\(zTest))", mono)
+}
+// Recentering (coverage-authored art): mean luma → 0.5 → exact brush color; swings both ways.
+check("recenter(mean)=0.5", LightnessMap.recenter(0.82, mean: 0.82, neighborhood: 1.0), 0.5)
+checkBool("recenter swings both ways",
+          LightnessMap.recenter(0.95, mean: 0.82, neighborhood: 1.0) > 0.5 &&
+          LightnessMap.recenter(0.6, mean: 0.82, neighborhood: 1.0) < 0.5)
+// Neighborhood damping: a texel at the tip BOUNDARY (sparse neighborhood) maps to 0.5 →
+// fades with the brush color (no dark halo); the SAME luma amid bright interior keeps
+// its full value swing (chalk speckle survives).
+check("boundary texel → no halo", LightnessMap.recenter(0.3, mean: 0.82, neighborhood: 0.2), 0.5)
+checkBool("interior speckle keeps swing",
+          abs(LightnessMap.recenter(0.3, mean: 0.82, neighborhood: 0.95) - 0.5) > 0.2)
+// setLightness preserves hue/sat: remap to the SAME L is an identity.
+let lmSame = LightnessMap.setLightness(r: lmBrush.r, g: lmBrush.g, b: lmBrush.b, newL: lmZ)
+check("setLightness(sameL) identity", lmSame.b, lmBrush.b, tol: 1e-9)
+
 // --- per-dab timing (the PLAN's P1 exit-gate; informational, not a hard assert) ---
 // Worst-case dynamic brush: multi-sensor size + flow + rotation + scatter, all non-identity.
 // Measures the per-dab CPU cost the dynamics path adds on top of the legacy effectiveWidth call.

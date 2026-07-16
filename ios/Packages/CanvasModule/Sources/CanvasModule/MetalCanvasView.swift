@@ -453,6 +453,7 @@ public final class MetalCanvasView: UIView {
         renderer.activeStrokeOpacity = currentStrokeOpacity()
         renderer.activeShapeTexture = isErasing ? nil : currentShapeTexture()
         renderer.activeGrain = isErasing ? nil : currentGrain()
+        renderer.activeLightness = isErasing ? nil : currentBrushConfig().flatMap { renderer.lightnessSettings(for: $0) }
         renderer.renderFrame(drawable: drawable, isErasing: isErasing)
         NSLog("%@", "🔬OVL MCV.renderFrame main renderFrame returned")
 
@@ -2362,7 +2363,8 @@ public final class MetalCanvasView: UIView {
                         stamps,
                         strokeOpacity: Float(stroke.brush.opacity),
                         shapeTexture: renderer.shapeTexture(for: stroke.brush.shapeID),
-                        grain: renderer.grainSettings(for: stroke.brush)
+                        grain: renderer.grainSettings(for: stroke.brush),
+                        lightness: renderer.lightnessSettings(for: stroke.brush)
                     )
                 }
             }
@@ -2501,18 +2503,17 @@ public final class MetalCanvasView: UIView {
         return 1.0
     }
 
+    /// The active/current brush config (stroke in flight wins), nil for other tools.
+    private func currentBrushConfig() -> BrushConfig? {
+        if let b = activeStroke?.brush { return b }
+        if case .brush(let config) = currentTool { return config }
+        return nil
+    }
+
     /// Grain settings (P8) for the active/current brush, or nil. Resolved per frame
     /// alongside the shape texture; the wet path ignores grain (v1).
     private func currentGrain() -> (texture: MTLTexture, depth: Float, invScale: Float)? {
-        let brush: BrushConfig?
-        if let b = activeStroke?.brush {
-            brush = b
-        } else if case .brush(let config) = currentTool {
-            brush = config
-        } else {
-            brush = nil
-        }
-        guard let brush, !brush.wetEnabled else { return nil }
+        guard let brush = currentBrushConfig(), !brush.wetEnabled else { return nil }
         return renderer.grainSettings(for: brush)
     }
 

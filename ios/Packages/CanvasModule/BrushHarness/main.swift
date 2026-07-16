@@ -208,7 +208,8 @@ final class Scene {
             renderer.commitStampsToCanvas(stamps,
                                           strokeOpacity: Float(stroke.brush.opacity),
                                           shapeTexture: renderer.shapeTexture(for: stroke.brush.shapeID),
-                                          grain: renderer.grainSettings(for: stroke.brush))
+                                          grain: renderer.grainSettings(for: stroke.brush),
+                                          lightness: renderer.lightnessSettings(for: stroke.brush))
         }
     }
 
@@ -506,6 +507,32 @@ runScene("dry-09-knobs",
     }
     s.label("barrel roll sweeps 0 → π along the stroke — nib follows", y: 700)
     s.paint(rollerStroke)
+}
+
+runScene("dry-10-lightness-tips",
+         """
+         P4a lightness-map tips: the shaped tip's grayscale becomes a VALUE map instead of
+         being thrown away — dark tip pixels darken the ink, light ones lighten it, mid-gray
+         reproduces the brush color exactly (the oracle invariant). One cheap fragment turns a
+         flat color stroke into a value-modulated mass the img2img model reads as form.
+         - Rows: the same teal charcoal stroke at Tip Lightness 0 (flat, today) / 0.6 / 1.0.
+         - Bottom: chalk tip in red at 1.0 — internal light/dark structure from the tip art.
+         """) { s in
+    for (i, strength) in [CGFloat(0), 0.6, 1.0].enumerated() {
+        var b = pen(teal, width: 60, flow: 0.9, shape: "charcoal")
+        b.tipLightness = strength
+        s.label(String(format: "charcoal, tip lightness %.1f", strength), y: CGFloat(110 + i * 230))
+        s.paint(synthStroke(id: 120 + i, brush: b,
+                            from: CGPoint(x: 120, y: CGFloat(170 + i * 230)),
+                            to: CGPoint(x: 904, y: CGFloat(170 + i * 230)),
+                            bow: 40, force: { 0.35 + 0.55 * $0 }))
+    }
+    var r = pen(red, width: 60, flow: 0.9, shape: "chalk")
+    r.tipLightness = 1.0
+    s.label("chalk in red, tip lightness 1.0", y: 800)
+    s.paint(synthStroke(id: 123, brush: r,
+                        from: CGPoint(x: 120, y: 870), to: CGPoint(x: 904, y: 870),
+                        bow: 40, force: { 0.35 + 0.55 * $0 }))
 }
 
 runScene("wet-01-blue-into-yellow",

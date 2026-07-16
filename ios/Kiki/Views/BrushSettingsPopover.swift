@@ -18,6 +18,9 @@ struct BrushSettingsPopover: View {
         VStack(alignment: .leading, spacing: 18) {
             Group {
                 BrushShapePicker(selection: $coordinator.toolShapeID)
+                if coordinator.toolShapeID != nil {
+                    BrushSliderRow("Tip lightness", value: $coordinator.toolTipLightness, range: 0.0...1.0, help: Self.help["Tip lightness"]!)
+                }
                 GrainPicker(selection: $coordinator.toolGrainID)
                 if coordinator.toolGrainID != nil {
                     BrushSliderRow("Grain depth", value: $coordinator.toolGrainDepth, range: 0.0...1.0, help: Self.help["Grain depth"]!)
@@ -92,6 +95,9 @@ struct BrushSettingsPopover: View {
         "Hardness": BrushHelp(summary: "How crisp or soft the brush edge is.",
             low: "Soft, feathered airbrush edge.",
             high: "Crisp, sharp edge."),
+        "Tip lightness": BrushHelp(summary: "Lets the tip's texture lighten and darken the ink (embossed, dimensional strokes).",
+            low: "Flat ink — the tip texture only shapes coverage.",
+            high: "Full value mapping — dark tip areas darken, light areas lighten; mid-gray = your color."),
         "Grain depth": BrushHelp(summary: "How strongly the paper tooth shows through the stroke.",
             low: "No texture — solid paint.",
             high: "Heavy dry-media break-up; press harder (more flow) to fill the tooth."),

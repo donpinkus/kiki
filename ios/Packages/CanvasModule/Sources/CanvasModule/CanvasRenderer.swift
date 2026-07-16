@@ -40,6 +40,8 @@ public final class CanvasRenderer {
     /// composite time — once per stroke pixel, not per dab — is what keeps overlapping
     /// stamps from refilling the tooth (Procreate's "Texturized" behavior).
     private let grainCompositorPSO: MTLRenderPipelineState?
+    /// P4a: shaped-tip fragment that maps tip luma → ink VALUE (Schatz quadratic in sRGB).
+    private let lightnessShapedStampPSO: MTLRenderPipelineState?
     /// Procedural tileable grain textures (256² R8), generated once at init from
     /// deterministic hash noise — no bundle resources, so BrushHarness gets them free.
     private let grainTextures: [String: MTLTexture]
@@ -135,6 +137,8 @@ public final class CanvasRenderer {
     /// Phase 3). Built once at init from `Resources/BrushShapes`. The procedural round
     /// brush has no entry here.
     private let shapeTextures: [String: MTLTexture]
+    /// Mean in-shape luma per tip id (P4a recentering; see `shapeMeanLuma`).
+    private let shapeLumaMeans: [String: Float]
 
     /// The stamp texture for the stroke currently being drawn/flattened, or nil for the
     /// procedural round brush. `MetalCanvasView` sets this when a stroke starts (alongside
@@ -147,6 +151,11 @@ public final class CanvasRenderer {
     /// flatten stamp passes read it to pick the grain PSO + bind the texture/params.
     /// depth [0,1]; invScale multiplies document-space pixel coords into grain UV.
     var activeGrain: (texture: MTLTexture, depth: Float, invScale: Float)?
+
+    /// P4a lightness-map uniform for the stroke being drawn/flattened, or nil for the
+    /// flat-ink path: (hue, saturation, lightness z of the brush sRGB color, strength).
+    /// Precomputed CPU-side so the fragment only runs quadratic + HSL→RGB + s2l.
+    var activeLightness: (params: SIMD4<Float>, recenter: SIMD4<Float>)?
 
     /// Quad vertex buffer: 6 vertices for two triangles covering [-1,1]² with
     /// texcoords [0,1]². Shared by brush stamps and compositor.
@@ -239,6 +248,7 @@ public final class CanvasRenderer {
         // ever fails to compile.
         self.shapedBrushStampPSO = Self.makeShapedBrushStampPSO(device: device, library: lib)
         self.grainCompositorPSO = Self.makeGrainStampPSO(device: device, library: lib, fragment: "grainCompositorFragment", vertex: "compositorVertex")
+        self.lightnessShapedStampPSO = Self.makeGrainStampPSO(device: device, library: lib, fragment: "lightnessShapedStampFragment")
         self.grainTextures = Self.makeGrainTextures(device: device)
         // Wet PSO uses framebuffer fetch — unsupported on the Simulator, so this may
         // be nil there; the wet tool guards on it and no-ops if unavailable.
@@ -270,7 +280,9 @@ public final class CanvasRenderer {
 
         // Load textured brush-shape stamps (pro-brush Phase 3). Missing/failed assets are
         // skipped — that shape just falls back to the procedural round brush at draw time.
-        self.shapeTextures = Self.loadShapeTextures(device: device, queue: queue)
+        let shapes = Self.loadShapeTextures(device: device, queue: queue)
+        self.shapeTextures = shapes.textures
+        self.shapeLumaMeans = shapes.lumaMeans
 
         // All stored properties initialized — build the wet KM spectral tables.
         setupWetKMTables()
@@ -780,7 +792,8 @@ public final class CanvasRenderer {
     /// regenerated as stamps and committed in one pass. `strokeOpacity` is the
     /// per-stroke ceiling applied at flatten (stamp alpha carries the brush's flow).
     func commitStampsToCanvas(_ stamps: [StampInstance], strokeOpacity: Float = 1.0, shapeTexture: MTLTexture? = nil,
-                              grain: (texture: MTLTexture, depth: Float, invScale: Float)? = nil) {
+                              grain: (texture: MTLTexture, depth: Float, invScale: Float)? = nil,
+                              lightness: (params: SIMD4<Float>, recenter: SIMD4<Float>)? = nil) {
         guard let canvas = activeLayerTexture, !stamps.isEmpty else { return }
         guard let scratch = scratchTexture else { return }
         guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
@@ -803,9 +816,21 @@ public final class CanvasRenderer {
             enc.setVertexBuffer(stampBuf, offset: 0, index: 1)
             var canvasSize = SIMD2<Float>(Float(canvasWidth), Float(canvasHeight))
             enc.setVertexBytes(&canvasSize, length: MemoryLayout<SIMD2<Float>>.size, index: 2)
-            if let shapeTexture, let shapedPSO = shapedBrushStampPSO {
-                enc.setRenderPipelineState(shapedPSO)
-                enc.setFragmentTexture(shapeTexture, index: 0)
+            if let shapeTexture {
+                if let lm = lightness, let pso = lightnessShapedStampPSO {
+                    enc.setRenderPipelineState(pso)
+                    enc.setFragmentTexture(shapeTexture, index: 0)
+                    var p0 = lm.params
+                    var p1 = lm.recenter
+                    enc.setFragmentBytes(&p0, length: MemoryLayout<SIMD4<Float>>.size, index: 0)
+                    enc.setFragmentBytes(&p1, length: MemoryLayout<SIMD4<Float>>.size, index: 1)
+                } else if let shapedPSO = shapedBrushStampPSO {
+                    enc.setRenderPipelineState(shapedPSO)
+                    enc.setFragmentTexture(shapeTexture, index: 0)
+                } else {
+                    enc.setRenderPipelineState(brushStampPSO)
+                    enc.setFragmentTexture(brushMaskTexture, index: 0)
+                }
             } else {
                 enc.setRenderPipelineState(brushStampPSO)
                 enc.setFragmentTexture(brushMaskTexture, index: 0)
@@ -1342,9 +1367,21 @@ public final class CanvasRenderer {
             // Textured shape (Phase 3) takes priority for the brush; eraser + round brush
             // keep the procedural path. (Grain applies at scratch-COMPOSITE time, not per
             // dab — per-dab carving is refilled by overlapping stamps; see grainCompositor.)
-            if !isEraser, let shapeTex = activeShapeTexture, let shapedPSO = shapedBrushStampPSO {
-                enc.setRenderPipelineState(shapedPSO)
-                enc.setFragmentTexture(shapeTex, index: 0)
+            if !isEraser, let shapeTex = activeShapeTexture {
+                if let lm = activeLightness, let pso = lightnessShapedStampPSO {
+                    enc.setRenderPipelineState(pso)
+                    enc.setFragmentTexture(shapeTex, index: 0)
+                    var p0 = lm.params
+                    var p1 = lm.recenter
+                    enc.setFragmentBytes(&p0, length: MemoryLayout<SIMD4<Float>>.size, index: 0)
+                    enc.setFragmentBytes(&p1, length: MemoryLayout<SIMD4<Float>>.size, index: 1)
+                } else if let shapedPSO = shapedBrushStampPSO {
+                    enc.setRenderPipelineState(shapedPSO)
+                    enc.setFragmentTexture(shapeTex, index: 0)
+                } else {
+                    enc.setRenderPipelineState(brushStampPSO)
+                    enc.setFragmentTexture(brushMaskTexture, index: 0)
+                }
             } else {
                 enc.setRenderPipelineState(isEraser ? eraserStampPSO : brushStampPSO)
                 enc.setFragmentTexture(brushMaskTexture, index: 0)
@@ -1655,6 +1692,18 @@ public final class CanvasRenderer {
         return try? device.makeRenderPipelineState(descriptor: desc)
     }
 
+    /// Resolve a brush's P4a lightness-map uniform, or nil when off / round tip.
+    /// NOTE: uses the UNJITTERED brush color (per-stroke color jitter + lightness maps
+    /// are both niche; combining them per-stroke is a follow-up).
+    func lightnessSettings(for brush: BrushConfig) -> (params: SIMD4<Float>, recenter: SIMD4<Float>)? {
+        guard brush.tipLightness > 0.005, let shapeID = brush.shapeID else { return nil }
+        let hsl = LightnessMap.hsl(r: Double(brush.color.red), g: Double(brush.color.green), b: Double(brush.color.blue))
+        let mean = shapeLumaMeans[shapeID] ?? 0.75
+        return (SIMD4<Float>(Float(hsl.h), Float(hsl.s), Float(hsl.l),
+                             Float(min(max(brush.tipLightness, 0), 1))),
+                SIMD4<Float>(mean, 1.6, 0, 0))
+    }
+
     /// Resolve a brush's grain settings (P8): texture + depth + document-space UV scale.
     /// nil when the brush has no grain, depth ≈ 0, or the id is unknown.
     func grainSettings(for brush: BrushConfig) -> (texture: MTLTexture, depth: Float, invScale: Float)? {
@@ -1674,8 +1723,9 @@ public final class CanvasRenderer {
     /// Load every catalog shape that has a PNG resource into a mipmapped R8Unorm mask
     /// texture (luminance = coverage). Mipmaps avoid minification shimmer when a large
     /// (2048²) stamp is scaled down to a small brush radius.
-    private static func loadShapeTextures(device: MTLDevice, queue: MTLCommandQueue) -> [String: MTLTexture] {
+    private static func loadShapeTextures(device: MTLDevice, queue: MTLCommandQueue) -> (textures: [String: MTLTexture], lumaMeans: [String: Float]) {
         var out: [String: MTLTexture] = [:]
+        var means: [String: Float] = [:]
         for descriptor in BrushShapeCatalog.all {
             guard let resourceName = descriptor.resourceName,
                   let data = shapePNGData(resourceName: resourceName),
@@ -1685,8 +1735,26 @@ public final class CanvasRenderer {
                 continue
             }
             out[descriptor.id] = texture
+            means[descriptor.id] = shapeMeanLuma(cgImage)
         }
-        return out
+        return (out, means)
+    }
+
+    /// Mean in-shape luma of a tip (pixels above a small threshold) — the P4a lightness
+    /// map recenters tip luma around this so coverage-authored art (luma = coverage,
+    /// clustered bright) maps its MEAN to "exact brush color" instead of washing white.
+    private static func shapeMeanLuma(_ image: CGImage) -> Float {
+        let w = min(image.width, 128), h = min(image.height, 128)
+        var bytes = [UInt8](repeating: 0, count: w * h)
+        guard let ctx = CGContext(data: &bytes, width: w, height: h, bitsPerComponent: 8,
+                                  bytesPerRow: w, space: CGColorSpaceCreateDeviceGray(),
+                                  bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return 0.75 }
+        ctx.interpolationQuality = .low
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        var sum = 0.0
+        var n = 0
+        for b in bytes where b > 12 { sum += Double(b) / 255.0; n += 1 }
+        return n > 0 ? Float(sum / Double(n)) : 0.75
     }
 
     /// Shape-PNG bytes. SwiftPM builds read from the module resource bundle; the
@@ -1826,6 +1894,63 @@ public final class CanvasRenderer {
         float start = min(in.hardness, 1.0 - aa) - soft * soft * 0.85;
         float alpha = 1.0 - smoothstep(start, 1.0, d);
         return in.color * alpha;
+    }
+
+    // P4a lightness-map tip (Krita PreserveLightness / Schatz quadratic; oracle:
+    // LightnessMap.swift + OfflineTests). The tip's grayscale becomes a VALUE map:
+    // f(x)=(2-4z)x² +(4z-1)x with z = brush HSL lightness (f(0)=0, f(1)=1, f(0.5)=z →
+    // mid-gray tip pixels reproduce the brush color exactly). ALL of this runs in
+    // sRGB-ENCODED space (the gamma landmine): the uniform carries the brush color as
+    // sRGB HSL (precomputed CPU-side), and only the final result converts to linear
+    // for the premultiplied _srgb store. Coverage stays the shaped-tip rule.
+    static inline float lmHue2rgb(float p, float q, float t0) {
+        float t = t0;
+        if (t < 0.0) t += 1.0;
+        if (t > 1.0) t -= 1.0;
+        if (t < 1.0/6.0) return p + (q - p) * 6.0 * t;
+        if (t < 1.0/2.0) return q;
+        if (t < 2.0/3.0) return p + (q - p) * (2.0/3.0 - t) * 6.0;
+        return p;
+    }
+
+    static inline float3 lmHSL2RGB(float h, float s, float l) {
+        if (s < 1e-6) return float3(l, l, l);
+        float q = l < 0.5 ? l * (1.0 + s) : l + s - l * s;
+        float p = 2.0 * l - q;
+        return float3(lmHue2rgb(p, q, h + 1.0/3.0), lmHue2rgb(p, q, h), lmHue2rgb(p, q, h - 1.0/3.0));
+    }
+
+    static inline float3 lmS2L(float3 c) {
+        return float3(
+            c.r <= 0.04045 ? c.r / 12.92 : pow((c.r + 0.055) / 1.055, 2.4),
+            c.g <= 0.04045 ? c.g / 12.92 : pow((c.g + 0.055) / 1.055, 2.4),
+            c.b <= 0.04045 ? c.b / 12.92 : pow((c.b + 0.055) / 1.055, 2.4));
+    }
+
+    fragment float4 lightnessShapedStampFragment(
+        StampVaryings in [[stage_in]],
+        texture2d<float> shapeTex [[texture(0)]],
+        constant float4& lm [[buffer(0)]],  // (h, s, z, strength) — brush color as sRGB HSL
+        constant float4& rc [[buffer(1)]]   // (meanLuma, gain, 0, 0) — coverage-art recentering
+    ) {
+        constexpr sampler shapeSampler(filter::linear, mip_filter::linear, address::clamp_to_zero);
+        float m = shapeTex.sample(shapeSampler, in.texCoord).r;
+        float gamma = mix(1.8, 0.55, clamp(in.hardness, 0.0, 1.0));
+        float cov = pow(max(m, 0.0), gamma);
+        // Recenter coverage-authored luma so the tip's MEAN maps to the brush color,
+        // damping the value swing by the NEIGHBORHOOD coverage (coarse-mip sample):
+        // boundary texels fade with the brush color (no dark halo) while interior
+        // speckle keeps its swing (mirrors LightnessMap.recenter — per-texel damping
+        // cannot separate the two, same m in both zones).
+        float mB = shapeTex.sample(shapeSampler, in.texCoord, level(4.0)).r;
+        float damp = smoothstep(0.5, 0.9, mB);
+        float mc = clamp(0.5 + (m - rc.x) * rc.y * damp, 0.0, 1.0);
+        float z = lm.z;
+        float f = clamp((2.0 - 4.0 * z) * mc * mc + (4.0 * z - 1.0) * mc, 0.0, 1.0);
+        float L = z + (f - z) * lm.w;
+        float3 lin = lmS2L(lmHSL2RGB(lm.x, lm.y, L));
+        float a = in.color.a * cov;   // flow × coverage, premultiplied out
+        return float4(lin * a, a);
     }
 
     // Textured-shape brush (pro-brush Phase 3). Samples a grayscale stamp mask (luminance

@@ -135,6 +135,13 @@ final class AppCoordinator {
             applyTool()
         }
     }
+    /// Tip lightness ("Tip lightness", P4a): shaped tip luma → ink value mapping.
+    var toolTipLightness: CGFloat = 0.0 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
     /// Grain texture id ("Grain", P8). nil = none.
     var toolGrainID: String? = nil {
         didSet {
@@ -1780,6 +1787,7 @@ final class AppCoordinator {
                 aspectRatio: toolAspect,
                 grainID: toolGrainID,
                 grainDepth: toolGrainDepth,
+                tipLightness: toolTipLightness,
                 dynamics: toolDynamics
             )
             canvasViewModel.selectBrush(config)
