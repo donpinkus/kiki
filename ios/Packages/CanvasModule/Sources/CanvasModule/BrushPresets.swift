@@ -172,6 +172,17 @@ public enum CuratedPresetCatalog {
     private static func pressureSize(min: Double = 0.35) -> CurveOption {
         CurveOption(sensors: [SensorChannel(sensor: .pressure)], minValue: min)
     }
+    /// Like `pressureSize` but CONCAVE (≈ p^0.35), matching the legacy pressureGamma feel
+    /// of brushes without size dynamics. A linear curve reaches only ~50% width at
+    /// typical drawing pressure, which made Charcoal/6B feel much smaller than Chalk or
+    /// Pastel at the same size setting (device report, 2026-07-15). Dry media stay fat.
+    private static func softPressureSize(min: Double) -> CurveOption {
+        CurveOption(sensors: [SensorChannel(sensor: .pressure)], minValue: min,
+                    commonCurve: ResponseCurve(points: [
+                        ResponseCurve.Point(0, 0), ResponseCurve.Point(0.25, 0.62),
+                        ResponseCurve.Point(0.5, 0.78), ResponseCurve.Point(0.75, 0.90),
+                        ResponseCurve.Point(1, 1)]))
+    }
     private static func pressureFlow(min: Double) -> CurveOption {
         CurveOption(sensors: [SensorChannel(sensor: .pressure)], minValue: min)
     }
@@ -189,7 +200,7 @@ public enum CuratedPresetCatalog {
             b.hardness = 0.6
             b.spacing = 0.12
             b.pressureSmoothing = 0.3
-            b.dynamics = BrushDynamics(size: pressureSize(), flow: pressureFlow(min: 0.4),
+            b.dynamics = BrushDynamics(size: softPressureSize(min: 0.35), flow: pressureFlow(min: 0.4),
                                        // The signature 6B move: pressing harder darkens
                                        // the graphite, not just widens it (cap: never
                                        // darker than 60% of the ink).
@@ -244,7 +255,7 @@ public enum CuratedPresetCatalog {
             b.tipLightness = 0.6
             b.flow = 0.8
             b.spacing = 0.15
-            b.dynamics = BrushDynamics(size: pressureSize(min: 0.5), flow: pressureFlow(min: 0.4))
+            b.dynamics = BrushDynamics(size: softPressureSize(min: 0.5), flow: pressureFlow(min: 0.4))
             return b
         },
 
