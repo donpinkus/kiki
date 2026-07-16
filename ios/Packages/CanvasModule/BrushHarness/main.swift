@@ -898,6 +898,67 @@ runScene("wet-05-smear-sweep",
     }
 }
 
+runScene("wet-06-mix-x-opacity",
+         """
+         Mix sweep × OPACITY grid: every cell is the same wet-blue-over-yellow drag.
+         - Columns: stroke Opacity 100% / 50% / 10% (the per-stroke alpha ceiling from the
+           wet-ink-through-scratch rework — at 10% the stroke is a barely-there glaze).
+         - Rows: Mix 0.2 / 0.5 / 0.9 (deposit strength; Smear fixed low at 0.12).
+         Expect each column to keep the SAME color story as the full-opacity Mix sweep
+         (wet-03) but fade as a whole toward the right — opacity must scale the entire
+         glaze uniformly, never re-tint or wash the mix itself.
+         """) { s in
+    let opacities: [CGFloat] = [1.0, 0.5, 0.1]
+    let mixes: [CGFloat] = [0.2, 0.5, 0.9]
+    for (c, op) in opacities.enumerated() {
+        s.label("opacity \(Int(op * 100))%", x: CGFloat(60 + c * 330), y: 100)
+    }
+    for (r, mixV) in mixes.enumerated() {
+        let y = CGFloat(230 + r * 300)
+        s.label(String(format: "mix %.1f", mixV), y: y - 70)
+        for (c, op) in opacities.enumerated() {
+            let x0 = CGFloat(40 + c * 330)
+            s.paint(synthStroke(id: 200 + r * 10 + c, brush: pen(yellow, width: 70),
+                                from: CGPoint(x: x0 + 45, y: y), to: CGPoint(x: x0 + 260, y: y),
+                                force: { _ in 1 }))
+            var b = wet(blue, width: 34, mix: mixV, smear: 0.12)
+            b.opacity = op
+            s.paint(synthStroke(id: 250 + r * 10 + c, brush: b,
+                                from: CGPoint(x: x0, y: y), to: CGPoint(x: x0 + 300, y: y)))
+        }
+    }
+}
+
+runScene("wet-07-smear-x-opacity",
+         """
+         Smear sweep × OPACITY grid — the wet-05 counterpart of wet-06.
+         - Columns: stroke Opacity 100% / 50% / 10%.
+         - Rows: Smear 0.1 / 0.4 / 0.8 (load pickup rate; Mix fixed at 0.7).
+         The blue→green→yellow convergence DISTANCE must depend only on the row (Smear);
+         the column (opacity) only scales how strongly the whole glaze reads. If the
+         convergence point shifts with opacity, opacity is leaking into the load walk.
+         """) { s in
+    let opacities: [CGFloat] = [1.0, 0.5, 0.1]
+    let smears: [CGFloat] = [0.1, 0.4, 0.8]
+    for (c, op) in opacities.enumerated() {
+        s.label("opacity \(Int(op * 100))%", x: CGFloat(60 + c * 330), y: 100)
+    }
+    for (r, smearV) in smears.enumerated() {
+        let y = CGFloat(230 + r * 300)
+        s.label(String(format: "smear %.1f", smearV), y: y - 70)
+        for (c, op) in opacities.enumerated() {
+            let x0 = CGFloat(40 + c * 330)
+            s.paint(synthStroke(id: 300 + r * 10 + c, brush: pen(yellow, width: 70),
+                                from: CGPoint(x: x0 + 45, y: y), to: CGPoint(x: x0 + 260, y: y),
+                                force: { _ in 1 }))
+            var b = wet(blue, width: 34, mix: 0.7, smear: smearV)
+            b.opacity = op
+            s.paint(synthStroke(id: 350 + r * 10 + c, brush: b,
+                                from: CGPoint(x: x0, y: y), to: CGPoint(x: x0 + 300, y: y)))
+        }
+    }
+}
+
 // MARK: - Fixture replay (recorded on iPad via Brush Studio → "Record strokes")
 // `BrushFixture` is the module's shared contract type (Sources/CanvasModule/BrushFixture.swift).
 
