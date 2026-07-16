@@ -178,6 +178,23 @@ public struct BrushConfig: Codable, Sendable {
     /// light ones lighten it, mid-gray = exact brush color. 0 = off (flat ink, today's
     /// look). Shaped tips only; the round procedural tip has no luma to map.
     public var tipLightness: CGFloat
+    /// Stamps per spacing point (Procreate Shape "Count", 1–16). Copies beyond the first
+    /// get independent scatter draws (using the brush's scatter/lateral/linear magnitudes),
+    /// so Count × Scatter = clustered texture. With no scatter configured the copies
+    /// coincide (Procreate semantics — Count is designed to pair with Scatter).
+    public var stampCount: Int
+    /// Count jitter [0,1] (Procreate "Count Jitter"): randomly reduces the per-dab copy
+    /// count (deterministic per dab; replay-identical). 0 = always `stampCount`.
+    public var stampCountJitter: CGFloat
+    /// Signed follow-stroke rotation (Procreate Shape "Rotation" −100…100 ≙ −1…1).
+    /// nil = legacy behavior (shapes orient per `BrushShapeCatalog.orientsToStroke`,
+    /// fully). Set: multiplies the stroke-following angle — 1 follow, 0 fixed upright,
+    /// −1 inverse-follow (mirror). Shaped tips only.
+    public var rotationFollow: CGFloat?
+    /// Mirror the tip art horizontally / vertically (Procreate Shape "Flip X/Y").
+    /// Vertex-stage UV flip; no effect on the symmetric procedural round tip.
+    public var flipX: Bool
+    public var flipY: Bool
     /// Krita-grade brush dynamics: per-parameter sensor→curve→combine→remap options
     /// (`BrushDynamics`). `nil` (the default) means "no dynamics" — the legacy
     /// `pressureGamma`/`tiltSensitivity` scalars drive size and everything else is a flat
@@ -210,6 +227,11 @@ public struct BrushConfig: Codable, Sendable {
         grainDepth: CGFloat = 0.5,
         grainScale: CGFloat = 1.0,
         tipLightness: CGFloat = 0.0,
+        stampCount: Int = 1,
+        stampCountJitter: CGFloat = 0.0,
+        rotationFollow: CGFloat? = nil,
+        flipX: Bool = false,
+        flipY: Bool = false,
         dynamics: BrushDynamics? = nil
     ) {
         self.color = color
@@ -235,6 +257,11 @@ public struct BrushConfig: Codable, Sendable {
         self.grainDepth = grainDepth
         self.grainScale = grainScale
         self.tipLightness = tipLightness
+        self.stampCount = stampCount
+        self.stampCountJitter = stampCountJitter
+        self.rotationFollow = rotationFollow
+        self.flipX = flipX
+        self.flipY = flipY
         self.dynamics = dynamics
     }
 
@@ -270,6 +297,7 @@ public struct BrushConfig: Codable, Sendable {
         case hardness, spacing, taper, wetEnabled, wetStrength, wetPickup, shapeID
         case dynamics, wetSmudge, aspectRatio, stabilization, pressureSmoothing
         case grainID, grainDepth, grainScale, spacingJitter, tipLightness
+        case stampCount, stampCountJitter, rotationFollow, flipX, flipY
     }
 
     public init(from decoder: Decoder) throws {
@@ -307,6 +335,12 @@ public struct BrushConfig: Codable, Sendable {
         grainDepth = try container.decodeIfPresent(CGFloat.self, forKey: .grainDepth) ?? 0.5
         grainScale = try container.decodeIfPresent(CGFloat.self, forKey: .grainScale) ?? 1.0
         tipLightness = try container.decodeIfPresent(CGFloat.self, forKey: .tipLightness) ?? 0.0
+        // Cheap-knobs batch 2 — defaults reproduce single-stamp, catalog-oriented, unflipped tips.
+        stampCount = try container.decodeIfPresent(Int.self, forKey: .stampCount) ?? 1
+        stampCountJitter = try container.decodeIfPresent(CGFloat.self, forKey: .stampCountJitter) ?? 0.0
+        rotationFollow = try container.decodeIfPresent(CGFloat.self, forKey: .rotationFollow)
+        flipX = try container.decodeIfPresent(Bool.self, forKey: .flipX) ?? false
+        flipY = try container.decodeIfPresent(Bool.self, forKey: .flipY) ?? false
         // Krita-grade dynamics — default nil (legacy scalar behavior) so configs saved before
         // it decode to today's pen unchanged.
         dynamics = try container.decodeIfPresent(BrushDynamics.self, forKey: .dynamics)
@@ -343,6 +377,11 @@ public struct BrushConfig: Codable, Sendable {
         try container.encode(grainDepth, forKey: .grainDepth)
         try container.encode(grainScale, forKey: .grainScale)
         try container.encode(tipLightness, forKey: .tipLightness)
+        try container.encode(stampCount, forKey: .stampCount)
+        try container.encode(stampCountJitter, forKey: .stampCountJitter)
+        try container.encodeIfPresent(rotationFollow, forKey: .rotationFollow)
+        try container.encode(flipX, forKey: .flipX)
+        try container.encode(flipY, forKey: .flipY)
         try container.encodeIfPresent(dynamics, forKey: .dynamics)
     }
 }

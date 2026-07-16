@@ -142,6 +142,40 @@ final class AppCoordinator {
             applyTool()
         }
     }
+    /// Stamps per spacing point ("Count", 1–8; CGFloat for the slider, rounded at build).
+    var toolStampCount: CGFloat = 1 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    /// Count jitter [0,1] ("Count jitter").
+    var toolStampCountJitter: CGFloat = 0 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    /// Signed follow-stroke rotation ("Rotation", −1…1). 1 = legacy full follow.
+    var toolRotationFollow: CGFloat = 1 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    /// Tip art mirror ("Flip X/Y").
+    var toolFlipX: Bool = false {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    var toolFlipY: Bool = false {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
     /// Grain texture id ("Grain", P8). nil = none.
     var toolGrainID: String? = nil {
         didSet {
@@ -1788,6 +1822,11 @@ final class AppCoordinator {
                 grainID: toolGrainID,
                 grainDepth: toolGrainDepth,
                 tipLightness: toolTipLightness,
+                stampCount: Int(toolStampCount.rounded()),
+                stampCountJitter: toolStampCountJitter,
+                rotationFollow: toolRotationFollow,
+                flipX: toolFlipX,
+                flipY: toolFlipY,
                 dynamics: toolDynamics
             )
             canvasViewModel.selectBrush(config)

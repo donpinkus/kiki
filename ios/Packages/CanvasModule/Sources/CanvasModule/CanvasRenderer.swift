@@ -156,6 +156,9 @@ public final class CanvasRenderer {
     /// flat-ink path: (hue, saturation, lightness z of the brush sRGB color, strength).
     /// Precomputed CPU-side so the fragment only runs quadratic + HSL→RGB + s2l.
     var activeLightness: (params: SIMD4<Float>, recenter: SIMD4<Float>)?
+    /// Tip-art mirror for the ACTIVE brush (Flip X/Y, cheap-knobs batch 2): (1,0)/(0,1)
+    /// flags fed to the stamp vertex's UV flip. Zero for eraser/wet/round.
+    var activeFlip = SIMD2<Float>(0, 0)
 
     /// Quad vertex buffer: 6 vertices for two triangles covering [-1,1]² with
     /// texcoords [0,1]². Shared by brush stamps and compositor.
@@ -642,8 +645,8 @@ public final class CanvasRenderer {
         enc.setRenderPipelineState(eraserStampPSO)
         enc.setVertexBuffer(quadVertexBuffer, offset: 0, index: 0)
         enc.setVertexBuffer(stampBuf, offset: 0, index: 1)
-        var canvasSize = SIMD2<Float>(Float(canvasWidth), Float(canvasHeight))
-        enc.setVertexBytes(&canvasSize, length: MemoryLayout<SIMD2<Float>>.size, index: 2)
+        var canvasSizeFlip = SIMD4<Float>(Float(canvasWidth), Float(canvasHeight), 0, 0)
+        enc.setVertexBytes(&canvasSizeFlip, length: MemoryLayout<SIMD4<Float>>.size, index: 2)
         enc.setFragmentTexture(brushMaskTexture, index: 0)
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: stamps.count)
         enc.endEncoding()
@@ -683,8 +686,8 @@ public final class CanvasRenderer {
         enc.setRenderPipelineState(wetPSO)
         enc.setVertexBuffer(quadVertexBuffer, offset: 0, index: 0)
         enc.setVertexBuffer(stampBuf, offset: 0, index: 1)
-        var canvasSize = SIMD2<Float>(Float(canvasWidth), Float(canvasHeight))
-        enc.setVertexBytes(&canvasSize, length: MemoryLayout<SIMD2<Float>>.size, index: 2)
+        var canvasSizeFlip = SIMD4<Float>(Float(canvasWidth), Float(canvasHeight), 0, 0)
+        enc.setVertexBytes(&canvasSizeFlip, length: MemoryLayout<SIMD4<Float>>.size, index: 2)
         // Fragment KM tables (the carried-load + canvas colors are upsampled in-shader).
         enc.setFragmentBuffer(basisBuf, offset: 0, index: 0)
         enc.setFragmentBuffer(matBuf, offset: 0, index: 1)
@@ -793,7 +796,8 @@ public final class CanvasRenderer {
     /// per-stroke ceiling applied at flatten (stamp alpha carries the brush's flow).
     func commitStampsToCanvas(_ stamps: [StampInstance], strokeOpacity: Float = 1.0, shapeTexture: MTLTexture? = nil,
                               grain: (texture: MTLTexture, depth: Float, invScale: Float)? = nil,
-                              lightness: (params: SIMD4<Float>, recenter: SIMD4<Float>)? = nil) {
+                              lightness: (params: SIMD4<Float>, recenter: SIMD4<Float>)? = nil,
+                              flip: SIMD2<Float> = .zero) {
         guard let canvas = activeLayerTexture, !stamps.isEmpty else { return }
         guard let scratch = scratchTexture else { return }
         guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
@@ -814,8 +818,8 @@ public final class CanvasRenderer {
         if let enc = cmdBuf.makeRenderCommandEncoder(descriptor: scratchRPD) {
             enc.setVertexBuffer(quadVertexBuffer, offset: 0, index: 0)
             enc.setVertexBuffer(stampBuf, offset: 0, index: 1)
-            var canvasSize = SIMD2<Float>(Float(canvasWidth), Float(canvasHeight))
-            enc.setVertexBytes(&canvasSize, length: MemoryLayout<SIMD2<Float>>.size, index: 2)
+            var canvasSizeFlip = SIMD4<Float>(Float(canvasWidth), Float(canvasHeight), flip.x, flip.y)
+            enc.setVertexBytes(&canvasSizeFlip, length: MemoryLayout<SIMD4<Float>>.size, index: 2)
             if let shapeTexture {
                 if let lm = lightness, let pso = lightnessShapedStampPSO {
                     enc.setRenderPipelineState(pso)
@@ -1362,8 +1366,9 @@ public final class CanvasRenderer {
         if stampCount > 0 {
             enc.setVertexBuffer(quadVertexBuffer, offset: 0, index: 0)
             enc.setVertexBuffer(stampBuffer, offset: 0, index: 1)
-            var canvasSize = SIMD2<Float>(Float(canvasWidth), Float(canvasHeight))
-            enc.setVertexBytes(&canvasSize, length: MemoryLayout<SIMD2<Float>>.size, index: 2)
+            var canvasSizeFlip = SIMD4<Float>(Float(canvasWidth), Float(canvasHeight),
+                                              isEraser ? 0 : activeFlip.x, isEraser ? 0 : activeFlip.y)
+            enc.setVertexBytes(&canvasSizeFlip, length: MemoryLayout<SIMD4<Float>>.size, index: 2)
             // Textured shape (Phase 3) takes priority for the brush; eraser + round brush
             // keep the procedural path. (Grain applies at scratch-COMPOSITE time, not per
             // dab — per-dab carving is refilled by overlapping stamps; see grainCompositor.)
@@ -1695,6 +1700,12 @@ public final class CanvasRenderer {
     /// Resolve a brush's P4a lightness-map uniform, or nil when off / round tip.
     /// NOTE: uses the UNJITTERED brush color (per-stroke color jitter + lightness maps
     /// are both niche; combining them per-stroke is a follow-up).
+    /// Flip X/Y flags for the stamp vertex UV mirror. Zero unless a shaped tip asks.
+    func flipSettings(for brush: BrushConfig) -> SIMD2<Float> {
+        guard brush.shapeID != nil else { return .zero }
+        return SIMD2<Float>(brush.flipX ? 1 : 0, brush.flipY ? 1 : 0)
+    }
+
     func lightnessSettings(for brush: BrushConfig) -> (params: SIMD4<Float>, recenter: SIMD4<Float>)? {
         guard brush.tipLightness > 0.005, let shapeID = brush.shapeID else { return nil }
         let hsl = LightnessMap.hsl(r: Double(brush.color.red), g: Double(brush.color.green), b: Double(brush.color.blue))
@@ -1840,7 +1851,7 @@ public final class CanvasRenderer {
         uint instanceId [[instance_id]],
         const device QuadVertex* quads [[buffer(0)]],
         const device StampInstance* instances [[buffer(1)]],
-        constant float2& canvasSize [[buffer(2)]]
+        constant float4& canvasSizeFlip [[buffer(2)]]  // (w, h, flipX, flipY)
     ) {
         QuadVertex q = quads[vertexId];
         StampInstance inst = instances[instanceId];
@@ -1864,12 +1875,18 @@ public final class CanvasRenderer {
         // Canvas pixels → NDC. Metal NDC: x ∈ [-1,1] left→right, y ∈ [-1,1] bottom→top.
         // Canvas y=0 is top → NDC y=+1. So we flip.
         float2 ndc;
-        ndc.x = (canvasPos.x / canvasSize.x) * 2.0 - 1.0;
-        ndc.y = 1.0 - (canvasPos.y / canvasSize.y) * 2.0;
+        ndc.x = (canvasPos.x / canvasSizeFlip.x) * 2.0 - 1.0;
+        ndc.y = 1.0 - (canvasPos.y / canvasSizeFlip.y) * 2.0;
+
+        // Flip X/Y (Procreate Shape): per-brush UV mirror of the tip art. zw are 0/1
+        // flags; no-op for the symmetric procedural round tip.
+        float2 uv = q.texCoord;
+        if (canvasSizeFlip.z > 0.5) { uv.x = 1.0 - uv.x; }
+        if (canvasSizeFlip.w > 0.5) { uv.y = 1.0 - uv.y; }
 
         StampVaryings out;
         out.position = float4(ndc, 0.0, 1.0);
-        out.texCoord = q.texCoord;
+        out.texCoord = uv;
         out.color = inst.color;
         out.hardness = inst.hardness;
         out.wetTargetAlpha = inst.wetTargetAlpha;

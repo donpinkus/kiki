@@ -433,6 +433,8 @@ public struct SensorInput: Sendable {
     public var randPerStroke: Double     // [0,1)
     public var randScatterX: Double      // [0,1) — independent per-dab draw for scatter X
     public var randScatterY: Double      // [0,1) — independent per-dab draw for scatter Y
+    public var randScatterLat: Double    // [0,1) — independent per-dab draw, lateral (⊥ stroke) jitter
+    public var randScatterLin: Double    // [0,1) — independent per-dab draw, linear (∥ stroke) jitter
 
     public init(
         pressure: Double = 1,
@@ -446,7 +448,9 @@ public struct SensorInput: Sendable {
         randPerDab: Double = 0,
         randPerStroke: Double = 0,
         randScatterX: Double = 0.5,
-        randScatterY: Double = 0.5
+        randScatterY: Double = 0.5,
+        randScatterLat: Double = 0.5,
+        randScatterLin: Double = 0.5
     ) {
         self.pressure = pressure
         self.tiltElevationNorm = tiltElevationNorm
@@ -460,6 +464,8 @@ public struct SensorInput: Sendable {
         self.randPerStroke = randPerStroke
         self.randScatterX = randScatterX
         self.randScatterY = randScatterY
+        self.randScatterLat = randScatterLat
+        self.randScatterLin = randScatterLin
     }
 }
 
@@ -547,6 +553,8 @@ public struct StrokeDynamicsState {
         // Independent per-dab streams for scatter X/Y (distinct channels so X and Y don't correlate).
         let scatterX = brushHash01(seed, dabIndex &+ 1, 0x5CA7)
         let scatterY = brushHash01(seed, dabIndex &+ 1, 0x5CA8)
+        let scatterLat = brushHash01(seed, dabIndex &+ 1, 0x5CA9)
+        let scatterLin = brushHash01(seed, dabIndex &+ 1, 0x5CAA)
 
         let input = SensorInput(
             pressure: clamp01(force),
@@ -560,7 +568,9 @@ public struct StrokeDynamicsState {
             randPerDab: randPerDab,
             randPerStroke: perStrokeRand,
             randScatterX: scatterX,
-            randScatterY: scatterY
+            randScatterY: scatterY,
+            randScatterLat: scatterLat,
+            randScatterLin: scatterLin
         )
         dabIndex += 1
         return input
@@ -636,6 +646,13 @@ public struct BrushDynamics: Codable, Equatable, Sendable {
     /// Scatter: per-dab random center displacement, magnitude = value × dab diameter. Size-like
     /// fold (so scatter can itself be pressure/speed-driven). Krita `KisScatterOption`.
     public var scatter: CurveOption?
+    /// Lateral scatter (Procreate "Jitter"⊥): per-dab random displacement PERPENDICULAR
+    /// to the stroke direction only, magnitude = value × dab diameter. Size-like fold.
+    /// Splits the isotropic `scatter` into the Procreate Stroke-Path components.
+    public var scatterLateral: CurveOption?
+    /// Linear scatter (Procreate "Jitter"∥): per-dab random displacement ALONG the stroke
+    /// direction only, magnitude = value × dab diameter. Size-like fold.
+    public var scatterLinear: CurveOption?
     /// Tip roundness/aspect multiplier (Procreate "Pressure/Tilt Roundness"): per-dab
     /// multiplier on `BrushConfig.aspectRatio`, size-like fold, result clamped to
     /// [0.05, 1]. Drive with pressure for a nib that squashes as you press. Added
@@ -651,11 +668,14 @@ public struct BrushDynamics: Codable, Equatable, Sendable {
 
     public init(size: CurveOption? = nil, flow: CurveOption? = nil,
                 rotation: CurveOption? = nil, scatter: CurveOption? = nil,
+                scatterLateral: CurveOption? = nil, scatterLinear: CurveOption? = nil,
                 ratio: CurveOption? = nil, colorJitter: ColorJitter? = nil) {
         self.size = size
         self.flow = flow
         self.rotation = rotation
         self.scatter = scatter
+        self.scatterLateral = scatterLateral
+        self.scatterLinear = scatterLinear
         self.ratio = ratio
         self.colorJitter = colorJitter
     }
@@ -663,16 +683,19 @@ public struct BrushDynamics: Codable, Equatable, Sendable {
     /// True if no parameter has a non-identity dynamic — the legacy path can run unchanged.
     public var isInert: Bool {
         size == nil && flow == nil && rotation == nil
-            && scatter == nil && ratio == nil && (colorJitter?.isInert ?? true)
+            && scatter == nil && scatterLateral == nil && scatterLinear == nil
+            && ratio == nil && (colorJitter?.isInert ?? true)
     }
 
-    enum CodingKeys: String, CodingKey { case size, flow, rotation, scatter, ratio, colorJitter }
+    enum CodingKeys: String, CodingKey { case size, flow, rotation, scatter, scatterLateral, scatterLinear, ratio, colorJitter }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         size = try c.decodeIfPresent(CurveOption.self, forKey: .size)
         flow = try c.decodeIfPresent(CurveOption.self, forKey: .flow)
         rotation = try c.decodeIfPresent(CurveOption.self, forKey: .rotation)
         scatter = try c.decodeIfPresent(CurveOption.self, forKey: .scatter)
+        scatterLateral = try c.decodeIfPresent(CurveOption.self, forKey: .scatterLateral)
+        scatterLinear = try c.decodeIfPresent(CurveOption.self, forKey: .scatterLinear)
         ratio = try c.decodeIfPresent(CurveOption.self, forKey: .ratio)
         colorJitter = try c.decodeIfPresent(ColorJitter.self, forKey: .colorJitter)
     }

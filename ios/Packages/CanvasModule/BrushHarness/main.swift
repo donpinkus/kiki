@@ -209,7 +209,8 @@ final class Scene {
                                           strokeOpacity: Float(stroke.brush.opacity),
                                           shapeTexture: renderer.shapeTexture(for: stroke.brush.shapeID),
                                           grain: renderer.grainSettings(for: stroke.brush),
-                                          lightness: renderer.lightnessSettings(for: stroke.brush))
+                                          lightness: renderer.lightnessSettings(for: stroke.brush),
+                                          flip: renderer.flipSettings(for: stroke.brush))
         }
     }
 
@@ -533,6 +534,92 @@ runScene("dry-10-lightness-tips",
     s.paint(synthStroke(id: 123, brush: r,
                         from: CGPoint(x: 120, y: 870), to: CGPoint(x: 904, y: 870),
                         bow: 40, force: { 0.35 + 0.55 * $0 }))
+}
+
+runScene("dry-11-count-scatter",
+         """
+         Cheap-knobs batch 2 (Procreate Stroke Path / Shape): stamp Count and the scatter split.
+         - Row 1: isotropic Scatter 0.5, Count 1 — the baseline spray.
+         - Row 2: SAME scatter, Count 4 — four stamps per spacing point, each with its own
+           scatter draw: a denser cluster texture at the same walk rate.
+         - Row 3: Count 4 + Count Jitter 0.9 — the per-dab copy count varies randomly, so
+           density breathes along the stroke.
+         - Row 4: LATERAL scatter only (⊥ stroke) — dabs spread ACROSS the path, edges fuzz,
+           the along-path rhythm stays even.
+         - Row 5: LINEAR scatter only (∥ stroke) — dabs bunch and gap ALONG the path, the
+           stroke's width stays clean.
+         """) { s in
+    func sprayBase(_ width: CGFloat = 34) -> BrushConfig {
+        var b = pen(.black, width: width, flow: 0.85)
+        b.hardness = 0.85
+        b.spacing = 1.1
+        return b
+    }
+    var iso = sprayBase()
+    iso.dynamics = BrushDynamics(scatter: CurveOption(sensors: [], strength: 0.5))
+    s.label("scatter 0.5, count 1", y: 100)
+    s.paint(synthStroke(id: 130, brush: iso, from: CGPoint(x: 120, y: 160), to: CGPoint(x: 904, y: 160), force: { _ in 1 }))
+
+    var counted = iso
+    counted.stampCount = 4
+    s.label("scatter 0.5, count 4 — clustered spray, same walk", y: 260)
+    s.paint(synthStroke(id: 131, brush: counted, from: CGPoint(x: 120, y: 320), to: CGPoint(x: 904, y: 320), force: { _ in 1 }))
+
+    var jittered = counted
+    jittered.stampCountJitter = 0.9
+    s.label("count 4, count jitter 0.9 — density breathes", y: 420)
+    s.paint(synthStroke(id: 132, brush: jittered, from: CGPoint(x: 120, y: 480), to: CGPoint(x: 904, y: 480), force: { _ in 1 }))
+
+    var lat = sprayBase(26)
+    lat.spacing = 0.5
+    lat.dynamics = BrushDynamics(scatterLateral: CurveOption(sensors: [], strength: 0.9))
+    s.label("lateral scatter only — spread ACROSS the path", y: 580)
+    s.paint(synthStroke(id: 133, brush: lat, from: CGPoint(x: 120, y: 660), to: CGPoint(x: 904, y: 660), bow: 60, force: { _ in 1 }))
+
+    var lin = sprayBase(26)
+    lin.spacing = 0.5
+    lin.dynamics = BrushDynamics(scatterLinear: CurveOption(sensors: [], strength: 0.9))
+    s.label("linear scatter only — bunch/gap ALONG the path", y: 790)
+    s.paint(synthStroke(id: 134, brush: lin, from: CGPoint(x: 120, y: 870), to: CGPoint(x: 904, y: 870), bow: 60, force: { _ in 1 }))
+}
+
+runScene("dry-12-orientation-flips",
+         """
+         Cheap-knobs batch 2 (Procreate Shape): signed follow-stroke Rotation and Flip X/Y.
+         - Rows 1-3: the same flat charcoal nib (aspect 0.25) on the same S-curve with the
+           Rotation knob at +1 / 0 / −1: follows the stroke (thick-thin calligraphy) /
+           held upright (thick where the path is horizontal) / INVERSE-follows (the
+           thick/thin pattern mirrors row 1).
+         - Row 4: drybrush dabs, unflipped vs Flip X vs Flip Y (spaced out so single stamps
+           are inspectable — the streak pattern mirrors accordingly).
+         """) { s in
+    for (i, follow) in [CGFloat(1), 0, -1].enumerated() {
+        var nib = pen(i == 1 ? teal : .black, width: 56, shape: "charcoal")
+        nib.aspectRatio = 0.25
+        nib.spacing = 0.15
+        nib.rotationFollow = follow
+        s.label(String(format: "rotation %+.0f — %@", follow,
+                       follow == 1 ? "follows the stroke" : follow == 0 ? "held upright" : "inverse-follows"),
+                y: CGFloat(95 + i * 230))
+        s.paint(synthStroke(id: 140 + i, brush: nib,
+                            from: CGPoint(x: 120, y: CGFloat(160 + i * 230)),
+                            to: CGPoint(x: 904, y: CGFloat(160 + i * 230)),
+                            bow: 90, force: { _ in 0.85 }))
+    }
+    func flipRow(_ id: Int, from x0: CGFloat, to x1: CGFloat, flipX: Bool, flipY: Bool) {
+        var b = pen(.black, width: 62, shape: "drybrush")
+        b.spacing = 1.3
+        b.rotationFollow = 0   // upright dabs so the mirror is inspectable
+        b.flipX = flipX
+        b.flipY = flipY
+        s.paint(synthStroke(id: id, brush: b, from: CGPoint(x: x0, y: 880), to: CGPoint(x: x1, y: 880), force: { _ in 1 }))
+    }
+    s.label("plain", y: 800)
+    s.label("flip X", x: 400, y: 800)
+    s.label("flip Y", x: 690, y: 800)
+    flipRow(145, from: 120, to: 310, flipX: false, flipY: false)
+    flipRow(146, from: 400, to: 590, flipX: true, flipY: false)
+    flipRow(147, from: 690, to: 880, flipX: false, flipY: true)
 }
 
 runScene("wet-01-blue-into-yellow",

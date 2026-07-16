@@ -41,6 +41,24 @@ struct BrushSettingsPopover: View {
             BrushSliderRow("Aspect", value: $coordinator.toolAspect, range: 0.1...1.0, help: Self.help["Aspect"]!)
             BrushSliderRow("Spacing", value: $coordinator.toolSpacing, range: 0.02...1.0, help: Self.help["Spacing"]!)
             Group {
+                BrushSliderRow("Count", value: $coordinator.toolStampCount, range: 1...8, help: Self.help["Count"]!,
+                               format: { "\(Int($0.rounded()))" })
+                if coordinator.toolStampCount.rounded() > 1 {
+                    BrushSliderRow("Count jitter", value: $coordinator.toolStampCountJitter, range: 0.0...1.0, help: Self.help["Count jitter"]!)
+                }
+                if coordinator.toolShapeID != nil {
+                    BrushSliderRow("Rotation", value: $coordinator.toolRotationFollow, range: -1.0...1.0, help: Self.help["Rotation"]!,
+                                   format: { String(format: "%+.0f%%", $0 * 100) })
+                    HStack(spacing: 20) {
+                        Toggle("Flip X", isOn: $coordinator.toolFlipX)
+                        Toggle("Flip Y", isOn: $coordinator.toolFlipY)
+                    }
+                    .font(.subheadline.weight(.medium))
+                }
+            }
+            .disabled(wet)
+            .opacity(wet ? 0.35 : 1)
+            Group {
                 BrushSliderRow("Taper", value: $coordinator.toolTaper, range: 0.0...1.0, help: Self.help["Taper"]!)
             }
             .disabled(wet)
@@ -107,6 +125,15 @@ struct BrushSettingsPopover: View {
         "Spacing": BrushHelp(summary: "How far apart the stamped dabs are along the stroke.",
             low: "Dense — a smooth, continuous line.",
             high: "Far apart — you see individual dabs."),
+        "Count": BrushHelp(summary: "How many stamps land at each spacing point (pairs with Scatter in Brush Studio for spray/cluster texture).",
+            low: "One stamp per point — the normal stroke.",
+            high: "Eight stamps per point, each with its own scatter."),
+        "Count jitter": BrushHelp(summary: "Randomly varies the per-point stamp count, so density breathes along the stroke.",
+            low: "Always the full Count.",
+            high: "Anywhere from one stamp up to the full Count, at random."),
+        "Rotation": BrushHelp(summary: "How the tip turns with your stroke direction.",
+            low: "−100%: turns opposite to the stroke (mirrored calligraphy).",
+            high: "+100%: follows the stroke; 0% holds the tip upright."),
         "Taper": BrushHelp(summary: "Thins the stroke toward its start and end.",
             low: "Uniform width from end to end.",
             high: "Tapers to a point at both ends."),
@@ -216,13 +243,17 @@ private struct BrushSliderRow: View {
     @Binding var value: CGFloat
     let range: ClosedRange<CGFloat>
     let help: BrushHelp
+    /// Value readout override (default: percent).
+    let format: (CGFloat) -> String
     @State private var showHelp = false
 
-    init(_ title: String, value: Binding<CGFloat>, range: ClosedRange<CGFloat>, help: BrushHelp) {
+    init(_ title: String, value: Binding<CGFloat>, range: ClosedRange<CGFloat>, help: BrushHelp,
+         format: @escaping (CGFloat) -> String = { "\(Int(($0 * 100).rounded()))%" }) {
         self.title = title
         self._value = value
         self.range = range
         self.help = help
+        self.format = format
     }
 
     var body: some View {
@@ -239,7 +270,7 @@ private struct BrushSliderRow: View {
                     helpContent.presentationCompactAdaptation(.popover)
                 }
                 Spacer()
-                Text("\(Int((value * 100).rounded()))%")
+                Text(format(value))
                     .font(.subheadline.monospacedDigit())
                     .foregroundStyle(.secondary)
             }

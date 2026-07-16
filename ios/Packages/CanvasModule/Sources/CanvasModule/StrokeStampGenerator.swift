@@ -92,9 +92,15 @@ enum StrokeStampGenerator {
         // travel direction → rotation = atan2(-dx, dy). Round (procedural) brushes are
         // radially symmetric, so they stay at 0.
         let orientsToStroke = BrushShapeCatalog.orientsToStroke(brush.shapeID)
+        // Signed follow-stroke rotation (Procreate Shape "Rotation" −1…1). nil = legacy:
+        // catalog-orienting shapes follow fully, others stay upright.
+        let rotationFollow: CGFloat = {
+            if let f = brush.rotationFollow { return brush.shapeID != nil ? max(-1, min(1, f)) : 0 }
+            return orientsToStroke ? 1 : 0
+        }()
         func strokeRotation(dx: CGFloat, dy: CGFloat) -> Float {
-            guard orientsToStroke, dx != 0 || dy != 0 else { return 0 }
-            return Float(atan2(-dx, dy))
+            guard rotationFollow != 0, dx != 0 || dy != 0 else { return 0 }
+            return Float(CGFloat(atan2(-dx, dy)) * rotationFollow)
         }
         // Direction at the very start/end caps, taken from the first/last real segment.
         let firstDir: (CGFloat, CGFloat) = stroke.points.count > 1
@@ -140,9 +146,10 @@ enum StrokeStampGenerator {
         /// options. `dt` is the seconds across the segment this dab sits on (for the Speed sensor).
         func dabAttrs(x: CGFloat, y: CGFloat, force: CGFloat, altitude: CGFloat, azimuth: CGFloat,
                       dx: CGFloat, dy: CGFloat, dt: Double, roll: CGFloat = 0)
-            -> (width: CGFloat, color: SIMD4<Float>, rotation: Float, offset: CGPoint, aspect: Float) {
+            -> (width: CGFloat, color: SIMD4<Float>, rotation: Float, offset: CGPoint, aspect: Float,
+                scatterMags: SIMD3<Float>) {
             guard hasDyn, var st = dynState else {
-                return (brush.effectiveWidth(force: force, altitude: altitude), color, strokeRotation(dx: dx, dy: dy), .zero, aspect)
+                return (brush.effectiveWidth(force: force, altitude: altitude), color, strokeRotation(dx: dx, dy: dy), .zero, aspect, .zero)
             }
             let input = st.advance(
                 x: Double(x), y: Double(y), force: Double(force), altitude: Double(altitude),
@@ -160,20 +167,95 @@ enum StrokeStampGenerator {
             if let rotOpt = dyn?.rotation { rot += Float(rotOpt.value(input) * Double.pi) } // [-1,1] turns → ±π
             // Scatter: per-dab random center displacement, magnitude = value × dab diameter.
             // Displaces only the rendered stamp; the spacing/path walk uses the un-scattered point.
+            // Three channels (isotropic + Procreate's Stroke-Path split): lateral displaces
+            // PERPENDICULAR to the travel direction, linear ALONG it. Magnitudes (× width)
+            // are also returned so Count copies can take independent draws at the same size.
             var offset = CGPoint.zero
+            var mags = SIMD3<Float>(0, 0, 0) // (iso, lateral, linear) × width
+            let segLen = hypot(dx, dy)
+            let ux = segLen > 0 ? dx / segLen : 0
+            let uy = segLen > 0 ? dy / segLen : 0
             if let sc = dyn?.scatter {
-                let mag = sc.value(input)
-                offset = CGPoint(x: w * CGFloat((2 * input.randScatterX - 1) * mag),
-                                 y: w * CGFloat((2 * input.randScatterY - 1) * mag))
+                let mag = w * CGFloat(sc.value(input))
+                mags.x = Float(mag)
+                offset.x += mag * CGFloat(2 * input.randScatterX - 1)
+                offset.y += mag * CGFloat(2 * input.randScatterY - 1)
+            }
+            if let sl = dyn?.scatterLateral {
+                let mag = w * CGFloat(sl.value(input))
+                mags.y = Float(mag)
+                let d = mag * CGFloat(2 * input.randScatterLat - 1)
+                offset.x += -uy * d
+                offset.y += ux * d
+            }
+            if let sn = dyn?.scatterLinear {
+                let mag = w * CGFloat(sn.value(input))
+                mags.z = Float(mag)
+                let d = mag * CGFloat(2 * input.randScatterLin - 1)
+                offset.x += ux * d
+                offset.y += uy * d
             }
             // Roundness/ratio (Procreate Pressure/Tilt Roundness): per-dab aspect multiplier.
             var dabAspect = aspect
             if let ratioOpt = dyn?.ratio {
                 dabAspect = Float(min(max(CGFloat(aspect) * CGFloat(ratioOpt.value(input)), 0.05), 1))
             }
-            return (w, col, rot, offset, dabAspect)
+            return (w, col, rot, offset, dabAspect, mags)
         }
         // ---------------------------------------------------------------------------------
+
+        // Count (Procreate Shape "Count" / "Count Jitter"): stamps per spacing point.
+        // Copy 0 is the normal dab (byte-identical when count == 1); copies 1…n−1 re-draw
+        // the scatter channels deterministically (stroke seed + dab serial + copy index)
+        // at the same magnitudes, so they cluster around the walk point.
+        let stampCount = min(max(brush.stampCount, 1), 16)
+        let countJitter = min(max(brush.stampCountJitter, 0), 1)
+        var dabSerial: UInt64 = 0
+        func appendDab(_ attr: (width: CGFloat, color: SIMD4<Float>, rotation: Float, offset: CGPoint,
+                                aspect: Float, scatterMags: SIMD3<Float>),
+                       x: CGFloat, y: CGFloat, dx: CGFloat, dy: CGFloat) {
+            dabSerial &+= 1
+            var copies = stampCount
+            if stampCount > 1, countJitter > 0 {
+                let r = brushHash01(spacingSeed, dabSerial, 0xC07)
+                copies = max(1, stampCount - Int(floor(Double(stampCount) * countJitter * r)))
+            }
+            let segLen = hypot(dx, dy)
+            let ux = segLen > 0 ? dx / segLen : 0
+            let uy = segLen > 0 ? dy / segLen : 0
+            for c in 0..<copies {
+                var off = attr.offset
+                if c > 0 {
+                    let idx = dabSerial &* 31 &+ UInt64(c)
+                    off = .zero
+                    if attr.scatterMags.x > 0 {
+                        let m = CGFloat(attr.scatterMags.x)
+                        off.x += m * CGFloat(2 * brushHash01(spacingSeed, idx, 0xC0A7) - 1)
+                        off.y += m * CGFloat(2 * brushHash01(spacingSeed, idx, 0xC0A8) - 1)
+                    }
+                    if attr.scatterMags.y > 0 {
+                        let d = CGFloat(attr.scatterMags.y) * CGFloat(2 * brushHash01(spacingSeed, idx, 0xC0A9) - 1)
+                        off.x += -uy * d
+                        off.y += ux * d
+                    }
+                    if attr.scatterMags.z > 0 {
+                        let d = CGFloat(attr.scatterMags.z) * CGFloat(2 * brushHash01(spacingSeed, idx, 0xC0AA) - 1)
+                        off.x += ux * d
+                        off.y += uy * d
+                    }
+                }
+                let pos = CGPoint(x: x + off.x, y: y + off.y)
+                guard clipPath.map({ $0.contains(pos) }) ?? true else { continue }
+                stamps.append(CanvasRenderer.StampInstance(
+                    center: SIMD2<Float>(Float(pos.x * scale), Float(pos.y * scale)),
+                    radius: Float(attr.width * 0.5 * scale),
+                    rotation: attr.rotation,
+                    color: attr.color,
+                    hardness: hardness,
+                    aspect: attr.aspect
+                ))
+            }
+        }
 
         let first = stroke.points[0]
         let firstDt = stroke.points.count > 1 ? max(0, Double(stroke.points[1].timestamp - first.timestamp)) : 0
@@ -181,18 +263,7 @@ enum StrokeStampGenerator {
                                  azimuth: first.azimuth, dx: firstDir.0, dy: firstDir.1, dt: firstDt,
                                  roll: first.rollAngle)
         let firstWidth = firstAttr.width
-        if clipPath.map({ $0.contains(CGPoint(x: first.position.x + firstAttr.offset.x,
-                                              y: first.position.y + firstAttr.offset.y)) }) ?? true {
-            stamps.append(CanvasRenderer.StampInstance(
-                center: SIMD2<Float>(Float((first.position.x + firstAttr.offset.x) * scale),
-                                     Float((first.position.y + firstAttr.offset.y) * scale)),
-                radius: Float(firstWidth * 0.5 * scale),
-                rotation: firstAttr.rotation,
-                color: firstAttr.color,
-                hardness: hardness,
-                aspect: firstAttr.aspect
-            ))
-        }
+        appendDab(firstAttr, x: first.position.x, y: first.position.y, dx: firstDir.0, dy: firstDir.1)
 
         var lastStampPos = first.position
         var currentSpacing = jitteredSpacing(max(firstWidth * spacingFraction, 0.5), 0)
@@ -230,17 +301,7 @@ enum StrokeStampGenerator {
                 let width = attr.width
 
                 let pos = CGPoint(x: x, y: y)
-                let scattered = CGPoint(x: x + attr.offset.x, y: y + attr.offset.y)
-                if clipPath.map({ $0.contains(scattered) }) ?? true {
-                    stamps.append(CanvasRenderer.StampInstance(
-                        center: SIMD2<Float>(Float(scattered.x * scale), Float(scattered.y * scale)),
-                        radius: Float(width * 0.5 * scale),
-                        rotation: attr.rotation,
-                        color: attr.color,
-                        hardness: hardness,
-                        aspect: attr.aspect
-                    ))
-                }
+                appendDab(attr, x: x, y: y, dx: dx, dy: dy)
 
                 lastStampPos = pos
                 currentSpacing = jitteredSpacing(max(width * spacingFraction, 0.5), stamps.count)
@@ -259,19 +320,7 @@ enum StrokeStampGenerator {
             let attr = dabAttrs(x: last.position.x, y: last.position.y, force: last.force, altitude: last.altitude,
                                 azimuth: last.azimuth, dx: lastDir.0, dy: lastDir.1, dt: lastDt,
                                 roll: last.rollAngle)
-            let width = attr.width
-            if clipPath.map({ $0.contains(CGPoint(x: last.position.x + attr.offset.x,
-                                                  y: last.position.y + attr.offset.y)) }) ?? true {
-                stamps.append(CanvasRenderer.StampInstance(
-                    center: SIMD2<Float>(Float((last.position.x + attr.offset.x) * scale),
-                                         Float((last.position.y + attr.offset.y) * scale)),
-                    radius: Float(width * 0.5 * scale),
-                    rotation: attr.rotation,
-                    color: attr.color,
-                    hardness: hardness,
-                    aspect: attr.aspect
-                ))
-            }
+            appendDab(attr, x: last.position.x, y: last.position.y, dx: lastDir.0, dy: lastDir.1)
         }
 
         applyTaper(to: &stamps, taper: brush.taper)

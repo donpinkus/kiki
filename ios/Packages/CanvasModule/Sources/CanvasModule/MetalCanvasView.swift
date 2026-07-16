@@ -454,6 +454,7 @@ public final class MetalCanvasView: UIView {
         renderer.activeShapeTexture = isErasing ? nil : currentShapeTexture()
         renderer.activeGrain = isErasing ? nil : currentGrain()
         renderer.activeLightness = isErasing ? nil : currentBrushConfig().flatMap { renderer.lightnessSettings(for: $0) }
+        renderer.activeFlip = isErasing ? .zero : (currentBrushConfig().map { renderer.flipSettings(for: $0) } ?? .zero)
         renderer.renderFrame(drawable: drawable, isErasing: isErasing)
         NSLog("%@", "🔬OVL MCV.renderFrame main renderFrame returned")
 
@@ -2364,7 +2365,8 @@ public final class MetalCanvasView: UIView {
                         strokeOpacity: Float(stroke.brush.opacity),
                         shapeTexture: renderer.shapeTexture(for: stroke.brush.shapeID),
                         grain: renderer.grainSettings(for: stroke.brush),
-                        lightness: renderer.lightnessSettings(for: stroke.brush)
+                        lightness: renderer.lightnessSettings(for: stroke.brush),
+                        flip: renderer.flipSettings(for: stroke.brush)
                     )
                 }
             }
