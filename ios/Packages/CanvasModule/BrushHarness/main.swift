@@ -622,6 +622,26 @@ runScene("dry-12-orientation-flips",
     flipRow(147, from: 690, to: 880, flipX: false, flipY: true)
 }
 
+runScene("dry-13-falloff",
+         """
+         Fall Off (Procreate Stroke Path): the stroke's paint runs out over drawn distance —
+         a per-dab flow multiplier over cumulative arc length, independent of speed or dab
+         density. All three rows are the SAME long serpentine stroke:
+         - Row 1: fall off 0 — never dies (constant ink to the end).
+         - Row 2: fall off 0.5 — fades over roughly the document width.
+         - Row 3: fall off 1.0 — dries out within a few hundred px, like a drying marker.
+         """) { s in
+    for (i, k) in [CGFloat(0), 0.5, 1.0].enumerated() {
+        var b = pen(.black, width: 34, flow: 0.9)
+        b.fallOff = k
+        s.label(String(format: "fall off %.1f", k), y: CGFloat(120 + i * 300))
+        s.paint(synthStroke(id: 150 + i, brush: b,
+                            from: CGPoint(x: 120, y: CGFloat(200 + i * 300)),
+                            to: CGPoint(x: 904, y: CGFloat(200 + i * 300)),
+                            bow: 90, force: { _ in 0.8 }))
+    }
+}
+
 runScene("wet-01-blue-into-yellow",
          """
          Spectral pigment mixing (Kubelka-Munk): a WET blue stroke dragged left-to-right through a

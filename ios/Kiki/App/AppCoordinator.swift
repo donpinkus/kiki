@@ -142,6 +142,20 @@ final class AppCoordinator {
             applyTool()
         }
     }
+    /// Fall Off ("Fall off"): paint runs out over drawn distance.
+    var toolFallOff: CGFloat = 0 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    /// Grain scale ("Grain scale", 0.5–3×): coarseness multiplier on the grain tile.
+    var toolGrainScale: CGFloat = 1.0 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
     /// Stamps per spacing point ("Count", 1–8; CGFloat for the slider, rounded at build).
     var toolStampCount: CGFloat = 1 {
         didSet {
@@ -1821,7 +1835,9 @@ final class AppCoordinator {
                 aspectRatio: toolAspect,
                 grainID: toolGrainID,
                 grainDepth: toolGrainDepth,
+                grainScale: toolGrainScale,
                 tipLightness: toolTipLightness,
+                fallOff: toolFallOff,
                 stampCount: Int(toolStampCount.rounded()),
                 stampCountJitter: toolStampCountJitter,
                 rotationFollow: toolRotationFollow,

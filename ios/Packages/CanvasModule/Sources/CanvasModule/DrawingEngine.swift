@@ -178,6 +178,11 @@ public struct BrushConfig: Codable, Sendable {
     /// light ones lighten it, mid-gray = exact brush color. 0 = off (flat ink, today's
     /// look). Shaped tips only; the round procedural tip has no luma to map.
     public var tipLightness: CGFloat
+    /// Fall Off [0,1] (Procreate Stroke Path): the stroke's paint runs out over drawn
+    /// distance — flow ramps to zero at a die length that shrinks as the knob rises
+    /// (0 = never dies; 1 = dies within a few hundred document px). Applied as a
+    /// per-dab flow multiplier over cumulative arc length; dry path only.
+    public var fallOff: CGFloat
     /// Stamps per spacing point (Procreate Shape "Count", 1–16). Copies beyond the first
     /// get independent scatter draws (using the brush's scatter/lateral/linear magnitudes),
     /// so Count × Scatter = clustered texture. With no scatter configured the copies
@@ -227,6 +232,7 @@ public struct BrushConfig: Codable, Sendable {
         grainDepth: CGFloat = 0.5,
         grainScale: CGFloat = 1.0,
         tipLightness: CGFloat = 0.0,
+        fallOff: CGFloat = 0.0,
         stampCount: Int = 1,
         stampCountJitter: CGFloat = 0.0,
         rotationFollow: CGFloat? = nil,
@@ -257,6 +263,7 @@ public struct BrushConfig: Codable, Sendable {
         self.grainDepth = grainDepth
         self.grainScale = grainScale
         self.tipLightness = tipLightness
+        self.fallOff = fallOff
         self.stampCount = stampCount
         self.stampCountJitter = stampCountJitter
         self.rotationFollow = rotationFollow
@@ -297,7 +304,7 @@ public struct BrushConfig: Codable, Sendable {
         case hardness, spacing, taper, wetEnabled, wetStrength, wetPickup, shapeID
         case dynamics, wetSmudge, aspectRatio, stabilization, pressureSmoothing
         case grainID, grainDepth, grainScale, spacingJitter, tipLightness
-        case stampCount, stampCountJitter, rotationFollow, flipX, flipY
+        case stampCount, stampCountJitter, rotationFollow, flipX, flipY, fallOff
     }
 
     public init(from decoder: Decoder) throws {
@@ -336,6 +343,7 @@ public struct BrushConfig: Codable, Sendable {
         grainScale = try container.decodeIfPresent(CGFloat.self, forKey: .grainScale) ?? 1.0
         tipLightness = try container.decodeIfPresent(CGFloat.self, forKey: .tipLightness) ?? 0.0
         // Cheap-knobs batch 2 — defaults reproduce single-stamp, catalog-oriented, unflipped tips.
+        fallOff = try container.decodeIfPresent(CGFloat.self, forKey: .fallOff) ?? 0.0
         stampCount = try container.decodeIfPresent(Int.self, forKey: .stampCount) ?? 1
         stampCountJitter = try container.decodeIfPresent(CGFloat.self, forKey: .stampCountJitter) ?? 0.0
         rotationFollow = try container.decodeIfPresent(CGFloat.self, forKey: .rotationFollow)
@@ -377,6 +385,7 @@ public struct BrushConfig: Codable, Sendable {
         try container.encode(grainDepth, forKey: .grainDepth)
         try container.encode(grainScale, forKey: .grainScale)
         try container.encode(tipLightness, forKey: .tipLightness)
+        try container.encode(fallOff, forKey: .fallOff)
         try container.encode(stampCount, forKey: .stampCount)
         try container.encode(stampCountJitter, forKey: .stampCountJitter)
         try container.encodeIfPresent(rotationFollow, forKey: .rotationFollow)

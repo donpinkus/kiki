@@ -13,6 +13,11 @@ Like `OfflineTests/`, this is **not** a SwiftPM target — it compiles the modul
 directly (`-D BRUSH_HARNESS` swaps `Bundle.module` resource lookup for the
 `BRUSH_SHAPES_DIR` env var), so it never affects the app build.
 
+> **Render alone.** Don't render the battery while an xcodebuild or other heavy job runs
+> concurrently: under system load the shaped-tip scenes (mipmapped shape textures) come out
+> with sub-texel differences vs. a solo run (observed 2026-07-15; solo runs are byte-for-byte
+> deterministic across binaries). Byte-diff comparisons are only meaningful between solo runs.
+
 ## Run
 
 ```bash

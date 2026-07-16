@@ -210,11 +210,27 @@ enum StrokeStampGenerator {
         // at the same magnitudes, so they cluster around the walk point.
         let stampCount = min(max(brush.stampCount, 1), 16)
         let countJitter = min(max(brush.stampCountJitter, 0), 1)
+        // Fall Off (Procreate Stroke Path): paint runs out over drawn distance. The die
+        // length shrinks as the knob rises — 250px (document space) at 1.0, ~5000px near
+        // 0 (effectively "never" on the 2048² document). Quadratic knee gives the slider
+        // a usable low end. Scales the premultiplied dab color (flow), preserving ratio.
+        let fallOff = min(max(brush.fallOff, 0), 1)
+        let dieLength: CGFloat = fallOff > 0 ? 250 + 4750 * (1 - fallOff) * (1 - fallOff) : .infinity
+        var fallArc: CGFloat = 0          // cumulative arc length at the current dab
+        var lastDabPos: CGPoint? = nil    // walk position of the previous dab (un-scattered)
         var dabSerial: UInt64 = 0
         func appendDab(_ attr: (width: CGFloat, color: SIMD4<Float>, rotation: Float, offset: CGPoint,
                                 aspect: Float, scatterMags: SIMD3<Float>),
                        x: CGFloat, y: CGFloat, dx: CGFloat, dy: CGFloat) {
             dabSerial &+= 1
+            var attr = attr
+            if fallOff > 0 {
+                if let lp = lastDabPos { fallArc += hypot(x - lp.x, y - lp.y) }
+                lastDabPos = CGPoint(x: x, y: y)
+                let m = Float(max(0, 1 - fallArc / dieLength))
+                if m <= 0 { return }  // paint ran out
+                attr.color *= m
+            }
             var copies = stampCount
             if stampCount > 1, countJitter > 0 {
                 let r = brushHash01(spacingSeed, dabSerial, 0xC07)

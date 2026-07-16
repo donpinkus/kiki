@@ -24,6 +24,8 @@ struct BrushSettingsPopover: View {
                 GrainPicker(selection: $coordinator.toolGrainID)
                 if coordinator.toolGrainID != nil {
                     BrushSliderRow("Grain depth", value: $coordinator.toolGrainDepth, range: 0.0...1.0, help: Self.help["Grain depth"]!)
+                    BrushSliderRow("Grain scale", value: $coordinator.toolGrainScale, range: 0.5...3.0, help: Self.help["Grain scale"]!,
+                                   format: { String(format: "%.1f\u{00D7}", $0) })
                 }
             }
             .disabled(wet)
@@ -60,6 +62,7 @@ struct BrushSettingsPopover: View {
             .opacity(wet ? 0.35 : 1)
             Group {
                 BrushSliderRow("Taper", value: $coordinator.toolTaper, range: 0.0...1.0, help: Self.help["Taper"]!)
+                BrushSliderRow("Fall off", value: $coordinator.toolFallOff, range: 0.0...1.0, help: Self.help["Fall off"]!)
             }
             .disabled(wet)
             .opacity(wet ? 0.35 : 1)
@@ -125,6 +128,12 @@ struct BrushSettingsPopover: View {
         "Spacing": BrushHelp(summary: "How far apart the stamped dabs are along the stroke.",
             low: "Dense — a smooth, continuous line.",
             high: "Far apart — you see individual dabs."),
+        "Fall off": BrushHelp(summary: "The stroke's paint gradually runs out as you draw.",
+            low: "Never runs out.",
+            high: "Fades to nothing within a short distance — like a drying marker."),
+        "Grain scale": BrushHelp(summary: "How coarse the paper-grain features are.",
+            low: "Fine tooth.",
+            high: "Coarse, chunky tooth."),
         "Count": BrushHelp(summary: "How many stamps land at each spacing point (pairs with Scatter in Brush Studio for spray/cluster texture).",
             low: "One stamp per point — the normal stroke.",
             high: "Eight stamps per point, each with its own scatter."),
