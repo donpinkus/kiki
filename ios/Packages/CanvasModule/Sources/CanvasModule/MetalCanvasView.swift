@@ -950,7 +950,10 @@ public final class MetalCanvasView: UIView {
     /// adaptive spacing.
     private func appendStampsForLatestPoints(touch: UITouch, event: UIEvent?) {
         guard let stroke = activeStroke else { return }
-        activeStrokeStamps = generateStampsForStroke(stroke, scale: canvasScale)
+        // Live preview: NO end cap (it re-evaluates at the pencil with live force each
+        // frame — grows/shrinks in place and dances with scatter). The cap lands via the
+        // touchesEnded regen, so the finished stroke still ends exactly at the lift point.
+        activeStrokeStamps = generateStampsForStroke(stroke, scale: canvasScale, includeEndCap: false)
     }
 
     // MARK: - Eraser (incremental application)
@@ -2439,11 +2442,13 @@ public final class MetalCanvasView: UIView {
     /// The pipeline itself lives in `StrokeStampGenerator` (pure, UIKit-free) so the
     /// BrushHarness runs the identical shipped code headless on macOS; this wrapper
     /// supplies the view's lasso clip + Brush Studio dev tuning.
-    private func generateStampsForStroke(_ stroke: Stroke, scale: CGFloat) -> [CanvasRenderer.StampInstance] {
+    private func generateStampsForStroke(_ stroke: Stroke, scale: CGFloat,
+                                         includeEndCap: Bool = true) -> [CanvasRenderer.StampInstance] {
         StrokeStampGenerator.stamps(
             for: stroke, scale: scale, clipPath: lassoClipPath,
             tuning: StrokeStampGenerator.DevTuning(
-                maxSpeed: devMaxSpeed, distancePeriod: devDistancePeriod, fadePeriod: devFadePeriod))
+                maxSpeed: devMaxSpeed, distancePeriod: devDistancePeriod, fadePeriod: devFadePeriod),
+            includeEndCap: includeEndCap)
     }
 
     /// Read-only access to the flattened canvas (all visible layers) as a CGImage

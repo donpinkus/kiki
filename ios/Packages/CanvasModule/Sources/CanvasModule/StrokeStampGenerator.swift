@@ -63,8 +63,15 @@ enum StrokeStampGenerator {
     /// Generate stamp instances for a complete stroke (used by replay + active drawing).
     /// When `clipPath` is set (lasso), stamps whose center falls outside the clip path
     /// are discarded (CPU-side clip masking).
+    /// `includeEndCap`: emit the final dab at the stroke's last point. TRUE for every
+    /// finalization path (flatten, replay, shape snap). The LIVE per-touch preview passes
+    /// FALSE: the cap sits at the live pencil position and re-evaluates with live force
+    /// and a shifting dab serial each frame, so in place it visibly grew/shrank with
+    /// pressure and its scatter draws danced (device report, 2026-07-15). Ink the user
+    /// sees during a stroke is now monotonic — dabs only ever get added.
     static func stamps(for stroke: Stroke, scale: CGFloat, clipPath: CGPath? = nil,
-                              tuning: DevTuning = DevTuning()) -> [CanvasRenderer.StampInstance] {
+                              tuning: DevTuning = DevTuning(),
+                              includeEndCap: Bool = true) -> [CanvasRenderer.StampInstance] {
         guard !stroke.points.isEmpty else { return [] }
 
         let brush = stroke.brush
@@ -375,8 +382,8 @@ enum StrokeStampGenerator {
             arcSinceLastStamp = segmentDist - (traveled - currentSpacing)
         }
 
-        // End cap.
-        if let last = stroke.points.last {
+        // End cap (finalization only — see `includeEndCap`).
+        if includeEndCap, let last = stroke.points.last {
             let n = stroke.points.count
             let lastDir: (CGFloat, CGFloat) = n > 1
                 ? (last.position.x - stroke.points[n - 2].position.x,
