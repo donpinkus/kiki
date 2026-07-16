@@ -75,10 +75,15 @@ struct BrushStudioView: View {
                         Text("\(coordinator.recordedStrokes.count) stroke\(coordinator.recordedStrokes.count == 1 ? "" : "s") recorded")
                             .font(.caption).foregroundStyle(.secondary)
                         Spacer()
+                        // .borderless is LOAD-BEARING: with the default style, a Form row
+                        // forwards one tap to EVERY Button in the row — tapping Upload also
+                        // fired Clear, wiping the recording before the upload read it (the
+                        // "recording gone + upload failed" device reports, 2026-07-15/16).
                         Button("Clear") {
                             coordinator.recordedStrokes.removeAll()
                             uploadState = .idle
                         }
+                            .buttonStyle(.borderless)
                             .font(.caption)
                             .disabled(coordinator.recordedStrokes.isEmpty)
                         Button("Share…") {
@@ -86,6 +91,7 @@ struct BrushStudioView: View {
                                 recordingShareItem = RecordingShareItem(url: url)
                             }
                         }
+                            .buttonStyle(.borderless)
                             .font(.caption)
                             .disabled(coordinator.recordedStrokes.isEmpty)
                         Button(uploadState == .uploading ? "Uploading…" : "Upload") {
@@ -97,6 +103,7 @@ struct BrushStudioView: View {
                                 uploadState = err == nil ? .done : .failed
                             }
                         }
+                            .buttonStyle(.borderless)
                             .font(.caption.weight(.medium))
                             .disabled(coordinator.recordedStrokes.isEmpty || uploadState == .uploading)
                     }
@@ -114,6 +121,7 @@ struct BrushStudioView: View {
                         Button("Share last recording…") {
                             recordingShareItem = RecordingShareItem(url: last)
                         }
+                        .buttonStyle(.borderless)
                         .font(.caption)
                     }
                     Text("Upload sends the stroke data (for exact replay) + a PNG of the canvas to Kiki Insights — a one-tap brush bug report. Share… is the offline AirDrop fallback.")
