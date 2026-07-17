@@ -132,6 +132,14 @@ public struct BrushConfig: Codable, Sendable {
     /// Stroke-end taper [0,1]. 0 = no taper; higher tapers the stamp radius toward the
     /// start and end of the stroke (the taper length is this fraction of the half-stroke).
     public var taper: CGFloat
+    /// Per-end taper OVERRIDES (richer taper, 2026-07-16): when > 0 they set the taper
+    /// length for that end alone, on top of the symmetric `taper` (effective length per
+    /// end = max(taper, taperStart/End)). 0 = follow `taper` (default, back-compat).
+    public var taperStart: CGFloat
+    public var taperEnd: CGFloat
+    /// How much the taper also fades OPACITY toward the stroke tips [0,1] (Procreate's
+    /// Taper "Opacity" slider). 0 = size-only taper (the pre-2026-07-16 look).
+    public var taperOpacity: CGFloat
     /// Wet-mix mode (pro-brush Phase 4, Step 1). When true the brush writes directly to
     /// the canvas layer (eraser-style RMW) and mixes its color into the pixels under it,
     /// instead of stamping opaquely via the scratch — i.e. wet-on-wet build-up.
@@ -242,6 +250,9 @@ public struct BrushConfig: Codable, Sendable {
         spacing: CGFloat = 0.3,
         spacingJitter: CGFloat = 0.0,
         taper: CGFloat = 0.0,
+        taperStart: CGFloat = 0.0,
+        taperEnd: CGFloat = 0.0,
+        taperOpacity: CGFloat = 0.0,
         wetEnabled: Bool = false,
         wetStrength: CGFloat = 0.4,
         wetPickup: CGFloat = 0.25,
@@ -276,6 +287,9 @@ public struct BrushConfig: Codable, Sendable {
         self.spacing = spacing
         self.spacingJitter = spacingJitter
         self.taper = taper
+        self.taperStart = taperStart
+        self.taperEnd = taperEnd
+        self.taperOpacity = taperOpacity
         self.wetEnabled = wetEnabled
         self.wetStrength = wetStrength
         self.wetPickup = wetPickup
@@ -339,6 +353,7 @@ public struct BrushConfig: Codable, Sendable {
         case grainID, grainDepth, grainScale, spacingJitter, tipLightness
         case stampCount, stampCountJitter, rotationFollow, flipX, flipY, fallOff, tipAngle
         case wetCharge, wetRefill
+        case taperStart, taperEnd, taperOpacity
     }
 
     public init(from decoder: Decoder) throws {
@@ -363,6 +378,9 @@ public struct BrushConfig: Codable, Sendable {
         spacing = try container.decodeIfPresent(CGFloat.self, forKey: .spacing) ?? 0.3
         spacingJitter = try container.decodeIfPresent(CGFloat.self, forKey: .spacingJitter) ?? 0.0
         taper = try container.decodeIfPresent(CGFloat.self, forKey: .taper) ?? 0.0
+        taperStart = try container.decodeIfPresent(CGFloat.self, forKey: .taperStart) ?? 0.0
+        taperEnd = try container.decodeIfPresent(CGFloat.self, forKey: .taperEnd) ?? 0.0
+        taperOpacity = try container.decodeIfPresent(CGFloat.self, forKey: .taperOpacity) ?? 0.0
         wetEnabled = try container.decodeIfPresent(Bool.self, forKey: .wetEnabled) ?? false
         wetStrength = try container.decodeIfPresent(CGFloat.self, forKey: .wetStrength) ?? 0.4
         wetPickup = try container.decodeIfPresent(CGFloat.self, forKey: .wetPickup) ?? 0.25
@@ -410,6 +428,9 @@ public struct BrushConfig: Codable, Sendable {
         try container.encode(spacing, forKey: .spacing)
         try container.encode(spacingJitter, forKey: .spacingJitter)
         try container.encode(taper, forKey: .taper)
+        try container.encode(taperStart, forKey: .taperStart)
+        try container.encode(taperEnd, forKey: .taperEnd)
+        try container.encode(taperOpacity, forKey: .taperOpacity)
         try container.encode(wetEnabled, forKey: .wetEnabled)
         try container.encode(wetStrength, forKey: .wetStrength)
         try container.encode(wetPickup, forKey: .wetPickup)

@@ -768,6 +768,35 @@ runScene("dry-16-wiggle-deposit",
     s.paint(wiggle(id: 181, brush: spray, cx: 740, cy: 500))
 }
 
+runScene("dry-17-taper",
+         """
+         Richer taper (Procreate Taper pane essentials). All rows are the same stroke.
+         - Row 1: legacy symmetric taper 0.5, size only — the pre-2026-07-16 behavior
+           (regression reference; must match older renders of taper strokes).
+         - Row 2: START-only taper 0.7 — thin entry, blunt exit.
+         - Row 3: END-only taper 0.7 — blunt entry, thin exit.
+         - Row 4: symmetric taper 0.5 + taper OPACITY 1.0 — the tips fade out to nothing
+           instead of ending as thin-but-solid points (compare row 1's tips).
+         """) { s in
+    func row(_ id: Int, _ y: CGFloat, start: CGFloat, end: CGFloat, both: CGFloat, opac: CGFloat) {
+        var b = pen(.black, width: 40)
+        b.taper = both
+        b.taperStart = start
+        b.taperEnd = end
+        b.taperOpacity = opac
+        s.paint(synthStroke(id: id, brush: b, from: CGPoint(x: 120, y: y), to: CGPoint(x: 904, y: y),
+                            bow: 40, force: { _ in 0.85 }))
+    }
+    s.label("symmetric taper 0.5 (legacy reference)", y: 110)
+    row(460, 190, start: 0, end: 0, both: 0.5, opac: 0)
+    s.label("start-only taper 0.7 — thin entry, blunt exit", y: 330)
+    row(461, 410, start: 0.7, end: 0, both: 0, opac: 0)
+    s.label("end-only taper 0.7 — blunt entry, thin exit", y: 550)
+    row(462, 630, start: 0, end: 0.7, both: 0, opac: 0)
+    s.label("taper 0.5 + taper opacity 1.0 — tips FADE, not just thin", y: 770)
+    row(463, 850, start: 0, end: 0, both: 0.5, opac: 1.0)
+}
+
 runScene("wet-01-blue-into-yellow",
          """
          Spectral pigment mixing (Kubelka-Munk): a WET blue stroke dragged left-to-right through a

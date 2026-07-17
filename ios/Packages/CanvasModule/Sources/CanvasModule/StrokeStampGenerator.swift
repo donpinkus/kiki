@@ -260,6 +260,33 @@ enum StrokeStampGenerator {
         // at the same magnitudes, so they cluster around the walk point.
         let stampCount = min(max(brush.stampCount, 1), 16)
         let countJitter = min(max(brush.stampCountJitter, 0), 1)
+        // Taper-aware dab DENSITY (2026-07-16): applyTaper shrinks radii after the walk,
+        // so without this the tip dabs — spaced by their pre-taper width — separate into
+        // beads (caught by dry-17). Inside a taper zone the walk tightens spacing by the
+        // same ramp the radii will get (floored so the dab count stays bounded).
+        let taperStartLen = max(brush.taper, brush.taperStart)
+        let taperEndLen = max(brush.taper, brush.taperEnd)
+        let hasTaper = taperStartLen > 0 || taperEndLen > 0
+        let totalArc: CGFloat = {
+            guard hasTaper else { return 0 }
+            var t: CGFloat = 0
+            for i in 1..<stroke.points.count {
+                let a = stroke.points[i - 1].position, b = stroke.points[i].position
+                t += hypot(b.x - a.x, b.y - a.y)
+            }
+            return t
+        }()
+        func taperDensity(_ arc: CGFloat) -> CGFloat {
+            guard hasTaper, totalArc > 0 else { return 1 }
+            let sLen = taperStartLen * totalArc * 0.5
+            let eLen = taperEndLen * totalArc * 0.5
+            let tIn = sLen > 0 ? min(arc / sLen, 1) : 1
+            let tOut = eLen > 0 ? min((totalArc - arc) / eLen, 1) : 1
+            return max(min(tIn, tOut), 0.12)
+        }
+        /// Arc position of the current dab along the point list (drives taperDensity).
+        var walkArc: CGFloat = 0
+
         // Fall Off (Procreate Stroke Path): paint runs out over drawn distance. The die
         // length shrinks as the knob rises — 250px (document space) at 1.0, ~5000px near
         // 0 (effectively "never" on the 2048² document). Quadratic knee gives the slider
@@ -331,7 +358,7 @@ enum StrokeStampGenerator {
         let firstWidth = firstAttr.width
         appendDab(firstAttr, x: first.position.x, y: first.position.y, dx: firstDir.0, dy: firstDir.1)
 
-        var currentSpacing = jitteredSpacing(max(firstWidth * spacingFraction * firstAttr.spacingMul, 0.5), 0)
+        var currentSpacing = jitteredSpacing(max(firstWidth * spacingFraction * firstAttr.spacingMul * taperDensity(0), 0.5), 0)
         // TRUE arc length accumulated since the last emitted stamp, carried across
         // segments. The previous walk re-derived this per segment as the STRAIGHT-LINE
         // distance from the last stamp point — fine for smooth strokes (chord ≈ arc),
@@ -373,13 +400,16 @@ enum StrokeStampGenerator {
 
                 appendDab(attr, x: x, y: y, dx: dx, dy: dy)
 
-                currentSpacing = jitteredSpacing(max(width * spacingFraction * attr.spacingMul, 0.5), stamps.count)
+                currentSpacing = jitteredSpacing(
+                    max(width * spacingFraction * attr.spacingMul * taperDensity(walkArc + traveled), 0.5),
+                    stamps.count)
                 traveled += currentSpacing
             }
             // Post-loop, `traveled` sits one gap past the last emitted stamp (or one gap
             // past the pre-segment arc when nothing emitted) — this recovers the arc
             // walked since the last stamp in both cases.
             arcSinceLastStamp = segmentDist - (traveled - currentSpacing)
+            walkArc += segmentDist
         }
 
         // End cap (finalization only — see `includeEndCap`).
@@ -396,30 +426,48 @@ enum StrokeStampGenerator {
             appendDab(attr, x: last.position.x, y: last.position.y, dx: lastDir.0, dy: lastDir.1)
         }
 
-        applyTaper(to: &stamps, taper: brush.taper)
+        applyTaper(to: &stamps,
+                   startLen: max(brush.taper, brush.taperStart),
+                   endLen: max(brush.taper, brush.taperEnd),
+                   opacityAmount: brush.taperOpacity)
         return stamps
     }
 
-    /// Taper the stamp radii toward both ends of the stroke. `taper` [0,1] sets the
-    /// taper length as a fraction of the stroke's half-length; each stamp's radius is
-    /// scaled by how far it sits inside that taper zone (linear, → 0 at the very tips).
-    /// Operates on the final stamp centers (canvas px) so it's independent of how the
-    /// stamps were generated. No-op for taper == 0 or strokes too short to taper.
+    /// Legacy symmetric entry point (kept for callers/tests): both ends at `taper`.
     static func applyTaper(to stamps: inout [CanvasRenderer.StampInstance], taper: CGFloat) {
-        guard taper > 0, stamps.count > 2 else { return }
+        applyTaper(to: &stamps, startLen: taper, endLen: taper, opacityAmount: 0)
+    }
+
+    /// Taper the stamps toward the stroke's ends (richer taper, 2026-07-16).
+    /// `startLen`/`endLen` [0,1] set each end's taper length as a fraction of the
+    /// stroke's half-length (independent ends — Procreate's Taper pane); the size
+    /// factor ramps linearly to 0 at the very tips. `opacityAmount` [0,1] additionally
+    /// fades the stamp's premultiplied color by the same ramp (0 = size-only, the
+    /// legacy look; 1 = tips fade fully transparent). Operates on final stamp centers
+    /// (canvas px) so it's independent of how the stamps were generated.
+    static func applyTaper(to stamps: inout [CanvasRenderer.StampInstance],
+                           startLen: CGFloat, endLen: CGFloat, opacityAmount: CGFloat) {
+        guard startLen > 0 || endLen > 0, stamps.count > 2 else { return }
         var arc = [CGFloat](repeating: 0, count: stamps.count)
         for i in 1..<stamps.count {
             let a = stamps[i - 1].center, b = stamps[i].center
             arc[i] = arc[i - 1] + CGFloat(hypot(b.x - a.x, b.y - a.y))
         }
         let length = arc[stamps.count - 1]
-        let taperLen = taper * length * 0.5
-        guard taperLen > 0 else { return }
+        let startTaperLen = startLen * length * 0.5
+        let endTaperLen = endLen * length * 0.5
+        guard startTaperLen > 0 || endTaperLen > 0 else { return }
+        let opac = Float(min(max(opacityAmount, 0), 1))
         for i in 0..<stamps.count {
             let s = arc[i]
-            let tIn = min(s / taperLen, 1)
-            let tOut = min((length - s) / taperLen, 1)
-            stamps[i].radius *= Float(min(tIn, tOut))
+            let tIn = startTaperLen > 0 ? min(s / startTaperLen, 1) : 1
+            let tOut = endTaperLen > 0 ? min((length - s) / endTaperLen, 1) : 1
+            let factor = Float(min(tIn, tOut))
+            stamps[i].radius *= factor
+            if opac > 0 {
+                // Premultiplied: scaling the whole vector scales alpha with it.
+                stamps[i].color *= (1 - opac) + opac * factor
+            }
         }
     }
 }

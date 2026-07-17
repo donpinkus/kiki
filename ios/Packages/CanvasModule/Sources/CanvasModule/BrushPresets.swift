@@ -216,6 +216,7 @@ public enum CuratedPresetCatalog {
             b.streamline = 0.4
             b.stabilization = 0.35
             b.taper = 0.25
+            b.taperOpacity = 0.4   // richer taper: tips thin AND soften — inky entries
             b.dynamics = BrushDynamics(size: pressureSize(min: 0.3))
             return b
         },

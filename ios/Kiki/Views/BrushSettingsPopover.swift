@@ -70,6 +70,9 @@ struct BrushSettingsPopover: View {
             .opacity(wet ? 0.35 : 1)
             Group {
                 BrushSliderRow("Taper", value: $coordinator.toolTaper, range: 0.0...1.0, help: Self.help["Taper"]!)
+                if coordinator.toolTaper > 0.005 {
+                    BrushSliderRow("Taper opacity", value: $coordinator.toolTaperOpacity, range: 0.0...1.0, help: Self.help["Taper opacity"]!)
+                }
                 BrushSliderRow("Fall off", value: $coordinator.toolFallOff, range: 0.0...1.0, help: Self.help["Fall off"]!)
             }
             .disabled(wet)
@@ -161,6 +164,9 @@ struct BrushSettingsPopover: View {
         "Taper": BrushHelp(summary: "Thins the stroke toward its start and end.",
             low: "Uniform width from end to end.",
             high: "Tapers to a point at both ends."),
+        "Taper opacity": BrushHelp(summary: "Also fades the ink toward the tapered tips, not just the width.",
+            low: "Tips thin but stay full-strength (classic hard taper).",
+            high: "Tips fade out to nothing (soft, airy entries and exits)."),
         "Mix": BrushHelp(summary: "How strongly each dab deposits its color onto the canvas.",
             low: "Barely tints — color builds up slowly.",
             high: "Covers in a single pass."),

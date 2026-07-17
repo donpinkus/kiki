@@ -159,6 +159,13 @@ final class AppCoordinator {
     /// The last-applied curated preset id (chip highlight in the popover). Purely
     /// informational — manual knob tweaks after applying don't clear it (v1).
     var activeCuratedPresetID: String?
+    /// Taper opacity fade ("Taper opacity", richer taper): fades alpha at tapered tips.
+    var toolTaperOpacity: CGFloat = 0.0 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
     /// Wet Refill ("Refill"): pull the carried load back toward the ink over distance.
     var toolWetRefill: CGFloat = 0.0 {
         didSet {
@@ -2034,6 +2041,7 @@ final class AppCoordinator {
                 spacing: toolSpacing,
                 spacingJitter: toolSpacingJitter,
                 taper: toolTaper,
+                taperOpacity: toolTaperOpacity,
                 wetEnabled: toolWetEnabled || toolWetSmudge,
                 wetStrength: toolWetStrength,
                 wetPickup: toolWetPickup,
