@@ -205,7 +205,7 @@ const start = async () => {
 
 start();
 
-// Flush queued PostHog events on graceful shutdown so we don't lose in-flight
+// Flush queued Insights events on graceful shutdown so we don't lose in-flight
 // analytics when Railway restarts the container.
 async function gracefulShutdown(signal: string): Promise<void> {
   app.log.info({ signal }, 'Shutting down — flushing analytics');

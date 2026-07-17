@@ -67,7 +67,7 @@ public final class CanvasViewModel {
     public var currentBrushColorProvider: (() -> UIColor)?
 
     /// Telemetry callback for QuickShape lifecycle events. Set by the
-    /// AppCoordinator to forward to PostHog via `Analytics.track`.
+    /// AppCoordinator to forward to analytics via `Analytics.track`.
     public var onSnapEvent: ((SnapEvent) -> Void)?
 
     /// Fires the first time per app launch that a brush stroke commits with

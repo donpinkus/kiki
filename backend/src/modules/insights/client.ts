@@ -1,10 +1,10 @@
 /**
  * Kiki Insights dual-write sink.
  *
- * Mirrors backend analytics events into the Insights microsite's /ingest
- * endpoint (the same contract iOS uses), alongside PostHog. This is the
- * server-side half of "mirror existing events" — pod/session lifecycle events
- * the iPad never sees, tagged source='backend' on the Insights side.
+ * Sends backend analytics events to the Insights microsite's /ingest
+ * endpoint (the same contract iOS uses). This is the server-side half of
+ * event collection — session lifecycle events the iPad never sees, tagged
+ * source='backend' on the Insights side.
  *
  * Best-effort and fully decoupled:
  *   - No-op unless both INSIGHTS_URL and INSIGHTS_INGEST_KEY are set.

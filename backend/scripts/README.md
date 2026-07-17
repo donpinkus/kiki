@@ -103,14 +103,6 @@ or APIs.
   on-demand pods (which aren't preempted). Tests create-reliability and
   runtime-stability without the preemption variable.
 
-### Status checks (`check-*`)
-
-- **`check-volume-versions.ts`** — Report the deployed app version on each
-  network volume by querying PostHog for the most recent
-  `pod.provision.completed` event per DC. Compares against local git HEAD.
-  Free, fast. Limitation: only sees DCs that have served a recent provision —
-  silent on long-cold DCs.
-
 ### One-off investigation (`debug-*`)
 
 - **`debug-video-load.ts`** — Spawns a video pod and SSHs in to capture a
@@ -131,11 +123,6 @@ All scripts that talk to RunPod need:
   `RUNPOD_SSH_PRIVATE_KEY="$(cat ~/.ssh/id_ed25519)"`.
 - `RUNPOD_REGISTRY_AUTH_ID` (optional) — Docker Hub auth for the
   `runpod/pytorch` base pull; reduces cold-host pull times.
-
-Scripts that read PostHog (`check-*`) need:
-
-- `POSTHOG_PERSONAL_API_KEY`
-- `POSTHOG_PROJECT_ID`
 
 All of these live in `.env.local` at the repo root (gitignored). Most
 scripts source it implicitly; check the script's docstring for specifics.

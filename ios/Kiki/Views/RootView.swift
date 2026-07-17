@@ -18,12 +18,6 @@ struct RootView: View {
         }
         .statusBarHidden(true)
         .animation(.easeInOut(duration: 0.25), value: coordinator.currentScreen)
-        .onAppear {
-            // didSet on AppCoordinator.currentScreen handles subsequent
-            // navigation, but doesn't fire for the initial value set during
-            // init. Emit one explicit screen event for the entry screen.
-            Analytics.screen(coordinator.currentScreen.analyticsName)
-        }
         .onChange(of: scenePhase) { _, newPhase in
             coordinator.handleScenePhaseChange(newPhase)
         }

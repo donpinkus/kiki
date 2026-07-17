@@ -46,12 +46,7 @@ final class AppCoordinator {
 
     // MARK: - Navigation
 
-    var currentScreen: AppScreen = .gallery {
-        didSet {
-            guard currentScreen != oldValue else { return }
-            Analytics.screen(currentScreen.analyticsName)
-        }
-    }
+    var currentScreen: AppScreen = .gallery
     var currentDrawingId: UUID?
 
     // MARK: - Persistence
@@ -648,7 +643,7 @@ final class AppCoordinator {
     /// Started in `startStream`, finished on first `onImageReceived` callback.
     private var pendingStartupTransaction: (any Span)?
     /// Timestamp when the current stream startup began. Paired with first-frame
-    /// arrival to emit PostHog's `stream.first_frame` with a waitMs property.
+    /// arrival to emit `stream.first_frame` with a waitMs property.
     private var streamStartupBeganAt: Date?
     /// When the user entered the current drawing. Used to compute session
     /// duration for the `drawing.closed` analytics event. Set in
@@ -803,18 +798,10 @@ final class AppCoordinator {
         // Gate on auth: if no Keychain token, show sign-in. Otherwise the
         // normal gallery/drawing flow resumes.
         let initialUserId = KeychainStore.default.get("userId")
-        let initialEmail = KeychainStore.default.get("email")
         self.signedInUserId = initialUserId
         if initialUserId == nil {
             currentScreen = .signIn
         } else {
-            // Re-bind analytics identity on every relaunch of an already-signed-in
-            // user. `signInWithApple()` is the only other place `identify` fires,
-            // but it only runs on a fresh sign-in — so without this call, returning
-            // users stay bound to their anonymous device ID forever and iOS events
-            // never stitch to the backend-emitted userId.
-            Analytics.identify(userId: initialUserId!, email: initialEmail)
-
             // Re-sync subscription entitlements on launch: posts any current
             // StoreKit entitlement to the backend (reconciles a missed webhook /
             // fresh install) and updates local status for the paywall.
@@ -867,7 +854,7 @@ final class AppCoordinator {
         canvasViewModel.onUserActivity = { [weak self] in
             self?.handleUserActivity()
         }
-        // QuickShape telemetry — forward recognizer lifecycle events to PostHog.
+        // QuickShape telemetry — forward recognizer lifecycle events to analytics.
         canvasViewModel.onSnapEvent = { event in
             Self.trackSnapEvent(event)
         }
@@ -955,7 +942,6 @@ final class AppCoordinator {
             self.generationError = nil
             self.signedInUserId = userId
             if let userId {
-                Analytics.identify(userId: userId, email: email)
                 Analytics.track(.userSignedIn, properties: ["user_id": userId])
                 // Tag every Sentry event/log/span emitted on this device with
                 // user.id so cross-stack queries `user_id:<X>` return iOS
@@ -992,7 +978,6 @@ final class AppCoordinator {
             await authService.signOut()
             await MainActor.run {
                 Analytics.track(.userSignedOut)
-                Analytics.reset()
                 Log.info("auth.signed_out", attributes: ["event": "auth.signed_out"])
                 // Clear user attribution so the next signed-in (or anonymous)
                 // user's events don't get tagged with this user's id.

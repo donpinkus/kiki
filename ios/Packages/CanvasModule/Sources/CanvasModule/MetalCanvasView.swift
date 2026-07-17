@@ -184,7 +184,7 @@ public final class MetalCanvasView: UIView {
     public var isQuickShapeLoggingEnabled: Bool = false
 
     /// Telemetry callback fired at each significant stage of the snap
-    /// lifecycle. Wired by the app target to forward to PostHog (or any
+    /// lifecycle. Wired by the app target to forward to analytics (or any
     /// other analytics backend).
     public var onSnapEvent: ((SnapEvent) -> Void)?
 

@@ -187,19 +187,11 @@ export interface AppConfig {
    * reconcile ignores this (uses 0) since the process was just rebuilt. */
   readonly RECONCILE_MIN_AGE_SEC: number;
 
-  // ─── Product analytics (PostHog) ───────────────────────────────────────
-  /** PostHog project API key (write-only, `phc_...`). If unset, all analytics
-   * calls no-op — safe to leave empty in dev. */
-  readonly POSTHOG_API_KEY: string;
-  /** PostHog ingestion host. Default US cloud. Override for EU cloud or
-   * self-hosted. */
-  readonly POSTHOG_HOST: string;
-
   // ─── Kiki Insights (internal per-user analytics microsite) ─────────────
   /** Base URL of the Insights service (e.g. https://kiki-insights.up.railway.app).
    * When set together with INSIGHTS_INGEST_KEY, every backend analytics event is
-   * dual-written to Insights' /ingest (best-effort, fire-and-forget) alongside
-   * PostHog. Unset → no-op (local dev / CI). */
+   * written to Insights' /ingest (best-effort, fire-and-forget).
+   * Unset → no-op (local dev / CI). */
   readonly INSIGHTS_URL: string;
   /** Service key presented as `x-insights-key` to Insights' /ingest. MUST equal
    * the value set on the Insights service. Unset → Insights dual-write no-ops. */
@@ -358,8 +350,6 @@ function validateConfig(): AppConfig {
     MAX_SESSION_REPLACEMENTS: Number(process.env['MAX_SESSION_REPLACEMENTS'] ?? 2),
     RECONCILE_INTERVAL_MS: Number(process.env['RECONCILE_INTERVAL_MS'] ?? 30 * 60 * 1000),
     RECONCILE_MIN_AGE_SEC: Number(process.env['RECONCILE_MIN_AGE_SEC'] ?? 600),
-    POSTHOG_API_KEY: process.env['POSTHOG_API_KEY'] ?? '',
-    POSTHOG_HOST: process.env['POSTHOG_HOST'] ?? 'https://us.i.posthog.com',
     INSIGHTS_URL: process.env['INSIGHTS_URL'] ?? '',
     INSIGHTS_INGEST_KEY: process.env['INSIGHTS_INGEST_KEY'] ?? '',
     POD_BOOT_WATCHDOG_ENABLED: process.env['POD_BOOT_WATCHDOG_ENABLED'] !== 'false',

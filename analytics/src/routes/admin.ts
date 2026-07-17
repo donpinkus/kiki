@@ -5,7 +5,7 @@
  *
  * The read model is deliberately per-user: list users, then drill into one
  * user's full timeline (sessions + events) and drawings gallery — the view the
- * aggregate tools (PostHog/Sentry) don't give.
+ * aggregate tools (Sentry) don't give.
  */
 
 import type { FastifyPluginAsync } from 'fastify';

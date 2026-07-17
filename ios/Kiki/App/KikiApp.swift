@@ -1,7 +1,6 @@
 import SwiftUI
 import SwiftData
 import Sentry
-import PostHog
 
 @main
 struct KikiApp: App {
@@ -49,21 +48,6 @@ struct KikiApp: App {
                 return log
             }
         }
-
-        // PostHog — product analytics (events, funnels, cohorts). Paired with
-        // Sentry which owns crashes/errors/APM. Project token is "write-only"
-        // per PostHog docs — safe to embed in the app binary, same as the
-        // Sentry DSN above.
-        let posthogConfig = PostHogConfig(
-            apiKey: "phc_vWiC8bcuN2EUq6jfuUfU24yGUqS3y2Pi8V4Ec5mUe84w",
-            host: "https://us.i.posthog.com"
-        )
-        // Auto-captured screen events use UIKit view-controller class names,
-        // which on SwiftUI all collapse to `UIHostingController<...>` —
-        // useless. Disable and emit explicit screen events from
-        // AppCoordinator's `currentScreen` didSet.
-        posthogConfig.captureScreenViews = false
-        PostHogSDK.shared.setup(posthogConfig)
 
         // First user-journey log of every cold launch. Carries `app_version`
         // so we can correlate "user reports app got stuck on X" with the

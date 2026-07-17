@@ -1,45 +1,26 @@
 /**
- * PostHog product-analytics wrapper.
+ * Product-analytics wrapper — events go to Kiki Insights.
  *
- * Single module owns every backend event we send to PostHog. Call sites use
- * the typed `track*()` functions below so event names + property shapes stay
- * in one place instead of being scattered as magic strings.
+ * Single module owns every backend event we track. Call sites use the typed
+ * `track*()` functions below so event names + property shapes stay in one
+ * place instead of being scattered as magic strings.
  *
- * If `POSTHOG_API_KEY` is unset (local dev, CI), everything no-ops — no
- * errors, no guards needed at call sites.
+ * If `INSIGHTS_URL` / `INSIGHTS_INGEST_KEY` are unset (local dev, CI),
+ * everything no-ops — no errors, no guards needed at call sites.
  *
  * Division of concerns:
- *   - Sentry — errors, crashes, APM traces (see orchestrator.ts spans)
- *   - PostHog — product events, funnels, cohorts (this file)
- *
- * See `documents/plans/scale-to-100-users.md` WS6 for the full picture.
+ *   - Sentry — errors, crashes, structured logs
+ *   - Kiki Insights — product events, per-user timelines, session replay (this file)
  */
 
-import { PostHog } from 'posthog-node';
-import { config } from '../../config/index.js';
 import { captureInsights, flushInsights } from '../insights/client.js';
-
-let client: PostHog | null = null;
-
-function getClient(): PostHog | null {
-  if (!config.POSTHOG_API_KEY) return null;
-  if (!client) {
-    client = new PostHog(config.POSTHOG_API_KEY, { host: config.POSTHOG_HOST });
-  }
-  return client;
-}
 
 /**
  * Flush queued events. Call on SIGTERM / SIGINT so in-flight events don't
  * get dropped when Railway restarts the container.
  */
 export async function shutdownAnalytics(): Promise<void> {
-  // Flush any queued Insights events before the container dies.
   await flushInsights();
-  if (client) {
-    await client.shutdown();
-    client = null;
-  }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -47,14 +28,8 @@ export async function shutdownAnalytics(): Promise<void> {
 // ────────────────────────────────────────────────────────────────────────────
 
 function capture(distinctId: string, event: string, properties: Record<string, unknown>): void {
-  // Dual-write to the Insights microsite (best-effort, no-op unless configured).
-  // Done before the PostHog early-return so Insights mirroring is independent of
-  // whether PostHog is enabled.
+  // Best-effort, no-op unless Insights is configured.
   captureInsights(distinctId, event, properties);
-
-  const c = getClient();
-  if (!c) return;
-  c.capture({ distinctId, event, properties });
 }
 
 export function trackPodProvisionStarted(props: {
