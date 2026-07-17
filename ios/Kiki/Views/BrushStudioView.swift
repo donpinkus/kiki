@@ -139,6 +139,17 @@ struct BrushStudioView: View {
                 curveSection("Darkness", option: $dyn.darkness, fold: .sizeLike, defaultSensor: .pressure)
                 curveSection("Grain (moving)", option: $dyn.grain, fold: .sizeLike, defaultSensor: .pressure)
 
+                Section("Secondary color") {
+                    ColorPicker("Ink 2", selection: Binding(
+                        get: { coordinator.toolSecondaryColor ?? .yellow },
+                        set: { coordinator.toolSecondaryColor = $0 }), supportsOpacity: false)
+                    Toggle("Enabled", isOn: Binding(
+                        get: { coordinator.toolSecondaryColor != nil },
+                        set: { coordinator.toolSecondaryColor = $0 ? .yellow : nil }))
+                    Text("Blend is driven by the Secondary curve below — pressure for a two-tone nib, Distance for a gradient, Fuzzy for speckle.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+                curveSection("Secondary blend", option: $dyn.secondary, fold: .sizeLike, defaultSensor: .pressure)
                 ColorJitterSection(title: "Color jitter (per stroke)", jitter: $dyn.colorJitter)
                 ColorJitterSection(title: "Color jitter (per dab)", jitter: $dyn.dabColorJitter,
                                    defaults: ColorJitter(hue: 0.01, saturation: 0.08, brightness: 0.08))

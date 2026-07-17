@@ -173,6 +173,13 @@ final class AppCoordinator {
             applyTool()
         }
     }
+    /// Secondary ink ("Ink 2", P6): per-dab blend target; nil = single ink.
+    var toolSecondaryColor: Color? = nil {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
     /// Wet Blur ("Blur", smudge softness): neighborhood pickup + soft rim.
     var toolWetBlur: CGFloat = 0.0 {
         didSet {
@@ -2088,6 +2095,7 @@ final class AppCoordinator {
                 rotationFollow: toolRotationFollow,
                 flipX: toolFlipX,
                 flipY: toolFlipY,
+                secondaryColor: toolSecondaryColor.map { $0.codable },
                 dynamics: toolDynamics
             )
             canvasViewModel.selectBrush(config)

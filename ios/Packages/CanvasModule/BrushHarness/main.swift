@@ -895,6 +895,40 @@ runScene("dry-20-edge-quality",
                         force: { _ in 1 }))
 }
 
+runScene("dry-21-secondary-color",
+         """
+         Secondary-color dynamics (P6 complete): a second ink blended per dab by any
+         sensor. Primary BLUE, secondary YELLOW in every row; only the driving sensor
+         changes.
+         - Row 1: pressure bell — yellow at the light ends, blue where pressed (the
+           blend follows force within ONE stroke).
+         - Row 2: Distance — a blue→yellow gradient along the stroke; the sensor is
+           PERIODIC (default period 600px), so the gradient wraps back to blue and
+           repeats — that's the Distance sensor's contract, not a bug.
+         - Row 3: Fuzzy (per-dab random) — two-color speckle, deterministic per stroke.
+         """) { s in
+    func secBrush(_ curve: CurveOption) -> BrushConfig {
+        var b = pen(blue, width: 44, flow: 0.95)
+        b.hardness = 0.75
+        b.spacing = 0.35
+        b.secondaryColor = yellow
+        b.dynamics = BrushDynamics(secondary: curve)
+        return b
+    }
+    s.label("pressure bell — yellow light ends, blue pressed middle", y: 130)
+    s.paint(synthStroke(id: 530, brush: secBrush(CurveOption(
+        sensors: [SensorChannel(sensor: .pressure,
+                                curve: ResponseCurve(points: [ResponseCurve.Point(0, 1), ResponseCurve.Point(1, 0)]))],
+        useSameCurve: false)),
+        from: CGPoint(x: 100, y: 230), to: CGPoint(x: 924, y: 230), force: { 0.1 + 0.85 * sin($0 * .pi) }))
+    s.label("distance — gradient along the stroke", y: 420)
+    s.paint(synthStroke(id: 531, brush: secBrush(CurveOption(sensors: [SensorChannel(sensor: .distance)])),
+        from: CGPoint(x: 100, y: 520), to: CGPoint(x: 924, y: 520), force: { _ in 0.8 }))
+    s.label("fuzzy per-dab — two-color speckle", y: 700)
+    s.paint(synthStroke(id: 532, brush: secBrush(CurveOption(sensors: [SensorChannel(sensor: .fuzzyPerDab)])),
+        from: CGPoint(x: 100, y: 800), to: CGPoint(x: 924, y: 800), force: { _ in 0.8 }))
+}
+
 runScene("wet-01-blue-into-yellow",
          """
          Spectral pigment mixing (Kubelka-Munk): a WET blue stroke dragged left-to-right through a

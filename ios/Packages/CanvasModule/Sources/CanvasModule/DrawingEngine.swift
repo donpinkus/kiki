@@ -244,6 +244,11 @@ public struct BrushConfig: Codable, Sendable {
     /// Vertex-stage UV flip; no effect on the symmetric procedural round tip.
     public var flipX: Bool
     public var flipY: Bool
+    /// Secondary ink (P6 "Secondary Color"): when set AND `dynamics.secondary` provides
+    /// a blend curve, each dab's color lerps (sRGB) from the primary toward this by the
+    /// curve's per-dab value — pressure-driven two-tone nibs, distance gradients, fuzzy
+    /// two-color speckle. nil = single-ink brush (default).
+    public var secondaryColor: CodableColor?
     /// Krita-grade brush dynamics: per-parameter sensor→curve→combine→remap options
     /// (`BrushDynamics`). `nil` (the default) means "no dynamics" — the legacy
     /// `pressureGamma`/`tiltSensitivity` scalars drive size and everything else is a flat
@@ -291,6 +296,7 @@ public struct BrushConfig: Codable, Sendable {
         rotationFollow: CGFloat? = nil,
         flipX: Bool = false,
         flipY: Bool = false,
+        secondaryColor: CodableColor? = nil,
         dynamics: BrushDynamics? = nil
     ) {
         self.color = color
@@ -331,6 +337,7 @@ public struct BrushConfig: Codable, Sendable {
         self.rotationFollow = rotationFollow
         self.flipX = flipX
         self.flipY = flipY
+        self.secondaryColor = secondaryColor
         self.dynamics = dynamics
     }
 
@@ -374,7 +381,7 @@ public struct BrushConfig: Codable, Sendable {
         case dynamics, wetSmudge, aspectRatio, stabilization, pressureSmoothing
         case grainID, grainDepth, grainScale, spacingJitter, tipLightness
         case stampCount, stampCountJitter, rotationFollow, flipX, flipY, fallOff, tipAngle
-        case wetCharge, wetRefill, wetJitter, wetBlur
+        case wetCharge, wetRefill, wetJitter, wetBlur, secondaryColor
         case taperStart, taperEnd, taperOpacity, grainMoving
     }
 
@@ -429,6 +436,7 @@ public struct BrushConfig: Codable, Sendable {
         rotationFollow = try container.decodeIfPresent(CGFloat.self, forKey: .rotationFollow)
         flipX = try container.decodeIfPresent(Bool.self, forKey: .flipX) ?? false
         flipY = try container.decodeIfPresent(Bool.self, forKey: .flipY) ?? false
+        secondaryColor = try container.decodeIfPresent(CodableColor.self, forKey: .secondaryColor)
         // Krita-grade dynamics — default nil (legacy scalar behavior) so configs saved before
         // it decode to today's pen unchanged.
         dynamics = try container.decodeIfPresent(BrushDynamics.self, forKey: .dynamics)
@@ -464,6 +472,7 @@ public struct BrushConfig: Codable, Sendable {
         try container.encode(wetRefill, forKey: .wetRefill)
         try container.encode(wetJitter, forKey: .wetJitter)
         try container.encode(wetBlur, forKey: .wetBlur)
+        try container.encodeIfPresent(secondaryColor, forKey: .secondaryColor)
         try container.encodeIfPresent(shapeID, forKey: .shapeID)
         // aspectRatio was decoded-but-never-encoded from P4b (2026-07-15 fix): saved
         // brushes / recorded fixtures silently lost their aspect on round-trip.

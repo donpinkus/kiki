@@ -194,8 +194,13 @@ enum StrokeStampGenerator {
             guard let cj = dyn?.dabColorJitter, !cj.isInert else { return nil }
             return cj
         }()
+        // Secondary ink (P6): active only when BOTH the color and the blend curve exist.
+        let secondarySRGB: (r: Double, g: Double, b: Double)? = {
+            guard let sec = brush.secondaryColor, dyn?.secondary != nil else { return nil }
+            return (Double(sec.red), Double(sec.green), Double(sec.blue))
+        }()
         let baseSRGB: (r: Double, g: Double, b: Double) = {
-            guard hasDyn, dabCJ != nil else { return (0, 0, 0) }
+            guard hasDyn, dabCJ != nil || secondarySRGB != nil else { return (0, 0, 0) }
             var srgb = (r: Double(brush.color.red), g: Double(brush.color.green), b: Double(brush.color.blue))
             if let cj = dyn?.colorJitter, !cj.isInert {
                 let sd = strokeSeed(stroke.id)
@@ -233,13 +238,23 @@ enum StrokeStampGenerator {
             // premultiplied alpha > 1 (malformed for the _srgb blend). P1-review fix.
             let a = min(1, max(0, baseFlow * Float(flowMul)))
             var linRGB = baseLinRGB
-            if let cj = dabCJ {
-                let dab = st.dabIndex   // post-advance: unique, monotonically increasing per dab
-                let jit = cj.applied(toSRGB: baseSRGB,
-                                     rH: brushHash01(spacingSeed, dab, 0x4021),
-                                     rS: brushHash01(spacingSeed, dab, 0x4022),
-                                     rB: brushHash01(spacingSeed, dab, 0x4023))
-                linRGB = SIMD3<Float>(s2lLocal(CGFloat(jit.r)), s2lLocal(CGFloat(jit.g)), s2lLocal(CGFloat(jit.b)))
+            if dabCJ != nil || secondarySRGB != nil {
+                var srgb = baseSRGB
+                // Secondary blend FIRST (the dab's base tone), jitter on top.
+                if let sec = secondarySRGB, let curve = dyn?.secondary {
+                    let t = min(max(curve.value(input), 0), 1)
+                    srgb = (srgb.r + (sec.r - srgb.r) * t,
+                            srgb.g + (sec.g - srgb.g) * t,
+                            srgb.b + (sec.b - srgb.b) * t)
+                }
+                if let cj = dabCJ {
+                    let dab = st.dabIndex   // post-advance: unique, monotonically increasing per dab
+                    srgb = cj.applied(toSRGB: srgb,
+                                      rH: brushHash01(spacingSeed, dab, 0x4021),
+                                      rS: brushHash01(spacingSeed, dab, 0x4022),
+                                      rB: brushHash01(spacingSeed, dab, 0x4023))
+                }
+                linRGB = SIMD3<Float>(s2lLocal(CGFloat(srgb.r)), s2lLocal(CGFloat(srgb.g)), s2lLocal(CGFloat(srgb.b)))
             }
             if let dk = dyn?.darkness {
                 // Device-space darken (multiply in sRGB, like Krita's darken option):
