@@ -14,7 +14,6 @@ public struct ResultView: View {
     private let state: ResultState
     private let currentBrushColor: Color
     private let onColorPicked: ((Color) -> Void)?
-    private let onResumeTapped: (() -> Void)?
     private let isUserDrawing: Bool
 
     @State private var showToast = false
@@ -33,13 +32,11 @@ public struct ResultView: View {
         state: ResultState = .empty,
         currentBrushColor: Color = .black,
         onColorPicked: ((Color) -> Void)? = nil,
-        onResumeTapped: (() -> Void)? = nil,
         isUserDrawing: Bool = false
     ) {
         self.state = state
         self.currentBrushColor = currentBrushColor
         self.onColorPicked = onColorPicked
-        self.onResumeTapped = onResumeTapped
         self.isUserDrawing = isUserDrawing
     }
 
@@ -58,9 +55,6 @@ public struct ResultView: View {
                 provisioningView(message: message, previousImage: previousImage)
                     .accessibilityElement(children: .combine)
 
-            case .generating(let progress, let previousImage):
-                generatingView(progress: progress, previousImage: previousImage)
-
             case .preview(let image):
                 imageView(image)
 
@@ -69,9 +63,6 @@ public struct ResultView: View {
 
             case .error(let message, let previousImage):
                 errorView(message: message, previousImage: previousImage)
-
-            case .idleTimeout(let previousImage):
-                idleTimeoutView(previousImage: previousImage)
 
             case .videoStreaming(let latestFrame, _):
                 imageView(latestFrame)
@@ -162,8 +153,10 @@ public struct ResultView: View {
         .padding(.vertical, 32)
     }
 
-    /// Title legibility on a dimmed image background — same recipe as
-    /// `idleTimeoutView` (tight crisp shadow + softer diffuse halo).
+    /// Title legibility on a dimmed image background — tight crisp shadow
+    /// for edge definition + softer diffuse halo for separation from the
+    /// underlying image (the pattern Apple uses for titles atop photo/video
+    /// backgrounds).
     private struct LayeredShadow: ViewModifier {
         let enabled: Bool
         func body(content: Content) -> some View {
@@ -177,78 +170,12 @@ public struct ResultView: View {
         }
     }
 
-    // MARK: - Idle Timeout
-
-    private func idleTimeoutView(previousImage: UIImage?) -> some View {
-        Button(action: { onResumeTapped?() }) {
-            ZStack {
-                // Last generated image stays visible underneath as a reminder
-                // that the user's work hasn't gone anywhere.
-                if let image = previousImage {
-                    imageView(image)
-                }
-                // Semi-opaque dim on top — mostly covers the image so the
-                // paused state reads clearly, but the image is still faintly
-                // visible behind it.
-                Color.black.opacity(0.55)
-                    .ignoresSafeArea()
-
-                VStack(spacing: 20) {
-                    Image(systemName: "moon.zzz.fill")
-                        .font(.system(size: 48, weight: .light))
-                        .foregroundStyle(idleGradient)
-
-                    Text("Session Paused - Draw to Resume")
-                        .font(.title2.weight(.semibold))
-                        .foregroundStyle(idleGradient)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 40)
-                }
-                // Layered shadow for depth: tight crisp shadow for edge
-                // definition + softer diffuse halo for separation from the
-                // underlying image. Both low-opacity so the gradient stays
-                // clean — this is the pattern Apple uses for titles atop
-                // photo/video backgrounds (Photos, TV app captions).
-                .shadow(color: .black.opacity(0.4), radius: 2, y: 1)
-                .shadow(color: .black.opacity(0.3), radius: 12, y: 6)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
-
-    private var idleGradient: LinearGradient {
-        LinearGradient(
-            colors: [.teal, .purple],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
-    }
-
     private var provisioningGradient: LinearGradient {
         LinearGradient(
             colors: [.purple, .pink, .orange],
             startPoint: .topLeading,
             endPoint: .bottomTrailing
         )
-    }
-
-    private func generatingView(progress: GenerationProgress, previousImage: UIImage?) -> some View {
-        ZStack {
-            if let image = previousImage {
-                imageView(image)
-            } else {
-                Color(.systemGray5)
-            }
-
-            VStack {
-                Spacer()
-                progressPanel(progress: progress)
-                    .padding(.bottom, 24)
-                    .padding(.horizontal, 24)
-            }
-        }
     }
 
     private func errorView(message: String, previousImage: UIImage?) -> some View {
@@ -346,72 +273,6 @@ public struct ResultView: View {
         }
     }
 
-    // MARK: - Progress Panel
-
-    private func progressPanel(progress: GenerationProgress) -> some View {
-        TimelineView(.periodic(from: progress.phaseStartedAt, by: 1.0)) { context in
-            let elapsed = context.date.timeIntervalSince(progress.phaseStartedAt)
-
-            VStack(alignment: .leading, spacing: 6) {
-                ForEach(GenerationPhase.allCases) { phase in
-                    phaseRow(
-                        phase: phase,
-                        progress: progress,
-                        elapsed: elapsed
-                    )
-                }
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
-        }
-    }
-
-    private func phaseRow(
-        phase: GenerationPhase,
-        progress: GenerationProgress,
-        elapsed: TimeInterval
-    ) -> some View {
-        HStack(spacing: 8) {
-            if let duration = progress.durations[phase] {
-                // Completed
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-                    .font(.caption2)
-                Text(phase.label)
-                    .foregroundStyle(.white.opacity(0.7))
-                Spacer()
-                Text(formatDuration(duration))
-                    .foregroundStyle(.white.opacity(0.5))
-            } else if phase == progress.currentPhase {
-                // Active
-                ProgressView()
-                    .scaleEffect(0.6)
-                    .frame(width: 14, height: 14)
-                Text(phase.label)
-                    .foregroundStyle(.white)
-                Spacer()
-                Text(formatDuration(elapsed))
-                    .foregroundStyle(.white.opacity(0.7))
-            } else {
-                // Pending
-                Image(systemName: "circle")
-                    .foregroundStyle(.white.opacity(0.3))
-                    .font(.caption2)
-                Text(phase.label)
-                    .foregroundStyle(.white.opacity(0.3))
-                Spacer()
-            }
-        }
-        .font(.caption)
-        .fontDesign(.monospaced)
-    }
-
-    private func formatDuration(_ duration: TimeInterval) -> String {
-        if duration < 1 { return "< 1s" }
-        return "\(Int(duration))s"
-    }
-
     // MARK: - Toast
 
     private var toastOverlay: some View {
@@ -481,33 +342,6 @@ public struct ResultView: View {
     ResultView(state: .provisioning(
         message: "Connecting…",
         previousImage: UIImage(systemName: "photo.fill")?.withTintColor(.systemTeal, renderingMode: .alwaysOriginal)
-    ))
-}
-
-#Preview("Generating – Preparing") {
-    ResultView(state: .generating(
-        progress: GenerationProgress(currentPhase: .preparing),
-        previousImage: nil
-    ))
-}
-
-#Preview("Generating – Uploading") {
-    ResultView(state: .generating(
-        progress: GenerationProgress(
-            currentPhase: .uploading,
-            durations: [.preparing: 0.08]
-        ),
-        previousImage: nil
-    ))
-}
-
-#Preview("Generating – Downloading") {
-    ResultView(state: .generating(
-        progress: GenerationProgress(
-            currentPhase: .downloading,
-            durations: [.preparing: 0.05, .uploading: 11.3]
-        ),
-        previousImage: nil
     ))
 }
 

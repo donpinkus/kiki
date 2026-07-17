@@ -248,10 +248,11 @@ public actor AuthService {
         keychain.remove(Self.keychainEmail)
     }
 
-    /// Best-effort: ask the backend to terminate the user's pod and delete
-    /// their Redis session. Call BEFORE `signOut()` so the JWT is still
-    /// available for the request. Failures are logged but never thrown — the
-    /// local sign-out must always succeed regardless of backend reachability.
+    /// Best-effort: notify the backend that the user signed out. The endpoint
+    /// is now just a sign-out marker (no pod or Redis session to clean up).
+    /// Call BEFORE `signOut()` so the JWT is still available for the request.
+    /// Failures are logged but never thrown — the local sign-out must always
+    /// succeed regardless of backend reachability.
     public func requestServerSignOut() async {
         guard let token = currentBundle()?.accessToken else { return }
         let url = backendURL.appendingPathComponent("/v1/auth/signout")

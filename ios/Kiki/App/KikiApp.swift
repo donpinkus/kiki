@@ -33,13 +33,11 @@ struct KikiApp: App {
             options.enableLogs = true
 
             // Belt-and-suspenders attribute injection: the `Log` facade
-            // already injects `phase` (TaskLocal) + `stream_id` (static)
-            // at emit time. This callback catches any direct
-            // `SentrySDK.logger.X` calls (or future auto-instrumented
-            // logs) and adds `stream_id`. `phase` is a TaskLocal that
-            // doesn't cross thread boundaries, so this callback can't
-            // backfill it — that's why `Log.emit` is the source of truth
-            // for `phase`.
+            // already injects `phase` (a lock-based imperative global —
+            // see `Phase.swift`) + `stream_id` (static) at emit time.
+            // This callback catches any direct `SentrySDK.logger.X` calls
+            // (or future auto-instrumented logs) and adds `stream_id`;
+            // the `Log` facade remains the source of truth for `phase`.
             options.beforeSendLog = { log in
                 if let streamId = StreamContext.streamId,
                    log.attributes["stream_id"] == nil {

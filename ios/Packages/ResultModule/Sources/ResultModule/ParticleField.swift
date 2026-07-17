@@ -1,9 +1,10 @@
 import SwiftUI
 
-/// Decorative rainbow particle field rendered on the result pane during
-/// pod warming. While `isEmitting` is true, particles spawn from random
-/// points along the bottom and drift upward with a slight arc, fading as
-/// they rise. Lets the user *do* something fun during the 90s cold start
+/// Decorative rainbow particle field rendered on the result pane while
+/// the fal connection is being established. While `isEmitting` is true,
+/// particles spawn from random points along the bottom and drift upward
+/// with a slight arc, fading as they rise. Lets the user *do* something
+/// fun during the connect wait (usually seconds; minutes on a cold pool)
 /// — drawing on the canvas flips `isEmitting`, which makes the result
 /// pane respond visibly even before the AI is ready.
 public struct ParticleField: View {

@@ -269,7 +269,6 @@ struct DrawingView: View {
                 state: coordinator.resultState,
                 currentBrushColor: coordinator.currentColor,
                 onColorPicked: { coordinator.currentColor = $0 },
-                onResumeTapped: { coordinator.resumeStream() },
                 isUserDrawing: coordinator.canvasViewModel.isInteracting
             )
             .overlay(alignment: .top) {

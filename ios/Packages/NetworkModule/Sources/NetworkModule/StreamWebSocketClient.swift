@@ -30,23 +30,15 @@ public actor StreamWebSocketClient {
         case disconnecting
     }
 
-    /// A message from the server about the provision state machine.
-    /// `type == "state"` carries a full state event; `type == "error"` is an
-    /// out-of-band failure (auth, entitlement, rate-limit, relay error) that
-    /// happens outside the state flow.
+    /// A message from the server about the two-state stream lifecycle
+    /// (`connecting` → `ready`). `type == "state"` carries a state event;
+    /// `type == "error"` is an out-of-band failure (auth, entitlement,
+    /// rate-limit, relay error) that happens outside the state flow.
     public struct ServerStatus: Decodable, Sendable {
         public let type: String
         public let state: String?            // present for type=="state"
-        public let stateEnteredAt: Int64?    // ms epoch, type=="state"
-        /// Ms epoch when the current pod-warm cycle began. Stable across all
-        /// state transitions for a given session — drives the warm-up progress
-        /// bar so reconnecting clients resume instead of restarting.
-        public let warmingStartedAt: Int64?  // type=="state"
-        public let replacementCount: Int?    // type=="state"
-        public let failureCategory: String?  // type=="state" && state=="failed"
-        // Real error message from the source. Populated for type=="error"
-        // and for type=="state" when state=="failed". Client renders verbatim
-        // — no category-to-string mapping that fabricates a cause.
+        // Real error message from the source. Populated for type=="error".
+        // Client renders verbatim.
         public let message: String?
         // Stable machine-readable error code for type=="error" (e.g.
         // "free_limit_reached"). Lets the client branch on the cause (show a
@@ -59,8 +51,8 @@ public actor StreamWebSocketClient {
         public let capUsd: Double?
     }
 
-    /// A generated image frame from the pod. `requestId` is set when the
-    /// pod preceded the binary with a `frame_meta` text message (used for
+    /// A generated image frame from the backend. `requestId` is set when the
+    /// backend preceded the binary with a `frame_meta` text message (used for
     /// style-preview correlation). Normal streaming frames have nil.
     public struct ReceivedFrame: Sendable {
         public let requestId: String?

@@ -79,7 +79,7 @@ struct SettingsPanel: View {
         } header: {
             Text("Video")
         } footer: {
-            Text("Suffix is sent to the pod every config update — edit and the next video request picks it up. Empty = use the user's prompt verbatim.")
+            Text("Suffix is sent with every config update (video generation is currently offline; kept for the planned revival). Empty = use the user's prompt verbatim.")
         }
     }
 
@@ -187,7 +187,7 @@ struct SettingsPanel: View {
         } header: {
             Text("Diagnostics")
         } footer: {
-            Text("Provider: fal = hosted feedback-loop img2img; Lambda = our reference-mode pipeline on an H100 (adherence A/B, test accounts only — switching reconnects the stream). Profiling adds ~15–25% latency; writes a Perfetto trace to /tmp on the pod (fetch via SCP).")
+            Text("Provider: fal = hosted feedback-loop img2img; Lambda = our reference-mode pipeline on an H100 (adherence A/B, test accounts only — switching reconnects the stream). Profiling currently has no effect on the hosted fal path (kept for the future self-hosted video/image revival).")
         }
     }
 }

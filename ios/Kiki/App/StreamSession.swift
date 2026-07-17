@@ -15,22 +15,14 @@ final class StreamSession {
     // MARK: - Types
 
     /// UI-facing stream state. Server status messages drive transitions —
-    /// a bare WS open is just a breadcrumb. The `.warming` case carries
-    /// `startedAt` (the original pod-warm-cycle origin, server-supplied
-    /// via `warmingStartedAt`) for a continuous progress bar across
-    /// multiple status updates and reconnect attempts. `nil` means we
-    /// haven't received the timestamp yet — the UI must NOT render a
-    /// 0%-filled bar in that window or it looks like the warm-up is
-    /// restarting on each reconnect.
+    /// a bare WS open is just a breadcrumb. The `.warming` case carries the
+    /// display message for the connecting overlay (the backend's only
+    /// pre-ready state is `connecting`).
     enum StreamReadiness: Equatable {
         case disconnected
-        case warming(message: String, startedAt: Date?)
+        case warming(message: String)
         case ready
         case failed(message: String)
-        /// Backend reaper terminated the pod after 30 min of no frame activity.
-        /// User can resume by tapping the right-pane overlay or starting to draw.
-        /// No message carried — the UI uses a hardcoded title.
-        case idleTimeout
     }
 
     // MARK: - Properties
@@ -74,9 +66,7 @@ final class StreamSession {
     /// the canvas changed either way.
     var onCanvasFrameCaptured: ((UIImage) -> Void)?
 
-    /// Current readiness, observed by AppCoordinator. The warm-up start time
-    /// lives inside `.warming(startedAt:)` itself — `warm()` carries it
-    /// forward across consecutive warming transitions.
+    /// Current readiness, observed by AppCoordinator.
     private(set) var readiness: StreamReadiness = .disconnected
 
     // MARK: - Preview mode (style picker)
@@ -135,9 +125,10 @@ final class StreamSession {
     /// after 180s — forces upload of the breadcrumb buffer for stuck-on-
     /// Connecting cases that would otherwise sit silently on the device until
     /// the user force-quits. Cancelled and reset on every readiness transition
-    /// (substate progress restarts the timer; final states cancel it).
+    /// (re-entering `.warming` restarts the timer; final states cancel it).
     /// 180s threshold: forensic, not alerting — user-reported symptom is
-    /// "stuck for minutes". Avoids cold-start `warming_model` false-positives.
+    /// "stuck for minutes". Avoids false-positives during a cold fal pool's
+    /// multi-minute spin-up wait.
     private var warmingWatchdogTask: Task<Void, Never>?
     /// Wall-clock of the most recent successful frame received, used to log
     /// "elapsed since last frame" on unexpected disconnect.
@@ -287,7 +278,7 @@ final class StreamSession {
         return resized.jpegData(compressionQuality: 0.7)
     }
 
-    func stop(finalReadiness: StreamReadiness = .disconnected) {
+    func stop() {
         Self.breadcrumb(category: "stream.lifecycle", message: "Stopping", data: [
             "framesSent": framesSent,
             "framesReceived": framesReceived,
@@ -297,7 +288,7 @@ final class StreamSession {
         reconnectTask?.cancel()
         reconnectTask = nil
         Task { await client.disconnect() }
-        setReadiness(finalReadiness)
+        setReadiness(.disconnected)
     }
 
     // MARK: - Connection
@@ -332,14 +323,15 @@ final class StreamSession {
             let connectMs = Int(Date().timeIntervalSince(connectStart) * 1000)
             // NOTE: do NOT reset reconnectAttempts here. A bare URLSession WS
             // handshake is not a stable-connection signal — sendConfig can
-            // still fail post-handshake, and the orchestrator may take ~96 s
-            // to declare the session usable. Resetting here previously caused
-            // an infinite retry loop because runReconnect's catch would loop
-            // back, increment attempts, hit a fresh handshake, reset to 0,
-            // and the maxReconnectAttempts cap would never trip. Reset is now
+            // still fail post-handshake, and the backend may take a while to
+            // declare the session usable (a cold fal pool is minutes, not
+            // seconds). Resetting here previously caused an infinite retry
+            // loop because runReconnect's catch would loop back, increment
+            // attempts, hit a fresh handshake, reset to 0, and the
+            // maxReconnectAttempts cap would never trip. Reset is now
             // gated on the backend's `.ready` state (see handleState).
             // WS open is just a breadcrumb — don't change readiness here.
-            // The server's status=ready (or status=provisioning, or type=error)
+            // The server's state=ready (or state=connecting, or type=error)
             // is what actually drives the next transition, via statusTask.
             Self.breadcrumb(category: "stream.connection", message: "Connected to server", data: [
                 "attemptId": attemptId,
@@ -653,15 +645,12 @@ final class StreamSession {
                     "message": status.message ?? "",
                 ])
                 await MainActor.run {
+                    // Nil-safe decode: unknown state strings (e.g. a future
+                    // backend addition) are ignored rather than crashing or
+                    // failing the whole status decode.
                     if status.type == "state", let stateRaw = status.state,
                        let state = ProvisionState(rawValue: stateRaw) {
-                        self.handleState(
-                            state,
-                            replacementCount: status.replacementCount ?? 0,
-                            failureCategory: status.failureCategory.flatMap { FailureCategory(rawValue: $0) },
-                            warmingStartedAt: status.warmingStartedAt.map { Date(timeIntervalSince1970: TimeInterval($0) / 1000) },
-                            message: status.message
-                        )
+                        self.handleState(state)
                     } else if status.type == "error" {
                         // Out-of-band error (auth, entitlement, rate-limit,
                         // relay failure). Distinct from state=failed, which
@@ -698,48 +687,24 @@ final class StreamSession {
         }
     }
 
-    /// Map a server state event to UI readiness. Non-terminal states use
-    /// state-code mappings (the codes ARE the meaning — "Connecting...",
-    /// "Finding GPU..." are not invented). For `.failed`, use the real
-    /// error message bubbled up from the source — no client-side
-    /// category-to-string translation that fabricates a cause.
-    private func handleState(
-        _ state: ProvisionState,
-        replacementCount: Int,
-        failureCategory: FailureCategory?,
-        warmingStartedAt: Date?,
-        message: String?
-    ) {
+    /// Map a server state event to UI readiness. The backend's stream
+    /// lifecycle is two states: `connecting` (relay being wired) and
+    /// `ready` (frames can flow). Errors arrive out-of-band as
+    /// `type=="error"` messages, handled in the statusTask loop.
+    private func handleState(_ state: ProvisionState) {
         switch state {
-        case .queued, .findingGpu, .creatingPod, .fetchingImage, .warmingModel, .connecting:
-            self.warm(message: displayText(for: state, replacementCount: replacementCount), serverStartedAt: warmingStartedAt)
+        case .connecting:
+            self.warm(message: displayText(for: state))
         case .ready:
             self.setReadiness(.ready)
             // Reset retry budget here (not on bare WS handshake): `.ready`
-            // means the orchestrator has provisioned, warmed, and declared
-            // the session usable. That's the canonical stable-connection
+            // means the backend has wired the relay and declared the
+            // session usable. That's the canonical stable-connection
             // signal; failures before this point should still count against
             // maxReconnectAttempts so the cap actually trips.
             self.reconnectAttempts = 0
             // Re-send config now that the server is ready to accept it.
             self.lastSentConfig = nil
-        case .failed:
-            self.reconnectAttempts = 0
-            self.setReadiness(.failed(message: message ?? "Something went wrong"))
-        case .terminated:
-            // Idle reaper sends terminated + idle_timeout. Stop the session
-            // cleanly so attemptReconnect doesn't fight the deliberate close;
-            // user resumes via coordinator.resumeStream() (tap-to-resume on
-            // the overlay or starting a stroke).
-            //
-            // Other terminated paths (manual abort, replaceSession cleanup of
-            // old pod) carry no failureCategory and fall through to
-            // .disconnected as before.
-            if failureCategory == .idleTimeout {
-                self.stop(finalReadiness: .idleTimeout)
-            } else {
-                self.setReadiness(.disconnected)
-            }
         }
     }
 
@@ -781,24 +746,9 @@ final class StreamSession {
         }
     }
 
-    /// Transition to `.warming`. The server's `warmingStartedAt` (when
-    /// present) is authoritative — it's the original pod-warm-cycle start,
-    /// stable across reconnects, so the progress bar resumes correctly even
-    /// after a fresh session is created (e.g. on gallery↔drawing navigation).
-    /// Carries forward an existing readiness's startedAt when the server
-    /// hasn't supplied one yet (e.g. the pre-WS-open "Connecting…" call).
-    /// Never falls back to `Date()` — a fresh fallback timestamp would
-    /// render the progress bar at 0%, which looks like a restart.
-    private func warm(message: String, serverStartedAt: Date? = nil) {
-        let startedAt: Date?
-        if let serverStartedAt {
-            startedAt = serverStartedAt
-        } else if case .warming(_, let existing) = readiness {
-            startedAt = existing
-        } else {
-            startedAt = nil
-        }
-        applyReadiness(.warming(message: message, startedAt: startedAt))
+    /// Transition to `.warming` with the given display message.
+    private func warm(message: String) {
+        applyReadiness(.warming(message: message))
     }
 
     /// Transition to a terminal/stable state (`.ready`, `.disconnected`,
@@ -820,14 +770,13 @@ final class StreamSession {
         onReadinessChanged?(new)
 
         // Manage the warming watchdog. Every transition cancels any pending
-        // watchdog; entering `.warming` schedules a fresh one. Substate progress
-        // (queued → finding_gpu → ...) resets the timer naturally. Terminal
-        // states (.ready/.failed/.disconnected/.idleTimeout) just cancel.
+        // watchdog; entering `.warming` schedules a fresh one. Terminal
+        // states (.ready/.failed/.disconnected) just cancel.
         // Cleanup on `stop()` happens via `setReadiness(.disconnected)` →
         // applyReadiness, so no need to touch `cancelStreamingTasks`.
         warmingWatchdogTask?.cancel()
         warmingWatchdogTask = nil
-        if case .warming(let message, _) = new {
+        if case .warming(let message) = new {
             let snapshot = (
                 message: message,
                 framesSent: framesSent,

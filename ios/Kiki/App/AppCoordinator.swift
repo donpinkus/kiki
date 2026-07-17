@@ -827,9 +827,8 @@ final class AppCoordinator {
         // foregrounds go through handleScenePhaseChange (idempotent).
         markForegrounded()
 
-        // Pre-warm the GPU pod as soon as the app launches with a signed-in
-        // user. ~90s cold start otherwise dominates time-to-first-image and
-        // makes the app look broken to App Review and first-time users.
+        // Start the stream as soon as the app launches with a signed-in
+        // user, so the fal relay is connected before the first stroke.
         if signedInUserId != nil {
             startStream()
             seedResultStateForCurrentDrawing()
@@ -847,12 +846,6 @@ final class AppCoordinator {
         // Supply the current brush color to the canvas ring preview
         canvasViewModel.currentBrushColorProvider = { [weak self] in
             UIColor(self?.currentColor ?? .black)
-        }
-        // Auto-resume after idle timeout: any stroke fires this, and if the
-        // session is paused we kick a fresh provision without requiring the
-        // user to navigate or tap an overlay.
-        canvasViewModel.onUserActivity = { [weak self] in
-            self?.handleUserActivity()
         }
         // QuickShape telemetry — forward recognizer lifecycle events to analytics.
         canvasViewModel.onSnapEvent = { event in
@@ -962,8 +955,8 @@ final class AppCoordinator {
                 self.currentScreen = .gallery
             }
 
-            // Kick off pod provisioning immediately so the user isn't waiting
-            // for ~90s of cold start when they tap into a drawing.
+            // Start the stream immediately so the fal relay is connected by
+            // the time the user taps into a drawing.
             self.startStream()
             self.seedResultStateForCurrentDrawing()
         }
@@ -971,9 +964,9 @@ final class AppCoordinator {
 
     func signOut() {
         Task {
-            // Ask the backend to terminate the pod and delete the session row
-            // BEFORE clearing the JWT. Best-effort — never throws. Without
-            // this, the pod leaks for ~10 min until the idle reaper catches it.
+            // Notify the backend of the sign-out (marker endpoint — nothing
+            // server-side to tear down anymore) BEFORE clearing the JWT so
+            // the request is still authenticated. Best-effort — never throws.
             await authService.requestServerSignOut()
             await authService.signOut()
             await MainActor.run {
@@ -1372,7 +1365,7 @@ final class AppCoordinator {
         }
 
         // Transaction captures user-perceived spin-up latency: from this call
-        // through pod provisioning to first frame received. `StreamSession`
+        // through relay connect to first frame received. `StreamSession`
         // finishes it via the `onImageReceived` first-frame detection below.
         let startupTx = SentrySDK.startTransaction(name: "app.stream.startup", operation: "app.stream.startup")
         self.pendingStartupTransaction = startupTx
@@ -1660,9 +1653,8 @@ final class AppCoordinator {
         resumeStream()
     }
 
-    /// Public entry point for resuming a paused/idle session. Used by:
-    ///   • The right-pane "Session paused" overlay (tap target)
-    ///   • Stroke-triggered auto-resume (canvas onUserActivity)
+    /// Public entry point for restarting the stream (used by the paywall
+    /// dismissal and the image-provider toggle).
     /// Tears down the existing (stopped) session and starts a fresh one. The
     /// `startStream()` early-return on `streamSession != nil` would otherwise
     /// no-op, since the session is technically present but stopped.
@@ -1673,15 +1665,6 @@ final class AppCoordinator {
             streamSession = nil
         }
         startStream()
-    }
-
-    /// Called whenever the user starts a canvas stroke. If the session is
-    /// idle-timed-out, this auto-resumes — no need to navigate or tap.
-    fileprivate func handleUserActivity() {
-        if case .idleTimeout = streamReadiness {
-            streamLog.info("User activity detected during idle timeout — resuming stream")
-            resumeStream()
-        }
     }
 
     private func stopStream() {
@@ -1750,7 +1733,7 @@ final class AppCoordinator {
         switch readiness {
         case .disconnected:
             resultState = lastSuccessfulImage.map { .preview(image: $0) } ?? .empty
-        case .warming(let message, _):
+        case .warming(let message):
             resultState = .provisioning(
                 message: message,
                 previousImage: lastSuccessfulImage
@@ -1762,8 +1745,6 @@ final class AppCoordinator {
         case .failed(let msg):
             streamLog.error("Stream failed: \(msg)")
             resultState = .error(message: msg, previousImage: lastSuccessfulImage)
-        case .idleTimeout:
-            resultState = .idleTimeout(previousImage: lastSuccessfulImage)
         }
     }
 
