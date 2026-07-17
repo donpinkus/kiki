@@ -1,5 +1,11 @@
 # iPad code review — 2026-07-17
 
+> **Fix status (same day):** P1 items 1–6 fixed in `db387b2`; P2 items 7–12
+> fixed in `3a9f49c` (item 13's SUSPECTED notes remain open); P3 swept in
+> `efbbe56`. P4 remains open. Canvas fixes verified via BrushHarness
+> (battery byte-identical; stamp-cap stress test old-FAIL/new-PASS;
+> layer-stack round-trip PASS) + OfflineTests ALL PASSED.
+
 Four-part review (app core, views, Network/Result/Export packages, CanvasModule)
 following the RunPod/PostHog removal. Findings ranked by severity. Items marked
 **[verified]** were re-checked by hand at the cited lines; the rest are
