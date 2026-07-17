@@ -22,7 +22,7 @@ struct SettingsPanel: View {
                         coordinator.streamResolution = 1024
                         coordinator.streamScheduleMu = 1.2
                         coordinator.streamCaptureFPS = 2
-                        coordinator.drawingLayout = .splitScreen
+                        coordinator.drawingLayout = .overlay
                         coordinator.videoResolution = 512
                         coordinator.videoFrames = 145
                         coordinator.videoPromptSuffix = AppCoordinator.defaultVideoPromptSuffix
