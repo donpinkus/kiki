@@ -1,9 +1,8 @@
 /**
- * fal.ai HOSTED realtime image relay — drop-in replacement for `StreamRelay`
- * on the IMAGE path only (video stays on RunPod).
+ * fal.ai HOSTED realtime image relay — the production image path.
  *
  * When `IMAGE_PROVIDER=fal`, `routes/stream.ts` wires one of these instead of a
- * RunPod `StreamRelay`. It speaks fal's realtime protocol upstream
+ * plain `StreamRelay`. It speaks fal's realtime protocol upstream
  * (`wss://fal.run/fal-ai/flux-2/klein/realtime`, msgpack frames, server-side
  * `Authorization: Key $FAL_KEY` — no token minting, no secret on the client)
  * and presents the SAME surface `StreamRelay` does downstream, so the existing
@@ -11,10 +10,10 @@
  *
  * The one piece of glue: fal emits no `frame_meta`/`queueEmpty`. So for each
  * returned frame this relay synthesizes a `frame_meta` text message immediately
- * before the binary JPEG, with `queueEmpty` derived exactly as the RunPod pod
- * derives it (`model-servers/image/server.py:281` — "no newer sketch arrived
- * during this frame's generation"). That keeps the user-paused → video
- * idle-state animation working without touching `stream.ts` or the video pod.
+ * before the binary JPEG, with `queueEmpty` derived exactly as our own image
+ * server derives it (`model-servers/image/server.py` — "no newer sketch arrived
+ * during this frame's generation"). Kept so the future idle-state video
+ * trigger (see archive/video-ltx/) can key off it unchanged.
  *
  * Protocol verified live 2026-06-06 (see `fal-spike/README.md` verdict):
  *   - input msg : {image_url:"data:image/jpeg;base64,…", prompt,
@@ -26,10 +25,9 @@
  *   - idle      : after ~30s with no input fal sends a TIMEOUT control + closes
  *                 ("reconnect when needed"). We reconnect lazily on next frame.
  *
- * ISOLATION: the entire fal coupling is this one module. Reverting to RunPod =
- * set `IMAGE_PROVIDER=runpod` (the RunPod image path is dormant, not removed).
- * Removing fal entirely = delete this file + the `IMAGE_PROVIDER==='fal'` branch
- * in stream.ts + the two config fields. No coupling into the orchestrator/relay.
+ * ISOLATION: the entire fal coupling is this one module. Removing fal entirely
+ * = delete this file + the `IMAGE_PROVIDER==='fal'` branch in stream.ts + the
+ * config fields. No coupling into the relay.
  */
 import WebSocket from 'ws';
 import { Packr } from 'msgpackr';
@@ -38,7 +36,7 @@ import * as Sentry from '@sentry/node';
 import type { WireRelayPhaseTimings } from '../relay/streamRelay.js';
 
 /** The subset of `StreamRelay` that `routes/stream.ts` actually calls. Both
- * `StreamRelay` (RunPod) and `FalImageRelay` (fal) satisfy this structurally,
+ * `StreamRelay` (Lambda) and `FalImageRelay` (fal) satisfy this structurally,
  * so the image-path wiring is provider-agnostic. */
 export interface ImageRelay {
   setLogContext(ctx: Record<string, unknown>): void;
@@ -50,7 +48,7 @@ export interface ImageRelay {
   onClose(cb: (code: number, reason: string) => void): void;
   onError(cb: (err: Error) => void): void;
   close(): void;
-  /** Optional usage hooks (fal only — RunPod billing is per-pod). `onUsage`
+  /** Optional usage hooks (fal only). `onUsage`
    * fires when accrued open-time may have advanced (on connection close + a
    * throttle during continuous drawing); the handler reads `cumulativeOpenMs`
    * and reconciles spend. */
@@ -364,7 +362,7 @@ export class FalImageRelay implements ImageRelay {
     );
     if (this.closedByUs) return; // session teardown — stream.ts cleanup does the final spend flush
     // Never call closeHandler: there's no pod to replace, and stream.ts's
-    // handleUpstreamClose would kick a RunPod replaceSession. fal closes are
+    // handleUpstreamClose would treat it as a terminal drop. fal closes are
     // expected (our idle-close, fal's ~30s timeout, or a transient drop) —
     // recover by reconnecting on the next frame.
     this.log('info', wasIdleClose ? 'fal.idle_closed' : 'fal.upstream_closed', { code, reason });
@@ -545,7 +543,7 @@ export class FalImageRelay implements ImageRelay {
     // Intentionally a no-op. fal upstream closes (idle TIMEOUT or transient
     // drop) are recovered internally via lazy reconnect — there's no pod to
     // replace. Propagating to stream.ts's handleUpstreamClose would wrongly
-    // kick a RunPod replaceSession. Accepted only for ImageRelay compatibility.
+    // trigger recovery. Accepted only for ImageRelay compatibility.
   }
 
   onError(cb: (err: Error) => void): void {

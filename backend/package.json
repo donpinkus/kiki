@@ -12,12 +12,7 @@
     "db:migrate": "tsx src/postgres/migrate.ts",
     "lint": "eslint src/",
     "format": "prettier --write \"src/**/*.ts\"",
-    "deploy": "tsx scripts/deploy.ts",
-    "sync-all": "tsx scripts/sync-all-dcs.ts",
-    "add-dc-volume": "tsx scripts/add-dc-volume.ts",
-    "launch-test-pod": "tsx scripts/launch-test-pod.ts",
-    "terminate-test-pod": "tsx scripts/terminate-test-pod.ts",
-    "list-test-pods": "tsx scripts/list-test-pods.ts"
+    "deploy": "tsx scripts/deploy.ts"
   },
   "engines": {
     "node": ">=20.0.0"
@@ -28,7 +23,6 @@
     "@fastify/websocket": "^11.0.1",
     "@sentry/node": "^10.49.0",
     "fastify": "^5.2.1",
-    "ioredis": "^5.10.1",
     "jose": "^6.2.2",
     "msgpackr": "^1.11.13",
     "pg": "^8.21.0"

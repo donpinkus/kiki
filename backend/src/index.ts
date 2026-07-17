@@ -12,11 +12,8 @@ import { getActiveBackgroundTask } from './modules/observability/scope.js';
 const PINO_TO_SENTRY: Record<string, string> = {
   userId: 'user_id',
   sessionId: 'session_id',
-  podId: 'pod_id',
-  videoPodId: 'video_pod_id',
   connId: 'conn_id',
   streamId: 'stream_id',
-  kind: 'pod_kind',
   elapsedMs: 'elapsed_ms',
 };
 
@@ -30,8 +27,8 @@ Sentry.init({
   integrations: [
     // Auto-captures `request.log.X({...}, 'msg')` and `app.log.X(...)` Pino
     // calls into Sentry's Logs product, preserving the structured first-arg
-    // object as log attributes. Existing call sites in orchestrator.ts /
-    // stream.ts flow through unchanged.
+    // object as log attributes. Existing call sites in stream.ts flow
+    // through unchanged.
     Sentry.pinoIntegration(),
     // Per-request async-context isolation so `Sentry.setUser({ id })` set in
     // the JWT preHandler stays scoped to that request. Without this, a setUser
@@ -83,12 +80,9 @@ import { authRoute } from './routes/auth.js';
 import { subscriptionRoute } from './routes/subscription.js';
 import { appStoreNotifyRoute } from './routes/appStoreNotify.js';
 import { usageRoute } from './routes/usage.js';
-import { opsRoute } from './routes/ops.js';
 import { lambdaDevRoute } from './routes/lambdaDev.js';
 import { start as startLambdaDevPool, stop as stopLambdaDevPool } from './modules/lambda/devPool.js';
 import { installAuth } from './modules/auth/index.js';
-import { start as startOrchestrator } from './modules/orchestrator/orchestrator.js';
-import { start as startCostMonitor } from './modules/orchestrator/costMonitor.js';
 import { start as startFalWarmer, stop as stopFalWarmer } from './modules/fal/falWarmer.js';
 import { shutdownAnalytics } from './modules/analytics/index.js';
 import { ensureDb, pool as pgPool } from './postgres/client.js';
@@ -128,7 +122,6 @@ await app.register(subscriptionRoute);
 await app.register(appStoreNotifyRoute);
 await app.register(usageRoute);
 await app.register(streamRoute);
-await app.register(opsRoute);
 await app.register(lambdaDevRoute);
 
 // --- Sentry error handler (must be before custom error handler) ---
@@ -179,15 +172,11 @@ app.setErrorHandler((error, request, reply) => {
 const start = async () => {
   try {
     // Durable store first: connect to Postgres and apply the (idempotent)
-    // schema before anything serves traffic or provisions pods.
+    // schema before anything serves traffic.
     await ensureDb();
     await migrate();
     app.log.info('Postgres connected and schema applied');
 
-    // Orchestrator boots before the server accepts connections: reconciles any
-    // orphan pods from a prior run and arms the idle reaper.
-    await startOrchestrator(app.log);
-    startCostMonitor(app.log);
     // Keep the fal realtime pool warm (no-op unless IMAGE_PROVIDER=fal).
     startFalWarmer(app.log);
     // Lambda dev pool idle-reaper + redeploy re-adoption (no-op unless

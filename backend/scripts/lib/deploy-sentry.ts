@@ -1,17 +1,16 @@
 /**
- * Sentry init for deploy CLI scripts (deploy.ts, sync-all-dcs.ts, sync-flux-app.ts).
+ * Sentry init for deploy CLI scripts (deploy.ts).
  *
  * Pipes console.log/info/warn/error into the Sentry Logs product so deploy
- * activity is correlatable with pod boot logs and backend events. Every log
- * carries `phase=deploying` for cross-stack filtering — distinct from the
- * user-journey phases (session_starting, drawing, animating, etc.).
+ * activity is correlatable with backend events. Every log carries
+ * `phase=deploying` for cross-stack filtering — distinct from the
+ * user-journey phases (preparing, drawing, etc.).
  *
  * No-op when SENTRY_DSN is unset (so devs without a local Sentry config can
  * still run `npm run deploy` without errors). Reads from .env.local at the
  * repo root or from process.env (Railway sets it on the deployed backend).
  *
- * Each deploy CLI script runs as its own Node process (deploy.ts spawns
- * sync-all-dcs.ts which spawns sync-flux-app.ts), so each must call
+ * Each deploy CLI script runs as its own Node process and must call
  * `initDeployLogging()` at top and `await flushDeployLogging()` before
  * `process.exit()` so logs aren't dropped.
  */
@@ -76,8 +75,8 @@ export function initDeployLogging(scriptName: string): void {
 
 /**
  * Attach an additional attribute to every log emitted by this process from
- * now on. Use after init when a value (e.g. the DC name in sync-flux-app.ts)
- * isn't known until after CLI args are parsed.
+ * now on. Use after init when a value isn't known until after CLI args are
+ * parsed.
  */
 export function setLogAttribute(key: string, value: string | number | boolean): void {
   extraAttributes[key] = value;

@@ -1,128 +1,37 @@
 # `backend/scripts/`
 
-Operational scripts for the RunPod side of the stack. All run from `backend/`
-via `npx tsx scripts/<name>.ts`.
-
-## Operating these in production
-
-If you're trying to deploy backend or pod code, iterate on a pod, or run
-test/experiment pods — read **`documents/references/pod-operations.md`**
-first. It's the canonical decision tree and uses the scripts below as its
-implementation. The notes here are reference detail for the scripts
-themselves, not a deploy runbook.
-
-## Naming convention
-
-Six families, distinguished by the verb:
-
-| Prefix         | Purpose                                                   | Mutates state? | Costs $?   |
-| -------------- | --------------------------------------------------------- | -------------- | ---------- |
-| `populate-*`   | First-time provisioning of a volume                       | yes            | yes        |
-| `sync-*`       | Push code/dep updates to a volume                         | yes            | yes        |
-| `deploy*`      | One-shot orchestration: sync-all + railway up             | yes            | yes        |
-| `launch-*` / `terminate-*` / `list-*` | Test pod lifecycle (`kiki-vtest-*` prefix; reaper-invisible) | yes / yes / no | yes (~$3/hr) / no / no |
-| `probe-*`      | Measure RunPod *behavior* over time                       | no             | yes        |
-| `check-*` / `debug-*` | Read-only point-in-time status / one-off investigation | no             | usually no |
-
-When adding a new script, pick the prefix that matches the verb you'd use to
-describe it. `probe-*` and `check-*` differ in that probes spin up real pods
-to observe RunPod's behavior under conditions; checks read existing telemetry
-or APIs.
+Operational scripts. All run from `backend/` via `npx tsx scripts/<name>.ts`
+(or the npm alias where noted).
 
 ## Scripts
 
-### Volume management (`populate-*`, `sync-*`)
+- **`deploy.ts`** (`npm run deploy`) — deploys the backend to Railway
+  (`railway up`) with Sentry `phase:deploying` log markers. Must run from
+  `backend/` (the Railway service is linked to that directory).
 
-- **`populate-volume.ts`** — First-time setup of a network volume. Spawns a
-  5090 (image volume) or H100 SXM (video volume), downloads weights into
-  `/workspace/huggingface/`, then terminates. Run once per DC volume at
-  provisioning time. Pass `--kind image` or `--kind video`. Image: ~15 min,
-  ~$0.20. Video: ~30 min, ~$1 (also requires `HF_TOKEN` for Gemma).
+- **`gen-style-thumbnail.sh <id> "<promptSuffix>"`** — renders a style-picker
+  thumbnail via fal.ai `fal-ai/flux-2` text-to-image (klein is img2img-only on
+  fal). Needs `FAL_KEY` in `backend/.env.local`. See CLAUDE.md "Adding a
+  style".
 
-- **`sync-flux-app.ts`** — Push updates to `model-servers/*.py` and
-  `requirements.txt`. Spawns a cheap pod, rsyncs files into `/workspace/app/`,
-  pip-installs into `/workspace/venv/`, writes `/workspace/app/.version.json`
-  with the local git SHA, terminates. Run per DC after every code change to
-  the FLUX server. ~5–10 min, ~$0.10. Usually invoked indirectly via
-  `npm run sync-all` or `npm run deploy`, not directly.
+- **`lambda/`** — Lambda Cloud tooling for the `IMAGE_PROVIDER=lambda` image
+  path (per-region filesystem/venv/weights setup, capacity checks, cold-start
+  bench, load test). See `lambda/README.md`.
 
-- **`sync-all-dcs.ts`** — Fans `sync-flux-app.ts` out to every DC in
-  `NETWORK_VOLUMES_BY_DC` + `NETWORK_VOLUMES_BY_DC_VIDEO` in parallel.
-  Per-DC stdout captured to `/tmp/sync-all-<DC>.log`. Aborts non-zero if any
-  DC fails. Exposed as `npm run sync-all`. ~5–10 min total (slowest DC
-  dominates).
-
-- **`add-dc-volume.ts`** — Provision a new image-pod network volume in a DC
-  not already in `NETWORK_VOLUMES_BY_DC`. Creates the volume via the
-  `createNetworkVolume` GraphQL mutation, then runs `populate-volume.ts` +
-  `sync-flux-app.ts` against it, then prints the JSON fragment to paste into
-  the env var. `--dc <DC>` for an explicit single DC, or no args to
-  auto-discover every 5090-stocked DC we don't already cover. Sequential,
-  ~15 min per DC. Currently image-only (5090, 50 GB). Exposed as
-  `npm run add-dc-volume`. After it succeeds, operator must update
-  `.env.local` + Railway env then `npm run deploy`.
-
-### Deploy orchestration (`deploy*`)
-
-- **`deploy.ts`** — Single-command deploy. Reads `backend/.flux-app-version`,
-  diffs against the current `model-servers/` tree hash, runs `sync-all-dcs`
-  if changed, then runs `railway up`. Exposed as `npm run deploy`. This is the
-  canonical deploy path; use it instead of running sync + railway separately.
-
-### Test pod lifecycle (`launch-*`, `terminate-*`, `list-*`)
-
-- **`launch-test-pod.ts`** — Spawns a video test pod (`kiki-vtest-<hex>`
-  prefix, invisible to the orchestrator's reaper). Always passes `PUBLIC_KEY`
-  to force the dev-mode bash respawn loop, so `pkill` re-launches python
-  instead of killing the container. Accepts `--dc <DC>`, `--env KEY=VALUE`
-  (repeatable), `--name <suffix>`. Default DC is US-CA-2. Exposed as
-  `npm run launch-test-pod`. ~$3/hr H100 SXM while running.
-
-- **`terminate-test-pod.ts`** — Terminates a test pod by ID. Refuses to
-  terminate any pod whose name doesn't start with `kiki-vtest-` (safety
-  guard against killing real user sessions). Exposed as
-  `npm run terminate-test-pod -- <podId>`.
-
-- **`list-test-pods.ts`** — Lists currently-running test pods (filters by
-  `kiki-vtest-*` prefix). Prints SSH + terminate commands per pod. Exposed
-  as `npm run list-test-pods`. Run at the start of a session to spot
-  forgotten pods.
-
-### Diagnostics (`probe-*`)
-
-- **`probe-dc-pulls.ts`** — Spin up N parallel pods per DC, time each through
-  pod-create → scheduled → runtime-live. Used to isolate slow/stalled
-  container pulls from the rest of the stack. Diagnostic for `fetching_image`
-  variance across DCs.
-
-- **`probe-spot-survival.ts`** — Get N spot 5090s per DC and watch them
-  survive (or get preempted) for 10 minutes. Measures real-time preemption
-  rate per DC.
-
-- **`probe-ondemand-survival.ts`** — Same as `probe-spot-survival.ts` but
-  on-demand pods (which aren't preempted). Tests create-reliability and
-  runtime-stability without the preemption variable.
-
-### One-off investigation (`debug-*`)
-
-- **`debug-video-load.ts`** — Spawns a video pod and SSHs in to capture a
-  full `video_pipeline.load()` traceback. Used when `/health` truncates the
-  load_error or when you want a live shell during the failure. Not part of
-  any routine flow.
+- **`lib/deploy-sentry.ts`** — shared Sentry init for deploy CLIs (pipes
+  console output into Sentry Logs with `phase:deploying`).
 
 ## Common environment
 
-All scripts that talk to RunPod need:
+Scripts read secrets from `.env.local` at the repo root (gitignored):
 
-- `RUNPOD_API_KEY` — RunPod GraphQL auth.
-- `RUNPOD_SSH_PRIVATE_KEY` — for SSHing into spawned pods (sync/populate
-  scripts only). `sync-all-dcs.ts` falls back to reading `~/.ssh/id_ed25519`
-  automatically when this env var is unset, so `npm run deploy` users don't
-  need to set it manually. Standalone `sync-flux-app.ts` and
-  `populate-volume.ts` invocations DO require it inline:
-  `RUNPOD_SSH_PRIVATE_KEY="$(cat ~/.ssh/id_ed25519)"`.
-- `RUNPOD_REGISTRY_AUTH_ID` (optional) — Docker Hub auth for the
-  `runpod/pytorch` base pull; reduces cold-host pull times.
+- `FAL_KEY` — fal.ai API key (thumbnail generation).
+- `LAMBDA_API_KEY` — Lambda Cloud API key (`lambda/*` scripts).
+- `SENTRY_DSN` — optional; enables deploy log shipping from local runs.
 
-All of these live in `.env.local` at the repo root (gitignored). Most
-scripts source it implicitly; check the script's docstring for specifics.
+## History
+
+The RunPod-era scripts (volume populate/sync, test-pod lifecycle, DC probes)
+were removed 2026-07-17 with the RunPod orchestration system. Recover from
+git history if ever needed; the LTX video serving code they deployed is
+archived in `archive/video-ltx/`.

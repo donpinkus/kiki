@@ -21,7 +21,6 @@ import {
   revokeRefresh,
   ACCESS_TTL_SECONDS,
 } from '../modules/auth/jwt.js';
-import { abortSession } from '../modules/orchestrator/orchestrator.js';
 import { upsertUserByAppleSub, getUserEmail } from '../postgres/users.js';
 
 interface AppleLoginBody {
@@ -82,18 +81,18 @@ export const authRoute: FastifyPluginAsync = async (fastify) => {
     },
   );
 
-  // POST /v1/auth/signout — clean up the caller's session: terminate their
-  // pod and delete the Redis session row. The JWT and refresh tokens stay
-  // valid (no server-side revocation today) so the caller can sign back in
-  // freely. Idempotent: safe to call when there's no active session.
+  // POST /v1/auth/signout — sign-out marker. There is no server-side session
+  // state to tear down anymore (image relays live and die with the WS
+  // connection); the JWT and refresh tokens stay valid (no server-side
+  // revocation today) so the caller can sign back in freely. Kept because
+  // shipped iOS clients call it on sign-out.
   fastify.post('/v1/auth/signout', async (request, reply) => {
     // Authed by the global gate (not public) — `request.userId` is set.
     const userId = request.userId;
     if (!userId) {
       return reply.code(401).send({ error: 'authentication_required' });
     }
-    await abortSession(userId, 'manual');
-    request.log.info({ userId }, 'Signout: session aborted');
+    request.log.info({ userId }, 'Signout');
     return reply.send({ ok: true });
   });
 

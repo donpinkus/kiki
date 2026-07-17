@@ -37,14 +37,11 @@ export interface WireRelayPhaseTimings {
 
 /** Subset of HTTP response headers we capture on `'unexpected-response'`.
  *  Cherry-picked for diagnostic value: `cf-ray` identifies a Cloudflare-style
- *  proxy hop (RunPod's WS proxy uses Cloudflare); `server` distinguishes
- *  Uvicorn from a proxy; `x-runpod-*` are RunPod's own diagnostic headers. */
+ *  proxy hop; `server` distinguishes Uvicorn from a proxy. */
 export interface RelevantHttpHeaders {
   'cf-ray'?: string;
   server?: string;
   'content-type'?: string;
-  'x-runpod-pod-id'?: string;
-  'x-runpod-server'?: string;
 }
 
 /** Structured failure information surfaced by `connect()`'s rejection.
@@ -102,8 +99,6 @@ const RELEVANT_HEADER_KEYS: ReadonlyArray<keyof RelevantHttpHeaders> = [
   'cf-ray',
   'server',
   'content-type',
-  'x-runpod-pod-id',
-  'x-runpod-server',
 ];
 
 function pickHeaders(rawHeaders: Record<string, string | string[] | undefined> | undefined): RelevantHttpHeaders | undefined {

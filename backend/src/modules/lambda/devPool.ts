@@ -187,13 +187,14 @@ async function ensureLoop(): Promise<void> {
     const name = `${NAME_PREFIX}${Date.now()}`;
     instanceName = name;
     const keys = await c.listSshKeys();
-    if (keys.length === 0) throw new Error('no SSH key registered on the Lambda account');
+    const firstKey = keys[0];
+    if (!firstKey) throw new Error('no SSH key registered on the Lambda account');
     const [launchedId] = await launchWithRetry(
       c,
       {
         region_name: config.LAMBDA_REGION,
         instance_type_name: config.LAMBDA_INSTANCE_TYPE,
-        ssh_key_names: [keys[0]!.name],
+        ssh_key_names: [firstKey.name],
         file_system_names: [fsName()],
         name,
         image: { family: OS_IMAGE_FAMILY },
@@ -203,7 +204,8 @@ async function ensureLoop(): Promise<void> {
       undefined,
       (msg) => log.info({ event: 'lambda_pool_launch_retry' }, msg),
     );
-    id = launchedId!;
+    if (!launchedId) throw new Error('Lambda launch returned no instance id');
+    id = launchedId;
     log.info({ instanceId: id, event: 'lambda_pool_launched' }, 'launched kiki-serve instance');
   }
 

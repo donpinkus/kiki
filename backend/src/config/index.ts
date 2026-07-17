@@ -1,13 +1,6 @@
 export interface AppConfig {
   readonly PORT: number;
   readonly HOST: string;
-  readonly RUNPOD_API_KEY: string;
-  /** Optional RunPod container registry credential ID for authenticated Docker
-   * Hub pulls. Used only by the one-off probe and populate-volume scripts.
-   * Runtime pod creation does not use a registry credential (stock RunPod base
-   * image is public). */
-  readonly RUNPOD_REGISTRY_AUTH_ID: string;
-
   // ─── Auth (Workstream 1) ──────────────────────────────────────────────
   /** HS256 secret for signing/verifying access tokens (1h TTL). */
   readonly JWT_ACCESS_SECRET: string;
@@ -32,34 +25,13 @@ export interface AppConfig {
    * exempt. Default 10. */
   readonly FREE_TIER_FAL_USD: number;
 
-  // ─── On-demand fallback (Workstream 2) ────────────────────────────────
-  /** When true, orchestrator falls back to on-demand pods when spot capacity
-   * is exhausted. Default false so the flag can be flipped on per deploy. */
-  readonly ONDEMAND_FALLBACK_ENABLED: boolean;
-
-  /** When true, skip the spot attempt entirely and provision on-demand pods
-   * directly. Implies `ONDEMAND_FALLBACK_ENABLED` semantics regardless of that
-   * flag's value. Used to ride out RunPod spot capacity instability without
-   * removing the spot code path. Default false. */
-  readonly ONDEMAND_ONLY_MODE: boolean;
-
-  /** When true, stream.ts provisions a video pod alongside the image pod for
-   * each session. When false, sessions are image-only and queueEmpty triggers
-   * log 'video_skipped: relay_disconnected' (same code path as a runtime
-   * provision failure). Lets us deploy backend-side video changes ahead of
-   * the pod-side code reaching every network volume. Default false. */
-  readonly VIDEO_POD_ENABLED: boolean;
-
-  // ─── Image provider (fal.ai hosted realtime vs RunPod) ────────────────
-  /** Which backend serves the live img2img path. `runpod` (default) provisions
-   * per-session FLUX.2-klein pods. `fal` relays each frame to fal's hosted
-   * `fal-ai/flux-2/klein/realtime` model instead (no pod, ~1.5s first frame).
-   * The VIDEO idle-state path stays on RunPod regardless. Revert = set back to
-   * `runpod` + redeploy; the RunPod image path is dormant, not removed.
-   * `lambda` relays to a manually-launched Lambda Cloud instance running our
-   * own image server (scripts/lambda/) at LAMBDA_IMAGE_URL — dev toggle for
-   * sketch-adherence comparison vs fal; no orchestration/provisioning yet. */
-  readonly IMAGE_PROVIDER: 'runpod' | 'fal' | 'lambda';
+  // ─── Image provider (fal.ai hosted realtime vs Lambda Cloud) ──────────
+  /** Which backend serves the live img2img path. `fal` (default, production)
+   * relays each frame to fal's hosted `fal-ai/flux-2/klein/realtime` model
+   * (~1.5s first frame). `lambda` relays to a Lambda Cloud H100 instance
+   * running our own image server (scripts/lambda/) — dev toggle for
+   * sketch-adherence comparison vs fal. */
+  readonly IMAGE_PROVIDER: 'fal' | 'lambda';
   /** Full WS URL of a manually-launched Lambda image instance, including path
    * and token (printed by scripts/lambda/coldstart-bench.ts --keep). Optional
    * static override — when set it takes precedence over the dev pool. */
@@ -126,66 +98,11 @@ export interface AppConfig {
    * ≈ 10 min of active drawing at the 1s floor; ~50 MB worst case). */
   readonly SESSION_CAPTURE_MAX_FRAMES: number;
 
-  // ─── Network volumes (pre-populated with weights, venv, app code) ────
-  /** Map of RunPod datacenter ID → network volume ID for IMAGE pods (FLUX
-   * BF16 + NVFP4, ~20 GB). Volumes live in 5090-stocked DCs. Pre-populated
-   * by `populate-volume.ts --kind image`. JSON env var, e.g.
-   * `{"EUR-NO-1":"49n6i3twuw","US-NC-1":"5vz7ubospw"}`. */
-  readonly NETWORK_VOLUMES_BY_DC: Readonly<Record<string, string>>;
-  /** Map of RunPod datacenter ID → network volume ID for VIDEO pods
-   * (LTX-2.3 22B FP8 + Gemma-3-12B + spatial upscaler, ~52 GB). Volumes
-   * live in H100-SXM-stocked DCs (different set than image volumes —
-   * 5090 DCs typically don't have H100 SXM, and vice versa). Pre-populated
-   * by `populate-volume.ts --kind video` (requires HF_TOKEN with Gemma
-   * access accepted). JSON env var. Empty → video pods skip provisioning. */
-  readonly NETWORK_VOLUMES_BY_DC_VIDEO: Readonly<Record<string, string>>;
-
-  // ─── Redis (Workstream 5) ──────────────────────────────────────────────
-  /** Redis connection URL. Required for session registry persistence. */
-  readonly REDIS_URL: string;
-
   // ─── Postgres (durable accounts; usage ledger) ─────────────────────────
   /** Postgres connection string — the durable store for user accounts (and,
    * later, the per-user usage ledger). Required; the backend fails to boot
    * without it. Railway injects this from the Postgres addon. */
   readonly DATABASE_URL: string;
-
-  // ─── Cost monitoring (Workstream 4) ────────────────────────────────────
-  /** Shared secret for /v1/ops/* endpoints. Unset → ops routes reject all. */
-  readonly OPS_API_KEY: string;
-  /** Tick interval for cost monitor. Default 5 min. */
-  readonly COST_MONITOR_INTERVAL_MS: number;
-  /** Discord webhook URL for cost alerts + hourly digest. Unset → log only. */
-  readonly COST_ALERT_WEBHOOK_URL: string;
-  /** Discord Forum channel webhook for per-pod lifecycle threads. Unset → falls
-   * back to COST_ALERT_WEBHOOK_URL (no threads). */
-  readonly COST_POD_LOG_WEBHOOK_URL: string;
-  /** Alert when active pod count exceeds this. */
-  readonly COST_ALERT_MAX_ACTIVE_PODS: number;
-  /** Alert when rolling 24h spend exceeds this (USD). */
-  readonly COST_ALERT_MAX_24H_SPEND: number;
-  /** Hard monthly spend cap (USD). Trips a provision gate when breached. */
-  readonly COST_ALERT_MAX_MONTHLY_SPEND: number;
-  /** Alert when any pod's age exceeds this (seconds). */
-  readonly COST_ALERT_MAX_POD_AGE_SECONDS: number;
-  /** Minimum seconds between alerts of the same type. */
-  readonly COST_ALERT_COOLDOWN_SECONDS: number;
-
-  // ─── Preemption handling (Workstream 7) ────────────────────────────────
-  /** When true, hold client WS open and transparently replace the pod on
-   * preemption. When false, close client with error (legacy behavior). */
-  readonly PREEMPTION_REPLACEMENT_ENABLED: boolean;
-  /** Max replacement attempts per session before giving up. */
-  readonly MAX_SESSION_REPLACEMENTS: number;
-
-  // ─── Orphan pod reconciliation ─────────────────────────────────────────
-  /** Interval between continuous `reconcileOrphanPods` sweeps (ms). Default 30 min. */
-  readonly RECONCILE_INTERVAL_MS: number;
-  /** Minimum pod age (seconds) before a runtime reconcile will consider it
-   * orphaned. Guards against terminating pods that are still mid-provision.
-   * Default 600 (10 min), well above the ~150s provision deadline. Boot-time
-   * reconcile ignores this (uses 0) since the process was just rebuilt. */
-  readonly RECONCILE_MIN_AGE_SEC: number;
 
   // ─── Kiki Insights (internal per-user analytics microsite) ─────────────
   /** Base URL of the Insights service (e.g. https://kiki-insights.up.railway.app).
@@ -197,49 +114,8 @@ export interface AppConfig {
    * the value set on the Insights service. Unset → Insights dual-write no-ops. */
   readonly INSIGHTS_INGEST_KEY: string;
 
-  // ─── Pod-boot stall watchdog ───────────────────────────────────────────
-  /** When true, `waitForRuntime` fast-fails with `PodBootStallError` once
-   * `pod.runtime` has stayed null longer than `POD_BOOT_STALL_MS`, and
-   * `provision` rerolls onto a different DC. Disable to restore legacy binary
-   * 10-min timeout. Covers NFS mount stalls and stock-image pulls on cold
-   * hosts (the watchdog was originally GHCR-focused pre-2026-04-23). */
-  readonly POD_BOOT_WATCHDOG_ENABLED: boolean;
-  /** Ms to wait for `pod.runtime` to become non-null before calling a stall.
-   * Default 45000 (45 s) — tighter than the old 120 s budget because the
-   * stock image usually boots in ~5–90 s on a host with the base cached.
-   * Tune upward if Sentry shows false-positive stalls on legitimately cold
-   * hosts. */
-  readonly POD_BOOT_STALL_MS: number;
-  /** Max retries with a different DC per provision attempt. Default 2 (so up
-   * to 3 attempts total). Set to 0 to emit Sentry stall events without
-   * actually rerolling — useful for a dry-run observation phase. */
-  readonly POD_BOOT_MAX_REROLLS: number;
-
   readonly NODE_ENV: 'development' | 'production' | 'test';
   readonly LOG_LEVEL: 'fatal' | 'error' | 'warn' | 'info' | 'debug' | 'trace';
-}
-
-function parseVolumesMap(raw: string | undefined, varName: string): Readonly<Record<string, string>> {
-  if (!raw) return Object.freeze({});
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    throw new Error(
-      `${varName} must be valid JSON (got: ${raw.slice(0, 60)}...)`,
-    );
-  }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error(`${varName} must be a JSON object { "DC-ID": "volumeId" }`);
-  }
-  const out: Record<string, string> = {};
-  for (const [dc, vol] of Object.entries(parsed)) {
-    if (typeof vol !== 'string' || !vol) {
-      throw new Error(`${varName}[${dc}] must be a non-empty string`);
-    }
-    out[dc] = vol;
-  }
-  return Object.freeze(out);
 }
 
 function validateConfig(): AppConfig {
@@ -256,11 +132,6 @@ function validateConfig(): AppConfig {
   const port = Number(process.env['PORT'] ?? 3000);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     throw new Error(`Invalid PORT: ${process.env['PORT']}`);
-  }
-
-  const runpodApiKey = process.env['RUNPOD_API_KEY'] ?? '';
-  if (!runpodApiKey) {
-    throw new Error('RUNPOD_API_KEY is required (orchestrator needs it to create/query/terminate pods)');
   }
 
   const jwtAccessSecret = process.env['JWT_ACCESS_SECRET'] ?? '';
@@ -294,12 +165,12 @@ function validateConfig(): AppConfig {
     throw new Error('DATABASE_URL is required (Postgres connection string for the durable user/account store)');
   }
 
-  const imageProvider = (process.env['IMAGE_PROVIDER'] ?? 'runpod') as AppConfig['IMAGE_PROVIDER'];
-  if (!['runpod', 'fal', 'lambda'].includes(imageProvider)) {
-    throw new Error(`Invalid IMAGE_PROVIDER: ${imageProvider} (expected 'runpod', 'fal', or 'lambda')`);
+  const imageProvider = (process.env['IMAGE_PROVIDER'] ?? 'fal') as AppConfig['IMAGE_PROVIDER'];
+  if (!['fal', 'lambda'].includes(imageProvider)) {
+    throw new Error(`Invalid IMAGE_PROVIDER: ${imageProvider} (expected 'fal' or 'lambda')`);
   }
   const falKey = process.env['FAL_KEY'] ?? '';
-  if (imageProvider === 'fal' && !falKey) {
+  if (imageProvider === 'fal' && !falKey && nodeEnv !== 'test') {
     throw new Error("IMAGE_PROVIDER=fal requires FAL_KEY (fal.ai API key) to be set");
   }
   const lambdaImageUrl = process.env['LAMBDA_IMAGE_URL'] ?? '';
@@ -313,16 +184,12 @@ function validateConfig(): AppConfig {
   return {
     PORT: port,
     HOST: process.env['HOST'] ?? '0.0.0.0',
-    RUNPOD_API_KEY: runpodApiKey,
-    RUNPOD_REGISTRY_AUTH_ID: process.env['RUNPOD_REGISTRY_AUTH_ID'] ?? '',
     JWT_ACCESS_SECRET: jwtAccessSecret,
     JWT_REFRESH_SECRET: jwtRefreshSecret,
     APPLE_BUNDLE_ID: appleBundleId,
     APPLE_APP_APPLE_ID: Number(process.env['APPLE_APP_APPLE_ID'] ?? 0),
     AUTH_REQUIRED: process.env['AUTH_REQUIRED'] === 'true',
     FREE_TIER_FAL_USD: Number(process.env['FREE_TIER_FAL_USD'] ?? 10),
-    ONDEMAND_FALLBACK_ENABLED: process.env['ONDEMAND_FALLBACK_ENABLED'] === 'true',
-    VIDEO_POD_ENABLED: process.env['VIDEO_POD_ENABLED'] === 'true',
     IMAGE_PROVIDER: imageProvider,
     LAMBDA_IMAGE_URL: lambdaImageUrl,
     LAMBDA_API_KEY: process.env['LAMBDA_API_KEY'] ?? '',
@@ -338,32 +205,9 @@ function validateConfig(): AppConfig {
     SESSION_CAPTURE_ENABLED: process.env['SESSION_CAPTURE_ENABLED'] !== 'false',
     SESSION_CAPTURE_MIN_INTERVAL_MS: Number(process.env['SESSION_CAPTURE_MIN_INTERVAL_MS'] ?? 1000),
     SESSION_CAPTURE_MAX_FRAMES: Number(process.env['SESSION_CAPTURE_MAX_FRAMES'] ?? 600),
-    ONDEMAND_ONLY_MODE: process.env['ONDEMAND_ONLY_MODE'] === 'true',
-    NETWORK_VOLUMES_BY_DC: parseVolumesMap(process.env['NETWORK_VOLUMES_BY_DC'], 'NETWORK_VOLUMES_BY_DC'),
-    NETWORK_VOLUMES_BY_DC_VIDEO: parseVolumesMap(
-      process.env['NETWORK_VOLUMES_BY_DC_VIDEO'],
-      'NETWORK_VOLUMES_BY_DC_VIDEO',
-    ),
-    REDIS_URL: process.env['REDIS_URL'] ?? '',
     DATABASE_URL: databaseUrl,
-    PREEMPTION_REPLACEMENT_ENABLED: process.env['PREEMPTION_REPLACEMENT_ENABLED'] === 'true',
-    MAX_SESSION_REPLACEMENTS: Number(process.env['MAX_SESSION_REPLACEMENTS'] ?? 2),
-    RECONCILE_INTERVAL_MS: Number(process.env['RECONCILE_INTERVAL_MS'] ?? 30 * 60 * 1000),
-    RECONCILE_MIN_AGE_SEC: Number(process.env['RECONCILE_MIN_AGE_SEC'] ?? 600),
     INSIGHTS_URL: process.env['INSIGHTS_URL'] ?? '',
     INSIGHTS_INGEST_KEY: process.env['INSIGHTS_INGEST_KEY'] ?? '',
-    POD_BOOT_WATCHDOG_ENABLED: process.env['POD_BOOT_WATCHDOG_ENABLED'] !== 'false',
-    POD_BOOT_STALL_MS: Number(process.env['POD_BOOT_STALL_MS'] ?? 45_000),
-    POD_BOOT_MAX_REROLLS: Number(process.env['POD_BOOT_MAX_REROLLS'] ?? 2),
-    OPS_API_KEY: process.env['OPS_API_KEY'] ?? '',
-    COST_MONITOR_INTERVAL_MS: Number(process.env['COST_MONITOR_INTERVAL_MS'] ?? 300_000),
-    COST_ALERT_WEBHOOK_URL: process.env['COST_ALERT_WEBHOOK_URL'] ?? '',
-    COST_POD_LOG_WEBHOOK_URL: process.env['COST_POD_LOG_WEBHOOK_URL'] ?? '',
-    COST_ALERT_MAX_ACTIVE_PODS: Number(process.env['COST_ALERT_MAX_ACTIVE_PODS'] ?? 50),
-    COST_ALERT_MAX_24H_SPEND: Number(process.env['COST_ALERT_MAX_24H_SPEND'] ?? 200),
-    COST_ALERT_MAX_MONTHLY_SPEND: Number(process.env['COST_ALERT_MAX_MONTHLY_SPEND'] ?? 5000),
-    COST_ALERT_MAX_POD_AGE_SECONDS: Number(process.env['COST_ALERT_MAX_POD_AGE_SECONDS'] ?? 3600),
-    COST_ALERT_COOLDOWN_SECONDS: Number(process.env['COST_ALERT_COOLDOWN_SECONDS'] ?? 1800),
     NODE_ENV: nodeEnv,
     LOG_LEVEL: logLevel,
   };
