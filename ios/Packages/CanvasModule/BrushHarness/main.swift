@@ -1059,6 +1059,47 @@ runScene("wet-10-refill-sweep",
     }
 }
 
+runScene("wet-11-charge-refill-invariants",
+         """
+         Invariant pins for the Charge/Refill dials.
+         - Row 1: SMUDGE IMMUNITY. Two identical red patches, each smudged rightward with
+           an identical drag — left with default knobs, right with Charge 0.15 + Refill
+           0.9. Charge and Refill are INK-mode concepts (smudge has no ink to refill or
+           deplete): the two smudge tails must be pixel-identical. Any difference = the
+           guards broke.
+         - Row 2: REFILL EQUILIBRIUM. A blue drag through a LONG yellow patch at
+           Smear 0.6 / Refill 0.3: inside the patch pickup and refill fight to a steady
+           PARTIAL green — the trail must never converge to full yellow no matter how
+           long the crossing (compare wet-05's smear rows, which do converge), and must
+           return to blue after the exit.
+         """) { s in
+    // Row 1: smudge immunity A/B.
+    func smudgeCell(_ idBase: Int, x0: CGFloat, charge: CGFloat, refill: CGFloat) {
+        s.paint(synthStroke(id: idBase, brush: pen(red, width: 90),
+                            from: CGPoint(x: x0, y: 240), to: CGPoint(x: x0 + 180, y: 240),
+                            force: { _ in 1 }))
+        var b = wet(red, width: 50, mix: 0.6, smear: 0.85, smudge: true)
+        b.wetCharge = charge
+        b.wetRefill = refill
+        s.paint(synthStroke(id: idBase + 1, brush: b,
+                            from: CGPoint(x: x0 + 20, y: 240), to: CGPoint(x: x0 + 400, y: 240)))
+    }
+    s.label("smudge, default knobs", y: 130)
+    smudgeCell(440, x0: 60, charge: 1.0, refill: 0.0)
+    s.label("smudge, charge 0.15 + refill 0.9 — must be IDENTICAL", x: 540, y: 130)
+    smudgeCell(444, x0: 560, charge: 0.15, refill: 0.9)
+
+    // Row 2: refill equilibrium through a LONG crossing.
+    s.label("smear 0.6 / refill 0.3 through a LONG patch — steady partial green, never full yellow", y: 560)
+    s.paint(synthStroke(id: 450, brush: pen(yellow, width: 100),
+                        from: CGPoint(x: 200, y: 660), to: CGPoint(x: 850, y: 660),
+                        force: { _ in 1 }))
+    var eq = wet(blue, width: 44, mix: 0.8, smear: 0.6)
+    eq.wetRefill = 0.3
+    s.paint(synthStroke(id: 451, brush: eq,
+                        from: CGPoint(x: 60, y: 660), to: CGPoint(x: 990, y: 660)))
+}
+
 // MARK: - Fixture replay (recorded on iPad via Brush Studio → "Record strokes")
 // `BrushFixture` is the module's shared contract type (Sources/CanvasModule/BrushFixture.swift).
 

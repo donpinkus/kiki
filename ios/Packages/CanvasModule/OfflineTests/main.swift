@@ -338,6 +338,26 @@ for zTest in [0.3, 0.5, 0.7] {
     }
     checkBool("lightness quad monotonic (z=\(zTest))", mono)
 }
+// Charge half-life (wet reservoir): identity at 1 (infinite), monotonic in charge,
+// pinned bounds — the walker's decay is 0.5^(arc/halfLife) on the deposit alpha.
+do {
+    var b = BrushConfig(color: .black, baseWidth: 30)
+    b.wetCharge = 1.0
+    checkBool("charge 1 → bottomless", b.wetChargeHalfLife == .infinity)
+    b.wetCharge = 0.0
+    check("charge 0 half-life floor", Double(b.wetChargeHalfLife), 180.0)
+    b.wetCharge = 0.5
+    check("charge 0.5 half-life", Double(b.wetChargeHalfLife), 180.0 + 3420 * 0.25)
+    var prev = 0.0
+    var monotonic = true
+    for c in stride(from: 0.0, through: 0.99, by: 0.11) {
+        b.wetCharge = CGFloat(c)
+        let h = Double(b.wetChargeHalfLife)
+        if h < prev { monotonic = false }
+        prev = h
+    }
+    checkBool("charge half-life monotonic", monotonic)
+}
 // A no-sensor rotationLike CurveOption folds to 0, NOT to its strength — the static nib
 // angle must come from BrushConfig.tipAngle (calligraphy bug, caught on device 2026-07-15).
 check("no-sensor rotationLike folds to 0",

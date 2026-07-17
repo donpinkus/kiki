@@ -312,6 +312,13 @@ public struct BrushConfig: Codable, Sendable {
     // travel and aren't useful strokes at 2048² document resolution.
     public static let widthRange: ClosedRange<CGFloat> = 2.5...100
 
+    /// Charge → deposit-decay half-life in document px (pure; offline-asserted).
+    /// `.infinity` at charge ≥ 0.999 (bottomless — the identity the default relies on).
+    public var wetChargeHalfLife: CGFloat {
+        let c = max(0, min(1, wetCharge))
+        return c >= 0.999 ? .infinity : 180 + 3420 * c * c
+    }
+
     /// Compute effective stroke width for a given pressure and tilt.
     public func effectiveWidth(force: CGFloat, altitude: CGFloat = .pi / 2) -> CGFloat {
         var width = baseWidth * pow(max(force, 0.01), pressureGamma)

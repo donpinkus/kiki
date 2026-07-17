@@ -69,8 +69,7 @@ struct WetStrokeWalker {
         // Charge (P7): finite paint reservoir. deposit weight × 0.5^(arc/halfLife);
         // charge 1 = bottomless (identity — pre-Charge strokes byte-identical).
         let refill = Float(max(0, min(1, brush.wetRefill)))
-        let charge = max(0, min(1, brush.wetCharge))
-        let chargeHalfLife: CGFloat = charge >= 0.999 ? .infinity : 180 + 3420 * charge * charge
+        let chargeHalfLife = brush.wetChargeHalfLife
 
         // Fresh paint load at the start of a stroke. SMUDGE seeds the load (color AND
         // alpha) from the CANVAS under the first dab — push existing paint, introduce no
