@@ -77,9 +77,9 @@ same cost (one generation either way).
 
 ## Open items before building
 
-- n=1 subject/style — repeat on 3–5 diverse generations (portrait, object, scene;
-  other style suffixes) to confirm the sketch prompt generalizes.
-- Sketch-prompt tuning: background retention, line weight, color count.
+- ~~n=1~~ RESOLVED: generalization confirmed on 5 real drawings (section above).
+- Sketch-prompt tuning: strict color fidelity variant ("using the exact same
+  colors as the image"), line weight, color count.
 - App-side: import mechanics (layer vs flatten), resolution (sketchify at 768²,
   canvas is 2048² — upscale strategy for import), undo semantics.
 - Latency UX: one generation (~1 s incl. overhead) — fine as a tap action.
