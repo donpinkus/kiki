@@ -312,14 +312,33 @@ Source-level read of diffusers @1aadc65 (agent-verified, code-cited) + on-GPU te
   hallucinated a second angel), skull in hand from frame 20, scythe appears as
   drawn, red accents correct, strong frame-to-frame coherence. 705 ms/frame
   per-call at 4 steps (458 at 2 steps), 37 GB VRAM.
-- **CONCLUSION — the streaming path is real, on 9B:** kv9b + held-cache projects
-  to ~500 ms steady-state at 4 steps (~330 ms at 2 steps; compile untested on 9B)
-  ≈ baseline-4B speed with better adherence, or faster at 2-step. Next: (1)
-  measure held-cache on 9b directly (est. above uses the 4B held/percall ratio);
-  (2) 2-step quality on 9b; (3) compile on 9b; (4) fp8 variant (klein-9b-kv-fp8)
-  for VRAM/speed; (5) productize: port the held-cache loop into image/server.py
-  behind a flag, with delta-triggered re-extract instead of every-4th-frame;
-  (6) true per-row batching (independent thread).
+- **kv9b held-cache MEASURED (2026-07-17): 551 ms steady-state, extract frames
+  681 ms** (4-step, uncompiled). Staleness check on continuous replay looked
+  visually indistinguishable (`scratchpad/grid-9b-staleness.jpg`) — **but that
+  test masked the real failure mode (Donald, 2026-07-17): draw one line, STOP,
+  wait.** Generation is input-driven, so under any every-N refresh policy the
+  settled image may NEVER reflect the last stroke — broken core loop. Scheduled/
+  lagged refresh policies are REJECTED. Every generated frame must be fresh.
+- **Policy consequence:** since every generation follows a sketch change,
+  "fresh every frame" makes the simple held-cache worthless in production
+  (full extract every frame ≈ per-call, 681–705 ms). The held cache only earns
+  its keep via **partial invalidation** (Donald's proposal): recompute only the
+  changed tokens (dirty-rect → token indices; scatter-write K/V; stale-unchanged-
+  token approximation with periodic full extract for drift). Estimated fresh-
+  every-frame cost ~570–590 ms — a ~15–20% win over per-call, contingent on the
+  approximation not costing adherence. That experiment (real surgery, ~half-day)
+  now decides whether streaming caching ships at all; **per-call 9B (705 ms,
+  adherence-best, zero cache machinery) is the safe ship** either way.
+- **CONCLUSION — streaming on 9B works end to end:** best-adhering model at
+  production speed (551 vs baseline-4B's 563), before compile. Remaining: (1)
+  compile-on-9B (~1.2× → ~460 ms est.); (2) fp8 variant for VRAM/speed; (3)
+  productize: port held-cache into image/server.py behind a flag with
+  delta-triggered re-extract; (4) true per-row batching (independent thread).
+  2-step de-prioritized per the locked steps↔adherence rule.
+- **FLUX_COMPILE verified end-to-end (2026-07-17):** compiled server through the
+  real WS path = **p50 609 ms vs 716 uncompiled (1.18×)**, warmup absorbs 158 s
+  (both shapes). us-south-2 filesystem boot.sh + app code updated; us-southeast-1
+  still pending the same edit (needs capacity there).
 
 ### Ship-now config (Donald-locked, 2026-07-17)
 

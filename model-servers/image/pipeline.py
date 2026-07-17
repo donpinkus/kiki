@@ -89,7 +89,19 @@ class FluxKleinPipeline:
         )
         t0 = time.time()
 
-        from diffusers import Flux2KleinPipeline
+        # Pipeline class selection (FLUX_PIPELINE env): `base` is the standard
+        # Flux2KleinPipeline; `kv` is Flux2KleinKVPipeline — reference-token
+        # K/V are extracted once at step 0 and reused for the remaining steps
+        # (~30% faster per frame). KV mode requires a checkpoint TRAINED for
+        # its attention pattern (e.g. black-forest-labs/FLUX.2-klein-9b-kv via
+        # FLUX_MODEL): on standard klein weights it destroys sketch adherence
+        # (measured 2026-07-16 — see documents/plans/lambda-image-provider.md).
+        if config.PIPELINE_VARIANT == "kv":
+            from diffusers.pipelines.flux2.pipeline_flux2_klein_kv import (
+                Flux2KleinKVPipeline as Flux2KleinPipeline,
+            )
+        else:
+            from diffusers import Flux2KleinPipeline
 
         # Page-cache prefetch (parallel reads of all safetensors). Note we
         # now prefetch the transformer dir too — under device_map='cuda'
@@ -134,7 +146,7 @@ class FluxKleinPipeline:
         # safetensors version doesn't support device=. load_state_dict
         # handles either case correctly when the transformer is on GPU.
         t_phase = time.time()
-        if config.USE_NVFP4:
+        if config.USE_NVFP4 and config.PIPELINE_VARIANT != "kv":
             self._try_load_nvfp4()
         self._phase_timings["nvfp4_load_ms"] = int((time.time() - t_phase) * 1000)
 
@@ -185,8 +197,8 @@ class FluxKleinPipeline:
                 height=config.DEFAULT_HEIGHT,
                 width=config.DEFAULT_WIDTH,
                 num_inference_steps=config.STEPS,
-                guidance_scale=1.0,
                 generator=torch.Generator(device="cuda").manual_seed(0),
+                **({} if config.PIPELINE_VARIANT == "kv" else {"guidance_scale": 1.0}),
             )
         # Compiled graphs are shape-specialized: the txt2img warmup above does
         # NOT cover reference-mode's longer sequence (gen+ref tokens). Without
@@ -246,11 +258,12 @@ class FluxKleinPipeline:
                 height=config.DEFAULT_HEIGHT,
                 width=config.DEFAULT_WIDTH,
                 num_inference_steps=steps,
+                generator=generator,
                 # klein is step-wise distilled and ignores guidance_scale;
                 # diffusers prints a warning every frame if we don't pin it
-                # to the neutral value.
-                guidance_scale=1.0,
-                generator=generator,
+                # to the neutral value. The KV pipeline is distilled-only and
+                # has no guidance_scale parameter at all.
+                **({} if config.PIPELINE_VARIANT == "kv" else {"guidance_scale": 1.0}),
             )
         return result.images[0]
 
@@ -414,6 +427,7 @@ class FluxKleinPipeline:
 
         return {
             "model": config.MODEL_ID,
+            "pipeline": config.PIPELINE_VARIANT,
             "dtype": config.DTYPE,
             "quantization": self._quantization,
             "default_steps": config.STEPS,
