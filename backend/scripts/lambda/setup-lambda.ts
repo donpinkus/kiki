@@ -88,7 +88,7 @@ function runRsync(ip: string, localPath: string, remotePath: string): Promise<vo
   const sshCmd = `ssh -i ${SSH_KEY_PATH} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null`;
   const args = [
     '-az', '--delete',
-    '--exclude', '__pycache__', '--exclude', '*.pyc', '--exclude', 'video/', '--exclude', 'dev/',
+    '--exclude', '__pycache__', '--exclude', '*.pyc', '--exclude', 'dev/',
     '-e', sshCmd,
     `${localPath}/`,
     `ubuntu@${ip}:${remotePath}/`,
