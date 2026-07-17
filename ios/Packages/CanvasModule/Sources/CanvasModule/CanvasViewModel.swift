@@ -76,6 +76,15 @@ public final class CanvasViewModel {
     public var onFirstBrushStrokeCommitted: (() -> Void)?
     private var hasFiredFirstBrushStrokeThisSession: Bool = false
 
+    /// Forwarded from `MetalCanvasView.onStrokeCompleted`: every completed brush stroke
+    /// (dry + wet), already normalized to canvas pixels. Used by the dev stroke recorder
+    /// (Brush Studio → "Record strokes" → BrushHarness fixture).
+    public var onStrokeCompleted: ((Stroke) -> Void)?
+
+    func handleStrokeCompleted(_ stroke: Stroke) {
+        onStrokeCompleted?(stroke)
+    }
+
     // MARK: - Lifecycle
 
     public init() {
@@ -288,7 +297,12 @@ public final class CanvasViewModel {
 
     public func captureSnapshot() -> SketchSnapshot? {
         guard let canvasView else { return nil }
-        guard !canvasView.isEmpty || hasBackgroundContent else { return nil }
+        // `hasActiveStroke` lets the FIRST stroke stream while still being
+        // drawn: `isEmpty` only flips once a stroke commits (strokeCount is
+        // stroke-end incremented), but the in-flight stroke is already in the
+        // snapshot via the scratch texture. Without it, a new user's first
+        // stroke generates nothing until they lift the pencil.
+        guard !canvasView.isEmpty || hasBackgroundContent || canvasView.hasActiveStroke else { return nil }
 
         let outputSize = canvasView.bounds.size
         guard outputSize.width > 0, outputSize.height > 0 else { return nil }

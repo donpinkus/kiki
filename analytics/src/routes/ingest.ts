@@ -81,6 +81,108 @@ async function rollUpSession(
 }
 
 export const ingestRoute: FastifyPluginAsync = async (app) => {
+  // Raw JPEG bodies for /ingest/capture (events are JSON; drawings are
+  // multipart — capture frames arrive at ~1/s/kind per active stream, so the
+  // lean raw-body path beats multipart overhead).
+  app.addContentTypeParser('image/jpeg', { parseAs: 'buffer' }, (_req, body, done) => {
+    done(null, body);
+  });
+
+  // ─── Session replay frame (raw JPEG body) ─────────────────────────────────
+  // Backend-only (service key): mirrors a throttled sample of a live drawing
+  // session. Query params: stream_id, user_id, kind (sketch|generated),
+  // seq (int, per-kind), ts (epoch ms at relay time).
+  app.post('/ingest/capture', async (request, reply) => {
+    let principal;
+    try {
+      principal = await authenticateIngest(request);
+    } catch (err) {
+      request.log.warn({ err: (err as Error).message }, 'capture ingest auth failed');
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    if (principal.source === 'ios') {
+      return reply.code(403).send({ error: 'capture ingest is backend-only' });
+    }
+
+    const q = request.query as Record<string, string | undefined>;
+    const streamId = q['stream_id'];
+    const userId = q['user_id'];
+    const kind = q['kind'];
+    const seq = Number(q['seq']);
+    const ts = Number(q['ts']);
+    const jpeg = request.body as Buffer | undefined;
+
+    if (!streamId || !userId || (kind !== 'sketch' && kind !== 'generated')) {
+      return reply.code(400).send({ error: 'stream_id, user_id, kind=sketch|generated required' });
+    }
+    if (!Number.isInteger(seq) || seq < 1 || !Number.isFinite(ts)) {
+      return reply.code(400).send({ error: 'seq (int ≥1) and ts (epoch ms) required' });
+    }
+    if (!Buffer.isBuffer(jpeg) || jpeg.length === 0) {
+      return reply.code(400).send({ error: 'JPEG body required (Content-Type: image/jpeg)' });
+    }
+    if (jpeg.length > 2 * 1024 * 1024) {
+      return reply.code(400).send({ error: 'frame too large (max 2MB)' });
+    }
+    // stream_id lands in blob paths — reject anything path-shaped.
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(streamId)) {
+      return reply.code(400).send({ error: 'invalid stream_id' });
+    }
+
+    const key = `captures/${streamId}/${kind}-${String(seq).padStart(5, '0')}.jpg`;
+    await blobStore.put(key, jpeg);
+    await query(
+      `INSERT INTO capture_frames (stream_id, user_id, kind, seq, captured_at, blob_key)
+       VALUES ($1, $2, $3, $4, to_timestamp($5 / 1000.0), $6)
+       ON CONFLICT (stream_id, kind, seq) DO NOTHING`,
+      [streamId, userId, kind, seq, ts, key],
+    );
+    return reply.send({ ok: true });
+  });
+
+  // ─── Session replay prompt change (JSON) ───────────────────────────────────
+  // Backend-only: the prompt text that was live from `ts` onward in a stream.
+  app.post('/ingest/capture-prompt', async (request, reply) => {
+    let principal;
+    try {
+      principal = await authenticateIngest(request);
+    } catch (err) {
+      request.log.warn({ err: (err as Error).message }, 'capture-prompt ingest auth failed');
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    if (principal.source === 'ios') {
+      return reply.code(403).send({ error: 'capture-prompt ingest is backend-only' });
+    }
+
+    const b = (request.body ?? {}) as Record<string, unknown>;
+    const streamId = b['stream_id'];
+    const userId = b['user_id'];
+    const seq = Number(b['seq']);
+    const ts = Number(b['ts']);
+    const prompt = b['prompt'];
+    if (
+      typeof streamId !== 'string' ||
+      !/^[A-Za-z0-9_-]{1,128}$/.test(streamId) ||
+      typeof userId !== 'string' ||
+      !userId ||
+      typeof prompt !== 'string' ||
+      prompt.length > 4000 ||
+      !Number.isInteger(seq) ||
+      seq < 1 ||
+      !Number.isFinite(ts)
+    ) {
+      return reply.code(400).send({ error: 'stream_id, user_id, seq, ts, prompt required' });
+    }
+
+    await query(
+      `INSERT INTO capture_prompts (stream_id, user_id, seq, captured_at, prompt)
+       VALUES ($1, $2, $3, to_timestamp($4 / 1000.0), $5)
+       ON CONFLICT (stream_id, seq) DO NOTHING`,
+      [streamId, userId, seq, ts, prompt],
+    );
+    return reply.send({ ok: true });
+  });
+
   app.post('/ingest', async (request, reply) => {
     let principal;
     try {
@@ -212,12 +314,180 @@ export const ingestRoute: FastifyPluginAsync = async (app) => {
     // so there's no counter to maintain here.
     return reply.send({ ok: true, drawing_id: drawingId });
   });
+
+  // ─── Brush-target attempt upload (multipart, service key) ─────────────────
+  // Claude posts recreation renders against a brush target (Brushes tab shows
+  // them beside the references). Fields: target_id (required), label, note.
+  // File part: image (PNG).
+  app.post('/ingest/brush-target-attempt', async (request, reply) => {
+    try {
+      await authenticateIngest(request);
+    } catch (err) {
+      request.log.warn({ err: (err as Error).message }, 'brush-target attempt auth failed');
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    const fields: Record<string, string> = {};
+    let imageBuf: Buffer | null = null;
+    let filename = 'attempt.png';
+    const parts = (request as unknown as { parts: () => AsyncIterableIterator<MultipartPart> }).parts();
+    for await (const part of parts) {
+      if (part.type === 'field') fields[part.fieldname] = String(part.value);
+      else { imageBuf = await part.toBuffer(); filename = part.filename ?? filename; }
+    }
+    const targetId = Number(fields['target_id']);
+    if (!Number.isFinite(targetId)) return reply.code(400).send({ error: 'target_id required' });
+    if (!imageBuf || imageBuf.length === 0) return reply.code(400).send({ error: 'image required' });
+    if (imageBuf.length > 24 * 1024 * 1024) return reply.code(400).send({ error: 'image too large' });
+    const { rows: t } = await query(`SELECT id FROM brush_targets WHERE id = $1`, [targetId]);
+    if (t.length === 0) return reply.code(404).send({ error: 'no such target' });
+    const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const key = `brush-targets/${targetId}/attempts/${stamp}-${filename.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+    await blobStore.put(key, imageBuf);
+    const { rows } = await query<{ id: string }>(
+      `INSERT INTO brush_target_images (target_id, kind, label, note, blob_key)
+       VALUES ($1, 'attempt', $2, $3, $4) RETURNING id`,
+      [targetId, fields['label'] ?? null, fields['note'] ?? null, key],
+    );
+    await query(`UPDATE brush_targets SET status = 'in_progress', updated_at = now() WHERE id = $1 AND status = 'todo'`, [targetId]);
+    return { ok: true, id: rows[0]!.id };
+  });
+
+  // ─── Brush fixture upload (multipart) ─────────────────────────────────────
+  // Brush Studio's "Record strokes → Upload": the BrushFixture JSON (replayable in
+  // BrushHarness) + an optional PNG snapshot of the canvas at capture time. Dev
+  // tooling / brush bug-report channel — see BrushHarness/README.md.
+  // Fields: name, note, stroke_count, user_id (only for service-key callers).
+  // Files:  fixture (application/json, required), snapshot (PNG, optional).
+  app.post('/ingest/fixture', async (request, reply) => {
+    let principal;
+    try {
+      principal = await authenticateIngest(request);
+    } catch (err) {
+      request.log.warn({ err: (err as Error).message }, 'fixture ingest auth failed');
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+
+    const fields: Record<string, string> = {};
+    let fixtureBuf: Buffer | null = null;
+    let snapshotBuf: Buffer | null = null;
+
+    const parts = (request as unknown as { parts: () => AsyncIterableIterator<MultipartPart> }).parts();
+    for await (const part of parts) {
+      if (part.type === 'field') {
+        fields[part.fieldname] = String(part.value);
+      } else {
+        const buf = await part.toBuffer();
+        if (part.fieldname === 'fixture') fixtureBuf = buf;
+        else if (part.fieldname === 'snapshot') snapshotBuf = buf;
+      }
+    }
+
+    const userId = principal.source === 'ios' ? principal.userId : fields['user_id'];
+    if (!userId) return reply.code(400).send({ error: 'user_id required' });
+    if (!fixtureBuf) return reply.code(400).send({ error: 'fixture file required' });
+    if (fixtureBuf.length > 32 * 1024 * 1024) return reply.code(400).send({ error: 'fixture too large' });
+
+    // Sanity-parse so a corrupt upload fails loudly here, not at harness replay.
+    let strokeCount = Number(fields['stroke_count']);
+    try {
+      const parsed = JSON.parse(fixtureBuf.toString('utf8')) as { strokes?: unknown[] };
+      if (!Array.isArray(parsed.strokes)) throw new Error('no strokes[]');
+      if (!Number.isFinite(strokeCount)) strokeCount = parsed.strokes.length;
+    } catch (err) {
+      return reply.code(400).send({ error: `fixture is not valid BrushFixture JSON: ${(err as Error).message}` });
+    }
+
+    const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const fixtureKey = `fixtures/${stamp}/fixture.json`;
+    await blobStore.put(fixtureKey, fixtureBuf);
+    let snapshotKey: string | null = null;
+    if (snapshotBuf) {
+      snapshotKey = `fixtures/${stamp}/snapshot.png`;
+      await blobStore.put(snapshotKey, snapshotBuf);
+    }
+
+    const inserted = await query<{ id: string }>(
+      `INSERT INTO fixtures (user_id, name, note, stroke_count, fixture_key, snapshot_key)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id`,
+      [userId, fields['name'] ?? null, fields['note'] ?? null, strokeCount, fixtureKey, snapshotKey],
+    );
+
+    return reply.send({ ok: true, id: inserted.rows[0]?.id, fixture_key: fixtureKey, snapshot_key: snapshotKey });
+  });
+
+  // ─── Brush-test battery run (multipart) ───────────────────────────────────
+  // BrushHarness → publish-run.sh: one run = the rendered synthetic-scene battery
+  // (+ any fixture replays) for one git SHA. Service-key only (published from the
+  // dev Mac, no user identity). Fields: git_sha, note (must precede files).
+  // Files: any number of `image` parts; each part's FILENAME (minus .png) is the
+  // scene name, e.g. "wet-02-smudge.png". No pass/fail semantics — the Tests tab
+  // is a visual-inspection gallery by design.
+  app.post('/ingest/test-run', async (request, reply) => {
+    let principal;
+    try {
+      principal = await authenticateIngest(request);
+    } catch (err) {
+      request.log.warn({ err: (err as Error).message }, 'test-run ingest auth failed');
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    if (principal.source === 'ios') {
+      return reply.code(403).send({ error: 'test-run ingest is service-key only' });
+    }
+
+    const fields: Record<string, string> = {};
+    const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const images: { scene: string; key: string }[] = [];
+
+    const parts = (request as unknown as { parts: () => AsyncIterableIterator<MultipartPart & { filename?: string } > }).parts();
+    for await (const part of parts) {
+      if (part.type === 'field') {
+        fields[part.fieldname] = String(part.value);
+      } else {
+        const buf = await part.toBuffer();
+        const scene = (part.filename ?? `image-${images.length}`).replace(/\.png$/i, '');
+        if (!/^[A-Za-z0-9._-]{1,128}$/.test(scene)) continue; // scene lands in blob paths
+        if (buf.length > 16 * 1024 * 1024) continue;
+        const key = `testruns/${stamp}/${scene}.png`;
+        await blobStore.put(key, buf);
+        images.push({ scene, key });
+      }
+    }
+
+    if (images.length === 0) return reply.code(400).send({ error: 'at least one image part required' });
+
+    // Optional scene → description map (harness manifest.json, shipped by publish-run.sh).
+    let descriptions: Record<string, string> = {};
+    if (fields['descriptions']) {
+      try {
+        const parsed = JSON.parse(fields['descriptions']) as Record<string, unknown>;
+        for (const [k, v] of Object.entries(parsed)) if (typeof v === 'string') descriptions[k] = v.slice(0, 500);
+      } catch {
+        request.log.warn('test-run descriptions field is not valid JSON — ignored');
+      }
+    }
+
+    const run = await query<{ id: string }>(
+      `INSERT INTO test_runs (git_sha, note) VALUES ($1, $2) RETURNING id`,
+      [fields['git_sha'] ?? null, fields['note'] ?? null],
+    );
+    const runId = run.rows[0]!.id;
+    for (const img of images) {
+      await query(
+        `INSERT INTO test_run_images (run_id, scene, blob_key, description) VALUES ($1, $2, $3, $4)`,
+        [runId, img.scene, img.key, descriptions[img.scene] ?? null],
+      );
+    }
+
+    return reply.send({ ok: true, id: runId, images: images.length });
+  });
 };
 
 // Minimal shape of @fastify/multipart parts we consume.
 interface MultipartPart {
   type: 'field' | 'file';
   fieldname: string;
+  filename?: string;
   value?: unknown;
   toBuffer(): Promise<Buffer>;
 }

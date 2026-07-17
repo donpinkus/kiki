@@ -84,9 +84,12 @@ import { subscriptionRoute } from './routes/subscription.js';
 import { appStoreNotifyRoute } from './routes/appStoreNotify.js';
 import { usageRoute } from './routes/usage.js';
 import { opsRoute } from './routes/ops.js';
+import { lambdaDevRoute } from './routes/lambdaDev.js';
+import { start as startLambdaDevPool, stop as stopLambdaDevPool } from './modules/lambda/devPool.js';
 import { installAuth } from './modules/auth/index.js';
 import { start as startOrchestrator } from './modules/orchestrator/orchestrator.js';
 import { start as startCostMonitor } from './modules/orchestrator/costMonitor.js';
+import { start as startFalWarmer, stop as stopFalWarmer } from './modules/fal/falWarmer.js';
 import { shutdownAnalytics } from './modules/analytics/index.js';
 import { ensureDb, pool as pgPool } from './postgres/client.js';
 import { migrate } from './postgres/migrate.js';
@@ -126,6 +129,7 @@ await app.register(appStoreNotifyRoute);
 await app.register(usageRoute);
 await app.register(streamRoute);
 await app.register(opsRoute);
+await app.register(lambdaDevRoute);
 
 // --- Sentry error handler (must be before custom error handler) ---
 Sentry.setupFastifyErrorHandler(app);
@@ -184,6 +188,12 @@ const start = async () => {
     // orphan pods from a prior run and arms the idle reaper.
     await startOrchestrator(app.log);
     startCostMonitor(app.log);
+    // Keep the fal realtime pool warm (no-op unless IMAGE_PROVIDER=fal).
+    startFalWarmer(app.log);
+    // Lambda dev pool idle-reaper + redeploy re-adoption (no-op unless
+    // LAMBDA_DEV_POOL_ENABLED). Instance launch happens on demand via
+    // POST /v1/dev/lambda/ensure, not here.
+    startLambdaDevPool(app.log);
 
     await app.listen({ port: config.PORT, host: config.HOST });
     app.log.info(`Server listening on ${config.HOST}:${config.PORT}`);
@@ -199,6 +209,10 @@ start();
 // analytics when Railway restarts the container.
 async function gracefulShutdown(signal: string): Promise<void> {
   app.log.info({ signal }, 'Shutting down — flushing analytics');
+  stopFalWarmer();
+  // Timer only — the kiki-serve instance intentionally survives redeploys
+  // (start() re-adopts it via the name prefix + deterministic token).
+  stopLambdaDevPool();
   try {
     await shutdownAnalytics();
   } catch (err) {

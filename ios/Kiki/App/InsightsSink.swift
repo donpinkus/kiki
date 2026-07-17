@@ -156,6 +156,59 @@ actor InsightsSink {
         req.httpBody = body
         _ = try? await URLSession.shared.data(for: req)
     }
+
+    /// Upload a brush-dev stroke fixture: the BrushFixture JSON (replayable in
+    /// BrushHarness) + an optional PNG snapshot of the canvas. Brush Studio's
+    /// "Record strokes → Upload". Unlike the fire-and-forget event/drawing mirrors,
+    /// this RETURNS the failure reason (nil = success) — it's an explicit user action
+    /// (doubles as a brush bug-report), so a failed upload must say WHY, not just fail
+    /// (device report 2026-07-15: an opaque failure gave nothing to debug with).
+    func uploadFixture(name: String?, note: String?, strokeCount: Int,
+                       fixtureJSON: Data, snapshotPNG: Data?) async -> String? {
+        guard let baseURL else { return "Insights URL not configured in this build" }
+        guard let token = await tokenProvider?() else { return "not signed in (no auth token)" }
+
+        let boundary = "kiki-\(UUID().uuidString)"
+        var body = Data()
+        func appendField(_ name: String, _ value: String) {
+            body.append("--\(boundary)\r\n")
+            body.append("Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n")
+            body.append("\(value)\r\n")
+        }
+        func appendFilePart(_ name: String, filename: String, contentType: String, _ data: Data) {
+            body.append("--\(boundary)\r\n")
+            body.append("Content-Disposition: form-data; name=\"\(name)\"; filename=\"\(filename)\"\r\n")
+            body.append("Content-Type: \(contentType)\r\n\r\n")
+            body.append(data)
+            body.append("\r\n")
+        }
+
+        if let name, !name.isEmpty { appendField("name", name) }
+        if let note, !note.isEmpty { appendField("note", note) }
+        appendField("stroke_count", String(strokeCount))
+        appendFilePart("fixture", filename: "fixture.json", contentType: "application/json", fixtureJSON)
+        if let snapshotPNG {
+            appendFilePart("snapshot", filename: "snapshot.png", contentType: "image/png", snapshotPNG)
+        }
+        body.append("--\(boundary)--\r\n")
+
+        var req = URLRequest(url: baseURL.appendingPathComponent("ingest/fixture"))
+        req.httpMethod = "POST"
+        req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        req.httpBody = body
+        do {
+            let (respBody, resp) = try await URLSession.shared.data(for: req)
+            let status = (resp as? HTTPURLResponse)?.statusCode ?? -1
+            guard status == 200 else {
+                let detail = String(data: respBody.prefix(120), encoding: .utf8) ?? ""
+                return "server rejected (HTTP \(status)) \(detail)"
+            }
+            return nil
+        } catch {
+            return "network: \(error.localizedDescription)"
+        }
+    }
 }
 
 private extension Data {

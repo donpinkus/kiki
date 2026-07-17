@@ -22,12 +22,19 @@ import {
 } from '../modules/orchestrator/orchestrator.js';
 import { StreamRelay, WireRelayError, type WireRelayPhaseTimings, type RelevantHttpHeaders } from '../modules/relay/streamRelay.js';
 import { FalImageRelay, type ImageRelay } from '../modules/fal/falImageRelay.js';
+import { recordFalConnection } from '../modules/fal/falConnectionLog.js';
+import { FrameCapture } from '../modules/insights/frameCapture.js';
 import { getPod } from '../modules/orchestrator/runpodClient.js';
 import {
   checkProvisionQuota,
   recordProvision,
 } from '../modules/auth/rateLimiter.js';
-import { checkFalBudget, addMonthlySpendUsd, RATE_USD_PER_SEC } from '../modules/falBudget/index.js';
+import { checkFalBudget, isTestAccount, addMonthlySpendUsd, RATE_USD_PER_SEC } from '../modules/falBudget/index.js';
+import {
+  ensure as ensureDevPool,
+  touch as touchDevPool,
+  wsUrl as devPoolWsUrl,
+} from '../modules/lambda/devPool.js';
 import { trackPodPreempted, trackPodRelayFailed, trackSessionClosed } from '../modules/analytics/index.js';
 
 /**
@@ -118,6 +125,16 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       // on a successful DB write, so a failed write is retried, not lost).
       let falMeteringEnabled = false;
       let lastBilledMs = 0;
+      // Admin session replay: throttled sketch/generated frame mirror to
+      // Insights (see modules/insights/frameCapture.ts). Created lazily once
+      // identity + streamId exist; null when capture is disabled/unconfigured.
+      let frameCapture: FrameCapture | null = null;
+      const captureFrame = (kind: 'sketch' | 'generated', jpeg: Buffer): void => {
+        if (!frameCapture && userId && streamId) {
+          frameCapture = new FrameCapture(streamId, userId, request.log);
+        }
+        frameCapture?.capture(kind, jpeg);
+      };
       let unsubscribeState: (() => void) | null = null;
       let clientDisconnected = false;
       const sessionStartMs = Date.now();
@@ -278,6 +295,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         if (isBinary) {
           if (relay) {
             relay.sendFrame(buf);
+            captureFrame('sketch', buf);
             // A new sketch from the iPad supersedes any in-flight video.
             // Send video_cancel on EVERY iPad frame while a video request
             // is in flight; the pod treats it idempotently. Once the
@@ -311,6 +329,14 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             const parsed = JSON.parse(text) as Record<string, unknown>;
             if (parsed.type === 'config') {
               lastConfig = parsed;
+              // Replay: record prompt changes (deduped in FrameCapture) so
+              // the Gallery player can show which prompt drove each frame.
+              if (typeof parsed['prompt'] === 'string') {
+                if (!frameCapture && userId && streamId) {
+                  frameCapture = new FrameCapture(streamId, userId, request.log);
+                }
+                frameCapture?.capturePrompt(parsed['prompt']);
+              }
               if (relay) {
                 relay.sendConfig(parsed);
               } else {
@@ -349,6 +375,29 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       // Search by streamId for the whole user attempt; by connId for one
       // specific WS upgrade. null when an older client without streamId connects.
       streamId = extractQueryParam(request.url, 'streamId');
+      // Per-session image-provider override (`?imageProvider=fal|lambda`) —
+      // the iPad Settings dev toggle for sketch-adherence A/B. Honored for
+      // JWT-authed TEST ACCOUNTS only; everyone else stays on the global
+      // config.IMAGE_PROVIDER. `imageProvider` shadows the config value for
+      // the rest of this handler (budget gate, relay selection, recovery).
+      let imageProvider: typeof config.IMAGE_PROVIDER = config.IMAGE_PROVIDER;
+      const requestedProvider = extractQueryParam(request.url, 'imageProvider');
+      if (requestedProvider && requestedProvider !== imageProvider) {
+        if ((requestedProvider === 'fal' || requestedProvider === 'lambda') && source === 'jwt') {
+          if (await isTestAccount(uid)) {
+            imageProvider = requestedProvider;
+            request.log.info(
+              { userId, connId, streamId, imageProvider, event: 'image_provider_override' },
+              'per-session image provider override (test account)',
+            );
+          } else {
+            request.log.warn(
+              { userId, connId, streamId, requestedProvider, event: 'image_provider_override_denied' },
+              'imageProvider param ignored — not a test account',
+            );
+          }
+        }
+      }
       // User attribution comes from the `userId` Pino field on every log line
       // in this handler — promoted to `user_id` Sentry log attribute by
       // `beforeSendLog` in `index.ts`. Don't `Sentry.setUser` here: the
@@ -384,7 +433,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       // device) so the monthly free budget can't be bypassed by reconnecting.
       // Exempt users (test accounts, active subscribers) pass and skip
       // mid-session metering. Only applies when the image path is fal.
-      if (config.IMAGE_PROVIDER === 'fal' && source === 'jwt') {
+      if (imageProvider === 'fal' && source === 'jwt') {
         try {
           const budget = await checkFalBudget(userId);
           if (!budget.allowed) {
@@ -505,21 +554,28 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         relay?.close();
         relay = null;
         const newRelay: ImageRelay =
-          config.IMAGE_PROVIDER === 'fal'
+          imageProvider === 'fal'
             ? new FalImageRelay(config.FAL_KEY, {
                 logger: request.log,
                 ctx: { userId, connId, streamId, role: 'image' },
                 idleCloseMs: config.FAL_IDLE_CLOSE_MS,
+                // Per-connection cold-start/latency record → fal_connections
+                // (source='user'), comparable 1:1 against warmer pings.
+                onConnection: (rec) =>
+                  recordFalConnection('user', { userId, streamId }, rec, request.log),
               })
             : new StreamRelay(podUrl);
         newRelay.setLogContext({ userId, connId, streamId, role: 'image' });
         newRelay.onMessage((data, isBinary) => {
           if (socket.readyState !== socket.OPEN) return;
           touch(userId);
+          // Keep the Lambda dev-pool idle reaper honest while frames flow.
+          if (imageProvider === 'lambda') touchDevPool();
           if (isBinary) {
             const buf = data as Buffer;
             const base64 = buf.toString('base64');
             socket.send(JSON.stringify({ type: 'frame', data: base64 }));
+            captureFrame('generated', buf);
 
             // Video trigger: the immediately preceding frame_meta said
             // queueEmpty:true, so this JPEG is the just-completed
@@ -918,6 +974,20 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
               }
             }
 
+            // Lambda dev path has no replacement pool — the instance is a
+            // manually-launched fixed VM. If the same-URL reconnect above
+            // failed, the instance is gone (terminated / crashed); bounce the
+            // client instead of provisioning a RunPod pod it can't use.
+            if (imageProvider === 'lambda') {
+              if (socket.readyState === socket.OPEN) {
+                socket.send(
+                  JSON.stringify({ type: 'error', message: 'Lambda image instance unreachable' }),
+                );
+                socket.close(1001, 'Upstream closed');
+              }
+              return;
+            }
+
             // Slow path: pod is truly gone. Full replacement (~90 s).
             // `replaceSession` emits state transitions through the broker with
             // replacementCount > 0 so the iOS UI prefixes "Replacing — ".
@@ -955,10 +1025,10 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         // Record this provision in the sliding-window history for hourly/daily
         // rate limiting. Active-pod enforcement is derived from the session
         // row in Redis, so there's no counter to roll back on failure.
-        // Skipped on the fal image path: there's no RunPod image pod to
-        // rate-limit (video still provisions a pod, but that's best-effort and
-        // not gated by the image provision window).
-        if (source === 'jwt' && !isReconnect && config.IMAGE_PROVIDER !== 'fal') {
+        // Skipped on the fal/lambda image paths: there's no RunPod image pod
+        // to rate-limit (video still provisions a pod, but that's best-effort
+        // and not gated by the image provision window).
+        if (source === 'jwt' && !isReconnect && imageProvider === 'runpod') {
           await recordProvision(userId);
         }
 
@@ -1030,7 +1100,41 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
           videoSessionEnabled = false;
         }
 
-        if (config.IMAGE_PROVIDER === 'fal') {
+        if (imageProvider === 'lambda') {
+          // Lambda Cloud dev path: relay to our own image server on a Lambda
+          // H100 — either the static LAMBDA_IMAGE_URL instance or the dev
+          // pool's kiki-serve instance (modules/lambda/devPool.ts). Same wire
+          // protocol as a RunPod pod (it IS image/server.py), so the plain
+          // StreamRelay is used — frame_meta/queueEmpty arrives natively and
+          // the video trigger works unchanged. No provisioning rate-limit, no
+          // metering: test-account-only A/B path.
+          const lambdaUrl = config.LAMBDA_IMAGE_URL || devPoolWsUrl();
+          if (!lambdaUrl) {
+            // Not up yet — kick the pool and tell the iPad explicitly. Serving
+            // fal silently here would corrupt the A/B comparison; an explicit
+            // bounce lets Donald retry once the pool reports ready.
+            const poolState = ensureDevPool();
+            request.log.info(
+              { userId, connId, streamId, poolStatus: poolState.status, event: 'lambda_not_ready' },
+              'imageProvider=lambda but no instance ready — bouncing client',
+            );
+            socket.send(
+              JSON.stringify({
+                type: 'error',
+                code: 'lambda_not_ready',
+                message: `Lambda H100 not ready: ${poolState.message}. Toggle back to fal or retry in ~3 min.`,
+              }),
+            );
+            socket.close(1013, 'lambda_not_ready');
+            return;
+          }
+          request.log.info(
+            { userId, connId, streamId, event: 'image_provider_lambda' },
+            'imageProvider=lambda — relaying to Lambda Cloud image instance',
+          );
+          await emitState(userId, 'connecting');
+          await wireRelay(lambdaUrl, null);
+        } else if (imageProvider === 'fal') {
           // fal hosted image path: no RunPod image pod. Wire the fal relay
           // directly — it connects in ~0.5s (vs ~96s pod cold start). The video
           // pod still provisions above (best-effort, RunPod H100); the synthetic

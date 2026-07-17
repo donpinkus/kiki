@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { listUsers, type UserSummary } from '../api';
+import { Spark14 } from '../ActivityBars';
 
 const fmt = (iso: string | null) => (iso ? new Date(iso).toLocaleString() : '—');
 
@@ -37,6 +38,7 @@ export function Users() {
               <th>Account</th>
               <th>Created</th>
               <th>Last active</th>
+              <th title="In-app minutes per day, last 14 days. Full bar = 15+ min.">Active (14d)</th>
               <th>Sessions</th>
               <th>Drawings</th>
               <th>Events</th>
@@ -59,6 +61,9 @@ export function Users() {
                 </td>
                 <td className="muted">{fmt(u.created_at)}</td>
                 <td className="muted">{fmt(u.last_seen)}</td>
+                <td>
+                  <Spark14 data={u.activity14d ?? []} />
+                </td>
                 <td>{u.session_count}</td>
                 <td>{u.drawing_count}</td>
                 <td>{u.event_count}</td>

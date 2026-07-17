@@ -120,6 +120,18 @@ async def websocket_stream(ws: WebSocket):
         f"WS upgrade attempt from {client_ip or '?'}",
         extra={"event": "pod.ws.upgrade_attempt", "client_ip": client_ip},
     )
+    # Optional shared-secret gate for deployments where this server sits on a
+    # public IP with the port open to the internet (Lambda Cloud), unlike the
+    # RunPod proxy whose per-pod hostname is effectively unguessable. No-op
+    # when KIKI_WS_TOKEN is unset (RunPod path unchanged).
+    expected_token = os.environ.get("KIKI_WS_TOKEN", "")
+    if expected_token and ws.query_params.get("token") != expected_token:
+        logger.warning(
+            f"WS rejected: bad token from {client_ip or '?'}",
+            extra={"event": "pod.ws.bad_token", "client_ip": client_ip},
+        )
+        await ws.close(code=4401)
+        return
     try:
         await ws.accept()
     except Exception as e:

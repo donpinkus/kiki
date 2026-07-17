@@ -2,6 +2,7 @@ import UIKit
 import Metal
 import CoreImage
 import StrokeRecognizerModule
+import os
 
 /// Metal-backed drawing canvas. GPU-resident
 /// texture pipeline: all painting happens in Metal shaders, display via
@@ -40,14 +41,39 @@ public final class MetalCanvasView: UIView {
 
     public var isEmpty: Bool { strokeCount == 0 }
 
+    /// True while a stroke is being drawn (between touchesBegan and the
+    /// stroke-end flatten). The in-flight stroke lives in the scratch texture
+    /// and is already composited into snapshots, but `strokeCount` — and thus
+    /// `isEmpty` — only advances at stroke end. Stream capture checks this so
+    /// the very first stroke on a blank canvas starts generating immediately
+    /// instead of waiting for the pencil to lift.
+    public var hasActiveStroke: Bool { activeStroke != nil }
+
     // MARK: - Callbacks
 
     public var onDrawingChanged: (() -> Void)?
+
+    /// Fires once per completed brush stroke (dry + wet; not eraser/lasso) with the
+    /// stroke normalized to CANVAS PIXELS (positions and brush width × canvasScale) —
+    /// the coordinate space BrushHarness fixtures replay at (scale 1), so recordings
+    /// are independent of the on-device view size. Dev stroke-recorder hook.
+    public var onStrokeCompleted: ((Stroke) -> Void)?
     /// Fired after any mutation that changes observable state (layers, undo, content).
     /// CanvasViewModel listens to this to sync its @Observable properties.
     public var onStateChanged: (() -> Void)?
     public var onInteractionBegan: (() -> Void)?
     public var onInteractionEnded: (() -> Void)?
+    /// DEV: fires (throttled, ~per move event) while drawing a dynamic brush, with the live brush
+    /// inputs + resulting multipliers, for the on-device input HUD. nil = not observed.
+    public var onBrushInputSample: ((BrushInputSample) -> Void)?
+    /// DEV: tunable engine-normalization constants, plumbed into `StrokeDynamicsState`. Set from the
+    /// Brush Studio "Engine tuning" sliders so e.g. `maxSpeed` is dialed live against the HUD.
+    public var devMaxSpeed: Double = 1500
+    public var devDistancePeriod: Double = 600
+    public var devFadePeriod: Double = 64
+    /// DEV: persistent per-stroke state for the input HUD (advanced in touchesMoved).
+    private var hudState: StrokeDynamicsState?
+    private var lastHUDEmit: TimeInterval = 0
     /// Fired when a lasso selection is extracted. No UIImage — the selection lives
     /// as an MTLTexture on the renderer, displayed by the Metal compositor.
     public var onLassoSelectionStarted: ((_ closedPath: CGPath, _ selectionBounds: CGRect) -> Void)?
@@ -91,10 +117,12 @@ public final class MetalCanvasView: UIView {
     private var activeStroke: Stroke?
     private var activeStrokeStamps: [CanvasRenderer.StampInstance] = []
 
-    /// Running smoothed cursor for StreamLine stabilization (brush only). Reset to the
-    /// first touch position at `touchesBegan`; each subsequent point is low-pass filtered
-    /// toward the raw pencil position. See `smoothedStrokePoint`. nil when not stabilizing.
-    private var streamlineCursor: CGPoint?
+    /// Stroke stabilization pipeline (P3 rebuild): StreamLine low-pass + Gaussian
+    /// arc-length smoothing + pressure smoothing, one instance per brush stroke
+    /// (`StrokeStabilizer` — pure, shared with BrushHarness/OfflineTests). All-zero
+    /// settings make `feed` a strict passthrough, so the default pen is unchanged.
+    /// `finish()` provides catch-up-on-lift so lagged strokes end at the pencil tip.
+    private var stabilizer: StrokeStabilizer?
 
     /// For eraser: tracks the last stroke-point index that was applied to the canvas.
     /// Eraser stamps are applied incrementally (each touchesMoved renders only NEW
@@ -106,15 +134,10 @@ public final class MetalCanvasView: UIView {
     /// Spacing from the last eraser stamp, carried across batches.
     private var lastEraserSpacing: CGFloat = 0.5
 
-    // Wet brush (pro-brush Phase 4) — same incremental, cross-batch bookkeeping as the
-    // eraser, since wet also writes directly to the layer per touchesMoved.
-    private var lastWetPointIndex: Int = 0
-    private var lastWetStampPos: CGPoint = .zero
-    private var lastWetSpacing: CGFloat = 0.5
-    /// Carried paint "load" (linear straight RGB) for the wet smear (Step 3): starts as the
-    /// brush color, contaminates toward the canvas color it crosses, so the deposited color
-    /// evolves and travels along the stroke. Reset each stroke.
-    private var wetLoad: SIMD3<Float> = .zero
+    // Wet brush (pro-brush Phase 4) — one walker per stroke holds the incremental
+    // cross-batch bookkeeping + carried load (`WetStrokeWalker`, pure/extracted so the
+    // BrushHarness shares it). nil when no wet stroke is active.
+    private var wetWalker: WetStrokeWalker?
 
     /// Debug: route wet stamps as per-stamp draws (serialized) vs one instanced draw.
     /// Forwarded to the renderer for the Phase-4 draw-order A/B experiment.
@@ -437,6 +460,10 @@ public final class MetalCanvasView: UIView {
 
         renderer.activeStrokeOpacity = currentStrokeOpacity()
         renderer.activeShapeTexture = isErasing ? nil : currentShapeTexture()
+        renderer.activeGrain = isErasing ? nil : currentGrain()
+        renderer.activeLightness = isErasing ? nil : currentBrushConfig().flatMap { renderer.lightnessSettings(for: $0) }
+        renderer.activeFlip = isErasing ? .zero : (currentBrushConfig().map { renderer.flipSettings(for: $0) } ?? .zero)
+        renderer.activeWetInk = !isErasing && (currentBrushConfig().map { $0.wetEnabled && !$0.wetSmudge } ?? false)
         renderer.renderFrame(drawable: drawable, isErasing: isErasing)
         NSLog("%@", "🔬OVL MCV.renderFrame main renderFrame returned")
 
@@ -563,18 +590,38 @@ public final class MetalCanvasView: UIView {
 
         switch currentTool {
         case .brush(let config):
-            activeStroke = Stroke(points: [makeStrokePoint(from: touch)], brush: config)
+            stabilizer = StrokeStabilizer(streamline: config.streamline,
+                                          stabilization: config.stabilization,
+                                          pressureSmoothing: config.pressureSmoothing)
+            let firstRaw = makeStrokePoint(from: touch)
+            let firstPoint = stabilizer?.feed(firstRaw) ?? firstRaw
+            activeStroke = Stroke(points: [firstPoint], brush: config)
             activeStrokeStamps = []
-            // Seed the StreamLine cursor at the true start so the first point isn't lagged.
-            streamlineCursor = touch.location(in: self)
-            if config.wetEnabled {
-                // Wet brush writes directly to the layer (eraser-style): snapshot for undo
-                // BEFORE any paint lands, and init cross-batch stamp bookkeeping.
-                lastWetPointIndex = 0
-                lastWetStampPos = touch.location(in: self)
-                lastWetSpacing = max(config.baseWidth * config.spacing, 0.5)
-                pushUndoSnapshot()
-                applyNewWetStamps()
+            // DEV input-HUD state for a dynamic brush (fresh per stroke).
+            hudState = (config.dynamics?.isInert == false)
+                ? StrokeDynamicsState(seed: strokeSeed(activeStroke!.id),
+                                      distancePeriod: devDistancePeriod, fadePeriod: devFadePeriod,
+                                      maxSpeed: devMaxSpeed)
+                : nil
+            if config.wetEnabled, config.wetSmudge {
+                // SMUDGE writes directly to the layer (eraser-style RMW): snapshot for
+                // undo BEFORE any paint lands, and init cross-batch stamp bookkeeping.
+                // No snapshot when wet rendering is unavailable (Simulator) — the stroke
+                // paints nothing, so it must not create an undo entry either.
+                if renderer.isWetRenderingAvailable {
+                    wetWalker = WetStrokeWalker(startPosition: touch.location(in: self), brush: config)
+                    pushUndoSnapshot()
+                    applyNewWetStamps()
+                }
+            } else if config.wetEnabled {
+                // Wet INK (P7 core): renders through the SCRATCH against the pristine
+                // canvas, flattened at the opacity ceiling like a dry stroke — undo comes
+                // from the flatten path, no snapshot here. Works on the Simulator (no
+                // framebuffer fetch).
+                if renderer.isWetInkAvailable {
+                    wetWalker = WetStrokeWalker(startPosition: touch.location(in: self), brush: config)
+                    appendNewWetInkStamps()
+                }
             } else {
                 appendStampsForLatestPoints(touch: touch, event: nil)
             }
@@ -678,16 +725,19 @@ public final class MetalCanvasView: UIView {
 
         switch currentTool {
         case .brush(let config):
-            // Append coalesced points (StreamLine-smoothed) and rebuild all stamps
-            // for live preview. Smoothing is baked into the stored points.
+            // Append coalesced points (stabilized) and rebuild all stamps for live
+            // preview. Stabilization is baked into the stored points, so replay, undo,
+            // persistence, and the recorder all see the same path.
             let coalesced = event?.coalescedTouches(for: touch) ?? [touch]
-            let streamline = activeStroke?.brush.streamline ?? 0
             for ct in coalesced {
-                activeStroke?.points.append(smoothedStrokePoint(from: ct, streamline: streamline))
+                let raw = makeStrokePoint(from: ct)
+                activeStroke?.points.append(stabilizer?.feed(raw) ?? raw)
             }
+            emitBrushInputSample(brush: config)
             if config.wetEnabled {
-                // Wet: apply only NEW stamps directly to the layer (no scratch).
-                applyNewWetStamps()
+                // Smudge: apply only NEW stamps directly to the layer (RMW).
+                // Wet ink: accumulate NEW stamps into the live scratch stroke.
+                if config.wetSmudge { applyNewWetStamps() } else { appendNewWetInkStamps() }
             } else {
                 appendStampsForLatestPoints(touch: touch, event: event)
                 // QuickShape: feed recognizer + drive snap state machine. Only
@@ -877,7 +927,13 @@ public final class MetalCanvasView: UIView {
         }
 
         var wetCancel = false
-        if case .brush(let config) = currentTool, config.wetEnabled { wetCancel = true }
+        if case .brush(let config) = currentTool, config.wetEnabled, config.wetSmudge {
+            // Only SMUDGE writes the layer mid-stroke (and pushes undo at touch-begin).
+            // Wet INK lives in the scratch until flatten — cancel just discards it.
+            // No snapshot was pushed when wet rendering is unavailable (Simulator),
+            // so there is nothing to revert — popping here would eat an older entry.
+            wetCancel = renderer.isWetRenderingAvailable
+        }
         if case .eraser = currentTool {
             // Eraser stamps were applied directly to canvas — revert by restoring
             // the undo snapshot that was pushed at touchesBegan.
@@ -899,7 +955,8 @@ public final class MetalCanvasView: UIView {
         activeStrokeStamps = []
         drawingTouch = nil
         lastEraserPointIndex = 0
-        lastWetPointIndex = 0
+        wetWalker = nil
+        stabilizer = nil
         lassoPoints.removeAll()
         lassoPath = nil
         hideLassoPreview()
@@ -914,7 +971,10 @@ public final class MetalCanvasView: UIView {
     /// adaptive spacing.
     private func appendStampsForLatestPoints(touch: UITouch, event: UIEvent?) {
         guard let stroke = activeStroke else { return }
-        activeStrokeStamps = generateStampsForStroke(stroke, scale: canvasScale)
+        // Live preview: NO end cap (it re-evaluates at the pencil with live force each
+        // frame — grows/shrinks in place and dances with scatter). The cap lands via the
+        // touchesEnded regen, so the finished stroke still ends exactly at the lift point.
+        activeStrokeStamps = generateStampsForStroke(stroke, scale: canvasScale, includeEndCap: false)
     }
 
     // MARK: - Eraser (incremental application)
@@ -988,88 +1048,42 @@ public final class MetalCanvasView: UIView {
     }
 
     /// Wet brush (pro-brush Phase 4, Step 1): apply only the new stamps directly to the
-    /// layer via the wet RMW path. Mirrors `applyNewEraserStamps` (incremental, cross-batch
-    /// spacing) but packs a wet stamp: STRAIGHT brush color converted to LINEAR (dst arrives
-    /// linear via framebuffer fetch) in rgb, and the per-stamp deposit weight in alpha.
+    /// layer via the wet RMW path. The walk itself lives in `WetStrokeWalker` (pure,
+    /// extracted so the BrushHarness shares the exact shipped code); this wrapper wires
+    /// the renderer's texture sampling + KM mixing into it and submits the stamps.
     private func applyNewWetStamps() {
-        guard let stroke = activeStroke, stroke.points.count > lastWetPointIndex else { return }
+        // Simulator: no wet PSO → applyWetStamps would no-op anyway; skip the walk
+        // (and its per-stamp texture readbacks) entirely.
+        guard renderer.isWetRenderingAvailable else { return }
+        guard let stroke = activeStroke, var walker = wetWalker else { return }
 
-        let brush = stroke.brush
-        let scale = canvasScale
-        let clipPath = lassoClipPath
-        func s2l(_ c: CGFloat) -> Float { let x = Float(c); return x <= 0.04045 ? x/12.92 : pow((x+0.055)/1.055, 2.4) }
-        // Per-stamp deposit weight. In wet mode the Opacity slider scales deposit
-        // (build-up rate) — the direct-to-layer path has no scratch ceiling to apply it to.
-        let dep = Float(max(0, min(1, brush.wetStrength)) * max(0, min(1, brush.opacity)))
-        let baseColor = SIMD3<Float>(s2l(brush.color.red), s2l(brush.color.green), s2l(brush.color.blue))
-        let hardness = Float(brush.hardness)
-        let spacingFrac = max(brush.spacing, 0.02)
-        let pickup = Float(max(0, min(1, brush.wetPickup)))   // how fast the load picks up canvas color
-
-        // Fresh paint load at the start of a stroke.
-        if lastWetPointIndex == 0 { wetLoad = baseColor }
-
-        var newStamps: [CanvasRenderer.StampInstance] = []
-        var stampPos = lastWetStampPos
-        var spacing = lastWetSpacing
-
-        // Place a stamp carrying the CURRENT load, then contaminate the load toward the
-        // canvas color under it (the smear: deposited color evolves & travels).
-        func emit(_ pos: CGPoint, _ width: CGFloat) {
-            guard clipPath.map({ $0.contains(pos) }) ?? true else { return }
-            let cx = Int(pos.x * scale), cy = Int(pos.y * scale)
-            newStamps.append(CanvasRenderer.StampInstance(
-                center: SIMD2<Float>(Float(pos.x * scale), Float(pos.y * scale)),
-                radius: Float(width * 0.5 * scale), rotation: 0,
-                color: SIMD4<Float>(wetLoad.x, wetLoad.y, wetLoad.z, dep), hardness: hardness))
-            if let s = renderer.sampleLayerColor(x: cx, y: cy), s.alpha > 0.05 {
-                wetLoad = renderer.kmMixCPU(wetLoad, s.color, pickup * s.alpha)
-            }
-        }
-
-        // First dab of the stroke (so a tap/dot deposits paint), placed once.
-        if lastWetPointIndex == 0 {
-            let p0 = stroke.points[0]
-            let w0 = brush.effectiveWidth(force: p0.force, altitude: p0.altitude)
-            emit(p0.position, w0)
-            stampPos = p0.position
-            spacing = max(w0 * spacingFrac, 0.5)
-        }
-
-        let startIdx = max(lastWetPointIndex, 1)
-        for i in startIdx..<stroke.points.count {
-            let prev = stroke.points[i - 1]
-            let curr = stroke.points[i]
-            let dx = curr.position.x - prev.position.x
-            let dy = curr.position.y - prev.position.y
-            let segDist = hypot(dx, dy)
-            guard segDist > 0 else { continue }
-
-            let distFromLastStamp = hypot(prev.position.x - stampPos.x, prev.position.y - stampPos.y)
-            var traveled = max(0, spacing - distFromLastStamp)
-
-            while traveled <= segDist {
-                let t = traveled / segDist
-                let x = prev.position.x + dx * t
-                let y = prev.position.y + dy * t
-                let force = prev.force + (curr.force - prev.force) * t
-                let altitude = prev.altitude + (curr.altitude - prev.altitude) * t
-                let width = brush.effectiveWidth(force: force, altitude: altitude)
-
-                emit(CGPoint(x: x, y: y), width)
-
-                stampPos = CGPoint(x: x, y: y)
-                spacing = max(width * spacingFrac, 0.5)
-                traveled += spacing
-            }
-        }
-
-        lastWetPointIndex = stroke.points.count
-        lastWetStampPos = stampPos
-        lastWetSpacing = spacing
+        let newStamps = walker.advance(
+            stroke: stroke, scale: canvasScale, clipPath: lassoClipPath,
+            sample: { [renderer] x, y in renderer.sampleLayerColor(x: x, y: y) },
+            sampleAveraged: { [renderer] x, y, r in renderer.sampleLayerColorAveraged(x: x, y: y, radius: r) },
+            mix: { [renderer] a, b, t in renderer.kmMixCPU(a, b, t) })
+        wetWalker = walker
 
         guard !newStamps.isEmpty else { return }
         renderer.applyWetStamps(newStamps)
+    }
+
+    /// Wet INK (P7 core): walk the new points and ACCUMULATE the stamps into
+    /// `activeStrokeStamps` — the frame loop renders them into the scratch through the
+    /// wet-ink PSO (KM vs the pristine canvas) and the flatten applies the opacity
+    /// ceiling. The CPU pickup samples the canvas, which stays untouched for the whole
+    /// stroke, so the smear drags BASE colors along (and no GPU drain is ever needed).
+    private func appendNewWetInkStamps() {
+        guard let stroke = activeStroke, var walker = wetWalker else { return }
+        let newStamps = walker.advance(
+            stroke: stroke, scale: canvasScale, clipPath: lassoClipPath,
+            sample: { [renderer] x, y in renderer.sampleLayerColor(x: x, y: y) },
+            sampleAveraged: { [renderer] x, y, r in renderer.sampleLayerColorAveraged(x: x, y: y, radius: r) },
+            mix: { [renderer] a, b, t in renderer.kmMixCPU(a, b, t) })
+        wetWalker = walker
+        guard !newStamps.isEmpty else { return }
+        activeStrokeStamps.append(contentsOf: newStamps)
+        isDirty = true
     }
 
     // MARK: - Stroke Completion
@@ -1085,13 +1099,26 @@ public final class MetalCanvasView: UIView {
             lastEraserPointIndex = 0
             lastEraserStampPos = .zero
             lastEraserSpacing = 0.5
-            lastWetPointIndex = 0
-            lastWetStampPos = .zero
-            lastWetSpacing = 0.5
+            wetWalker = nil
+            stabilizer = nil
             onInteractionEnded?()
         }
 
-        guard let stroke = activeStroke, !stroke.points.isEmpty else { return }
+        guard var stroke = activeStroke, !stroke.points.isEmpty else { return }
+
+        // P3 catch-up-on-lift: StreamLine/Gaussian smoothing lag the pencil by design;
+        // emit the tail from the lagged cursor to the true raw endpoint so the stroke
+        // ends exactly where the pencil lifted. Baked into the stroke BEFORE the final
+        // stamp regen / wet flush / recorder callback, so every consumer sees it.
+        if let tail = stabilizer?.finish(), !tail.isEmpty {
+            stroke.points.append(contentsOf: tail)
+            activeStroke = stroke
+            if case .brush(let cfg) = currentTool, !cfg.wetEnabled {
+                activeStrokeStamps = generateStampsForStroke(stroke, scale: canvasScale)
+            }
+        }
+
+        logStrokeDynamicsDiagnostic(stroke)
 
         if case .eraser = currentTool {
             // Eraser stamps were already applied directly to canvas during touchesMoved.
@@ -1103,14 +1130,26 @@ public final class MetalCanvasView: UIView {
         }
 
         if case .brush(let config) = currentTool, config.wetEnabled {
-            // Wet brush wrote directly to the layer during the stroke (like the eraser),
-            // with the undo snapshot taken at touchesBegan. Flush any trailing points
-            // (e.g. the StreamLine endpoint), then finish — nothing to flatten.
-            applyNewWetStamps()
-            strokeCount += 1
-            onDrawingChanged?()
-            isDirty = true
-            return
+            if config.wetSmudge {
+                // Smudge wrote directly to the layer during the stroke (like the eraser),
+                // with the undo snapshot taken at touchesBegan. Flush any trailing points,
+                // then finish — nothing to flatten. When wet rendering is unavailable
+                // (Simulator) nothing was painted, so no stroke count / autosave either.
+                if renderer.isWetRenderingAvailable {
+                    applyNewWetStamps()
+                    strokeCount += 1
+                    onDrawingChanged?()
+                    onStrokeCompleted?(canvasSpaceStroke(stroke))
+                    isDirty = true
+                }
+                return
+            }
+            // Wet INK: flush the walker's tail into the scratch stamp set, then fall
+            // through to the dry flatten path (undo snapshot + scratch re-render at the
+            // opacity ceiling — the flatten's stamp re-render runs the wet PSO because
+            // activeWetInk is still true for this brush).
+            guard renderer.isWetInkAvailable else { return }
+            appendNewWetInkStamps()
         }
 
         // Brush: push undo snapshot, flatten scratch into canvas.
@@ -1132,7 +1171,23 @@ public final class MetalCanvasView: UIView {
 
         strokeCount += 1
         onDrawingChanged?()
+        onStrokeCompleted?(canvasSpaceStroke(stroke))
         isDirty = true
+    }
+
+    /// The completed stroke re-expressed in CANVAS PIXELS (positions + brush width ×
+    /// canvasScale; pressure/tilt/timestamps pass through). Recordings made at any
+    /// view size then replay identically in the BrushHarness at scale 1.
+    private func canvasSpaceStroke(_ stroke: Stroke) -> Stroke {
+        let scale = canvasScale
+        var brush = stroke.brush
+        brush.baseWidth *= scale
+        let points = stroke.points.map { p -> StrokePoint in
+            var q = p
+            q.position = CGPoint(x: p.position.x * scale, y: p.position.y * scale)
+            return q
+        }
+        return Stroke(id: stroke.id, points: points, brush: brush)
     }
 
     // MARK: - Snap Edit Mode (handle dragging post-commit)
@@ -2357,7 +2412,10 @@ public final class MetalCanvasView: UIView {
                     renderer.commitStampsToCanvas(
                         stamps,
                         strokeOpacity: Float(stroke.brush.opacity),
-                        shapeTexture: renderer.shapeTexture(for: stroke.brush.shapeID)
+                        shapeTexture: renderer.shapeTexture(for: stroke.brush.shapeID),
+                        grain: renderer.grainSettings(for: stroke.brush),
+                        lightness: renderer.lightnessSettings(for: stroke.brush),
+                        flip: renderer.flipSettings(for: stroke.brush)
                     )
                 }
             }
@@ -2427,131 +2485,16 @@ public final class MetalCanvasView: UIView {
     }
 
     /// Generate stamp instances for a complete stroke (used by replay + active drawing).
-    /// When `lassoClipPath` is set, stamps whose center falls outside the clip path
-    /// are discarded (CPU-side clip masking).
-    private func generateStampsForStroke(_ stroke: Stroke, scale: CGFloat) -> [CanvasRenderer.StampInstance] {
-        guard !stroke.points.isEmpty else { return [] }
-
-        let brush = stroke.brush
-        let color = premultipliedColor(brush)
-        let hardness = Float(brush.hardness)
-        // Spacing as a fraction of stamp width; clamped so a tiny value can't generate
-        // a runaway number of stamps (the renderer also caps per-frame stamp count).
-        let spacingFraction = max(brush.spacing, 0.02)
-        let clipPath = lassoClipPath
-        var stamps: [CanvasRenderer.StampInstance] = []
-
-        // Textured (non-round) shapes orient their stamps to the stroke direction so
-        // anisotropic tips (dry-brush streaks, chisel) run along the line, not across it.
-        // Convention: the stamp's local +y axis (the PNG's vertical) is aligned with the
-        // travel direction → rotation = atan2(-dx, dy). Round (procedural) brushes are
-        // radially symmetric, so they stay at 0.
-        let orientsToStroke = BrushShapeCatalog.orientsToStroke(brush.shapeID)
-        func strokeRotation(dx: CGFloat, dy: CGFloat) -> Float {
-            guard orientsToStroke, dx != 0 || dy != 0 else { return 0 }
-            return Float(atan2(-dx, dy))
-        }
-        // Direction at the very start/end caps, taken from the first/last real segment.
-        let firstDir: (CGFloat, CGFloat) = stroke.points.count > 1
-            ? (stroke.points[1].position.x - stroke.points[0].position.x,
-               stroke.points[1].position.y - stroke.points[0].position.y)
-            : (0, 0)
-
-        let first = stroke.points[0]
-        let firstWidth = brush.effectiveWidth(force: first.force, altitude: first.altitude)
-        if clipPath.map({ $0.contains(first.position) }) ?? true {
-            stamps.append(CanvasRenderer.StampInstance(
-                center: SIMD2<Float>(Float(first.position.x * scale), Float(first.position.y * scale)),
-                radius: Float(firstWidth * 0.5 * scale),
-                rotation: strokeRotation(dx: firstDir.0, dy: firstDir.1),
-                color: color,
-                hardness: hardness
-            ))
-        }
-
-        var lastStampPos = first.position
-        var currentSpacing = max(firstWidth * spacingFraction, 0.5)
-
-        for i in 1..<stroke.points.count {
-            let prev = stroke.points[i - 1]
-            let curr = stroke.points[i]
-            let dx = curr.position.x - prev.position.x
-            let dy = curr.position.y - prev.position.y
-            let segmentDist = hypot(dx, dy)
-            guard segmentDist > 0 else { continue }
-
-            let leftover = hypot(prev.position.x - lastStampPos.x, prev.position.y - lastStampPos.y)
-            var traveled = max(0, currentSpacing - leftover)
-
-            while traveled <= segmentDist {
-                let t = traveled / segmentDist
-                let x = prev.position.x + dx * t
-                let y = prev.position.y + dy * t
-                let force = prev.force + (curr.force - prev.force) * t
-                let altitude = prev.altitude + (curr.altitude - prev.altitude) * t
-                let width = brush.effectiveWidth(force: force, altitude: altitude)
-
-                let pos = CGPoint(x: x, y: y)
-                if clipPath.map({ $0.contains(pos) }) ?? true {
-                    stamps.append(CanvasRenderer.StampInstance(
-                        center: SIMD2<Float>(Float(x * scale), Float(y * scale)),
-                        radius: Float(width * 0.5 * scale),
-                        rotation: strokeRotation(dx: dx, dy: dy),
-                        color: color,
-                        hardness: hardness
-                    ))
-                }
-
-                lastStampPos = pos
-                currentSpacing = max(width * spacingFraction, 0.5)
-                traveled += currentSpacing
-            }
-        }
-
-        // End cap.
-        if let last = stroke.points.last {
-            let width = brush.effectiveWidth(force: last.force, altitude: last.altitude)
-            let n = stroke.points.count
-            let lastDir: (CGFloat, CGFloat) = n > 1
-                ? (last.position.x - stroke.points[n - 2].position.x,
-                   last.position.y - stroke.points[n - 2].position.y)
-                : firstDir
-            if clipPath.map({ $0.contains(last.position) }) ?? true {
-                stamps.append(CanvasRenderer.StampInstance(
-                    center: SIMD2<Float>(Float(last.position.x * scale), Float(last.position.y * scale)),
-                    radius: Float(width * 0.5 * scale),
-                    rotation: strokeRotation(dx: lastDir.0, dy: lastDir.1),
-                    color: color,
-                    hardness: hardness
-                ))
-            }
-        }
-
-        applyTaper(to: &stamps, taper: brush.taper)
-        return stamps
-    }
-
-    /// Taper the stamp radii toward both ends of the stroke. `taper` [0,1] sets the
-    /// taper length as a fraction of the stroke's half-length; each stamp's radius is
-    /// scaled by how far it sits inside that taper zone (linear, → 0 at the very tips).
-    /// Operates on the final stamp centers (canvas px) so it's independent of how the
-    /// stamps were generated. No-op for taper == 0 or strokes too short to taper.
-    private func applyTaper(to stamps: inout [CanvasRenderer.StampInstance], taper: CGFloat) {
-        guard taper > 0, stamps.count > 2 else { return }
-        var arc = [CGFloat](repeating: 0, count: stamps.count)
-        for i in 1..<stamps.count {
-            let a = stamps[i - 1].center, b = stamps[i].center
-            arc[i] = arc[i - 1] + CGFloat(hypot(b.x - a.x, b.y - a.y))
-        }
-        let length = arc[stamps.count - 1]
-        let taperLen = taper * length * 0.5
-        guard taperLen > 0 else { return }
-        for i in 0..<stamps.count {
-            let s = arc[i]
-            let tIn = min(s / taperLen, 1)
-            let tOut = min((length - s) / taperLen, 1)
-            stamps[i].radius *= Float(min(tIn, tOut))
-        }
+    /// The pipeline itself lives in `StrokeStampGenerator` (pure, UIKit-free) so the
+    /// BrushHarness runs the identical shipped code headless on macOS; this wrapper
+    /// supplies the view's lasso clip + Brush Studio dev tuning.
+    private func generateStampsForStroke(_ stroke: Stroke, scale: CGFloat,
+                                         includeEndCap: Bool = true) -> [CanvasRenderer.StampInstance] {
+        StrokeStampGenerator.stamps(
+            for: stroke, scale: scale, clipPath: lassoClipPath,
+            tuning: StrokeStampGenerator.DevTuning(
+                maxSpeed: devMaxSpeed, distancePeriod: devDistancePeriod, fadePeriod: devFadePeriod),
+            includeEndCap: includeEndCap)
     }
 
     /// Read-only access to the flattened canvas (all visible layers) as a CGImage
@@ -2603,29 +2546,6 @@ public final class MetalCanvasView: UIView {
         return CGFloat(renderer.canvasWidth) / bounds.width
     }
 
-    /// Premultiplied stamp color. Alpha is the brush's **flow** (per-stamp deposit) —
-    /// NOT opacity. The per-stroke opacity ceiling is applied separately when the
-    /// scratch (active stroke) is composited onto the canvas (see `currentStrokeOpacity`
-    /// + `CanvasRenderer.activeStrokeOpacity`). This split is what lets a 30%-opacity
-    /// stroke that crosses itself stay 30% instead of stacking to opaque.
-    private func premultipliedColor(_ brush: BrushConfig) -> SIMD4<Float> {
-        // brush.color is sRGB (display) values. Stamps render into a
-        // .bgra8Unorm_srgb scratch texture, whose store applies a linear→sRGB
-        // ENCODE — so the shader must be fed LINEAR values for the stored pixel to
-        // equal the chosen color. Packing sRGB directly encodes a second time →
-        // every stroke lands a shade too light, and (now that the eyedropper reads
-        // the true canvas value) sampling a painted color and repainting it
-        // compounds lighter each cycle. Convert sRGB→linear here, matching the wet
-        // brush (`applyNewWetStamps`). Premultiply by flow in linear space, since
-        // the `_srgb` blend pipeline composites in linear.
-        func s2l(_ c: CGFloat) -> Float { let x = Float(c); return x <= 0.04045 ? x / 12.92 : pow((x + 0.055) / 1.055, 2.4) }
-        let r = s2l(brush.color.red)
-        let g = s2l(brush.color.green)
-        let b = s2l(brush.color.blue)
-        let a = Float(brush.flow)
-        return SIMD4<Float>(r * a, g * a, b * a, a)
-    }
-
     /// Per-stroke opacity ceiling for the stroke currently being drawn/committed,
     /// applied when the scratch is composited onto the canvas. For the eraser this is
     /// effectively unused: the eraser writes directly to the canvas and leaves the
@@ -2634,6 +2554,20 @@ public final class MetalCanvasView: UIView {
         if let brush = activeStroke?.brush { return Float(brush.opacity) }
         if case .brush(let config) = currentTool { return Float(config.opacity) }
         return 1.0
+    }
+
+    /// The active/current brush config (stroke in flight wins), nil for other tools.
+    private func currentBrushConfig() -> BrushConfig? {
+        if let b = activeStroke?.brush { return b }
+        if case .brush(let config) = currentTool { return config }
+        return nil
+    }
+
+    /// Grain settings (P8) for the active/current brush, or nil. Resolved per frame
+    /// alongside the shape texture; the wet path ignores grain (v1).
+    private func currentGrain() -> (texture: MTLTexture, depth: Float, invScale: Float, moving: Bool)? {
+        guard let brush = currentBrushConfig(), !brush.wetEnabled else { return nil }
+        return renderer.grainSettings(for: brush)
     }
 
     /// The brush-tip stamp texture for the active/current brush, or nil for the procedural
@@ -2651,30 +2585,6 @@ public final class MetalCanvasView: UIView {
         return renderer.shapeTexture(for: shapeID)
     }
 
-    /// StreamLine stabilization: low-pass the drawn position toward the raw pencil
-    /// position. `streamline` 0 → follow exactly (no change); higher → more lag/steadier
-    /// lines. Updates `streamlineCursor` and bakes the smoothed position into the returned
-    /// point so live preview, replay, undo, and persistence all see the same path.
-    /// Only `position` is smoothed; pressure/altitude/timestamp pass through raw.
-    private func smoothedStrokePoint(from touch: UITouch, streamline: CGFloat) -> StrokePoint {
-        var point = makeStrokePoint(from: touch)
-        guard streamline > 0 else {
-            streamlineCursor = point.position
-            return point
-        }
-        let prev = streamlineCursor ?? point.position
-        // factor 1 = follow exactly; → small = heavy lag. Clamped so the cursor always
-        // makes progress (never fully freezes, even at streamline = 1).
-        let factor = max(1.0 - streamline * 0.9, 0.08)
-        let smoothed = CGPoint(
-            x: prev.x + (point.position.x - prev.x) * factor,
-            y: prev.y + (point.position.y - prev.y) * factor
-        )
-        streamlineCursor = smoothed
-        point.position = smoothed
-        return point
-    }
-
     private func makeStrokePoint(from touch: UITouch) -> StrokePoint {
         let location = touch.location(in: self)
         let force: CGFloat
@@ -2683,12 +2593,96 @@ public final class MetalCanvasView: UIView {
         } else {
             force = 0.5
         }
+        // Azimuth (tilt direction) is only meaningful for the pencil; finger touches report 0.
+        // Stored raw in [0,2π); the TiltDirection sensor wraps it. Feeds chisel/flat-pencil
+        // shape dynamics (high img2img leverage). See BrushDynamics.swift.
+        let azimuth: CGFloat
+        if touch.type == .pencil {
+            let raw = touch.azimuthAngle(in: self)
+            azimuth = raw >= 0 ? raw : raw + 2 * .pi
+        } else {
+            azimuth = 0
+        }
+        // Pencil Pro barrel roll (iOS 17.5+); 0 for other pencils/fingers/older OS.
+        var roll: CGFloat = 0
+        if #available(iOS 17.5, *), touch.type == .pencil {
+            roll = touch.rollAngle
+        }
         return StrokePoint(
             position: location,
             force: force,
             altitude: touch.altitudeAngle,
-            timestamp: touch.timestamp
+            timestamp: touch.timestamp,
+            azimuth: azimuth,
+            rollAngle: roll
         )
+    }
+
+    // TEMPORARY brush-tuning diagnostic. Logs one summary line per completed dynamic stroke with
+    // the practical input ranges (pressure, raw px/s speed, normalized speedNorm, tilt) + the
+    // resulting size/flow multipliers — so brush dynamics can be tuned from real device values
+    // instead of guessing. View with: Xcode console, or
+    //   log stream --predicate 'subsystem == "com.kiki.canvas" AND category == "brushdiag"'
+    // Remove once dynamics tuning is settled.
+    private static let brushDiag = Logger(subsystem: "com.kiki.canvas", category: "brushdiag")
+
+    /// DEV: build + emit a live `BrushInputSample` for the input HUD (throttled ~20 Hz). Advances
+    /// the persistent `hudState` with the latest segment so the values match what the brush sees.
+    private func emitBrushInputSample(brush: BrushConfig) {
+        guard let cb = onBrushInputSample, var st = hudState,
+              let pts = activeStroke?.points, pts.count >= 2 else { return }
+        let curr = pts[pts.count - 1], prev = pts[pts.count - 2]
+        let dx = Double(curr.position.x - prev.position.x)
+        let dy = Double(curr.position.y - prev.position.y)
+        let dt = max(0, Double(curr.timestamp - prev.timestamp))
+        let input = st.advance(x: Double(curr.position.x), y: Double(curr.position.y),
+                               force: Double(curr.force), altitude: Double(curr.altitude),
+                               azimuth: Double(curr.azimuth), dx: dx, dy: dy, dt: dt)
+        hudState = st
+        guard curr.timestamp - lastHUDEmit > 0.05 else { return }
+        lastHUDEmit = curr.timestamp
+        let rawSpeed = dt > 0 ? (dx * dx + dy * dy).squareRoot() / dt : 0
+        let dyn = brush.dynamics
+        cb(BrushInputSample(
+            pressure: input.pressure, speedRaw: rawSpeed, speedNorm: input.speedNorm,
+            tiltElevation: input.tiltElevationNorm, azimuth: input.azimuthNorm,
+            drawingAngle: input.drawingAngleNorm, distanceNorm: input.distanceNorm, fadeNorm: input.fadeNorm,
+            sizeMul: dyn?.size?.value(input) ?? 1, flowMul: dyn?.flow?.value(input) ?? 1,
+            dabIndex: Int(st.dabIndex)))
+    }
+
+    private func logStrokeDynamicsDiagnostic(_ stroke: Stroke) {
+        let dyn = stroke.brush.dynamics
+        guard !(dyn?.isInert ?? true), stroke.points.count > 1 else { return }
+        var st = StrokeDynamicsState(seed: strokeSeed(stroke.id), distancePeriod: devDistancePeriod,
+                                     fadePeriod: devFadePeriod, maxSpeed: devMaxSpeed)
+        var pMin = 1.0, pMax = 0.0, rawMax = 0.0, snMax = 0.0, teMin = 1.0, teMax = 0.0
+        var szMin = 99.0, szMax = 0.0, flMin = 99.0, flMax = 0.0
+        for i in 1..<stroke.points.count {
+            let prev = stroke.points[i - 1], curr = stroke.points[i]
+            let dx = Double(curr.position.x - prev.position.x)
+            let dy = Double(curr.position.y - prev.position.y)
+            let dt = max(0, Double(curr.timestamp - prev.timestamp))
+            let input = st.advance(x: Double(curr.position.x), y: Double(curr.position.y),
+                                   force: Double(curr.force), altitude: Double(curr.altitude),
+                                   azimuth: Double(curr.azimuth), dx: dx, dy: dy, dt: dt)
+            let raw = dt > 0 ? (dx * dx + dy * dy).squareRoot() / dt : 0
+            pMin = min(pMin, input.pressure); pMax = max(pMax, input.pressure)
+            rawMax = max(rawMax, raw); snMax = max(snMax, input.speedNorm)
+            teMin = min(teMin, input.tiltElevationNorm); teMax = max(teMax, input.tiltElevationNorm)
+            if let s = dyn?.size { let v = s.value(input); szMin = min(szMin, v); szMax = max(szMax, v) }
+            if let f = dyn?.flow { let v = f.value(input); flMin = min(flMin, v); flMax = max(flMax, v) }
+        }
+        let msg = String(format: "n=%d  pressure=[%.2f…%.2f]  speed=%dpx/s max (norm→%.2f)  tilt=[%.2f…%.2f]  size×=[%.2f…%.2f]  flow×=[%.2f…%.2f]",
+                         stroke.points.count, pMin, pMax, Int(rawMax), snMax, teMin, teMax,
+                         szMin > szMax ? 0 : szMin, szMax, flMin > flMax ? 0 : flMin, flMax)
+        Self.brushDiag.log("\(msg, privacy: .public)")
+    }
+
+    /// Stable per-stroke RNG seed. Moved to `StrokeStampGenerator.strokeSeed` (2026-07-14);
+    /// this forwards so in-view callers (HUD state, diagnostics) read naturally.
+    private func strokeSeed(_ id: UUID) -> UInt64 {
+        StrokeStampGenerator.strokeSeed(id)
     }
 
 }

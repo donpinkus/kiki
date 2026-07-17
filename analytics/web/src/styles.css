@@ -22,7 +22,9 @@ body {
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
 
-.app { display: flex; min-height: 100vh; }
+/* (removed) a former `.app { min-height: 100vh }` layout rule lived here and
+   collided with `pill app` badges (test-account, session-source), stretching
+   them to viewport height. No element uses a bare `app` layout class. */
 
 .topbar {
   display: flex; align-items: center; justify-content: space-between;
@@ -55,8 +57,51 @@ tr:hover td { background: var(--panel-2); }
 .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; background: var(--panel-2); border: 1px solid var(--border); }
 .pill.app { color: var(--accent); }
 .pill.drawing { color: var(--accent-2); }
+/* Ops page status pills. Dedicated classes — never reuse `.app`/`.drawing`
+   here (`.app` is also the root layout class; a `pill app` pill inherits
+   min-height:100vh and stretches the table row to viewport height). */
+.pill.warm { color: var(--accent-2); }
+.pill.cold { color: #f0b429; }
+.pill.fail { color: #ff7b72; }
+.pill.src-user { color: var(--accent); }
+
+/* Replay player: brief highlight when the active prompt changes mid-playback. */
+.prompt-flash { animation: prompt-flash 1.2s ease-out; }
+@keyframes prompt-flash {
+  from { background: #33405e; }
+}
+
+/* Launch tab chart grid */
+.launch-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 12px; }
+
+/* Ops stat tiles */
+.stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.stat { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+.stat .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 6px; }
+.stat .value { font-size: 22px; font-weight: 600; }
+.stat .sub { color: var(--muted); font-size: 12px; margin-top: 4px; }
 
 .section-title { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 28px 0 12px; }
+
+/* Timeline grouped by app session (UserDetail) */
+.session-group {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  margin-bottom: 10px; overflow: hidden;
+}
+.session-group summary {
+  cursor: pointer; padding: 12px 16px; user-select: none; font-size: 13px;
+}
+.session-group summary:hover { background: var(--panel-2); }
+.session-group.gap summary, .session-group.gap summary strong { color: var(--muted); font-weight: 500; }
+.session-group-body { padding: 4px 16px 12px; font-size: 13px; }
+.event-row.expandable { cursor: pointer; }
+.event-row.expandable:hover { background: var(--panel-2); }
+.json-view {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+  padding: 10px 12px; margin: 6px 0 10px; overflow-x: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px; line-height: 1.55; white-space: pre;
+}
 
 /* Timeline */
 .timeline { border-left: 2px solid var(--border); margin-left: 8px; padding-left: 18px; }
@@ -82,5 +127,107 @@ tr:hover td { background: var(--panel-2); }
 .event-row .name { font-weight: 600; }
 .event-row .props { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* Error events (error.banner_shown, *.failed) — must jump out when scanning
+   a session timeline. Red tint spans the full row; count badge in summary. */
+.event-row.error-event { background: rgba(255, 123, 114, 0.09); border-bottom-color: rgba(255, 123, 114, 0.35); }
+.event-row.error-event .name { color: #ff7b72; }
+.event-row.error-event .props { color: rgba(255, 123, 114, 0.75); }
+.event-row.error-event.expandable:hover { background: rgba(255, 123, 114, 0.16); }
+.err-icon { font-weight: 400; }
+.pill.error-pill { color: #ff7b72; border-color: rgba(255, 123, 114, 0.45); }
+
 .filter-bar { display: flex; gap: 10px; margin-bottom: 16px; }
 .error { color: #ff7b72; }
+
+/* ─── Tests tab (brush-battery run gallery) ─── */
+select {
+  font: inherit; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--panel-2); color: var(--text); padding: 8px 32px 8px 10px;
+  appearance: none;
+  background-image: url("data:image/svg+xml;charset=utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%239aa3b2' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 12px center;
+  cursor: pointer;
+}
+select:focus { outline: 1px solid var(--accent); }
+.tests-controls { display: flex; gap: 18px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 22px; }
+.tests-controls label { display: flex; flex-direction: column; gap: 5px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+.scene-card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px 12px 10px; }
+.scene-name { font-weight: 600; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+.scene-desc {
+  color: var(--muted); font-size: 12px; line-height: 1.45; margin: 3px 0 9px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tests-img {
+  width: 100%; aspect-ratio: 1; object-fit: contain; background: #fff;
+  display: block; border-radius: 7px; border: 1px solid var(--border);
+}
+.tests-img-caption { color: var(--muted); font-size: 12px; margin-top: 5px; }
+.tests-note { color: var(--muted); font-size: 13px; margin: -10px 0 18px; }
+
+/* Tests-tab lightbox */
+.lightbox-backdrop {
+  position: fixed; inset: 0; z-index: 50;
+  background: rgba(8, 10, 14, 0.82);
+  display: flex; align-items: center; justify-content: center;
+  padding: 28px;
+}
+.lightbox-panel {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+  max-width: 920px; width: 100%; max-height: calc(100vh - 56px);
+  display: flex; flex-direction: column; overflow: hidden;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5);
+}
+.lightbox-head {
+  display: flex; align-items: baseline; gap: 12px;
+  padding: 14px 18px 0;
+}
+.lightbox-head .scene-name { font-size: 15px; }
+.lightbox-head .spacer { flex: 1; }
+.lightbox-close {
+  background: none; border: none; color: var(--muted); font-size: 22px;
+  line-height: 1; padding: 4px 8px; cursor: pointer; align-self: flex-start;
+}
+.lightbox-close:hover { color: var(--text); }
+.lightbox-desc { color: var(--muted); font-size: 13px; line-height: 1.55; padding: 6px 18px 12px; }
+.lightbox-desc p { margin: 0 0 6px; }
+.lightbox-desc p:last-child { margin-bottom: 0; }
+.lightbox-desc ul { margin: 4px 0 0; padding-left: 20px; }
+.lightbox-desc li { margin: 3px 0; }
+.lightbox-desc strong { color: var(--text); font-weight: 600; }
+.lightbox-desc code { background: var(--panel-2); border-radius: 4px; padding: 1px 5px; font-size: 12px; }
+.lightbox-img-wrap { position: relative; background: #fff; min-height: 0; flex: 1; }
+.lightbox-img-wrap img { display: block; width: 100%; height: 100%; max-height: 64vh; object-fit: contain; }
+.lightbox-nav {
+  position: absolute; top: 50%; transform: translateY(-50%);
+  background: rgba(15, 17, 21, 0.55); color: #fff; border: none; border-radius: 999px;
+  width: 42px; height: 42px; font-size: 20px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+.lightbox-nav:hover { background: rgba(15, 17, 21, 0.8); }
+.lightbox-nav:disabled { opacity: 0.25; cursor: default; }
+.lightbox-nav.prev { left: 12px; }
+.lightbox-nav.next { right: 12px; }
+.lightbox-foot {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 18px 12px; color: var(--muted); font-size: 12px;
+}
+.lightbox-foot .spacer { flex: 1; }
+.tests-img-button { all: unset; cursor: zoom-in; display: block; width: 100%; }
+
+/* ─── Brushes tab (brush clone targets) ─────────────────────────────────── */
+.chip {
+  border: 1px solid var(--border, #d0d4dc);
+  background: transparent;
+  border-radius: 999px;
+  padding: 4px 12px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.chip-active {
+  border-color: var(--accent, #4460d8);
+  background: color-mix(in srgb, var(--accent, #4460d8) 12%, transparent);
+}
+button.danger {
+  color: #b3282d;
+  border-color: #b3282d;
+}

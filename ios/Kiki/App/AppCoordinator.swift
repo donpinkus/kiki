@@ -127,6 +127,165 @@ final class AppCoordinator {
             applyTool()
         }
     }
+    /// Gaussian arc-length smoothing ("Smoothing", P3). 0 = off; higher = steadier
+    /// curvature with more trailing lag (catch-up-on-lift covers the tail).
+    var toolStabilization: CGFloat = 0.0 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    /// Tip lightness ("Tip lightness", P4a): shaped tip luma → ink value mapping.
+    var toolTipLightness: CGFloat = 0.0 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    /// Spacing jitter (batch 2; no slider yet — written by presets, read by applyTool).
+    var toolSpacingJitter: CGFloat = 0 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    /// Pressure smoothing (P3; no slider — written by presets, read by applyTool).
+    var toolPressureSmoothing: CGFloat = 0 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    /// The last-applied curated preset id (chip highlight in the popover). Purely
+    /// informational — manual knob tweaks after applying don't clear it (v1).
+    var activeCuratedPresetID: String?
+    /// Taper opacity fade ("Taper opacity", richer taper): fades alpha at tapered tips.
+    var toolTaperOpacity: CGFloat = 0.0 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    /// Wet Refill ("Refill"): pull the carried load back toward the ink over distance.
+    var toolWetRefill: CGFloat = 0.0 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    /// Secondary ink ("Ink 2", P6): per-dab blend target; nil = single ink.
+    var toolSecondaryColor: Color? = nil {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    /// Wet Blur ("Blur", smudge softness): neighborhood pickup + soft rim.
+    var toolWetBlur: CGFloat = 0.0 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    /// Wetness Jitter ("Wet jitter"): per-dab random deposit patchiness.
+    var toolWetJitter: CGFloat = 0.0 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    /// Wet Charge ("Charge", P7): finite paint reservoir; 1 = bottomless.
+    var toolWetCharge: CGFloat = 1.0 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    /// Static tip angle ("Angle", radians): the nib's base orientation (calligraphy).
+    var toolTipAngle: CGFloat = 0 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    /// Fall Off ("Fall off"): paint runs out over drawn distance.
+    var toolFallOff: CGFloat = 0 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    /// Grain mode ("Moving grain"): tooth rides with the stroke instead of the paper.
+    var toolGrainMoving: Bool = false {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    /// Grain scale ("Grain scale", 0.5–3×): coarseness multiplier on the grain tile.
+    var toolGrainScale: CGFloat = 1.0 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    /// Stamps per spacing point ("Count", 1–8; CGFloat for the slider, rounded at build).
+    var toolStampCount: CGFloat = 1 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    /// Count jitter [0,1] ("Count jitter").
+    var toolStampCountJitter: CGFloat = 0 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    /// Signed follow-stroke rotation ("Rotation", −1…1). 1 = legacy full follow.
+    var toolRotationFollow: CGFloat = 1 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    /// Tip art mirror ("Flip X/Y").
+    var toolFlipX: Bool = false {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    var toolFlipY: Bool = false {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    /// Grain texture id ("Grain", P8). nil = none.
+    var toolGrainID: String? = nil {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    /// Grain depth ("Depth", P8): how aggressively the paper tooth carves the dab.
+    var toolGrainDepth: CGFloat = 0.5 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    /// Tip aspect ratio ("Aspect", P4b anisotropy). 1 = round; lower flattens the tip
+    /// into a chisel/calligraphy nib (combine with a Rotation dynamics option or a
+    /// stroke-oriented shape to steer the nib angle).
+    var toolAspect: CGFloat = 1.0 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
 
     /// Wet-paint mode (pro-brush Phase 4, experimental). Brush only.
     var toolWetEnabled = false {
@@ -157,6 +316,21 @@ final class AppCoordinator {
             applyTool()
         }
     }
+    /// Krita-grade brush dynamics (sensor→curve→combine→remap). nil = no dynamics (legacy pen).
+    /// Edited live by the Brush Studio dev panel; applied to the active brush on change.
+    var toolDynamics: BrushDynamics? = nil {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    /// Smudge mode (with wet path): seed the carried load from the canvas instead of the ink.
+    var toolWetSmudge = false {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
 
     /// Debug: A/B the wet draw-order experiment (per-stamp vs instanced draws).
     var wetOrderingPerStamp = false {
@@ -165,6 +339,69 @@ final class AppCoordinator {
 
     /// Whether the brush-settings popover (secondary sliders) is shown.
     var showBrushSettings = false
+    /// Whether the Brush Studio (dev) tuning panel is shown. Presented from the sidebar (a
+    /// stable parent) rather than from inside the popover, so it survives the popover dismissing.
+    var showBrushStudio = false
+
+    // MARK: - DEV brush-tuning harness (input HUD + engine knobs + active test note)
+
+    /// Latest live brush-input sample (from MetalCanvasView), shown in the on-canvas HUD.
+    var liveBrushInput: BrushInputSample?
+    /// Whether the live input HUD is shown on the canvas.
+    var showInputHUD = false
+    /// Tunable engine-normalization constants (pushed into the canvas via DrawingView's CanvasView
+    /// on each @Observable update; dialed via Brush Studio sliders).
+    var devMaxSpeed: Double = 1500
+    var devDistancePeriod: Double = 600
+    var devFadePeriod: Double = 64
+    /// The active test brush's instruction note (shown in Brush Studio).
+    var activeTestNote: String?
+
+    /// DEV stroke recorder (Brush Studio → "Record strokes"): while on, every completed
+    /// brush stroke (dry + wet, canvas-pixel-normalized by MetalCanvasView) is appended
+    /// here, exportable as a BrushHarness fixture JSON via the share sheet. See
+    /// `ios/Packages/CanvasModule/BrushHarness/README.md`.
+    var isRecordingStrokes = false
+    var recordedStrokes: [Stroke] = []
+
+    /// Write the recording as a BrushFixture JSON to a temp file for sharing
+    /// (AirDrop/Files → replay with `brushharness --fixtures <file>`).
+    func exportRecordedStrokesURL() -> URL? {
+        guard let data = recordedFixtureJSON() else { return nil }
+        let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("brush-strokes-\(stamp).json")
+        do { try data.write(to: url) } catch { return nil }
+        return url
+    }
+
+    private func recordedFixtureJSON() -> Data? {
+        guard !recordedStrokes.isEmpty else { return nil }
+        let fixture = BrushFixture(name: nil, canvasSide: 2048, strokes: recordedStrokes)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return try? encoder.encode(fixture)
+    }
+
+    /// One-tap fixture upload to Kiki Insights: the stroke JSON (for BrushHarness
+    /// replay) plus a PNG snapshot of the current canvas (so a verbal description
+    /// has a picture to point at — the "brush bug report" button). Returns success
+    /// for UI confirmation. Fetched Mac-side via `BrushHarness/fetch-fixtures.sh`.
+    /// The last recording written to disk (auto-saved on every Upload attempt BEFORE any
+    /// network I/O, so a failed/interrupted upload can never lose the strokes — Share…
+    /// works from this file even if the in-memory recording is gone).
+    var lastRecordingURL: URL?
+
+    /// Returns nil on success, else a human-readable failure reason for the Studio UI.
+    func uploadRecordedFixture(note: String?) async -> String? {
+        guard let json = recordedFixtureJSON() else { return "no strokes recorded" }
+        // Persist FIRST — losing a recording to a failed upload is unacceptable.
+        if let url = exportRecordedStrokesURL() { lastRecordingURL = url }
+        let snapshot = canvasViewModel.generateThumbnail(maxDimension: 1024)?.pngData()
+        return await InsightsSink.shared.uploadFixture(
+            name: nil, note: note, strokeCount: recordedStrokes.count,
+            fixtureJSON: json, snapshotPNG: snapshot)
+    }
 
     // MARK: - Per-tool stored settings
 
@@ -230,7 +467,10 @@ final class AppCoordinator {
         toolShapeID = storedToolShapes[newTool]
         isSwappingToolValues = false
     }
-    var currentColor: Color = .black {
+    /// Initial brush color is a friendly aqua blue, not black: it makes the
+    /// color wheel obviously "already a color" so new users realize switching
+    /// colors is a thing (product call 2026-07-16).
+    var currentColor: Color = Color(red: 0.15, green: 0.69, blue: 0.78) {
         didSet { applyTool() }
     }
     var promptText = "" {
@@ -268,7 +508,20 @@ final class AppCoordinator {
     var showLayerPanel = false
     var resultState: ResultState = .empty
     var dividerPosition: CGFloat = 0.5
-    var generationError: String?
+    /// Message for the red error banner in `DrawingView`. Set on stream/auth
+    /// failures; cleared automatically when the condition resolves (successful
+    /// sign-in, stream reaching `.ready`, subscription activation) or manually
+    /// via the banner's ✕. The `didSet` is the single chokepoint that reports
+    /// "user saw an error banner" to analytics — don't add per-site tracking.
+    var generationError: String? {
+        didSet {
+            guard let generationError, generationError != oldValue else { return }
+            Analytics.track(.errorBannerShown, properties: [
+                "message": generationError,
+                "surface": "drawing_banner",
+            ])
+        }
+    }
 
     /// Fullscreen result-panel transform. `panelOffset` is the panel's
     /// translation from its default top-trailing position (in pane points);
@@ -322,7 +575,7 @@ final class AppCoordinator {
 
     // MARK: - Layout
 
-    var drawingLayout: DrawingLayout = .splitScreen {
+    var drawingLayout: DrawingLayout = .overlay {
         didSet {
             UserDefaults.standard.set(drawingLayout.rawValue, forKey: "drawingLayout")
             // Clear any in-flight panel hole so it can't linger across a layout
@@ -435,6 +688,45 @@ final class AppCoordinator {
     /// own default is 2.3 (looser/more restyling). Default 1.2 (more adherence).
     var streamScheduleMu: Double = 1.2 { didSet { syncStreamConfig() } }
 
+    /// Which backend image path serves this device's stream: "fal" (hosted
+    /// realtime) or "lambda" (our own FLUX pipeline on a Lambda Cloud H100 —
+    /// reference-mode VAE-concat conditioning, the adherence A/B). Sent as
+    /// `?imageProvider=` on the stream WS; the backend honors it for TEST
+    /// ACCOUNTS only. Unlike the config-push params above this is a WS query
+    /// param, so changing it reconnects the stream. Persisted.
+    var imageProvider: String = UserDefaults.standard.string(forKey: "imageProvider") ?? "fal" {
+        didSet {
+            guard imageProvider != oldValue else { return }
+            UserDefaults.standard.set(imageProvider, forKey: "imageProvider")
+            if imageProvider == "lambda" { ensureLambdaPool() }
+            if streamSession != nil { resumeStream() }
+        }
+    }
+
+    /// Last known Lambda dev-pool state line, shown under the provider picker
+    /// in Settings ("H100 ready at <ip>" / "Instance booting (~3 min)…").
+    private(set) var lambdaPoolStatus: String = ""
+
+    /// Fire-and-forget: ask the backend to spin up (or keep) the Lambda H100.
+    /// Called at sign-in/app-open and when the provider toggle flips to
+    /// lambda, so the instance is warming before it's needed. No-op when
+    /// signed out; backend 403s for non-test accounts (status shows that).
+    func ensureLambdaPool() {
+        guard signedInUserId != nil else { return }
+        Task { @MainActor in
+            do {
+                let state = try await authService.ensureLambdaPool()
+                self.lambdaPoolStatus = state.message
+                Log.info("lambda.pool_state", attributes: [
+                    "event": "lambda.pool_state",
+                    "status": state.status,
+                ])
+            } catch {
+                self.lambdaPoolStatus = "unavailable: \(error.localizedDescription)"
+            }
+        }
+    }
+
     /// LTX-2.3 video override — square resolution (px). Session-only by design:
     /// not @AppStorage, so each app launch resets to the perf baseline (512).
     /// Step 3.5 benchmark needs deterministic baselines per launch.
@@ -530,17 +822,14 @@ final class AppCoordinator {
                 await subscriptionManager.refreshEntitlements()
             }
             refreshUsage()
+            // Pre-warm the Lambda H100 dev instance at every launch of a
+            // signed-in (test) account so it's ready if the provider toggle
+            // flips to lambda. Backend-gated; harmless 403 otherwise.
+            ensureLambdaPool()
 
-            // If no drawings exist, go directly to a new drawing
-            let descriptor = FetchDescriptor<Drawing>(sortBy: [SortDescriptor(\.updatedAt, order: .reverse)])
-            let count = (try? modelContext.fetchCount(descriptor)) ?? 0
-            if count == 0 {
-                let drawing = Drawing()
-                modelContext.insert(drawing)
-                try? modelContext.save()
-                currentDrawingId = drawing.id
-                currentScreen = .drawing
-            }
+            // A user who has never made a drawing with content goes directly
+            // to a drawing instead of the gallery.
+            routeToDrawingIfNoContent()
         }
 
         applyTool()
@@ -562,6 +851,11 @@ final class AppCoordinator {
         // Eyedropper: commit picked colors to currentColor
         canvasViewModel.onColorPicked = { [weak self] uiColor in
             self?.currentColor = Color(uiColor: uiColor)
+        }
+        // DEV stroke recorder: capture completed strokes while recording is on.
+        canvasViewModel.onStrokeCompleted = { [weak self] stroke in
+            guard let self, self.isRecordingStrokes else { return }
+            self.recordedStrokes.append(stroke)
         }
         // Supply the current brush color to the canvas ring preview
         canvasViewModel.currentBrushColorProvider = { [weak self] in
@@ -655,6 +949,10 @@ final class AppCoordinator {
         let userId = await authService.userId
         let email = await authService.email
         await MainActor.run {
+            // A stale "Please sign in again" banner (set when the token fetch
+            // failed and forced sign-out) is resolved by this sign-in — clear
+            // it now rather than waiting for the new stream to reach ready.
+            self.generationError = nil
             self.signedInUserId = userId
             if let userId {
                 Analytics.identify(userId: userId, email: email)
@@ -667,18 +965,14 @@ final class AppCoordinator {
                     "event": "auth.signed_in",
                     "user_id": userId,
                 ])
+                // Pre-warm the Lambda H100 dev instance on fresh sign-in
+                // (mirrors the relaunch hook in init).
+                self.ensureLambdaPool()
             }
 
-            // After sign-in, route to gallery (or create a new drawing if none exist).
-            let descriptor = FetchDescriptor<Drawing>(sortBy: [SortDescriptor(\.updatedAt, order: .reverse)])
-            let count = (try? self.modelContext.fetchCount(descriptor)) ?? 0
-            if count == 0 {
-                let drawing = Drawing()
-                self.modelContext.insert(drawing)
-                try? self.modelContext.save()
-                self.currentDrawingId = drawing.id
-                self.currentScreen = .drawing
-            } else {
+            // After sign-in, route to gallery — or straight into a drawing
+            // when the user has never made one with content.
+            if !self.routeToDrawingIfNoContent() {
                 self.currentScreen = .gallery
             }
 
@@ -838,6 +1132,30 @@ final class AppCoordinator {
     }
 
     // MARK: - Gallery / Persistence
+
+    /// New-user routing: someone who has never made a drawing with content
+    /// lands directly in a drawing, not an empty gallery. "Never made" means
+    /// no drawing has content (`isContentEmpty`), not merely count == 0 — a
+    /// blank auto-created drawing persists when the app is killed before
+    /// `navigateToGallery()`'s cleanup runs, and must not strand the user in
+    /// a gallery with one empty tile. Reuses the newest blank drawing when
+    /// one exists instead of stacking new ones. Returns true when it routed.
+    @discardableResult
+    private func routeToDrawingIfNoContent() -> Bool {
+        let descriptor = FetchDescriptor<Drawing>(sortBy: [SortDescriptor(\.updatedAt, order: .reverse)])
+        let drawings = (try? modelContext.fetch(descriptor)) ?? []
+        guard drawings.allSatisfy(\.isContentEmpty) else { return false }
+        if let existing = drawings.first {
+            currentDrawingId = existing.id
+        } else {
+            let drawing = Drawing()
+            modelContext.insert(drawing)
+            try? modelContext.save()
+            currentDrawingId = drawing.id
+        }
+        currentScreen = .drawing
+        return true
+    }
 
     func newDrawing() {
         saveCurrentDrawing()
@@ -1089,7 +1407,11 @@ final class AppCoordinator {
         var components = URLComponents(url: backendURL, resolvingAgainstBaseURL: false)!
         components.scheme = backendURL.scheme == "https" ? "wss" : "ws"
         components.path = "/v1/stream"
-        components.queryItems = [URLQueryItem(name: "streamId", value: streamId)]
+        components.queryItems = [
+            URLQueryItem(name: "streamId", value: streamId),
+            // Dev A/B toggle — backend honors it for test accounts only.
+            URLQueryItem(name: "imageProvider", value: imageProvider),
+        ]
         guard let wsURL = components.url else {
             streamLog.error("Failed to construct WebSocket URL from \(self.backendURL.absoluteString)")
             SentrySDK.capture(message: "stream.startup: failed to construct WebSocket URL") { scope in
@@ -1243,6 +1565,14 @@ final class AppCoordinator {
                 Log.info("stream.reconnecting", attributes: ["event": "stream.reconnecting"])
             }
             self.streamReadiness = readiness
+            if case .ready = readiness {
+                // Stream is demonstrably healthy again — any lingering error
+                // banner (transient failure, stale auth message) is resolved.
+                // The out-of-time/paywall banner never reaches here: a capped
+                // session is rejected at the backend gate and stays .failed
+                // until `subscriptionDidActivate()` clears it.
+                self.generationError = nil
+            }
             if case .failed(let message) = readiness {
                 self.generationError = message
                 // End startup transaction with failure status if we never got a frame.
@@ -1623,6 +1953,129 @@ final class AppCoordinator {
         return result.isEmpty ? nil : result
     }
 
+    /// Load a brush preset / control-isolation test into the live tool (Brush Studio). Batched so
+    /// the brush is rebuilt once. Applies the preset's pin-overrides (baseWidth/opacity/flow) where
+    /// set, so a test fully specifies the brush; otherwise the user's values are kept.
+    func applyBrushPreset(_ preset: BrushPreset) {
+        isSwappingToolValues = true
+        toolDynamics = preset.dynamics
+        toolHardness = preset.hardness
+        toolSpacing = preset.spacing
+        toolShapeID = preset.shapeID
+        toolWetSmudge = false
+        if let bw = preset.baseWidth { toolSize = bw }
+        if let op = preset.opacity { toolOpacity = op }
+        if let fl = preset.flow { toolFlow = fl }
+        isSwappingToolValues = false
+        activeTestNote = preset.note
+        applyTool()
+    }
+
+    /// Apply a curated preset: run its recipe on a plain base carrying the user's
+    /// color/size/opacity, then write every resulting knob back into the tool fields so
+    /// the popover sliders reflect the preset. Batched (isSwappingToolValues) so the
+    /// brush rebuilds once.
+    func applyCuratedPreset(_ preset: CuratedPreset) {
+        let base = BrushConfig(color: currentColor.codable, baseWidth: toolSize, opacity: toolOpacity)
+        let c = preset.configure(base)
+        isSwappingToolValues = true
+        toolOpacity = c.opacity
+        toolFlow = c.flow
+        toolStreamline = c.streamline
+        toolStabilization = c.stabilization
+        toolPressureSmoothing = c.pressureSmoothing
+        toolHardness = c.hardness
+        toolSpacing = c.spacing
+        toolSpacingJitter = c.spacingJitter
+        toolTaper = c.taper
+        toolShapeID = c.shapeID
+        toolAspect = c.aspectRatio
+        toolGrainID = c.grainID
+        toolGrainDepth = c.grainDepth
+        toolGrainScale = c.grainScale
+        toolTipLightness = c.tipLightness
+        toolTipAngle = c.tipAngle
+        toolFallOff = c.fallOff
+        toolStampCount = CGFloat(c.stampCount)
+        toolStampCountJitter = c.stampCountJitter
+        toolRotationFollow = c.rotationFollow ?? 1
+        toolFlipX = c.flipX
+        toolFlipY = c.flipY
+        toolDynamics = c.dynamics
+        // Knobs added after preset v1 — a preset must fully specify the brush:
+        toolGrainMoving = c.grainMoving
+        toolTaperOpacity = c.taperOpacity
+        toolPressureSmoothing = c.pressureSmoothing
+        toolSecondaryColor = c.secondaryColor.map { Color(red: $0.red, green: $0.green, blue: $0.blue) }
+        toolWetEnabled = c.wetEnabled
+        toolWetSmudge = false
+        toolWetStrength = c.wetStrength
+        toolWetPickup = c.wetPickup
+        toolWetCharge = c.wetCharge
+        toolWetRefill = c.wetRefill
+        toolWetJitter = c.wetJitter
+        toolWetBlur = c.wetBlur
+        isSwappingToolValues = false
+        activeCuratedPresetID = preset.id
+        activeTestNote = nil
+        applyTool()
+    }
+
+    /// Reset every secondary knob to the engine default (the "None" preset chip),
+    /// keeping color/size/opacity.
+    func clearCuratedPreset() {
+        let d = BrushConfig(color: currentColor.codable, baseWidth: toolSize, opacity: toolOpacity)
+        isSwappingToolValues = true
+        toolFlow = d.flow
+        toolStreamline = d.streamline
+        toolStabilization = d.stabilization
+        toolPressureSmoothing = d.pressureSmoothing
+        toolHardness = d.hardness
+        toolSpacing = d.spacing
+        toolSpacingJitter = d.spacingJitter
+        toolTaper = d.taper
+        toolShapeID = nil
+        toolAspect = d.aspectRatio
+        toolGrainID = nil
+        toolGrainDepth = d.grainDepth
+        toolGrainScale = d.grainScale
+        toolTipLightness = d.tipLightness
+        toolTipAngle = d.tipAngle
+        toolFallOff = d.fallOff
+        toolStampCount = CGFloat(d.stampCount)
+        toolStampCountJitter = d.stampCountJitter
+        toolRotationFollow = 1
+        toolFlipX = false
+        toolFlipY = false
+        toolDynamics = nil
+        toolGrainMoving = false
+        toolTaperOpacity = 0
+        toolPressureSmoothing = 0
+        toolSecondaryColor = nil
+        toolWetEnabled = false
+        toolWetSmudge = false
+        toolWetStrength = d.wetStrength
+        toolWetPickup = d.wetPickup
+        toolWetCharge = d.wetCharge
+        toolWetRefill = d.wetRefill
+        toolWetJitter = d.wetJitter
+        toolWetBlur = d.wetBlur
+        isSwappingToolValues = false
+        activeCuratedPresetID = nil
+        activeTestNote = nil
+        applyTool()
+    }
+
+    /// Reset the live tool to the plain default pen (no dynamics, no smudge).
+    func resetBrushDynamics() {
+        isSwappingToolValues = true
+        toolDynamics = nil
+        toolWetSmudge = false
+        isSwappingToolValues = false
+        activeTestNote = nil
+        applyTool()
+    }
+
     private func applyTool() {
         switch currentTool {
         case .brush:
@@ -1634,13 +2087,37 @@ final class AppCoordinator {
                 pressureGamma: 0.35,
                 tiltSensitivity: 1.0,
                 streamline: toolStreamline,
+                stabilization: toolStabilization,
+                pressureSmoothing: toolPressureSmoothing,
                 hardness: toolHardness,
                 spacing: toolSpacing,
+                spacingJitter: toolSpacingJitter,
                 taper: toolTaper,
-                wetEnabled: toolWetEnabled,
+                taperOpacity: toolTaperOpacity,
+                wetEnabled: toolWetEnabled || toolWetSmudge,
                 wetStrength: toolWetStrength,
                 wetPickup: toolWetPickup,
-                shapeID: toolShapeID
+                wetSmudge: toolWetSmudge,
+                wetCharge: toolWetCharge,
+                wetRefill: toolWetRefill,
+                wetJitter: toolWetJitter,
+                wetBlur: toolWetBlur,
+                shapeID: toolShapeID,
+                aspectRatio: toolAspect,
+                grainID: toolGrainID,
+                grainDepth: toolGrainDepth,
+                grainScale: toolGrainScale,
+                grainMoving: toolGrainMoving,
+                tipLightness: toolTipLightness,
+                tipAngle: toolTipAngle,
+                fallOff: toolFallOff,
+                stampCount: Int(toolStampCount.rounded()),
+                stampCountJitter: toolStampCountJitter,
+                rotationFollow: toolRotationFollow,
+                flipX: toolFlipX,
+                flipY: toolFlipY,
+                secondaryColor: toolSecondaryColor.map { $0.codable },
+                dynamics: toolDynamics
             )
             canvasViewModel.selectBrush(config)
         case .eraser:

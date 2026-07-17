@@ -26,10 +26,30 @@ Shipped to `origin/main` and verified on device:
 
 Wet-paint follow-ups / known tradeoffs:
 - The per-stamp canvas read sees **committed** paint only, not the in-flight current stroke →
-  smearing your *own* just-laid paint within one stroke is approximate. The "truer" fix is a
+  smearing your *own* just-laid paint within one stroke is approximate. It is also
+  **timing-dependent**: stamps commit async (no waitUntilCompleted), so whether earlier
+  batches of the same stroke have landed when the CPU samples depends on GPU scheduling —
+  the same gesture can smear slightly differently run to run. The "truer" fix for both is a
   **GPU reservoir** (carry the load in a small texture updated in the wet pass).
+- **Low-Mix strokes still opacify + tint soft edges — WET INK ONLY as of 2026-07-15**:
+  for wet ink, alpha builds by *coverage* regardless of deposit, and
+  `dstLin = mix(brushLin, under, dst.a)` leaks the load color into semi-transparent pixels
+  even at near-zero Mix — the cost of the deliberate "no white halo" opaque-paint design;
+  revisit only alongside the GPU reservoir. **SMUDGE is fixed** (Donald hit it on device:
+  smudging 40%-opacity paint hardened it opaque): the load now carries ALPHA
+  (`WetStrokeWalker.loadAlpha` → `StampInstance.wetTargetAlpha`), the wet fragment moves
+  dst.a toward the carried alpha at the deposit rate (−1 sentinel keeps wet ink
+  byte-identical — verified by PNG-equal harness renders), the load's alpha depletes over
+  blank canvas (finite, fading drag-off tails; depletion rate scales with Smear), and
+  smudge on blank canvas now deposits ~nothing instead of falling back to ink. Harness
+  scene: `wet-04-smudge-translucent`.
+- Wet ignores Shape/Flow/Taper and Brush Studio dynamics (round tip, own deposit model);
+  the popover grays these out while wet is on. Honoring size dynamics is a cheap later add.
 - A **Smudge preset** (Mix low / Smear high) is a trivial add once presets exist.
 - KM gotcha: clamp integrated linear RGB to [0,1] **before** the endpoint-residual correction.
+- KM/recovery math lives in `WetKM.swift` (UIKit-free) so `OfflineTests` asserts the shipped
+  tables, mix, and premult-texel recovery on macOS (the 2026-07-14 decode-order fix is
+  regression-pinned there).
 
 ## Context
 

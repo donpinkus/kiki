@@ -55,8 +55,29 @@ export interface AppConfig {
    * per-session FLUX.2-klein pods. `fal` relays each frame to fal's hosted
    * `fal-ai/flux-2/klein/realtime` model instead (no pod, ~1.5s first frame).
    * The VIDEO idle-state path stays on RunPod regardless. Revert = set back to
-   * `runpod` + redeploy; the RunPod image path is dormant, not removed. */
-  readonly IMAGE_PROVIDER: 'runpod' | 'fal';
+   * `runpod` + redeploy; the RunPod image path is dormant, not removed.
+   * `lambda` relays to a manually-launched Lambda Cloud instance running our
+   * own image server (scripts/lambda/) at LAMBDA_IMAGE_URL — dev toggle for
+   * sketch-adherence comparison vs fal; no orchestration/provisioning yet. */
+  readonly IMAGE_PROVIDER: 'runpod' | 'fal' | 'lambda';
+  /** Full WS URL of a manually-launched Lambda image instance, including path
+   * and token (printed by scripts/lambda/coldstart-bench.ts --keep). Optional
+   * static override — when set it takes precedence over the dev pool. */
+  readonly LAMBDA_IMAGE_URL: string;
+  /** Lambda Cloud API key (cloud.lambda.ai/api-keys) — required for the dev
+   * pool; also the HMAC key for per-instance WS tokens. Server-side only. */
+  readonly LAMBDA_API_KEY: string;
+  /** When true (and LAMBDA_API_KEY set), the backend keeps at most one
+   * kiki-serve H100 instance for the per-session `imageProvider=lambda`
+   * toggle: launched on demand (app login / stream request via
+   * modules/lambda/devPool.ts), idle-reaped after 30 min. Dev/test-account
+   * only. Default false. */
+  readonly LAMBDA_DEV_POOL_ENABLED: boolean;
+  /** Region for dev-pool instances. Its `kiki-image-<region>` filesystem must
+   * be pre-populated via scripts/lambda/setup-lambda.ts. */
+  readonly LAMBDA_REGION: string;
+  /** Instance type for dev-pool instances. */
+  readonly LAMBDA_INSTANCE_TYPE: string;
   /** fal.ai API key — server-side only (CLAUDE.md #3: no secrets on client).
    * Used as `Authorization: Key <FAL_KEY>` on the fal realtime WS upgrade.
    * Required when `IMAGE_PROVIDER=fal`; ignored otherwise. */
@@ -67,6 +88,43 @@ export interface AppConfig {
    * Only beneficial if fal bills actual connection duration (verify first).
    * A few seconds (e.g. 2000-4000) balances savings vs reconnect churn. */
   readonly FAL_IDLE_CLOSE_MS: number;
+  /** fal keep-warm loop (modules/fal/falWarmer.ts) — env values are only the
+   * SEED for the `admin_config.fal_warmer` row (created at boot if absent);
+   * after that, the row is the runtime truth and is edited live from Kiki
+   * Insights → Ops. fal's marketplace pool for klein/realtime scales to zero
+   * and takes ~2-3.5 min to spin up (measured 2026-07-13), so without warming
+   * the first stroke of a session waits minutes for its first image. */
+  readonly FAL_WARMER_ENABLED: boolean;
+  /** Ping cadence. Binary-searched 2026-07-14: warmth holds at <=120s gaps
+   * (0% cold across 61 pings at 60/90/120s) and collapses at 150s (60% cold).
+   * Default 90s, NOT 120s: the warmer's 30s tick granularity stretches real
+   * gaps up to interval+30s, and 120+30=150s is exactly the cold boundary
+   * (observed in production 2026-07-15: a 150s effective gap → 111s cold
+   * start). 90+30=120s keeps worst-case gaps inside proven-warm territory.
+   * Cost is a non-factor between cadences — fal doesn't bill the cold
+   * spin-up/enqueue wait, only warm-runner-attached time. */
+  readonly FAL_WARMER_INTERVAL_MS: number;
+  /** Daily no-warm window, hours in America/Los_Angeles local time (handles
+   * PST/PDT). Pings are skipped from OFF_START (inclusive) to OFF_END
+   * (exclusive). Default 2→8 (2am-8am Pacific). Equal values = no window. */
+  readonly FAL_WARMER_OFF_START_HOUR: number;
+  readonly FAL_WARMER_OFF_END_HOUR: number;
+
+  // ─── Session capture (admin replay in Kiki Insights) ──────────────────
+  /** When true (default), the stream route mirrors a throttled sample of each
+   * session's sketch JPEGs (iPad→provider) and generated JPEGs (provider→iPad)
+   * to Insights /ingest/capture for admin replay (Insights → Gallery).
+   * PRIVACY: this persists user drawings server-side — it supersedes the old
+   * "sketches are ephemeral" rule (owner decision 2026-07-15). The privacy
+   * policy + App Store data disclosure must reflect it before external users.
+   * No-op unless INSIGHTS_URL + INSIGHTS_INGEST_KEY are also set. */
+  readonly SESSION_CAPTURE_ENABLED: boolean;
+  /** Per-kind capture floor: at most one sketch + one generated frame per this
+   * many ms per stream (default 1000 → ≤2 frames/s stored vs ~4 generated). */
+  readonly SESSION_CAPTURE_MIN_INTERVAL_MS: number;
+  /** Per-kind, per-stream frame cap — bounds storage per session (default 600
+   * ≈ 10 min of active drawing at the 1s floor; ~50 MB worst case). */
+  readonly SESSION_CAPTURE_MAX_FRAMES: number;
 
   // ─── Network volumes (pre-populated with weights, venv, app code) ────
   /** Map of RunPod datacenter ID → network volume ID for IMAGE pods (FLUX
@@ -245,12 +303,19 @@ function validateConfig(): AppConfig {
   }
 
   const imageProvider = (process.env['IMAGE_PROVIDER'] ?? 'runpod') as AppConfig['IMAGE_PROVIDER'];
-  if (!['runpod', 'fal'].includes(imageProvider)) {
-    throw new Error(`Invalid IMAGE_PROVIDER: ${imageProvider} (expected 'runpod' or 'fal')`);
+  if (!['runpod', 'fal', 'lambda'].includes(imageProvider)) {
+    throw new Error(`Invalid IMAGE_PROVIDER: ${imageProvider} (expected 'runpod', 'fal', or 'lambda')`);
   }
   const falKey = process.env['FAL_KEY'] ?? '';
   if (imageProvider === 'fal' && !falKey) {
     throw new Error("IMAGE_PROVIDER=fal requires FAL_KEY (fal.ai API key) to be set");
+  }
+  const lambdaImageUrl = process.env['LAMBDA_IMAGE_URL'] ?? '';
+  const lambdaDevPoolEnabled = process.env['LAMBDA_DEV_POOL_ENABLED'] === 'true';
+  if (imageProvider === 'lambda' && !/^wss?:\/\//.test(lambdaImageUrl) && !lambdaDevPoolEnabled) {
+    throw new Error(
+      'IMAGE_PROVIDER=lambda requires LAMBDA_IMAGE_URL (static instance) or LAMBDA_DEV_POOL_ENABLED=true',
+    );
   }
 
   return {
@@ -267,8 +332,20 @@ function validateConfig(): AppConfig {
     ONDEMAND_FALLBACK_ENABLED: process.env['ONDEMAND_FALLBACK_ENABLED'] === 'true',
     VIDEO_POD_ENABLED: process.env['VIDEO_POD_ENABLED'] === 'true',
     IMAGE_PROVIDER: imageProvider,
+    LAMBDA_IMAGE_URL: lambdaImageUrl,
+    LAMBDA_API_KEY: process.env['LAMBDA_API_KEY'] ?? '',
+    LAMBDA_DEV_POOL_ENABLED: lambdaDevPoolEnabled,
+    LAMBDA_REGION: process.env['LAMBDA_REGION'] ?? 'us-south-2',
+    LAMBDA_INSTANCE_TYPE: process.env['LAMBDA_INSTANCE_TYPE'] ?? 'gpu_1x_h100_sxm5',
     FAL_KEY: falKey,
     FAL_IDLE_CLOSE_MS: Number(process.env['FAL_IDLE_CLOSE_MS'] ?? 0),
+    FAL_WARMER_ENABLED: process.env['FAL_WARMER_ENABLED'] !== 'false',
+    FAL_WARMER_INTERVAL_MS: Number(process.env['FAL_WARMER_INTERVAL_MS'] ?? 90_000),
+    FAL_WARMER_OFF_START_HOUR: Number(process.env['FAL_WARMER_OFF_START_HOUR'] ?? 2),
+    FAL_WARMER_OFF_END_HOUR: Number(process.env['FAL_WARMER_OFF_END_HOUR'] ?? 8),
+    SESSION_CAPTURE_ENABLED: process.env['SESSION_CAPTURE_ENABLED'] !== 'false',
+    SESSION_CAPTURE_MIN_INTERVAL_MS: Number(process.env['SESSION_CAPTURE_MIN_INTERVAL_MS'] ?? 1000),
+    SESSION_CAPTURE_MAX_FRAMES: Number(process.env['SESSION_CAPTURE_MAX_FRAMES'] ?? 600),
     ONDEMAND_ONLY_MODE: process.env['ONDEMAND_ONLY_MODE'] === 'true',
     NETWORK_VOLUMES_BY_DC: parseVolumesMap(process.env['NETWORK_VOLUMES_BY_DC'], 'NETWORK_VOLUMES_BY_DC'),
     NETWORK_VOLUMES_BY_DC_VIDEO: parseVolumesMap(

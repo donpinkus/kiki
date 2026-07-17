@@ -76,3 +76,16 @@ export async function checkFalBudget(userId: string): Promise<FalBudgetStatus> {
   const spendUsd = row ? Number(row.spend) : 0;
   return { allowed: exempt || spendUsd < capUsd, exempt, spendUsd, capUsd };
 }
+
+/**
+ * Strict test-account check (does NOT treat subscribers as test accounts,
+ * unlike `exempt` above). Gates dev-only surfaces: the Lambda dev pool
+ * endpoints and the per-session `imageProvider` stream override.
+ */
+export async function isTestAccount(userId: string): Promise<boolean> {
+  const res = await query<{ is_test_account: boolean }>(
+    `SELECT is_test_account FROM users WHERE user_id = $1`,
+    [userId],
+  );
+  return res.rows[0]?.is_test_account ?? false;
+}

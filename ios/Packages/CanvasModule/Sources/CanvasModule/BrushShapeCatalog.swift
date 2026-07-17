@@ -12,6 +12,18 @@ public struct BrushShapeDescriptor: Identifiable, Equatable, Sendable {
     /// PNG resource name (no extension) in `Resources/BrushShapes`, or nil for the
     /// procedural round brush.
     public let resourceName: String?
+    /// Blobby dry-media tips randomize their rotation PER DAB (2026-07-16): repeating
+    /// the same art in the same orientation every stamp reads as discernible stamps —
+    /// a random spin fuses overlaps into an organic mass (the Procreate/Krita chalk
+    /// construction). Directional tips (dry brush streaks) keep their orientation.
+    public let rotationJitter: Bool
+
+    public init(id: String, displayName: String, resourceName: String?, rotationJitter: Bool = false) {
+        self.id = id
+        self.displayName = displayName
+        self.resourceName = resourceName
+        self.rotationJitter = rotationJitter
+    }
 
     public var isProcedural: Bool { resourceName == nil }
 }
@@ -26,10 +38,10 @@ public enum BrushShapeCatalog {
 
     public static let all: [BrushShapeDescriptor] = [
         BrushShapeDescriptor(id: roundID, displayName: "Round", resourceName: nil),
-        BrushShapeDescriptor(id: "chalk", displayName: "Chalk", resourceName: "chalk"),
-        BrushShapeDescriptor(id: "charcoal", displayName: "Charcoal", resourceName: "charcoal"),
+        BrushShapeDescriptor(id: "chalk", displayName: "Chalk", resourceName: "chalk", rotationJitter: true),
+        BrushShapeDescriptor(id: "charcoal", displayName: "Charcoal", resourceName: "charcoal", rotationJitter: true),
         BrushShapeDescriptor(id: "drybrush", displayName: "Dry Brush", resourceName: "drybrush"),
-        BrushShapeDescriptor(id: "pastel", displayName: "Pastel", resourceName: "pastel"),
+        BrushShapeDescriptor(id: "pastel", displayName: "Pastel", resourceName: "pastel", rotationJitter: true),
         BrushShapeDescriptor(id: "ink", displayName: "Spray", resourceName: "ink"),
     ]
 
@@ -43,5 +55,30 @@ public enum BrushShapeCatalog {
     /// (e.g. dry-brush streaks run along the line, not across it).
     public static func orientsToStroke(_ id: String?) -> Bool {
         !descriptor(for: id).isProcedural
+    }
+}
+
+// MARK: - Grain catalog (P8)
+
+/// One selectable grain texture. All grains are PROCEDURAL (generated at renderer init
+/// from deterministic hash noise, tileable 256²) — no bundle resources, so the
+/// BrushHarness gets them for free. `nativeScale` is the default UV multiplier applied
+/// on top of `BrushConfig.grainScale` (bigger = coarser features on canvas; the plan's
+/// guidance is to stay in the COARSE value-grain band that survives img2img).
+public struct GrainDescriptor: Identifiable, Equatable, Sendable {
+    public let id: String
+    public let displayName: String
+    public let nativeScale: CGFloat
+}
+
+public enum GrainCatalog {
+    public static let all: [GrainDescriptor] = [
+        GrainDescriptor(id: "paper", displayName: "Paper", nativeScale: 1.0),
+        GrainDescriptor(id: "canvasWeave", displayName: "Canvas", nativeScale: 1.2),
+        GrainDescriptor(id: "speckle", displayName: "Speckle", nativeScale: 1.6),
+    ]
+    public static func descriptor(for id: String?) -> GrainDescriptor? {
+        guard let id else { return nil }
+        return all.first { $0.id == id }
     }
 }

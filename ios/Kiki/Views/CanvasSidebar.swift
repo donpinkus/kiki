@@ -12,12 +12,10 @@ struct CanvasSidebar: View {
 
         VStack(spacing: 12) {
             // Vertical size slider
-            Slider(value: $coordinator.toolSize, in: widthRange) { editing in
+            VerticalSizeSlider(value: $coordinator.toolSize, range: widthRange) { editing in
                 isDraggingSize = editing
             }
-            .frame(width: 120)
-            .rotationEffect(.degrees(-90))
-            .frame(width: 30, height: 120)
+            .frame(width: 30, height: 180)
             .overlay(alignment: .trailing) {
                 if isDraggingSize {
                     // Show the configured size at rest (force=1, perp tilt) so the
@@ -60,6 +58,8 @@ struct CanvasSidebar: View {
                     .environment(coordinator)
                     .presentationCompactAdaptation(.popover)
             }
+            // Brush Studio is now a docked left panel owned by DrawingView (non-modal, so you can
+            // tune while drawing). The popover button just sets `coordinator.showBrushStudio`.
 
             Divider().frame(width: 24)
 
@@ -77,12 +77,14 @@ struct CanvasSidebar: View {
         .padding(.vertical, 16)
         .padding(.horizontal, 10)
         .background(
-            .ultraThinMaterial,
+            KikiTheme.sidebarBackground,
             in: UnevenRoundedRectangle(
                 cornerRadii: .init(topLeading: 0, bottomLeading: 0, bottomTrailing: 16, topTrailing: 16)
             )
         )
-        .shadow(color: .black.opacity(0.15), radius: 8, x: 2, y: 0)
+        .shadow(color: .black.opacity(0.25), radius: 8, x: 2, y: 0)
+        // Procreate-style chrome is always dark (matches DrawingTopBar).
+        .environment(\.colorScheme, .dark)
     }
 
     // MARK: - Helpers
@@ -98,5 +100,77 @@ struct CanvasSidebar: View {
         }
         .tint(Color.primary)
         .disabled(disabled)
+    }
+}
+
+/// Vertical brush-size slider with a logarithmic scale and absolute tracking.
+///
+/// - Logarithmic: brush size is perceived multiplicatively (3→4 px is a big jump, 80→81 is
+///   invisible), so equal finger travel maps to equal *ratio* change. The bottom half of the
+///   track covers the small sizes finely instead of racing through them.
+/// - Absolute tracking: the thumb jumps to the touch on press and follows the finger — the
+///   whole strip is touchable, no need to land on the thumb.
+private struct VerticalSizeSlider: View {
+    @Binding var value: CGFloat
+    let range: ClosedRange<CGFloat>
+    let onEditingChanged: (Bool) -> Void
+
+    @State private var isEditing = false
+
+    private var logMin: CGFloat { log(range.lowerBound) }
+    private var logMax: CGFloat { log(range.upperBound) }
+
+    private func t(for size: CGFloat) -> CGFloat {
+        (log(min(max(size, range.lowerBound), range.upperBound)) - logMin) / (logMax - logMin)
+    }
+
+    private func size(at t: CGFloat) -> CGFloat {
+        exp(logMin + min(max(t, 0), 1) * (logMax - logMin))
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let height = geo.size.height
+            let trackWidth: CGFloat = 6
+            let thumbSize: CGFloat = 24
+            let currentT = t(for: value)
+            // Thumb center travels [thumbSize/2, height - thumbSize/2]; top = max.
+            let thumbY = (height - thumbSize) * (1 - currentT) + thumbSize / 2
+
+            ZStack(alignment: .top) {
+                Capsule()
+                    .fill(KikiTheme.sliderTrack)
+                    .frame(width: trackWidth)
+                Capsule()
+                    .fill(KikiTheme.sliderFill)
+                    .frame(width: trackWidth, height: max(height - thumbY, trackWidth))
+                    .frame(maxHeight: .infinity, alignment: .bottom)
+                Circle()
+                    // Fixed white in both modes (like the system slider knob) so it stands
+                    // out against the dark sidebar material; shadow separates it in light mode.
+                    .fill(.white)
+                    .overlay(Circle().strokeBorder(.black.opacity(0.08), lineWidth: 0.5))
+                    .shadow(color: .black.opacity(0.3), radius: 3, y: 1)
+                    .frame(width: thumbSize, height: thumbSize)
+                    .position(x: geo.size.width / 2, y: thumbY)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { gesture in
+                        if !isEditing {
+                            isEditing = true
+                            onEditingChanged(true)
+                        }
+                        let t = 1 - (gesture.location.y - thumbSize / 2) / max(height - thumbSize, 1)
+                        value = size(at: t)
+                    }
+                    .onEnded { _ in
+                        isEditing = false
+                        onEditingChanged(false)
+                    }
+            )
+        }
     }
 }

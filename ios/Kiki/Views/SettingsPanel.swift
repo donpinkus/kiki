@@ -22,7 +22,7 @@ struct SettingsPanel: View {
                         coordinator.streamResolution = 1024
                         coordinator.streamScheduleMu = 1.2
                         coordinator.streamCaptureFPS = 2
-                        coordinator.drawingLayout = .splitScreen
+                        coordinator.drawingLayout = .overlay
                         coordinator.videoResolution = 512
                         coordinator.videoFrames = 145
                         coordinator.videoPromptSuffix = AppCoordinator.defaultVideoPromptSuffix
@@ -174,11 +174,20 @@ struct SettingsPanel: View {
         @Bindable var coordinator = coordinator
 
         return Section {
+            Picker("Image provider", selection: $coordinator.imageProvider) {
+                Text("fal realtime").tag("fal")
+                Text("Lambda H100").tag("lambda")
+            }
+            if !coordinator.lambdaPoolStatus.isEmpty {
+                Text(coordinator.lambdaPoolStatus)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Toggle("Profile next runs", isOn: $coordinator.enableProfiling)
         } header: {
             Text("Diagnostics")
         } footer: {
-            Text("Adds ~15–25% latency. Writes a Perfetto trace to /tmp on the pod (fetch via SCP).")
+            Text("Provider: fal = hosted feedback-loop img2img; Lambda = our reference-mode pipeline on an H100 (adherence A/B, test accounts only — switching reconnects the stream). Profiling adds ~15–25% latency; writes a Perfetto trace to /tmp on the pod (fetch via SCP).")
         }
     }
 }

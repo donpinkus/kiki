@@ -106,7 +106,13 @@ struct DrawingView: View {
                                     coordinator.panelHole.isActive = false
                                 }
                             }
-                        }
+                        },
+                        onBrushInputSample: { [weak coordinator] sample in
+                            coordinator?.liveBrushInput = sample
+                        },
+                        devMaxSpeed: coordinator.devMaxSpeed,
+                        devDistancePeriod: coordinator.devDistancePeriod,
+                        devFadePeriod: coordinator.devFadePeriod
                     )
                         .frame(width: canvasPaneWidth, height: geometry.size.height)
                         .frame(
@@ -116,6 +122,30 @@ struct DrawingView: View {
                         )
                         .ignoresSafeArea(.keyboard)
                         .zIndex(0)
+
+                    // DEV: live brush-input HUD (top-right), visual-only.
+                    if coordinator.showInputHUD {
+                        BrushInputHUD(sample: coordinator.liveBrushInput, note: coordinator.activeTestNote)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                            .padding(.top, 16).padding(.trailing, 16)
+                            .allowsHitTesting(false)
+                            .zIndex(5)
+                    }
+
+                    // DEV: Brush Studio docked to the left (non-modal) — tune while drawing on the
+                    // canvas to the right. Empty regions pass touches through (sidebar + canvas).
+                    if coordinator.showBrushStudio {
+                        BrushStudioView(initial: coordinator.toolDynamics)
+                            .environment(coordinator)
+                            .frame(width: 340)
+                            .background(.regularMaterial)
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                            .padding(.leading, 96)
+                            .padding(.vertical, 8)
+                            .zIndex(4)
+                            .transition(.move(edge: .leading))
+                    }
 
                     CanvasSidebar()
                         .frame(maxHeight: .infinity, alignment: .leading)
@@ -189,7 +219,7 @@ struct DrawingView: View {
                         .zIndex(2)
                     }
                 }
-                .background(Color(.systemGray6))
+                .background(KikiTheme.canvasBacking)
             }
             // Fill the bottom home-indicator safe-area inset so the (black) Metal
             // canvas reaches the physical bottom edge like it already does on the

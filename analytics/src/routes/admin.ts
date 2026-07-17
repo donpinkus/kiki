@@ -48,6 +48,160 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
 
     gated.get('/admin/api/me', async () => ({ ok: true }));
 
+    // ─── Brush clone targets (Brushes tab) ─────────────────────────────────
+    // Reference briefs for recreating Procreate-style brushes: name + notes +
+    // screenshots (stroke samples, settings panes). Claude pulls these via
+    // BrushHarness/fetch-targets.sh and posts attempt renders back.
+
+    gated.get('/admin/api/brush-targets', async () => {
+      const { rows: targets } = await query<{ id: string; name: string; note: string | null; status: string; created_at: string; updated_at: string }>(
+        `SELECT id, name, note, status, created_at, updated_at FROM brush_targets ORDER BY created_at DESC`,
+      );
+      if (targets.length === 0) return { targets: [] };
+      const { rows: images } = await query<{ id: string; target_id: string; kind: string; label: string | null; note: string | null; blob_key: string; created_at: string }>(
+        `SELECT id, target_id, kind, label, note, blob_key, created_at
+         FROM brush_target_images WHERE target_id = ANY($1::bigint[]) ORDER BY created_at`,
+        [targets.map((t) => t.id)],
+      );
+      const byTarget = new Map<string, unknown[]>();
+      for (const img of images) {
+        const list = byTarget.get(String(img.target_id)) ?? [];
+        list.push({ id: img.id, kind: img.kind, label: img.label, note: img.note, blob_key: img.blob_key, created_at: img.created_at });
+        byTarget.set(String(img.target_id), list);
+      }
+      return { targets: targets.map((t) => ({ ...t, images: byTarget.get(String(t.id)) ?? [] })) };
+    });
+
+    gated.post('/admin/api/brush-targets', async (request, reply) => {
+      const body = request.body as { name?: string; note?: string };
+      const name = (body?.name ?? '').trim();
+      if (!name) return reply.code(400).send({ error: 'name required' });
+      const { rows } = await query<{ id: string }>(
+        `INSERT INTO brush_targets (name, note) VALUES ($1, $2) RETURNING id`,
+        [name, body?.note ?? null],
+      );
+      return { ok: true, id: rows[0]!.id };
+    });
+
+    gated.patch('/admin/api/brush-targets/:id', async (request, reply) => {
+      const id = Number((request.params as { id: string }).id);
+      const body = request.body as { name?: string; note?: string; status?: string };
+      if (!Number.isFinite(id)) return reply.code(400).send({ error: 'bad id' });
+      await query(
+        `UPDATE brush_targets SET
+           name = COALESCE($2, name),
+           note = COALESCE($3, note),
+           status = COALESCE($4, status),
+           updated_at = now()
+         WHERE id = $1`,
+        [id, body?.name ?? null, body?.note ?? null, body?.status ?? null],
+      );
+      return { ok: true };
+    });
+
+    gated.delete('/admin/api/brush-targets/:id', async (request, reply) => {
+      const id = Number((request.params as { id: string }).id);
+      if (!Number.isFinite(id)) return reply.code(400).send({ error: 'bad id' });
+      await query(`DELETE FROM brush_targets WHERE id = $1`, [id]);
+      return { ok: true };
+    });
+
+    // Multipart upload: any number of file parts (fieldname 'image'); optional
+    // 'kind' field applies to all files in the request (reference | settings |
+    // attempt; default reference). Filenames become the initial labels.
+    gated.post('/admin/api/brush-targets/:id/images', async (request, reply) => {
+      const id = Number((request.params as { id: string }).id);
+      if (!Number.isFinite(id)) return reply.code(400).send({ error: 'bad id' });
+      const { rows: t } = await query(`SELECT id FROM brush_targets WHERE id = $1`, [id]);
+      if (t.length === 0) return reply.code(404).send({ error: 'no such target' });
+
+      let kind = 'reference';
+      const saved: { id: string; label: string }[] = [];
+      const parts = (request as unknown as { parts: () => AsyncIterableIterator<{ type: string; fieldname: string; value?: unknown; filename?: string; mimetype?: string; toBuffer: () => Promise<Buffer> }> }).parts();
+      for await (const part of parts) {
+        if (part.type === 'field') {
+          if (part.fieldname === 'kind') kind = String(part.value);
+          continue;
+        }
+        const buf = await part.toBuffer();
+        if (buf.length === 0) continue;
+        if (buf.length > 24 * 1024 * 1024) return reply.code(400).send({ error: 'image too large' });
+        const label = (part.filename ?? 'image').replace(/\.[a-zA-Z0-9]+$/, '');
+        const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const key = `brush-targets/${id}/${stamp}-${(part.filename ?? 'image.png').replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+        await blobStore.put(key, buf);
+        const { rows } = await query<{ id: string }>(
+          `INSERT INTO brush_target_images (target_id, kind, label, blob_key) VALUES ($1, $2, $3, $4) RETURNING id`,
+          [id, ['reference', 'settings', 'attempt'].includes(kind) ? kind : 'reference', label, key],
+        );
+        saved.push({ id: rows[0]!.id, label });
+      }
+      await query(`UPDATE brush_targets SET updated_at = now() WHERE id = $1`, [id]);
+      return { ok: true, images: saved };
+    });
+
+    gated.patch('/admin/api/brush-target-images/:id', async (request, reply) => {
+      const id = Number((request.params as { id: string }).id);
+      const body = request.body as { label?: string; note?: string; kind?: string };
+      if (!Number.isFinite(id)) return reply.code(400).send({ error: 'bad id' });
+      await query(
+        `UPDATE brush_target_images SET
+           label = COALESCE($2, label),
+           note = COALESCE($3, note),
+           kind = COALESCE($4, kind)
+         WHERE id = $1`,
+        [id, body?.label ?? null, body?.note ?? null, body?.kind ?? null],
+      );
+      return { ok: true };
+    });
+
+    gated.delete('/admin/api/brush-target-images/:id', async (request, reply) => {
+      const id = Number((request.params as { id: string }).id);
+      if (!Number.isFinite(id)) return reply.code(400).send({ error: 'bad id' });
+      await query(`DELETE FROM brush_target_images WHERE id = $1`, [id]);
+      return { ok: true };
+    });
+
+    // Brush-test battery runs (newest first), images nested per run. Feeds the
+    // Tests tab (visual gallery + cross-run side-by-sides; no pass/fail).
+    gated.get('/admin/api/test-runs', async (request) => {
+      const limit = Math.min(Number((request.query as { limit?: string }).limit) || 30, 200);
+      const { rows: runs } = await query<{ id: string; git_sha: string | null; note: string | null; created_at: string }>(
+        `SELECT id, git_sha, note, created_at FROM test_runs ORDER BY created_at DESC LIMIT $1`,
+        [limit],
+      );
+      if (runs.length === 0) return { runs: [] };
+      const { rows: images } = await query<{ run_id: string; scene: string; blob_key: string; description: string | null }>(
+        `SELECT run_id, scene, blob_key, description FROM test_run_images WHERE run_id = ANY($1::bigint[]) ORDER BY scene`,
+        [runs.map((r) => r.id)],
+      );
+      const byRun = new Map<string, { scene: string; blob_key: string; description: string | null }[]>();
+      for (const img of images) {
+        const list = byRun.get(String(img.run_id)) ?? [];
+        list.push({ scene: img.scene, blob_key: img.blob_key, description: img.description });
+        byRun.set(String(img.run_id), list);
+      }
+      return { runs: runs.map((r) => ({ ...r, images: byRun.get(String(r.id)) ?? [] })) };
+    });
+
+    // Brush-dev stroke fixtures (newest first) — consumed by
+    // `BrushHarness/fetch-fixtures.sh`, which downloads the keys via /blobs/*.
+    gated.get('/admin/api/fixtures', async (request) => {
+      const limit = Math.min(Number((request.query as { limit?: string }).limit) || 25, 200);
+      const { rows } = await query(
+        `SELECT id, user_id, name, note, stroke_count, fixture_key, snapshot_key, created_at
+         FROM fixtures ORDER BY created_at DESC LIMIT $1`,
+        [limit],
+      );
+      return { fixtures: rows };
+    });
+
+    // Day key in the admin's timezone (America/Los_Angeles) — matches the SQL
+    // `AT TIME ZONE 'America/Los_Angeles'` bucketing below so a session at
+    // 11pm Pacific lands on the same bar the admin expects.
+    const laDay = (d: Date): string =>
+      new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles' }).format(d);
+
     // Users list. Source of truth is the BACKEND's `users` table (identity +
     // subscription + test flag) and `monthly_usage` (this month's fal spend);
     // Insights-owned events/sessions/drawings contribute the activity rollups.
@@ -80,7 +234,34 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
          LIMIT 200`,
         [q],
       );
-      return { users: rows };
+
+      // Per-user daily in-app minutes for the row sparklines (last 14 Pacific
+      // days). One aggregate query, merged in JS — avoids a lateral join per
+      // user row. source='app' = foregrounded time (drawing sessions overlap
+      // app sessions; summing both would double-count).
+      const act = await query<{ user_id: string; day: string; minutes: number }>(
+        `SELECT user_id,
+                to_char(started_at AT TIME ZONE 'America/Los_Angeles', 'YYYY-MM-DD') AS day,
+                ceil(sum(duration_ms) / 60000.0)::int AS minutes
+         FROM sessions
+         WHERE source = 'app' AND started_at > now() - interval '15 days'
+         GROUP BY 1, 2`,
+      );
+      const actByUser = new Map<string, Record<string, number>>();
+      for (const r of act.rows) {
+        const m = actByUser.get(r.user_id) ?? {};
+        m[r.day] = r.minutes;
+        actByUser.set(r.user_id, m);
+      }
+      const days = Array.from({ length: 14 }, (_, i) =>
+        laDay(new Date(Date.now() - (13 - i) * 86_400_000)),
+      );
+      return {
+        users: rows.map((u) => ({
+          ...u,
+          activity14d: days.map((d) => actByUser.get(u['user_id'] as string)?.[d] ?? 0),
+        })),
+      };
     });
 
     // Full per-user view: profile + sessions + recent events + drawings.
@@ -96,7 +277,7 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
       );
       if (userRes.rowCount === 0) return reply.code(404).send({ error: 'user not found' });
 
-      const [sessions, events, drawings, usage] = await Promise.all([
+      const [sessions, events, drawings, usage, dailyActivity] = await Promise.all([
         query(
           `SELECT id, source, started_at, ended_at, duration_ms::int AS duration_ms, drawing_id
            FROM sessions WHERE user_id = $1 ORDER BY started_at DESC LIMIT 500`,
@@ -119,11 +300,22 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
            FROM monthly_usage WHERE user_id::text = $1 ORDER BY month DESC LIMIT 24`,
           [id],
         ),
+        // Full-history daily in-app minutes (Pacific days) for the activity
+        // bar chart. Gaps (zero days) are filled client-side.
+        query(
+          `SELECT to_char(started_at AT TIME ZONE 'America/Los_Angeles', 'YYYY-MM-DD') AS day,
+                  ceil(sum(duration_ms) / 60000.0)::int AS minutes
+           FROM sessions
+           WHERE user_id = $1 AND source = 'app'
+           GROUP BY 1 ORDER BY 1`,
+          [id],
+        ),
       ]);
 
       return {
         user: userRes.rows[0],
         usage: usage.rows,
+        daily_activity: dailyActivity.rows,
         sessions: sessions.rows,
         events: events.rows,
         drawings: drawings.rows.map((d) => ({
@@ -134,13 +326,352 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
       };
     });
 
+    // ─── Launch analytics (aggregate views for launch week) ─────────────────
+    // Everything derives from data already collected: events (iOS + backend
+    // dual-write), sessions, users. Days are Pacific (matches the rest of the
+    // dashboard). "Error event" = name matching error/fail — same heuristic as
+    // the user-timeline highlighting.
+    gated.get('/admin/api/launch', async (request) => {
+      // ?excludeTest=1 → drop test accounts (users.is_test_account) from every
+      // number on the page. Applied server-side: events rows don't carry the
+      // flag, so each query filters via the users table.
+      const excl = (request.query as { excludeTest?: string }).excludeTest === '1';
+      const [daily, newUsers, funnelRows, errorUsers, recentErrors, summary] = await Promise.all([
+        query(
+          `SELECT to_char(occurred_at AT TIME ZONE 'America/Los_Angeles', 'YYYY-MM-DD') AS day,
+                  count(DISTINCT user_id)::int AS dau,
+                  count(*) FILTER (WHERE name = 'drawing.created')::int AS drawings,
+                  count(*) FILTER (WHERE name = 'stream.started')::int AS streams,
+                  count(*) FILTER (WHERE name ~* 'error|fail')::int AS errors,
+                  count(*) FILTER (WHERE name = 'stream.ended'
+                    AND (properties->>'frames_received') ~ '^[0-9]+$'
+                    AND (properties->>'frames_received')::int = 0)::int AS dead_streams,
+                  COALESCE(sum((properties->>'frames_received')::int)
+                    FILTER (WHERE name = 'stream.ended'
+                      AND (properties->>'frames_received') ~ '^[0-9]+$'), 0)::int AS frames,
+                  round(percentile_cont(0.5) WITHIN GROUP (ORDER BY (properties->>'wait_ms')::float)
+                    FILTER (WHERE name = 'stream.first_frame' AND (properties->>'wait_ms') ~ '^[0-9.]+$'))::int AS ttfi_p50,
+                  round(percentile_cont(0.9) WITHIN GROUP (ORDER BY (properties->>'wait_ms')::float)
+                    FILTER (WHERE name = 'stream.first_frame' AND (properties->>'wait_ms') ~ '^[0-9.]+$'))::int AS ttfi_p90
+           FROM events
+           WHERE occurred_at > now() - interval '30 days'
+             AND ($1::bool = false OR user_id NOT IN
+                  (SELECT user_id::text FROM users WHERE is_test_account))
+           GROUP BY 1`,
+          [excl],
+        ),
+        query(
+          `SELECT to_char(created_at AT TIME ZONE 'America/Los_Angeles', 'YYYY-MM-DD') AS day,
+                  count(*)::int AS new_users
+           FROM users
+           WHERE created_at > now() - interval '30 days'
+             AND ($1::bool = false OR NOT is_test_account)
+           GROUP BY 1`,
+          [excl],
+        ),
+        // One row per user with funnel step flags + retention flags relative
+        // to their Pacific signup day. ≤ a few hundred users at launch scale.
+        query(
+          `SELECT u.user_id::text AS user_id,
+                  to_char(date_trunc('week', u.created_at AT TIME ZONE 'America/Los_Angeles'), 'YYYY-MM-DD') AS week,
+                  EXISTS (SELECT 1 FROM events e WHERE e.user_id = u.user_id::text
+                          AND e.name = 'drawing.opened') AS opened_drawing,
+                  EXISTS (SELECT 1 FROM events e WHERE e.user_id = u.user_id::text
+                          AND e.name = 'stream.first_frame') AS saw_image,
+                  EXISTS (SELECT 1 FROM events e WHERE e.user_id = u.user_id::text
+                          AND (e.occurred_at AT TIME ZONE 'America/Los_Angeles')::date
+                              > (u.created_at AT TIME ZONE 'America/Los_Angeles')::date) AS returned,
+                  EXISTS (SELECT 1 FROM events e WHERE e.user_id = u.user_id::text
+                          AND (e.occurred_at AT TIME ZONE 'America/Los_Angeles')::date
+                              = (u.created_at AT TIME ZONE 'America/Los_Angeles')::date + 1) AS d1,
+                  EXISTS (SELECT 1 FROM events e WHERE e.user_id = u.user_id::text
+                          AND (e.occurred_at AT TIME ZONE 'America/Los_Angeles')::date
+                              BETWEEN (u.created_at AT TIME ZONE 'America/Los_Angeles')::date + 1
+                                  AND (u.created_at AT TIME ZONE 'America/Los_Angeles')::date + 7) AS w1
+           FROM users u
+           WHERE ($1::bool = false OR NOT u.is_test_account)`,
+          [excl],
+        ),
+        query(
+          `SELECT e.user_id, u.email, count(*)::int AS errors, max(e.occurred_at) AS last_at
+           FROM events e
+           LEFT JOIN users u ON u.user_id::text = e.user_id
+           WHERE e.name ~* 'error|fail' AND e.occurred_at > now() - interval '7 days'
+             AND ($1::bool = false OR COALESCE(u.is_test_account, false) = false)
+           GROUP BY 1, 2
+           ORDER BY errors DESC
+           LIMIT 20`,
+          [excl],
+        ),
+        query(
+          `SELECT e.occurred_at, e.user_id, u.email, e.name, e.properties
+           FROM events e
+           LEFT JOIN users u ON u.user_id::text = e.user_id
+           WHERE e.name ~* 'error|fail'
+             AND ($1::bool = false OR COALESCE(u.is_test_account, false) = false)
+           ORDER BY e.occurred_at DESC
+           LIMIT 25`,
+          [excl],
+        ),
+        query(
+          `SELECT round(percentile_cont(0.5) WITHIN GROUP (ORDER BY (properties->>'wait_ms')::float))::int AS ttfi_p50_7d,
+                  round(percentile_cont(0.9) WITHIN GROUP (ORDER BY (properties->>'wait_ms')::float))::int AS ttfi_p90_7d
+           FROM events
+           WHERE name = 'stream.first_frame' AND (properties->>'wait_ms') ~ '^[0-9.]+$'
+             AND occurred_at > now() - interval '7 days'
+             AND ($1::bool = false OR user_id NOT IN
+                  (SELECT user_id::text FROM users WHERE is_test_account))`,
+          [excl],
+        ),
+      ]);
+
+      // Merge the two daily sources and aggregate the per-user funnel rows.
+      const byDay = new Map<string, Record<string, unknown>>();
+      for (const r of daily.rows) byDay.set(r['day'] as string, { ...r });
+      for (const r of newUsers.rows) {
+        const d: Record<string, unknown> = byDay.get(r['day'] as string) ?? { day: r['day'] };
+        d['new_users'] = r['new_users'];
+        byDay.set(r['day'] as string, d);
+      }
+
+      const funnel = { signed_up: 0, opened_drawing: 0, saw_image: 0, returned: 0 };
+      const cohortMap = new Map<string, { week: string; signups: number; d1: number; w1: number }>();
+      for (const r of funnelRows.rows) {
+        funnel.signed_up += 1;
+        if (r['opened_drawing']) funnel.opened_drawing += 1;
+        if (r['saw_image']) funnel.saw_image += 1;
+        if (r['returned']) funnel.returned += 1;
+        const wk = r['week'] as string;
+        const c = cohortMap.get(wk) ?? { week: wk, signups: 0, d1: 0, w1: 0 };
+        c.signups += 1;
+        if (r['d1']) c.d1 += 1;
+        if (r['w1']) c.w1 += 1;
+        cohortMap.set(wk, c);
+      }
+
+      return {
+        daily: [...byDay.values()],
+        funnel,
+        cohorts: [...cohortMap.values()].sort((a, b) => b.week.localeCompare(a.week)),
+        errorUsers: errorUsers.rows,
+        recentErrors: recentErrors.rows,
+        summary: summary.rows[0] ?? null,
+      };
+    });
+
+    // ─── Session replays (capture gallery) ─────────────────────────────────
+    // Streams grouped from capture_frames; poster = latest generated frame.
+    // Optional ?user_id= scopes to one user (UserDetail's replay section).
+    gated.get('/admin/api/captures', async (request) => {
+      const userId = (request.query as { user_id?: string }).user_id?.trim() || null;
+      const { rows } = await query(
+        `SELECT s.*, lp.prompt AS last_prompt
+         FROM (
+           SELECT c.stream_id,
+                  c.user_id,
+                  u.email,
+                  min(c.captured_at)                                 AS started_at,
+                  max(c.captured_at)                                 AS ended_at,
+                  count(*) FILTER (WHERE c.kind = 'sketch')::int     AS sketch_count,
+                  count(*) FILTER (WHERE c.kind = 'generated')::int  AS generated_count,
+                  (array_agg(c.blob_key ORDER BY c.seq DESC)
+                     FILTER (WHERE c.kind = 'generated'))[1]         AS poster_key
+           FROM capture_frames c
+           LEFT JOIN users u ON u.user_id::text = c.user_id
+           WHERE ($1::text IS NULL OR c.user_id = $1)
+           GROUP BY c.stream_id, c.user_id, u.email
+           ORDER BY max(c.captured_at) DESC
+           LIMIT 100
+         ) s
+         LEFT JOIN LATERAL (
+           SELECT prompt FROM capture_prompts p
+           WHERE p.stream_id = s.stream_id
+           ORDER BY p.captured_at DESC LIMIT 1
+         ) lp ON true`,
+        [userId],
+      );
+      return {
+        captures: rows.map((r) => ({
+          ...r,
+          poster_url: r['poster_key'] ? blobStore.urlFor(r['poster_key'] as string) : null,
+        })),
+      };
+    });
+
+    // All frames of one stream, replay order. The player interleaves the two
+    // kinds by captured_at (latest sketch left, latest generated right).
+    gated.get('/admin/api/captures/:streamId', async (request, reply) => {
+      const { streamId } = request.params as { streamId: string };
+      const [{ rows }, prompts] = await Promise.all([
+        query(
+          `SELECT c.kind, c.seq, c.captured_at, c.blob_key, c.user_id, u.email
+           FROM capture_frames c
+           LEFT JOIN users u ON u.user_id::text = c.user_id
+           WHERE c.stream_id = $1
+           ORDER BY c.captured_at ASC, c.seq ASC`,
+          [streamId],
+        ),
+        query(
+          `SELECT seq, captured_at, prompt FROM capture_prompts
+           WHERE stream_id = $1 ORDER BY captured_at ASC, seq ASC`,
+          [streamId],
+        ),
+      ]);
+      if (rows.length === 0) return reply.code(404).send({ error: 'capture not found' });
+      return {
+        stream_id: streamId,
+        user_id: rows[0]?.['user_id'] ?? null,
+        email: rows[0]?.['email'] ?? null,
+        frames: rows.map((r) => ({
+          kind: r['kind'],
+          seq: r['seq'],
+          captured_at: r['captured_at'],
+          url: blobStore.urlFor(r['blob_key'] as string),
+        })),
+        prompts: prompts.rows,
+      };
+    });
+
+    // ─── Ops: fal keep-warm dial ───────────────────────────────────────────
+    // The backend's falWarmer reads `admin_config.fal_warmer` every tick
+    // (~30s), so writes here take effect live — no backend redeploy. Both
+    // tables are backend-owned (created by backend schema.sql); before the
+    // first backend deploy with the warmer they won't exist yet, so surface
+    // that as schemaReady:false instead of a 500.
+    gated.get('/admin/api/ops/warmer', async () => {
+      try {
+        const [cfg, pings, stats, sources] = await Promise.all([
+          query(
+            `SELECT value, updated_at FROM admin_config WHERE key = 'fal_warmer'`,
+          ),
+          query(
+            `SELECT ts, found_warm, ms_to_first_frame, open_ms, error
+             FROM fal_warmer_pings
+             WHERE ts > now() - interval '48 hours'
+             ORDER BY ts DESC LIMIT 500`,
+          ),
+          // billed_ms estimates fal's actual charge: fal bills warm-runner-
+          // ATTACHED time only — a cold ping's spin-up wait (≈ its
+          // ms_to_first_frame) is enqueue time with no runner attached and is
+          // NOT billed (verified vs fal dashboard 2026-07-14).
+          query(
+            `SELECT count(*)::int                                        AS pings,
+                    count(*) FILTER (WHERE found_warm = false)::int      AS cold_encounters,
+                    count(*) FILTER (WHERE found_warm IS NULL)::int      AS failures,
+                    COALESCE(sum(greatest(0, open_ms - CASE WHEN found_warm IS DISTINCT FROM true
+                      THEN COALESCE(ms_to_first_frame, open_ms) ELSE 0 END)), 0)::int AS billed_ms
+             FROM fal_warmer_pings
+             WHERE ts > now() - interval '24 hours'`,
+          ),
+          // Warmer-vs-real-users comparison over ALL fal connections (the
+          // whole point of fal_connections: same table, GROUP BY source).
+          // wait_ms is the user-perceived first-result wait; percentile_cont
+          // ignores NULL (zero-frame connections).
+          query(
+            `SELECT source,
+                    count(*)::int                                    AS conns,
+                    count(*) FILTER (WHERE frames_received > 0)::int AS answered,
+                    count(*) FILTER (WHERE found_warm = false)::int  AS cold,
+                    round(percentile_cont(0.5) WITHIN GROUP (ORDER BY wait_ms))::int AS wait_p50,
+                    round(percentile_cont(0.9) WITHIN GROUP (ORDER BY wait_ms))::int AS wait_p90,
+                    max(wait_ms)::int                                AS wait_max
+             FROM fal_connections
+             WHERE opened_at > now() - interval '24 hours'
+             GROUP BY source ORDER BY source DESC`,
+          ),
+        ]);
+        return {
+          schemaReady: true,
+          config: cfg.rows[0]?.['value'] ?? null,
+          configUpdatedAt: cfg.rows[0]?.['updated_at'] ?? null,
+          pings: pings.rows,
+          stats24h: stats.rows[0],
+          sources24h: sources.rows,
+        };
+      } catch (err) {
+        if ((err as { code?: string }).code === '42P01') {
+          return {
+            schemaReady: false,
+            config: null,
+            configUpdatedAt: null,
+            pings: [],
+            stats24h: null,
+            sources24h: [],
+            userColdEvents: [],
+          };
+        }
+        throw err;
+      }
+    });
+
+    // General fal request history — one row per fal connection (user +
+    // warmer), newest first, with user email joined in. `source` filters
+    // server-side so "users only" isn't drowned by ~700 warmer rows/day.
+    gated.get('/admin/api/ops/connections', async (request) => {
+      const src = (request.query as { source?: string }).source;
+      const sourceFilter = src === 'user' || src === 'warmer' ? src : null;
+      try {
+        const { rows } = await query(
+          `SELECT c.opened_at, c.source, c.user_id::text AS user_id, u.email,
+                  c.wait_ms, c.found_warm, c.frames_sent, c.frames_received,
+                  c.open_ms, c.close_reason
+           FROM fal_connections c
+           LEFT JOIN users u ON u.user_id = c.user_id
+           WHERE c.opened_at > now() - interval '48 hours'
+             AND ($1::text IS NULL OR c.source = $1)
+           ORDER BY c.opened_at DESC LIMIT 500`,
+          [sourceFilter],
+        );
+        return { schemaReady: true, connections: rows };
+      } catch (err) {
+        if ((err as { code?: string }).code === '42P01') {
+          return { schemaReady: false, connections: [] };
+        }
+        throw err;
+      }
+    });
+
+    gated.put('/admin/api/ops/warmer', async (request, reply) => {
+      const b = (request.body ?? {}) as Record<string, unknown>;
+      const isHour = (n: unknown): n is number =>
+        typeof n === 'number' && Number.isInteger(n) && n >= 0 && n <= 24;
+      if (
+        typeof b['enabled'] !== 'boolean' ||
+        typeof b['intervalMs'] !== 'number' ||
+        b['intervalMs'] < 60_000 ||
+        b['intervalMs'] > 60 * 60_000 ||
+        !isHour(b['offStartHour']) ||
+        !isHour(b['offEndHour'])
+      ) {
+        return reply.code(400).send({
+          error:
+            'expected {enabled: bool, intervalMs: 60000..3600000, offStartHour: 0..24, offEndHour: 0..24}',
+        });
+      }
+      const value = {
+        enabled: b['enabled'],
+        intervalMs: b['intervalMs'],
+        offStartHour: b['offStartHour'],
+        offEndHour: b['offEndHour'],
+      };
+      await query(
+        `INSERT INTO admin_config (key, value) VALUES ('fal_warmer', $1)
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+        [JSON.stringify(value)],
+      );
+      return { ok: true, config: value };
+    });
+
     // Serve blob assets (admin-gated; SPA <img> sends the cookie same-origin).
     gated.get('/blobs/*', async (request, reply) => {
       const key = (request.params as Record<string, string>)['*'];
       if (!key) return reply.code(404).send({ error: 'not found' });
       try {
         const buf = await blobStore.get(key);
-        const type = key.endsWith('.mp4') ? 'video/mp4' : 'image/jpeg';
+        const type = key.endsWith('.mp4') ? 'video/mp4'
+          : key.endsWith('.png') ? 'image/png'
+          : key.endsWith('.json') ? 'application/json'
+          : 'image/jpeg';
         return reply.header('Content-Type', type).header('Cache-Control', 'private, max-age=3600').send(buf);
       } catch {
         return reply.code(404).send({ error: 'not found' });

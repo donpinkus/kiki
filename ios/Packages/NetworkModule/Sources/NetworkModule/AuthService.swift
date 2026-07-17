@@ -159,6 +159,28 @@ public actor AuthService {
         )
     }
 
+    /// Response from the Lambda dev-pool endpoints (test accounts only).
+    public struct LambdaPoolState: Codable, Sendable {
+        public let status: String
+        public let message: String
+        public let ip: String?
+    }
+
+    private struct EmptyBody: Encodable {}
+
+    /// Ask the backend to spin up (or keep alive) the Lambda H100 dev
+    /// instance backing the `imageProvider=lambda` toggle. Test accounts
+    /// only — the backend 403s for everyone else. Non-blocking server-side:
+    /// returns the pool's current state immediately.
+    public func ensureLambdaPool() async throws -> LambdaPoolState {
+        let token = try await currentAccessToken()
+        return try await authedPost(
+            path: "/v1/dev/lambda/ensure",
+            body: EmptyBody(),
+            token: token
+        )
+    }
+
     /// Fetch the signed-in user's current free-tier usage (for the in-app
     /// meter). Authenticated; auto-refreshes the access token.
     public func fetchUsage() async throws -> UsageResponse {

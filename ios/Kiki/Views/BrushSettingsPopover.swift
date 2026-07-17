@@ -10,15 +10,80 @@ struct BrushSettingsPopover: View {
     var body: some View {
         @Bindable var coordinator = coordinator
 
+        // Controls the wet path doesn't consume (it's a procedural round tip with its own
+        // deposit model — no shape texture, no per-dab flow, no taper). Gray them out while
+        // Wet paint is on rather than letting them silently do nothing.
+        let wet = coordinator.toolWetEnabled
+
+        // The control stack outgrew the screen once the Presets grid + batch-2 knobs
+        // landed — scroll it. The explicit maxHeight is required: a popover sizes to its
+        // content, so an unbounded ScrollView collapses (or overflows) without one.
+        ScrollView {
         VStack(alignment: .leading, spacing: 18) {
-            BrushShapePicker(selection: $coordinator.toolShapeID)
+            PresetPicker()
+            Divider()
+            Group {
+                BrushShapePicker(selection: $coordinator.toolShapeID)
+                if coordinator.toolShapeID != nil {
+                    BrushSliderRow("Tip lightness", value: $coordinator.toolTipLightness, range: 0.0...1.0, help: Self.help["Tip lightness"]!)
+                }
+                GrainPicker(selection: $coordinator.toolGrainID)
+                if coordinator.toolGrainID != nil {
+                    BrushSliderRow("Grain depth", value: $coordinator.toolGrainDepth, range: 0.0...1.0, help: Self.help["Grain depth"]!)
+                    BrushSliderRow("Grain scale", value: $coordinator.toolGrainScale, range: 0.5...3.0, help: Self.help["Grain scale"]!,
+                                   format: { String(format: "%.1f\u{00D7}", $0) })
+                    Toggle(isOn: $coordinator.toolGrainMoving) {
+                        Text("Moving grain").font(.subheadline.weight(.medium))
+                    }
+                    Text(coordinator.toolGrainMoving
+                         ? "Tooth rides with the stroke — streaky crayon/lead."
+                         : "Tooth stays on the paper — overlapping strokes share it.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+            .disabled(wet)
+            .opacity(wet ? 0.35 : 1)
 
             BrushSliderRow("Opacity", value: $coordinator.toolOpacity, range: 0.05...1.0, help: Self.help["Opacity"]!)
-            BrushSliderRow("Flow", value: $coordinator.toolFlow, range: 0.05...1.0, help: Self.help["Flow"]!)
+            Group {
+                BrushSliderRow("Flow", value: $coordinator.toolFlow, range: 0.05...1.0, help: Self.help["Flow"]!)
+            }
+            .disabled(wet)
+            .opacity(wet ? 0.35 : 1)
             BrushSliderRow("Stabilize", value: $coordinator.toolStreamline, range: 0.0...1.0, help: Self.help["Stabilize"]!)
+            BrushSliderRow("Smoothing", value: $coordinator.toolStabilization, range: 0.0...1.0, help: Self.help["Smoothing"]!)
             BrushSliderRow("Hardness", value: $coordinator.toolHardness, range: 0.0...1.0, help: Self.help["Hardness"]!)
+            BrushSliderRow("Aspect", value: $coordinator.toolAspect, range: 0.1...1.0, help: Self.help["Aspect"]!)
+            BrushSliderRow("Angle", value: $coordinator.toolTipAngle, range: 0...(.pi), help: Self.help["Angle"]!,
+                           format: { "\(Int(($0 * 180 / .pi).rounded()))\u{00B0}" })
             BrushSliderRow("Spacing", value: $coordinator.toolSpacing, range: 0.02...1.0, help: Self.help["Spacing"]!)
-            BrushSliderRow("Taper", value: $coordinator.toolTaper, range: 0.0...1.0, help: Self.help["Taper"]!)
+            Group {
+                BrushSliderRow("Count", value: $coordinator.toolStampCount, range: 1...8, help: Self.help["Count"]!,
+                               format: { "\(Int($0.rounded()))" })
+                if coordinator.toolStampCount.rounded() > 1 {
+                    BrushSliderRow("Count jitter", value: $coordinator.toolStampCountJitter, range: 0.0...1.0, help: Self.help["Count jitter"]!)
+                }
+                if coordinator.toolShapeID != nil {
+                    BrushSliderRow("Rotation", value: $coordinator.toolRotationFollow, range: -1.0...1.0, help: Self.help["Rotation"]!,
+                                   format: { String(format: "%+.0f%%", $0 * 100) })
+                    HStack(spacing: 20) {
+                        Toggle("Flip X", isOn: $coordinator.toolFlipX)
+                        Toggle("Flip Y", isOn: $coordinator.toolFlipY)
+                    }
+                    .font(.subheadline.weight(.medium))
+                }
+            }
+            .disabled(wet)
+            .opacity(wet ? 0.35 : 1)
+            Group {
+                BrushSliderRow("Taper", value: $coordinator.toolTaper, range: 0.0...1.0, help: Self.help["Taper"]!)
+                if coordinator.toolTaper > 0.005 {
+                    BrushSliderRow("Taper opacity", value: $coordinator.toolTaperOpacity, range: 0.0...1.0, help: Self.help["Taper opacity"]!)
+                }
+                BrushSliderRow("Fall off", value: $coordinator.toolFallOff, range: 0.0...1.0, help: Self.help["Fall off"]!)
+            }
+            .disabled(wet)
+            .opacity(wet ? 0.35 : 1)
 
             Divider()
             Toggle(isOn: $coordinator.toolWetEnabled) {
@@ -26,12 +91,36 @@ struct BrushSettingsPopover: View {
                 + Text("  (experimental)").font(.caption).foregroundColor(.secondary)
             }
             if coordinator.toolWetEnabled {
+                Text("Wet paint uses a round tip — Shape, Flow, Taper and Brush Studio dynamics don't apply. Opacity scales the deposit.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
                 BrushSliderRow("Mix", value: $coordinator.toolWetStrength, range: 0.05...1.0, help: Self.help["Mix"]!)
                 BrushSliderRow("Smear", value: $coordinator.toolWetPickup, range: 0.0...1.0, help: Self.help["Smear"]!)
+                BrushSliderRow("Charge", value: $coordinator.toolWetCharge, range: 0.05...1.0, help: Self.help["Charge"]!)
+                BrushSliderRow("Refill", value: $coordinator.toolWetRefill, range: 0.0...1.0, help: Self.help["Refill"]!)
+                BrushSliderRow("Wet jitter", value: $coordinator.toolWetJitter, range: 0.0...1.0, help: Self.help["Wet jitter"]!)
+                BrushSliderRow("Blur", value: $coordinator.toolWetBlur, range: 0.0...1.0, help: Self.help["Blur"]!)
+            }
+
+            Divider()
+            Button {
+                // Close this popover, then open the Studio sheet (owned by the sidebar) so it
+                // presents reliably instead of being cancelled by the popover dismissing.
+                coordinator.showBrushSettings = false
+                coordinator.showBrushStudio = true
+            } label: {
+                Label("Brush Studio (dev)", systemImage: "slider.horizontal.3")
+                    .font(.subheadline.weight(.medium))
+            }
+            if coordinator.toolDynamics != nil {
+                Text(wet ? "Dynamics active (ignored while Wet paint is on)" : "Dynamics active")
+                    .font(.caption).foregroundColor(.secondary)
             }
         }
         .padding(20)
+        }
         .frame(width: 300)
+        .frame(maxHeight: 620)
     }
 
     // One-sentence summary + what 0% and 100% mean, per control.
@@ -45,22 +134,113 @@ struct BrushSettingsPopover: View {
         "Stabilize": BrushHelp(summary: "Smooths shaky lines by letting the drawn line lag behind the pencil.",
             low: "Follows your hand exactly — every wobble shows.",
             high: "Very smooth and confident, but the line trails behind the pencil."),
+        "Smoothing": BrushHelp(summary: "Averages the path over the distance drawn for clean, steady curves.",
+            low: "No averaging — the path is exactly what Stabilize produces.",
+            high: "Very clean curvature; tremors vanish. The stroke still ends where the pencil lifts."),
         "Hardness": BrushHelp(summary: "How crisp or soft the brush edge is.",
             low: "Soft, feathered airbrush edge.",
             high: "Crisp, sharp edge."),
+        "Tip lightness": BrushHelp(summary: "Lets the tip's texture lighten and darken the ink (embossed, dimensional strokes).",
+            low: "Flat ink — the tip texture only shapes coverage.",
+            high: "Full value mapping — dark tip areas darken, light areas lighten; mid-gray = your color."),
+        "Grain depth": BrushHelp(summary: "How strongly the paper tooth shows through the stroke.",
+            low: "No texture — solid paint.",
+            high: "Heavy dry-media break-up; press harder (more flow) to fill the tooth."),
+        "Angle": BrushHelp(summary: "The tip's fixed base angle — a calligraphy nib when Aspect is low.",
+            low: "0°: the flat axis lies horizontal.",
+            high: "180°: rotated through a half turn (90° = vertical)."),
+        "Aspect": BrushHelp(summary: "How flat the brush tip is — a calligraphy/chisel nib at low values.",
+            low: "A thin flat blade (pair with Rotation dynamics in Brush Studio to steer the nib).",
+            high: "Fully round tip."),
         "Spacing": BrushHelp(summary: "How far apart the stamped dabs are along the stroke.",
             low: "Dense — a smooth, continuous line.",
             high: "Far apart — you see individual dabs."),
+        "Fall off": BrushHelp(summary: "The stroke's paint gradually runs out as you draw.",
+            low: "Never runs out.",
+            high: "Fades to nothing within a short distance — like a drying marker."),
+        "Grain scale": BrushHelp(summary: "How coarse the paper-grain features are.",
+            low: "Fine tooth.",
+            high: "Coarse, chunky tooth."),
+        "Count": BrushHelp(summary: "How many stamps land at each spacing point (pairs with Scatter in Brush Studio for spray/cluster texture).",
+            low: "One stamp per point — the normal stroke.",
+            high: "Eight stamps per point, each with its own scatter."),
+        "Count jitter": BrushHelp(summary: "Randomly varies the per-point stamp count, so density breathes along the stroke.",
+            low: "Always the full Count.",
+            high: "Anywhere from one stamp up to the full Count, at random."),
+        "Rotation": BrushHelp(summary: "How the tip turns with your stroke direction.",
+            low: "−100%: turns opposite to the stroke (mirrored calligraphy).",
+            high: "+100%: follows the stroke; 0% holds the tip upright."),
         "Taper": BrushHelp(summary: "Thins the stroke toward its start and end.",
             low: "Uniform width from end to end.",
             high: "Tapers to a point at both ends."),
+        "Taper opacity": BrushHelp(summary: "Also fades the ink toward the tapered tips, not just the width.",
+            low: "Tips thin but stay full-strength (classic hard taper).",
+            high: "Tips fade out to nothing (soft, airy entries and exits)."),
         "Mix": BrushHelp(summary: "How strongly each dab deposits its color onto the canvas.",
             low: "Barely tints — color builds up slowly.",
             high: "Covers in a single pass."),
         "Smear": BrushHelp(summary: "How much the brush picks up and carries the colors it crosses.",
             low: "No pickup — always lays your color, no blending trail.",
-            high: "Soaks up and drags color along the stroke (smudgy, blends).")
+            high: "Soaks up and drags color along the stroke (smudgy, blends)."),
+        "Charge": BrushHelp(summary: "How much paint is loaded on the brush — it runs out as you stroke.",
+            low: "A dab's worth: the stroke dries to a faint tint within a short distance.",
+            high: "Bottomless — deposits at full strength forever."),
+        "Refill": BrushHelp(summary: "How fast the brush re-loads its own color after picking up paint it crossed.",
+            low: "Never — picked-up color rides along until you cross something else.",
+            high: "Instantly — the brush always lays pure ink, no matter what it crosses."),
+        "Wet jitter": BrushHelp(summary: "Randomly varies how much paint each dab deposits — organic patchiness.",
+            low: "Even deposit along the stroke.",
+            high: "Some dabs land soaked, others nearly dry."),
+        "Blur": BrushHelp(summary: "Softens the smudge — dragged edges melt instead of staying crisp (Smudge mode only).",
+            low: "Crisp smudge — edges keep their definition as they drag.",
+            high: "Soft melt — the smudge averages what it crosses and feathers its rim.")
     ]
+}
+
+/// Curated preset picker (preset-library v1): one-tap full brush recipes. Keeps the
+/// user's color/size; every secondary knob below reflects the applied preset.
+private struct PresetPicker: View {
+    @Environment(AppCoordinator.self) private var coordinator
+
+    private let columns = [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Presets").font(.subheadline.weight(.medium))
+            LazyVGrid(columns: columns, spacing: 8) {
+                chip(nil, "None")
+                ForEach(CuratedPresetCatalog.all) { preset in
+                    chip(preset.id, preset.displayName)
+                }
+            }
+        }
+    }
+
+    private func chip(_ id: String?, _ label: String) -> some View {
+        let selected = coordinator.activeCuratedPresetID == id
+        return Button {
+            if let id, let preset = CuratedPresetCatalog.preset(for: id) {
+                coordinator.applyCuratedPreset(preset)
+            } else {
+                coordinator.clearCuratedPreset()
+            }
+        } label: {
+            Text(label)
+                .font(.caption)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+                .background(selected ? Color.accentColor.opacity(0.18) : Color.gray.opacity(0.12))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .strokeBorder(selected ? Color.accentColor : .clear, lineWidth: 1.5)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .foregroundStyle(selected ? Color.accentColor : .primary)
+        }
+        .buttonStyle(.plain)
+    }
 }
 
 /// Brush-tip shape selector (pro-brush Phase 3). A grid of labeled chips; "Round" is the
@@ -105,6 +285,48 @@ private struct BrushShapePicker: View {
     }
 }
 
+/// Grain texture selector (P8). "None" = no grain; the rest are the procedural
+/// document-space grains from `GrainCatalog`.
+private struct GrainPicker: View {
+    @Binding var selection: String?
+
+    private let columns = [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Grain").font(.subheadline.weight(.medium))
+            LazyVGrid(columns: columns, spacing: 8) {
+                chip(nil, "None")
+                ForEach(GrainCatalog.all) { grain in
+                    chip(grain.id, grain.displayName)
+                }
+            }
+        }
+    }
+
+    private func chip(_ id: String?, _ label: String) -> some View {
+        let selected = selection == id
+        return Button {
+            selection = id
+        } label: {
+            Text(label)
+                .font(.caption)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+                .background(selected ? Color.accentColor.opacity(0.18) : Color.gray.opacity(0.12))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .strokeBorder(selected ? Color.accentColor : .clear, lineWidth: 1.5)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .foregroundStyle(selected ? Color.accentColor : .primary)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 /// Help text for a brush control: a one-line summary plus the 0% / 100% extremes.
 struct BrushHelp {
     let summary: String
@@ -118,13 +340,17 @@ private struct BrushSliderRow: View {
     @Binding var value: CGFloat
     let range: ClosedRange<CGFloat>
     let help: BrushHelp
+    /// Value readout override (default: percent).
+    let format: (CGFloat) -> String
     @State private var showHelp = false
 
-    init(_ title: String, value: Binding<CGFloat>, range: ClosedRange<CGFloat>, help: BrushHelp) {
+    init(_ title: String, value: Binding<CGFloat>, range: ClosedRange<CGFloat>, help: BrushHelp,
+         format: @escaping (CGFloat) -> String = { "\(Int(($0 * 100).rounded()))%" }) {
         self.title = title
         self._value = value
         self.range = range
         self.help = help
+        self.format = format
     }
 
     var body: some View {
@@ -141,7 +367,7 @@ private struct BrushSliderRow: View {
                     helpContent.presentationCompactAdaptation(.popover)
                 }
                 Spacer()
-                Text("\(Int((value * 100).rounded()))%")
+                Text(format(value))
                     .font(.subheadline.monospacedDigit())
                     .foregroundStyle(.secondary)
             }

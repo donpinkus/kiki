@@ -28,6 +28,10 @@ export interface InsightsConfig {
 
   /** Directory where blob assets are stored (Railway volume mount in prod). */
   readonly BLOB_DIR: string;
+
+  /** Days to keep session-replay capture frames (rows + blobs). The daily
+   * prune loop in index.ts enforces it. Default 14. */
+  readonly CAPTURE_RETENTION_DAYS: number;
 }
 
 function num(name: string, value: string | undefined, fallback: number): number {
@@ -64,6 +68,7 @@ function loadConfig(): InsightsConfig {
     ADMIN_PASSWORD: required('ADMIN_PASSWORD'),
     ADMIN_SESSION_SECRET: required('ADMIN_SESSION_SECRET', { minLen: 32 }),
     BLOB_DIR: env['BLOB_DIR'] ?? './blobs',
+    CAPTURE_RETENTION_DAYS: num('CAPTURE_RETENTION_DAYS', env['CAPTURE_RETENTION_DAYS'], 14),
   };
 
   if (errors.length > 0) {

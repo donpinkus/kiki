@@ -67,6 +67,13 @@ enum AnalyticsEvent: String {
     // Share / export
     case imageShared = "image.shared"
     case videoShared = "video.shared"
+
+    // Errors surfaced to the user. Fired whenever any error banner/message
+    // becomes visible (drawing-view red banner, sign-in failure text).
+    // Properties: `message` (the verbatim string shown), `surface`
+    // ("drawing_banner" | "sign_in"). Kiki Insights highlights these red in
+    // the user timeline so UX problems jump out when scanning a session.
+    case errorBannerShown = "error.banner_shown"
 }
 
 enum Analytics {

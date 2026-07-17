@@ -12,6 +12,8 @@ export interface UserSummary {
   session_count: number;
   drawing_count: number;
   fal_spend_usd_month: number;
+  /** In-app minutes per Pacific day, oldest→today, exactly 14 entries. */
+  activity14d: number[];
 }
 
 export interface SessionRow {
@@ -61,6 +63,8 @@ export interface UserDetail {
     updated_at: string;
   };
   usage: MonthlyUsageRow[];
+  /** In-app minutes per Pacific day since first session (zero days omitted). */
+  daily_activity: { day: string; minutes: number }[];
   sessions: SessionRow[];
   events: EventRow[];
   drawings: DrawingRow[];
@@ -92,3 +96,224 @@ export const listUsers = (q: string) =>
   api<{ users: UserSummary[] }>(`/admin/api/users?q=${encodeURIComponent(q)}`);
 
 export const getUser = (id: string) => api<UserDetail>(`/admin/api/users/${encodeURIComponent(id)}`);
+
+// ─── Ops: fal keep-warm dial ────────────────────────────────────────────────
+
+export interface WarmerConfig {
+  enabled: boolean;
+  intervalMs: number;
+  offStartHour: number;
+  offEndHour: number;
+}
+
+export interface WarmerPing {
+  ts: string;
+  found_warm: boolean | null;
+  ms_to_first_frame: number | null;
+  open_ms: number;
+  error: string | null;
+}
+
+export interface SourceStats {
+  source: 'user' | 'warmer';
+  conns: number;
+  answered: number;
+  cold: number;
+  wait_p50: number | null;
+  wait_p90: number | null;
+  wait_max: number | null;
+}
+
+export interface ConnectionRow {
+  opened_at: string;
+  source: 'user' | 'warmer';
+  user_id: string | null;
+  email: string | null;
+  wait_ms: number | null;
+  found_warm: boolean | null;
+  frames_sent: number;
+  frames_received: number;
+  open_ms: number;
+  close_reason: string | null;
+}
+
+export type SourceFilter = 'all' | 'user' | 'warmer';
+
+export interface WarmerStatus {
+  schemaReady: boolean;
+  config: WarmerConfig | null;
+  configUpdatedAt: string | null;
+  pings: WarmerPing[];
+  stats24h: {
+    pings: number;
+    cold_encounters: number;
+    failures: number;
+    billed_ms: number;
+  } | null;
+  sources24h: SourceStats[];
+}
+
+export const getWarmer = () => api<WarmerStatus>('/admin/api/ops/warmer');
+
+// ─── Session replays (capture gallery) ──────────────────────────────────────
+
+export interface CaptureStreamSummary {
+  stream_id: string;
+  user_id: string;
+  email: string | null;
+  started_at: string;
+  ended_at: string;
+  sketch_count: number;
+  generated_count: number;
+  poster_url: string | null;
+  last_prompt: string | null;
+}
+
+export interface CapturePrompt {
+  seq: number;
+  captured_at: string;
+  prompt: string;
+}
+
+export interface CaptureFrame {
+  kind: 'sketch' | 'generated';
+  seq: number;
+  captured_at: string;
+  url: string;
+}
+
+export interface CaptureDetail {
+  stream_id: string;
+  user_id: string | null;
+  email: string | null;
+  frames: CaptureFrame[];
+  prompts: CapturePrompt[];
+}
+
+export const listCaptures = (userId?: string) =>
+  api<{ captures: CaptureStreamSummary[] }>(
+    `/admin/api/captures${userId ? `?user_id=${encodeURIComponent(userId)}` : ''}`,
+  );
+
+export const getCapture = (streamId: string) =>
+  api<CaptureDetail>(`/admin/api/captures/${encodeURIComponent(streamId)}`);
+
+export const getConnections = (source: SourceFilter) =>
+  api<{ schemaReady: boolean; connections: ConnectionRow[] }>(
+    `/admin/api/ops/connections${source === 'all' ? '' : `?source=${source}`}`,
+  );
+
+export const putWarmer = (config: WarmerConfig) =>
+  api<{ ok: boolean; config: WarmerConfig }>('/admin/api/ops/warmer', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(config),
+  });
+
+// ─── Brush-test battery runs (Tests tab) ────────────────────────────────────
+
+export interface TestRunImage {
+  scene: string;
+  blob_key: string;
+  description: string | null;
+}
+
+export interface TestRun {
+  id: string;
+  git_sha: string | null;
+  note: string | null;
+  created_at: string;
+  images: TestRunImage[];
+}
+
+export const listTestRuns = () => api<{ runs: TestRun[] }>('/admin/api/test-runs');
+
+// ─── Brush clone targets (Brushes tab) ──────────────────────────────────────
+
+export interface BrushTargetImage {
+  id: string;
+  kind: 'reference' | 'settings' | 'attempt';
+  label: string | null;
+  note: string | null;
+  blob_key: string;
+  created_at: string;
+}
+
+export interface BrushTarget {
+  id: string;
+  name: string;
+  note: string | null;
+  status: 'todo' | 'in_progress' | 'matched';
+  created_at: string;
+  updated_at: string;
+  images: BrushTargetImage[];
+}
+
+export const listBrushTargets = () => api<{ targets: BrushTarget[] }>('/admin/api/brush-targets');
+
+export const createBrushTarget = (name: string, note: string) =>
+  api<{ ok: boolean; id: string }>('/admin/api/brush-targets', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, note }),
+  });
+
+export const updateBrushTarget = (id: string, patch: { name?: string; note?: string; status?: string }) =>
+  api<{ ok: boolean }>(`/admin/api/brush-targets/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+
+export const deleteBrushTarget = (id: string) =>
+  api<{ ok: boolean }>(`/admin/api/brush-targets/${id}`, { method: 'DELETE' });
+
+export const uploadBrushTargetImages = (id: string, files: File[], kind: string) => {
+  const form = new FormData();
+  form.append('kind', kind);
+  for (const f of files) form.append('image', f, f.name);
+  return api<{ ok: boolean }>(`/admin/api/brush-targets/${id}/images`, { method: 'POST', body: form });
+};
+
+export const updateBrushTargetImage = (id: string, patch: { label?: string; note?: string; kind?: string }) =>
+  api<{ ok: boolean }>(`/admin/api/brush-target-images/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+
+export const deleteBrushTargetImage = (id: string) =>
+  api<{ ok: boolean }>(`/admin/api/brush-target-images/${id}`, { method: 'DELETE' });
+
+// ─── Launch analytics ────────────────────────────────────────────────────────
+
+export interface LaunchDaily {
+  day: string;
+  dau?: number;
+  new_users?: number;
+  drawings?: number;
+  streams?: number;
+  frames?: number;
+  dead_streams?: number;
+  errors?: number;
+  ttfi_p50?: number | null;
+  ttfi_p90?: number | null;
+}
+
+export interface LaunchData {
+  daily: LaunchDaily[];
+  funnel: { signed_up: number; opened_drawing: number; saw_image: number; returned: number };
+  cohorts: { week: string; signups: number; d1: number; w1: number }[];
+  errorUsers: { user_id: string; email: string | null; errors: number; last_at: string }[];
+  recentErrors: {
+    occurred_at: string;
+    user_id: string;
+    email: string | null;
+    name: string;
+    properties: Record<string, unknown>;
+  }[];
+  summary: { ttfi_p50_7d: number | null; ttfi_p90_7d: number | null } | null;
+}
+
+export const getLaunch = (excludeTest: boolean) =>
+  api<LaunchData>(`/admin/api/launch${excludeTest ? '?excludeTest=1' : ''}`);

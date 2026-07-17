@@ -31,6 +31,12 @@ USE_NVFP4 = os.getenv("FLUX_USE_NVFP4", "1") == "1"
 NVFP4_REPO = os.getenv("FLUX_NVFP4_REPO", "black-forest-labs/FLUX.2-klein-4b-nvfp4")
 NVFP4_FILENAME = os.getenv("FLUX_NVFP4_FILENAME", "flux-2-klein-4b-nvfp4.safetensors")
 
+# torch.compile the transformer at load (measured 1.2-1.25x per-frame on H100 BF16,
+# pixel-identical output; ~80-90s one-time compile absorbed into warmup). Off by
+# default: on RunPod 5090 spot the compile cost/benefit is unmeasured. Set
+# FLUX_COMPILE=1 on Lambda serving instances (boot.sh).
+USE_COMPILE = os.getenv("FLUX_COMPILE", "0") == "1"
+
 # ─── LTX-2.3 (video pod) ────────────────────────────────────────────────────
 # The video pod runs LTX-2.3 22B distilled FP8 via Lightricks' official
 # `ltx-pipelines.DistilledPipeline`. Two-stage: stage 1 generates at half

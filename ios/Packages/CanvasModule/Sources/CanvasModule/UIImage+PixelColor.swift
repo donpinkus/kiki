@@ -29,11 +29,12 @@ extension UIImage {
     /// This avoids depending on the source image's byte order (RGBA vs BGRA).
     private static func samplePixel(from cgImage: CGImage, x: Int, y: Int) -> UIColor? {
         var pixel: [UInt8] = [0, 0, 0, 0] // R, G, B, A
-        // Explicit sRGB — NEVER CGColorSpaceCreateDeviceRGB(), which is Display P3
-        // on modern iPads. The source snapshot is sRGB-tagged, so drawing it into a
-        // P3 context performs a real sRGB→P3 gamut conversion; reading those bytes
-        // back as sRGB shifts the sampled color a shade darker. sRGB→sRGB is an
-        // identity passthrough, so the picked color exactly matches the canvas pixel.
+        // Explicit sRGB, stating intent. (DeviceRGB would behave identically —
+        // iOS bitmap contexts treat CGColorSpaceCreateDeviceRGB() as an sRGB
+        // pass-through, verified 2026-07-13. The earlier comment here blaming
+        // "DeviceRGB = Display P3" for eyedropper drift was wrong: the real
+        // 2026-06-08 fixes were sampling a Metal snapshot instead of
+        // CALayer.render, and the Y-flip below.)
         let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
         guard let context = CGContext(
             data: &pixel,
