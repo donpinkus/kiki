@@ -12,6 +12,18 @@ public struct BrushShapeDescriptor: Identifiable, Equatable, Sendable {
     /// PNG resource name (no extension) in `Resources/BrushShapes`, or nil for the
     /// procedural round brush.
     public let resourceName: String?
+    /// Blobby dry-media tips randomize their rotation PER DAB (2026-07-16): repeating
+    /// the same art in the same orientation every stamp reads as discernible stamps —
+    /// a random spin fuses overlaps into an organic mass (the Procreate/Krita chalk
+    /// construction). Directional tips (dry brush streaks) keep their orientation.
+    public let rotationJitter: Bool
+
+    public init(id: String, displayName: String, resourceName: String?, rotationJitter: Bool = false) {
+        self.id = id
+        self.displayName = displayName
+        self.resourceName = resourceName
+        self.rotationJitter = rotationJitter
+    }
 
     public var isProcedural: Bool { resourceName == nil }
 }
@@ -26,10 +38,10 @@ public enum BrushShapeCatalog {
 
     public static let all: [BrushShapeDescriptor] = [
         BrushShapeDescriptor(id: roundID, displayName: "Round", resourceName: nil),
-        BrushShapeDescriptor(id: "chalk", displayName: "Chalk", resourceName: "chalk"),
-        BrushShapeDescriptor(id: "charcoal", displayName: "Charcoal", resourceName: "charcoal"),
+        BrushShapeDescriptor(id: "chalk", displayName: "Chalk", resourceName: "chalk", rotationJitter: true),
+        BrushShapeDescriptor(id: "charcoal", displayName: "Charcoal", resourceName: "charcoal", rotationJitter: true),
         BrushShapeDescriptor(id: "drybrush", displayName: "Dry Brush", resourceName: "drybrush"),
-        BrushShapeDescriptor(id: "pastel", displayName: "Pastel", resourceName: "pastel"),
+        BrushShapeDescriptor(id: "pastel", displayName: "Pastel", resourceName: "pastel", rotationJitter: true),
         BrushShapeDescriptor(id: "ink", displayName: "Spray", resourceName: "ink"),
     ]
 

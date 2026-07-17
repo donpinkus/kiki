@@ -247,8 +247,8 @@ public enum CuratedPresetCatalog {
             b.grainID = "paper"
             b.grainDepth = 0.6
             b.tipLightness = 0.5
-            b.flow = 0.85
-            b.spacing = 0.15
+            b.flow = 0.7
+            b.spacing = 0.09
             b.spacingJitter = 0.3
             b.dynamics = BrushDynamics(flow: pressureFlow(min: 0.35))
             return b
@@ -260,8 +260,8 @@ public enum CuratedPresetCatalog {
             b.grainID = "paper"
             b.grainDepth = 0.5
             b.tipLightness = 0.6
-            b.flow = 0.8
-            b.spacing = 0.15
+            b.flow = 0.65
+            b.spacing = 0.09
             b.dynamics = BrushDynamics(size: softPressureSize(min: 0.5), flow: pressureFlow(min: 0.4))
             return b
         },
@@ -272,8 +272,8 @@ public enum CuratedPresetCatalog {
             b.grainID = "speckle"
             b.grainDepth = 0.5
             b.tipLightness = 0.5
-            b.flow = 0.9
-            b.spacing = 0.14
+            b.flow = 0.7
+            b.spacing = 0.09
             b.dynamics = BrushDynamics(
                 flow: pressureFlow(min: 0.45),
                 colorJitter: ColorJitter(hue: 0.015, saturation: 0.08, brightness: 0.06),

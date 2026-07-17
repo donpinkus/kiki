@@ -131,6 +131,11 @@ enum StrokeStampGenerator {
         // travel direction → rotation = atan2(-dx, dy). Round (procedural) brushes are
         // radially symmetric, so they stay at 0.
         let orientsToStroke = BrushShapeCatalog.orientsToStroke(brush.shapeID)
+        // Blobby dry-media tips: random per-dab spin (catalog `rotationJitter`) unless
+        // the brush drives rotation explicitly — same-orientation art repetition reads
+        // as discernible stamps (device report, 2026-07-16).
+        let shapeRotationJitter = BrushShapeCatalog.descriptor(for: brush.shapeID).rotationJitter
+            && brush.dynamics?.rotation == nil && brush.rotationFollow == nil
         // Signed follow-stroke rotation (Procreate Shape "Rotation" −1…1). nil = legacy:
         // catalog-orienting shapes follow fully, others stay upright.
         let rotationFollow: CGFloat = {
@@ -359,6 +364,9 @@ enum StrokeStampGenerator {
                        interior: Bool = false) {
             dabSerial &+= 1
             var attr = attr
+            if shapeRotationJitter {
+                attr.rotation += Float(brushHash01(spacingSeed, dabSerial, 0x5B1A) * 2 * Double.pi)
+            }
             if flowCompRatio < 1 {
                 // a' = 1−(1−a)^ratio; premultiplied color scales by a'/a exactly.
                 let a = attr.color.w
