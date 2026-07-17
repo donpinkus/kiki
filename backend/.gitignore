@@ -13,3 +13,6 @@ dist/
 # during upload, so adding either file here causes it to be skipped and
 # the drift check silently no-ops in production. Both files will appear
 # as untracked after each deploy — that's expected.
+
+# Generated bench outputs (frames from cold-start/loadtest/ladder runs)
+scripts/lambda/out/

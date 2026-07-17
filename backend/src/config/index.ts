@@ -55,8 +55,29 @@ export interface AppConfig {
    * per-session FLUX.2-klein pods. `fal` relays each frame to fal's hosted
    * `fal-ai/flux-2/klein/realtime` model instead (no pod, ~1.5s first frame).
    * The VIDEO idle-state path stays on RunPod regardless. Revert = set back to
-   * `runpod` + redeploy; the RunPod image path is dormant, not removed. */
-  readonly IMAGE_PROVIDER: 'runpod' | 'fal';
+   * `runpod` + redeploy; the RunPod image path is dormant, not removed.
+   * `lambda` relays to a manually-launched Lambda Cloud instance running our
+   * own image server (scripts/lambda/) at LAMBDA_IMAGE_URL — dev toggle for
+   * sketch-adherence comparison vs fal; no orchestration/provisioning yet. */
+  readonly IMAGE_PROVIDER: 'runpod' | 'fal' | 'lambda';
+  /** Full WS URL of a manually-launched Lambda image instance, including path
+   * and token (printed by scripts/lambda/coldstart-bench.ts --keep). Optional
+   * static override — when set it takes precedence over the dev pool. */
+  readonly LAMBDA_IMAGE_URL: string;
+  /** Lambda Cloud API key (cloud.lambda.ai/api-keys) — required for the dev
+   * pool; also the HMAC key for per-instance WS tokens. Server-side only. */
+  readonly LAMBDA_API_KEY: string;
+  /** When true (and LAMBDA_API_KEY set), the backend keeps at most one
+   * kiki-serve H100 instance for the per-session `imageProvider=lambda`
+   * toggle: launched on demand (app login / stream request via
+   * modules/lambda/devPool.ts), idle-reaped after 30 min. Dev/test-account
+   * only. Default false. */
+  readonly LAMBDA_DEV_POOL_ENABLED: boolean;
+  /** Region for dev-pool instances. Its `kiki-image-<region>` filesystem must
+   * be pre-populated via scripts/lambda/setup-lambda.ts. */
+  readonly LAMBDA_REGION: string;
+  /** Instance type for dev-pool instances. */
+  readonly LAMBDA_INSTANCE_TYPE: string;
   /** fal.ai API key — server-side only (CLAUDE.md #3: no secrets on client).
    * Used as `Authorization: Key <FAL_KEY>` on the fal realtime WS upgrade.
    * Required when `IMAGE_PROVIDER=fal`; ignored otherwise. */
@@ -282,12 +303,19 @@ function validateConfig(): AppConfig {
   }
 
   const imageProvider = (process.env['IMAGE_PROVIDER'] ?? 'runpod') as AppConfig['IMAGE_PROVIDER'];
-  if (!['runpod', 'fal'].includes(imageProvider)) {
-    throw new Error(`Invalid IMAGE_PROVIDER: ${imageProvider} (expected 'runpod' or 'fal')`);
+  if (!['runpod', 'fal', 'lambda'].includes(imageProvider)) {
+    throw new Error(`Invalid IMAGE_PROVIDER: ${imageProvider} (expected 'runpod', 'fal', or 'lambda')`);
   }
   const falKey = process.env['FAL_KEY'] ?? '';
   if (imageProvider === 'fal' && !falKey) {
     throw new Error("IMAGE_PROVIDER=fal requires FAL_KEY (fal.ai API key) to be set");
+  }
+  const lambdaImageUrl = process.env['LAMBDA_IMAGE_URL'] ?? '';
+  const lambdaDevPoolEnabled = process.env['LAMBDA_DEV_POOL_ENABLED'] === 'true';
+  if (imageProvider === 'lambda' && !/^wss?:\/\//.test(lambdaImageUrl) && !lambdaDevPoolEnabled) {
+    throw new Error(
+      'IMAGE_PROVIDER=lambda requires LAMBDA_IMAGE_URL (static instance) or LAMBDA_DEV_POOL_ENABLED=true',
+    );
   }
 
   return {
@@ -304,6 +332,11 @@ function validateConfig(): AppConfig {
     ONDEMAND_FALLBACK_ENABLED: process.env['ONDEMAND_FALLBACK_ENABLED'] === 'true',
     VIDEO_POD_ENABLED: process.env['VIDEO_POD_ENABLED'] === 'true',
     IMAGE_PROVIDER: imageProvider,
+    LAMBDA_IMAGE_URL: lambdaImageUrl,
+    LAMBDA_API_KEY: process.env['LAMBDA_API_KEY'] ?? '',
+    LAMBDA_DEV_POOL_ENABLED: lambdaDevPoolEnabled,
+    LAMBDA_REGION: process.env['LAMBDA_REGION'] ?? 'us-south-2',
+    LAMBDA_INSTANCE_TYPE: process.env['LAMBDA_INSTANCE_TYPE'] ?? 'gpu_1x_h100_sxm5',
     FAL_KEY: falKey,
     FAL_IDLE_CLOSE_MS: Number(process.env['FAL_IDLE_CLOSE_MS'] ?? 0),
     FAL_WARMER_ENABLED: process.env['FAL_WARMER_ENABLED'] !== 'false',

@@ -250,6 +250,7 @@ Reading the patterns — *interpretation guide, not proof of cause*. A given que
 | Metal canvas architecture plan (layers, smudge, etc.) | `documents/plans/metal-canvas-rewrite.md` |
 | Pro-brush roadmap (flow/opacity → stabilization → stamps → wet/oil paint; Procreate parity) | `documents/plans/pro-brush-roadmap.md` |
 | FLUX.2-klein capability notebook (potential features, not committed) | `documents/ideas/flux-klein-capabilities.md` |
+| Lambda Cloud H100 image provider (IMAGE_PROVIDER=lambda) — architecture, scripts, cold-start plan | `documents/plans/lambda-image-provider.md` + `backend/scripts/lambda/README.md` |
 | Internal per-user analytics dashboard (Kiki Insights) — setup, schema, ingest contract, deploy | `analytics/README.md` |
 | Implementation decisions log | `documents/decisions.md` |
 | Removed features (ComfyUI, StreamDiffusion) | `documents/removed-features.md` |
