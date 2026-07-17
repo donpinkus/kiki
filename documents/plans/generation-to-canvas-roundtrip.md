@@ -50,6 +50,31 @@ committing if this ships). Key experimental facts:
    already supports a background image blob).
 3. Optionally blend CV line art on top if stroke-crispness matters after import.
 
+## Generalization + Form-vs-Colors modes (2026-07-17, 5 real drawings)
+
+Tested across five of Donald's real drawings (spaceship, floating island + fox,
+Pixar cat, halo man, Halo structure — each with its REAL session prompt), two
+sketchify modes each. Master grid: `scratchpad/rt2-grid.jpg`. Results:
+
+- **Sketchify generalizes: 5/5.** Clean coloring-book sketches for every subject
+  type, backgrounds included (the angel's white-bg result was subject-specific,
+  not a limitation).
+- **Form-only mode** (`"...uncolored coloring book outline style, no shading,
+  no color"`, seed 7): composition locked; palette re-derived from the prompt on
+  regeneration — recovers the original look when the prompt names colors (gray
+  cat, cherry blossom), plausible otherwise. The "I want the shape, I'll do the
+  colors" mode.
+- **Form+Colors mode** (the original colored-flat prompt): round-trips near-
+  identically — AND the sketch's colors STEER the regeneration (spaceship went
+  white/blue where the sketch fills were light; the man gained the sketch's red
+  vest). That's the editability contract working: recolor the sketch → the
+  generation follows. If stricter color fidelity to the source is wanted, add
+  "using the exact same colors as the image" to the sketchify prompt (untested).
+
+**Recommended user control: a two-option import choice** — "Lines only" vs
+"Lines + colors" — mapping 1:1 to the two sketchify prompts. Same pipeline,
+same cost (one generation either way).
+
 ## Open items before building
 
 - n=1 subject/style — repeat on 3–5 diverse generations (portrait, object, scene;
