@@ -204,7 +204,13 @@ public enum CuratedPresetCatalog {
                                        // The signature 6B move: pressing harder darkens
                                        // the graphite, not just widens it (cap: never
                                        // darker than 60% of the ink).
-                                       darkness: CurveOption(sensors: [SensorChannel(sensor: .pressure)], maxValue: 0.4))
+                                       darkness: CurveOption(sensors: [SensorChannel(sensor: .pressure)], maxValue: 0.4),
+                                       // ...and fills the paper tooth (inverted pressure
+                                       // — light touch shows grain, press goes smooth).
+                                       grain: CurveOption(
+                                        sensors: [SensorChannel(sensor: .pressure,
+                                                                curve: ResponseCurve(points: [ResponseCurve.Point(0, 1), ResponseCurve.Point(1, 0.25)]))],
+                                        useSameCurve: false))
             return b
         },
 
@@ -307,6 +313,40 @@ public enum CuratedPresetCatalog {
             b.stampCount = 3
             b.stampCountJitter = 0.4
             b.dynamics = BrushDynamics(scatter: CurveOption(sensors: [], strength: 0.6))
+            return b
+        },
+
+        CuratedPreset(id: "crayon", displayName: "Crayon") { base in
+            var b = base
+            // Moving-grain flagship: waxy directional streaks that ride WITH the stroke.
+            b.grainID = "paper"
+            b.grainDepth = 0.55
+            b.grainMoving = true
+            b.hardness = 0.75
+            b.flow = 0.9
+            b.spacing = 0.14
+            b.spacingJitter = 0.15
+            b.dynamics = BrushDynamics(size: softPressureSize(min: 0.55),
+                                       grain: CurveOption(
+                                        sensors: [SensorChannel(sensor: .pressure,
+                                                                curve: ResponseCurve(points: [ResponseCurve.Point(0, 1), ResponseCurve.Point(1, 0.35)]))],
+                                        useSameCurve: false))
+            return b
+        },
+
+        CuratedPreset(id: "watercolor", displayName: "Watercolor") { base in
+            var b = base
+            // Wet flagship on the complete dial set: translucent glazes that mix with
+            // what they cross, recover toward the ink, and patch organically.
+            b.wetEnabled = true
+            b.wetStrength = 0.65   // Mix
+            b.wetPickup = 0.35     // Smear
+            b.wetRefill = 0.15
+            b.wetCharge = 0.8
+            b.wetJitter = 0.25
+            b.hardness = 0.3
+            b.opacity = min(base.opacity, 0.85)
+            b.spacing = 0.2
             return b
         },
 
