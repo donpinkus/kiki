@@ -167,6 +167,15 @@ class FluxKleinPipeline:
             },
         )
 
+        # Optional torch.compile of the transformer (FLUX_COMPILE=1; measured
+        # 1.2-1.25x per-frame on H100 BF16 with pixel-identical output). The
+        # compile itself is lazy — its cost lands in the warmup calls below.
+        if config.USE_COMPILE:
+            logger.info("Compiling transformer (torch.compile, max-autotune-no-cudagraphs)")
+            self.pipe.transformer = torch.compile(
+                self.pipe.transformer, mode="max-autotune-no-cudagraphs"
+            )
+
         # Warmup with a dummy txt2img generation
         logger.info("Warming up...")
         t_phase = time.time()
@@ -178,6 +187,16 @@ class FluxKleinPipeline:
                 num_inference_steps=config.STEPS,
                 guidance_scale=1.0,
                 generator=torch.Generator(device="cuda").manual_seed(0),
+            )
+        # Compiled graphs are shape-specialized: the txt2img warmup above does
+        # NOT cover reference-mode's longer sequence (gen+ref tokens). Without
+        # this second warmup the FIRST USER FRAME would pay the ~80s recompile.
+        if config.USE_COMPILE:
+            _ = self.generate_reference(
+                image=Image.new("RGB", (config.DEFAULT_WIDTH, config.DEFAULT_HEIGHT), "white"),
+                prompt="warmup",
+                steps=config.STEPS,
+                seed=0,
             )
         self._phase_timings["warmup_inference_ms"] = int((time.time() - t_phase) * 1000)
         warmup_s = self._phase_timings["warmup_inference_ms"] / 1000

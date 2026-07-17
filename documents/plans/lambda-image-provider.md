@@ -255,6 +255,86 @@ quality frames saved to `backend/scripts/lambda/out/ladder/`):
   quality subjectively fine) — 2-step+compile = **288 ms/frame = 3.5 img/s/GPU** is
   a legitimate high-throughput mode if Donald approves the look on real drawings.
 
+### Reference-token KV caching — the "streaming flux" path (2026-07-16 evening)
+
+Source-level read of diffusers @1aadc65 (agent-verified, code-cited) + on-GPU tests:
+
+- **diffusers ships `Flux2KleinKVPipeline`** (`pipeline_flux2_klein_kv.py`) +
+  `Flux2KVCache`/`kv_cache_mode` in the transformer: reference tokens self-attend
+  only and get fixed-t modulation → their per-layer K/V become pure functions of the
+  sketch → extracted once (step 0), injected as K/V width for later steps (ref tokens
+  leave the sequence: ~45% shorter). The transformer API accepts a HELD cache →
+  **cross-frame reuse** (re-extract only when the sketch changes materially) is a
+  ~50-line custom pipeline. Cache ≈300 MB bf16.
+- **Measured (H100, same seed/sketch/prompt, extract included in every call):**
+  base 557/345 ms at 4/2 steps → **kv4b 419/297 ms (1.33×/1.16×)**. Cross-frame
+  retention would remove the extract from steady-state too. **Quality on standard 4B
+  weights: NOT degraded** (frames in `backend/scripts/lambda/out/kv/` — kv4b output
+  is arguably richer; composition differs; sketch-adherence impact unjudged, needs
+  real drawings). Composable with torch.compile in principle (untested together).
+- **BFL ships KV-trained checkpoints only at 9B** (`FLUX.2-klein-9b-kv` + `-fp8`).
+  The repo is GATED and our HF token got 403 — **Donald must accept the license**
+  on huggingface.co before the 9B test can run.
+- **Batching post-mortem correction:** `pipe(image=[s1..sN])` is N references for ONE
+  generation concatenated in sequence (klein.py:537-542) — not batching; our
+  "quadratic batching" measured multi-reference mode with cross-contaminated outputs.
+  True per-row batching is unimplemented, not impossible — small custom
+  `prepare_image_latents` could enable it. Open experiment.
+- Base-pipeline exact-reuse inventory (for the "95% unchanged" idea WITHOUT KV mode):
+  VAE encode (deterministic argmax), position-ids/RoPE (static per canvas size),
+  layer-1 per-token ref K/V per step-index — and nothing deeper (timestep modulation
+  hits every token via AdaLN; joint attention mixes ref with gen/text from layer 2).
+  Also: `prompt_embeds=` accepted by `__call__` (cache per session); pipeline enforces
+  PIL input (docstring claiming latents accepted is false at this commit).
+- **Streaming prototype results (2026-07-16 late, real 69-frame angel drawing
+  from Insights capture, H100):** baseline 563 ms/frame; kv-per-call 423 ms;
+  **held-cache (re-extract every 4th frame) 302 ms median — 1.87× vs prod** —
+  mechanically flawless (extract frames 387 ms, cached frames 301 ms, rock
+  steady). Cross-frame retention implementation: `scratchpad/kv-stream-proto.py`
+  policy C (mirrors kv.py's loop; ~80 lines; needs torch.no_grad — autograd
+  retention OOM'd 79 GB before that fix).
+- **BUT: KV mode on the standard 4B weights destroys sketch adherence.** On the
+  real drawing, baseline picks up the scythe/skull/red accents as they're drawn;
+  BOTH stock kv-per-call and held-cache never do (identical failure → not an
+  implementation bug). The "temporal stability" of the KV outputs is actually
+  weak conditioning — prompt+seed dominate. Consistent with ref tokens neither
+  attending to gen/text nor seeing the true timestep on weights never trained
+  for that pattern. **KV-on-4B is disqualified for Kiki** (adherence is the whole
+  point). Comparison grid: `scratchpad/proto-grid.jpg`.
+- **kv9b (trained-for-KV 9B checkpoint, license accepted, weights on NFS):
+  697/458 ms per-call at 4/2 steps, 37 GB VRAM.** Cat-sketch output follows
+  composition; the decisive angel-sequence adherence test is queued. If 9b-kv
+  adheres: held-cache would put it at ~450-500 ms steady-state ≈ baseline-4B
+  speed with (possibly) better quality — worth it only if adherence is BETTER
+  than baseline-4B, since equal-speed-equal-adherence = no win.
+- **kv9b over angel frames (2026-07-16 late): ADHERES — better than baseline-4B.**
+  Grid `scratchpad/proto-grid-9b.jpg`: single figure matching the sketch (baseline
+  hallucinated a second angel), skull in hand from frame 20, scythe appears as
+  drawn, red accents correct, strong frame-to-frame coherence. 705 ms/frame
+  per-call at 4 steps (458 at 2 steps), 37 GB VRAM.
+- **CONCLUSION — the streaming path is real, on 9B:** kv9b + held-cache projects
+  to ~500 ms steady-state at 4 steps (~330 ms at 2 steps; compile untested on 9B)
+  ≈ baseline-4B speed with better adherence, or faster at 2-step. Next: (1)
+  measure held-cache on 9b directly (est. above uses the 4B held/percall ratio);
+  (2) 2-step quality on 9b; (3) compile on 9b; (4) fp8 variant (klein-9b-kv-fp8)
+  for VRAM/speed; (5) productize: port the held-cache loop into image/server.py
+  behind a flag, with delta-triggered re-extract instead of every-4th-frame;
+  (6) true per-row batching (independent thread).
+
+### Ship-now config (Donald-locked, 2026-07-17)
+
+**4 steps + torch.compile + round-robin pool. NOT 3-step:** Donald has observed that
+dropping steps weakens sketch adherence on real drawings — adherence outranks
+throughput, so the steps dial is off the table for prod (any future steps cut must
+prove adherence parity on real drawing sequences, e.g. the angel fixture).
+Capacity at 4-step + compile (446 ms/frame → 2.24 img/s/GPU): **6 fully-served
+⅓-fps drawers per GPU** (~$0.72/active-drawer-hr), 12–18 connected users/GPU.
+
+**Known issue (backlog, unsolved):** longer text prompts make klein hallucinate away
+from the drawing — more text = less sketch influence. Candidate mitigations to explore
+on our own pipeline later: prompt truncation/weighting, reference-token upweighting.
+Also biases 9B-KV validation: judge its 2-step mode skeptically (steps↓ = adherence↓).
+
 ### Capacity & cost model (measured)
 
 Per H100 SXM ($4.29/hr), 768², users capped at 1 frame / 3 s (Donald-approved floor):

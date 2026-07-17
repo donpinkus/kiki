@@ -135,6 +135,7 @@ set -euo pipefail
 FS=${FS_ROOT}
 [ -f /etc/kiki.env ] && set -a && source /etc/kiki.env && set +a
 export FLUX_USE_NVFP4=0            # H100 is Hopper (SM 9.0) — no FP4; BF16 path
+export FLUX_COMPILE=1              # torch.compile: 1.2-1.25x, ~85s at boot (hidden in warmup)
 export HF_HOME=$FS/kiki/huggingface
 export HF_HUB_OFFLINE=1
 export HF_HUB_DISABLE_TELEMETRY=1
