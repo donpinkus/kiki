@@ -453,7 +453,10 @@ final class AppCoordinator {
         toolShapeID = storedToolShapes[newTool]
         isSwappingToolValues = false
     }
-    var currentColor: Color = .black {
+    /// Initial brush color is a friendly aqua blue, not black: it makes the
+    /// color wheel obviously "already a color" so new users realize switching
+    /// colors is a thing (product call 2026-07-16).
+    var currentColor: Color = Color(red: 0.15, green: 0.69, blue: 0.78) {
         didSet { applyTool() }
     }
     var promptText = "" {
