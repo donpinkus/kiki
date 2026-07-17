@@ -91,6 +91,28 @@ enum StrokeStampGenerator {
         // Spacing as a fraction of stamp width; clamped so a tiny value can't generate
         // a runaway number of stamps (the renderer also caps per-frame stamp count).
         let spacingFraction = max(brush.spacing, 0.02)
+        // Smooth-edge spacing cap (2026-07-16): the scallop sag between adjacent dabs is
+        // ≈ spacing²/(8·radius) px, so the tolerable spacing grows with √radius — small
+        // brushes are naturally sub-pixel smooth while big ones need tighter packing.
+        // Applied only when the user's spacing signals SMOOTH intent (≤ 0.35); brushes
+        // with deliberately visible stamping (Spray at 0.5+) are untouched. The allowed
+        // sag κ relaxes for soft rims (blur hides scallops) and tightens for max-blend
+        // moving grain (its union edge is harder than accumulated source-over). Any
+        // reduction is flow-COMPENSATED per dab so per-arc-length density is preserved:
+        // a' = 1 − (1−a)^(s_render/s_nominal).
+        let smoothIntent = spacingFraction <= 0.35
+        let movingGrainOn = brush.grainMoving && brush.grainID != nil
+        let sagKappa: CGFloat = movingGrainOn ? 0.3 : (0.35 + (1 - min(max(brush.hardness, 0), 1)) * 1.2)
+        func renderSpacing(_ nominal: CGFloat, width: CGFloat) -> (spacing: CGFloat, flowComp: Float) {
+            guard smoothIntent, width > 1 else { return (nominal, 1) }
+            let cap = max((8 * sagKappa * width * 0.5).squareRoot(), 0.75)
+            guard nominal > cap else { return (nominal, 1) }
+            // Max-blend (moving grain) doesn't accumulate — no compensation needed.
+            let comp = movingGrainOn ? 1 : Float(cap / nominal)
+            return (cap, comp)
+        }
+        /// Flow compensation for the CURRENT dab (set alongside currentSpacing).
+        var flowCompRatio: Float = 1
         var stamps: [CanvasRenderer.StampInstance] = []
 
         // Textured (non-round) shapes orient their stamps to the stroke direction so
@@ -306,6 +328,14 @@ enum StrokeStampGenerator {
                        x: CGFloat, y: CGFloat, dx: CGFloat, dy: CGFloat, arc: CGFloat = 0) {
             dabSerial &+= 1
             var attr = attr
+            if flowCompRatio < 1 {
+                // a' = 1−(1−a)^ratio; premultiplied color scales by a'/a exactly.
+                let a = attr.color.w
+                if a > 1e-5 {
+                    let aPrime = 1 - pow(1 - a, flowCompRatio)
+                    attr.color *= aPrime / a
+                }
+            }
             if fallOff > 0 {
                 if let lp = lastDabPos { fallArc += hypot(x - lp.x, y - lp.y) }
                 lastDabPos = CGPoint(x: x, y: y)
@@ -365,7 +395,9 @@ enum StrokeStampGenerator {
         let firstWidth = firstAttr.width
         appendDab(firstAttr, x: first.position.x, y: first.position.y, dx: firstDir.0, dy: firstDir.1)
 
-        var currentSpacing = jitteredSpacing(max(firstWidth * spacingFraction * firstAttr.spacingMul * taperDensity(0), 0.5), 0)
+        let firstRS = renderSpacing(max(firstWidth * spacingFraction * firstAttr.spacingMul * taperDensity(0), 0.5), width: firstWidth)
+        flowCompRatio = firstRS.flowComp
+        var currentSpacing = jitteredSpacing(firstRS.spacing, 0)
         // TRUE arc length accumulated since the last emitted stamp, carried across
         // segments. The previous walk re-derived this per segment as the STRAIGHT-LINE
         // distance from the last stamp point — fine for smooth strokes (chord ≈ arc),
@@ -407,9 +439,11 @@ enum StrokeStampGenerator {
 
                 appendDab(attr, x: x, y: y, dx: dx, dy: dy, arc: walkArc + traveled)
 
-                currentSpacing = jitteredSpacing(
+                let rs = renderSpacing(
                     max(width * spacingFraction * attr.spacingMul * taperDensity(walkArc + traveled), 0.5),
-                    stamps.count)
+                    width: width)
+                flowCompRatio = rs.flowComp
+                currentSpacing = jitteredSpacing(rs.spacing, stamps.count)
                 traveled += currentSpacing
             }
             // Post-loop, `traveled` sits one gap past the last emitted stamp (or one gap

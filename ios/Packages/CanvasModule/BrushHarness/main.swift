@@ -861,6 +861,40 @@ runScene("dry-19-grain-curve",
         useSameCurve: false)))
 }
 
+runScene("dry-20-edge-quality",
+         """
+         Edge-quality pin (2026-07-16): stroke edges must show NO scalloping at smooth-
+         intent spacing — visible stamping is opt-in via HIGH spacing only.
+         - Row 1: hard round pen (hardness 1) at width 90 — the worst case for scallop
+           sag; the edge must read as one clean contour.
+         - Row 2: moving-grain charcoal-flow at width 90 (max-blend union edge — held to
+           a tighter sag budget than source-over).
+         - Row 3: Spray Paint preset — HIGH spacing (deliberate stamping) must be
+           UNTOUCHED by the cap: individual dabs stay individually visible.
+         The cap scales with √radius (sag ≈ spacing²/8r), relaxes for soft rims, and is
+         flow-compensated so per-arc-length density is unchanged.
+         """) { s in
+    var hard = pen(.black, width: 90)
+    hard.hardness = 1.0
+    s.label("hard round, width 90 — edge must be ONE clean contour", y: 120)
+    s.paint(synthStroke(id: 490, brush: hard, from: CGPoint(x: 100, y: 220), to: CGPoint(x: 924, y: 220),
+                        bow: 50, force: { _ in 0.85 }))
+    var mg = pen(.black, width: 90, flow: 0.85)
+    mg.hardness = 0.8
+    mg.grainID = "paper"
+    mg.grainDepth = 0.6
+    mg.grainMoving = true
+    s.label("moving grain, width 90 — union edge, tighter budget", y: 420)
+    s.paint(synthStroke(id: 491, brush: mg, from: CGPoint(x: 100, y: 530), to: CGPoint(x: 924, y: 530),
+                        bow: 50, force: { _ in 0.85 }))
+    var spray = CuratedPresetCatalog.preset(for: "spraypaint")!.configure(
+        BrushConfig(color: .black, baseWidth: 34))
+    spray.streamline = 0; spray.stabilization = 0
+    s.label("spray (spacing 0.5, deliberate) — dabs must STAY individual", y: 720)
+    s.paint(synthStroke(id: 492, brush: spray, from: CGPoint(x: 100, y: 820), to: CGPoint(x: 924, y: 820),
+                        force: { _ in 1 }))
+}
+
 runScene("wet-01-blue-into-yellow",
          """
          Spectral pigment mixing (Kubelka-Munk): a WET blue stroke dragged left-to-right through a
