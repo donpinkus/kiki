@@ -194,6 +194,13 @@ final class AppCoordinator {
             applyTool()
         }
     }
+    /// Grain mode ("Moving grain"): tooth rides with the stroke instead of the paper.
+    var toolGrainMoving: Bool = false {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
     /// Grain scale ("Grain scale", 0.5–3×): coarseness multiplier on the grain tile.
     var toolGrainScale: CGFloat = 1.0 {
         didSet {
@@ -2053,6 +2060,7 @@ final class AppCoordinator {
                 grainID: toolGrainID,
                 grainDepth: toolGrainDepth,
                 grainScale: toolGrainScale,
+                grainMoving: toolGrainMoving,
                 tipLightness: toolTipLightness,
                 tipAngle: toolTipAngle,
                 fallOff: toolFallOff,

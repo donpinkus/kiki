@@ -102,8 +102,12 @@ enum StrokeStampGenerator {
         // Signed follow-stroke rotation (Procreate Shape "Rotation" −1…1). nil = legacy:
         // catalog-orienting shapes follow fully, others stay upright.
         let rotationFollow: CGFloat = {
-            if let f = brush.rotationFollow { return brush.shapeID != nil ? max(-1, min(1, f)) : 0 }
-            return orientsToStroke ? 1 : 0
+            if let f = brush.rotationFollow, brush.shapeID != nil { return max(-1, min(1, f)) }
+            if orientsToStroke { return 1 }
+            // Moving grain needs the dab's local frame aligned to the travel direction
+            // (local-Y = along-stroke) — the round tip is symmetric, so orienting it is
+            // visually free.
+            return (brush.grainMoving && brush.grainID != nil) ? 1 : 0
         }()
         // Static tip angle (calligraphy nib): added to every dab's rotation, before any
         // follow-stroke or dynamic component.
@@ -298,7 +302,7 @@ enum StrokeStampGenerator {
         var dabSerial: UInt64 = 0
         func appendDab(_ attr: (width: CGFloat, color: SIMD4<Float>, rotation: Float, offset: CGPoint,
                                 aspect: Float, scatterMags: SIMD3<Float>, spacingMul: CGFloat),
-                       x: CGFloat, y: CGFloat, dx: CGFloat, dy: CGFloat) {
+                       x: CGFloat, y: CGFloat, dx: CGFloat, dy: CGFloat, arc: CGFloat = 0) {
             dabSerial &+= 1
             var attr = attr
             if fallOff > 0 {
@@ -345,7 +349,8 @@ enum StrokeStampGenerator {
                     rotation: attr.rotation,
                     color: attr.color,
                     hardness: hardness,
-                    aspect: attr.aspect
+                    aspect: attr.aspect,
+                    arcU: Float(arc * scale)
                 ))
             }
         }
@@ -398,7 +403,7 @@ enum StrokeStampGenerator {
                                     roll: roll)
                 let width = attr.width
 
-                appendDab(attr, x: x, y: y, dx: dx, dy: dy)
+                appendDab(attr, x: x, y: y, dx: dx, dy: dy, arc: walkArc + traveled)
 
                 currentSpacing = jitteredSpacing(
                     max(width * spacingFraction * attr.spacingMul * taperDensity(walkArc + traveled), 0.5),
@@ -423,7 +428,8 @@ enum StrokeStampGenerator {
             let attr = dabAttrs(x: last.position.x, y: last.position.y, force: last.force, altitude: last.altitude,
                                 azimuth: last.azimuth, dx: lastDir.0, dy: lastDir.1, dt: lastDt,
                                 roll: last.rollAngle)
-            appendDab(attr, x: last.position.x, y: last.position.y, dx: lastDir.0, dy: lastDir.1)
+            appendDab(attr, x: last.position.x, y: last.position.y, dx: lastDir.0, dy: lastDir.1,
+                      arc: walkArc)
         }
 
         applyTaper(to: &stamps,

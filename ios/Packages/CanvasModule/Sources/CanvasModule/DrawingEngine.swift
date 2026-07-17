@@ -195,6 +195,12 @@ public struct BrushConfig: Codable, Sendable {
     public var grainDepth: CGFloat
     /// Grain scale multiplier on the 256px tile (× the grain's nativeScale). >1 = coarser.
     public var grainScale: CGFloat
+    /// Grain mode (P8 "Moving", 2026-07-16): false = document-space tooth (Procreate
+    /// "Texturized" — grain stays put under the stroke, dry-media invariant); true =
+    /// the grain rides WITH the stroke in an arc-anchored frame (Procreate "Moving" —
+    /// streaky crayon/lead). Moving grain carves per dab in the stamp fragments;
+    /// document grain carves once at scratch-composite time.
+    public var grainMoving: Bool
     /// P4a lightness-map strength [0,1]: reinterpret the shaped tip's grayscale as a VALUE
     /// map (Krita PreserveLightness / Schatz quadratic) — dark tip pixels darken the ink,
     /// light ones lighten it, mid-gray = exact brush color. 0 = off (flat ink, today's
@@ -264,6 +270,7 @@ public struct BrushConfig: Codable, Sendable {
         grainID: String? = nil,
         grainDepth: CGFloat = 0.5,
         grainScale: CGFloat = 1.0,
+        grainMoving: Bool = false,
         tipLightness: CGFloat = 0.0,
         tipAngle: CGFloat = 0.0,
         fallOff: CGFloat = 0.0,
@@ -301,6 +308,7 @@ public struct BrushConfig: Codable, Sendable {
         self.grainID = grainID
         self.grainDepth = grainDepth
         self.grainScale = grainScale
+        self.grainMoving = grainMoving
         self.tipLightness = tipLightness
         self.tipAngle = tipAngle
         self.fallOff = fallOff
@@ -353,7 +361,7 @@ public struct BrushConfig: Codable, Sendable {
         case grainID, grainDepth, grainScale, spacingJitter, tipLightness
         case stampCount, stampCountJitter, rotationFollow, flipX, flipY, fallOff, tipAngle
         case wetCharge, wetRefill
-        case taperStart, taperEnd, taperOpacity
+        case taperStart, taperEnd, taperOpacity, grainMoving
     }
 
     public init(from decoder: Decoder) throws {
@@ -395,6 +403,7 @@ public struct BrushConfig: Codable, Sendable {
         grainID = try container.decodeIfPresent(String.self, forKey: .grainID)
         grainDepth = try container.decodeIfPresent(CGFloat.self, forKey: .grainDepth) ?? 0.5
         grainScale = try container.decodeIfPresent(CGFloat.self, forKey: .grainScale) ?? 1.0
+        grainMoving = try container.decodeIfPresent(Bool.self, forKey: .grainMoving) ?? false
         tipLightness = try container.decodeIfPresent(CGFloat.self, forKey: .tipLightness) ?? 0.0
         // Cheap-knobs batch 2 — defaults reproduce single-stamp, catalog-oriented, unflipped tips.
         fallOff = try container.decodeIfPresent(CGFloat.self, forKey: .fallOff) ?? 0.0
@@ -444,6 +453,7 @@ public struct BrushConfig: Codable, Sendable {
         try container.encodeIfPresent(grainID, forKey: .grainID)
         try container.encode(grainDepth, forKey: .grainDepth)
         try container.encode(grainScale, forKey: .grainScale)
+        try container.encode(grainMoving, forKey: .grainMoving)
         try container.encode(tipLightness, forKey: .tipLightness)
         try container.encode(fallOff, forKey: .fallOff)
         try container.encode(tipAngle, forKey: .tipAngle)

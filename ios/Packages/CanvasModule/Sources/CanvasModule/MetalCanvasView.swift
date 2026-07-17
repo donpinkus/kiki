@@ -2557,7 +2557,7 @@ public final class MetalCanvasView: UIView {
 
     /// Grain settings (P8) for the active/current brush, or nil. Resolved per frame
     /// alongside the shape texture; the wet path ignores grain (v1).
-    private func currentGrain() -> (texture: MTLTexture, depth: Float, invScale: Float)? {
+    private func currentGrain() -> (texture: MTLTexture, depth: Float, invScale: Float, moving: Bool)? {
         guard let brush = currentBrushConfig(), !brush.wetEnabled else { return nil }
         return renderer.grainSettings(for: brush)
     }

@@ -797,6 +797,40 @@ runScene("dry-17-taper",
     row(463, 850, start: 0, end: 0, both: 0.5, opac: 1.0)
 }
 
+runScene("dry-18-moving-grain",
+         """
+         Grain modes A/B (P8 "Moving", 2026-07-16). Same paper grain, same strokes.
+         - Row 1: FIXED (document-space) grain, two overlapping strokes — the tooth
+           pattern is CONTINUOUS across both (the dry-media invariant from dry-08).
+         - Row 2: MOVING grain, the same two overlapping strokes — each stroke carries
+           its OWN streaks; the pattern does NOT line up across the overlap.
+         - Row 3: MOVING grain on an S-curve — the streaks FOLLOW the bend (the tooth is
+           anchored to arc length, not the paper).
+         """) { s in
+    func grainBrush(moving: Bool) -> BrushConfig {
+        var b = pen(.black, width: 56, flow: 0.75)
+        b.hardness = 0.7
+        b.grainID = "paper"
+        b.grainDepth = 0.65
+        b.grainMoving = moving
+        return b
+    }
+    s.label("fixed grain — tooth continuous across overlapping strokes", y: 110)
+    s.paint(synthStroke(id: 470, brush: grainBrush(moving: false),
+                        from: CGPoint(x: 120, y: 190), to: CGPoint(x: 700, y: 190), force: { 0.3 + 0.6 * $0 }))
+    s.paint(synthStroke(id: 471, brush: grainBrush(moving: false),
+                        from: CGPoint(x: 350, y: 205), to: CGPoint(x: 904, y: 205), force: { 0.3 + 0.6 * $0 }))
+    s.label("MOVING grain — each stroke carries its own streaks", y: 380)
+    s.paint(synthStroke(id: 472, brush: grainBrush(moving: true),
+                        from: CGPoint(x: 120, y: 460), to: CGPoint(x: 700, y: 460), force: { 0.3 + 0.6 * $0 }))
+    s.paint(synthStroke(id: 473, brush: grainBrush(moving: true),
+                        from: CGPoint(x: 350, y: 475), to: CGPoint(x: 904, y: 475), force: { 0.3 + 0.6 * $0 }))
+    s.label("MOVING grain on an S-curve — streaks follow the bend", y: 650)
+    s.paint(synthStroke(id: 474, brush: grainBrush(moving: true),
+                        from: CGPoint(x: 120, y: 800), to: CGPoint(x: 904, y: 800),
+                        bow: 90, force: { _ in 0.75 }))
+}
+
 runScene("wet-01-blue-into-yellow",
          """
          Spectral pigment mixing (Kubelka-Munk): a WET blue stroke dragged left-to-right through a

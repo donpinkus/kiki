@@ -32,6 +32,13 @@ struct BrushSettingsPopover: View {
                     BrushSliderRow("Grain depth", value: $coordinator.toolGrainDepth, range: 0.0...1.0, help: Self.help["Grain depth"]!)
                     BrushSliderRow("Grain scale", value: $coordinator.toolGrainScale, range: 0.5...3.0, help: Self.help["Grain scale"]!,
                                    format: { String(format: "%.1f\u{00D7}", $0) })
+                    Toggle(isOn: $coordinator.toolGrainMoving) {
+                        Text("Moving grain").font(.subheadline.weight(.medium))
+                    }
+                    Text(coordinator.toolGrainMoving
+                         ? "Tooth rides with the stroke — streaky crayon/lead."
+                         : "Tooth stays on the paper — overlapping strokes share it.")
+                        .font(.caption2).foregroundStyle(.secondary)
                 }
             }
             .disabled(wet)

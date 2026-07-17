@@ -52,6 +52,10 @@ public final class CanvasRenderer {
     private let wetStampPSO: MTLRenderPipelineState?
     /// Wet INK via scratch (P7 core) — texture-sampled KM, no framebuffer fetch.
     private let wetInkScratchPSO: MTLRenderPipelineState?
+    /// Max-blend dry stamp PSOs (moving grain — see makeMaxBlendStampPSO).
+    private let brushStampMaxPSO: MTLRenderPipelineState?
+    private let shapedStampMaxPSO: MTLRenderPipelineState?
+    private let lightnessShapedStampMaxPSO: MTLRenderPipelineState?
 
     /// False where framebuffer fetch is unsupported (the Simulator), i.e. the wet PSO
     /// failed to build. Callers use this to skip wet-stroke bookkeeping (undo snapshot,
@@ -142,6 +146,9 @@ public final class CanvasRenderer {
     /// Phase 3). Built once at init from `Resources/BrushShapes`. The procedural round
     /// brush has no entry here.
     private let shapeTextures: [String: MTLTexture]
+    /// 1×1 black — bound to the stamp fragments' moving-grain slot when moving grain is
+    /// off (Metal requires referenced textures to be bound; the enabled flag gates use).
+    private let blackDummyTexture: MTLTexture
     /// Mean in-shape luma per tip id (P4a recentering; see `shapeMeanLuma`).
     private let shapeLumaMeans: [String: Float]
 
@@ -155,7 +162,7 @@ public final class CanvasRenderer {
     /// no grain. `MetalCanvasView` resolves from the brush at stroke start; the live +
     /// flatten stamp passes read it to pick the grain PSO + bind the texture/params.
     /// depth [0,1]; invScale multiplies document-space pixel coords into grain UV.
-    var activeGrain: (texture: MTLTexture, depth: Float, invScale: Float)?
+    var activeGrain: (texture: MTLTexture, depth: Float, invScale: Float, moving: Bool)?
 
     /// P4a lightness-map uniform for the stroke being drawn/flattened, or nil for the
     /// flat-ink path: (hue, saturation, lightness z of the brush sRGB color, strength).
@@ -224,6 +231,12 @@ public final class CanvasRenderer {
         // smudging 40%-opacity paint keeps it ~40% instead of opacifying, and the
         // drag-off tail thins as the load depletes. Also in padding; stride stays 48.
         var wetTargetAlpha: Float = -1.0
+        // Moving grain (2026-07-16): the dab's arc position along its stroke, in canvas
+        // px — the along-stroke grain coordinate, so the tooth travels WITH the stroke
+        // (streaky dry media) instead of living in document space. Fills the last free
+        // float of the 48-byte stride — the struct is now exactly full; the next field
+        // added grows the stride to 64 (update the MSL mirror + this comment).
+        var arcU: Float = 0
     }
 
     /// Maximum stamps per frame. 240 Hz pencil × ~6 interpolated steps per touch
@@ -266,6 +279,9 @@ public final class CanvasRenderer {
         // be nil there; the wet tool guards on it and no-ops if unavailable.
         self.wetStampPSO = Self.makeWetStampPSO(device: device, library: lib)
         self.wetInkScratchPSO = Self.makeWetInkScratchPSO(device: device, library: lib)
+        self.brushStampMaxPSO = Self.makeMaxBlendStampPSO(device: device, library: lib, fragment: "brushStampFragment")
+        self.shapedStampMaxPSO = Self.makeMaxBlendStampPSO(device: device, library: lib, fragment: "shapedStampFragment")
+        self.lightnessShapedStampMaxPSO = Self.makeMaxBlendStampPSO(device: device, library: lib, fragment: "lightnessShapedStampFragment")
         self.maskedCopyPSO = Self.makeMaskedCopyPSO(device: device, library: lib)
         self.maskedClearPSO = Self.makeMaskedClearPSO(device: device, library: lib)
 
@@ -290,6 +306,15 @@ public final class CanvasRenderer {
         // Brush mask texture (64×64 soft circle).
         guard let mask = Self.generateBrushMask(device: device, size: 64) else { return nil }
         self.brushMaskTexture = mask
+
+        // Moving-grain dummy (see property doc).
+        let dummyDesc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .r8Unorm, width: 1, height: 1, mipmapped: false)
+        dummyDesc.usage = .shaderRead
+        guard let dummy = device.makeTexture(descriptor: dummyDesc) else { return nil }
+        var zero: UInt8 = 0
+        dummy.replace(region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0, withBytes: &zero, bytesPerRow: 1)
+        self.blackDummyTexture = dummy
 
         // Load textured brush-shape stamps (pro-brush Phase 3). Missing/failed assets are
         // skipped — that shape just falls back to the procedural round brush at draw time.
@@ -459,9 +484,11 @@ public final class CanvasRenderer {
     /// plain compositor. Restores the plain compositor PSO afterwards so surrounding
     /// draws in the same encoder are unaffected. (P8: grain carves at composite time.)
     private func drawScratch(_ enc: MTLRenderCommandEncoder, scratch: MTLTexture, opacity: Float,
-                             grain: (texture: MTLTexture, depth: Float, invScale: Float)?) {
+                             grain: (texture: MTLTexture, depth: Float, invScale: Float, moving: Bool)?) {
         var op = opacity
-        if let grain, let grainPSO = grainCompositorPSO {
+        // Moving grain carves per DAB in the stamp fragments — at composite time it must
+        // be a plain draw or the tooth would be applied twice.
+        if let grain, !grain.moving, let grainPSO = grainCompositorPSO {
             enc.setRenderPipelineState(grainPSO)
             enc.setFragmentTexture(scratch, index: 0)
             enc.setFragmentBytes(&op, length: MemoryLayout<Float>.size, index: 0)
@@ -813,7 +840,7 @@ public final class CanvasRenderer {
     /// regenerated as stamps and committed in one pass. `strokeOpacity` is the
     /// per-stroke ceiling applied at flatten (stamp alpha carries the brush's flow).
     func commitStampsToCanvas(_ stamps: [StampInstance], strokeOpacity: Float = 1.0, shapeTexture: MTLTexture? = nil,
-                              grain: (texture: MTLTexture, depth: Float, invScale: Float)? = nil,
+                              grain: (texture: MTLTexture, depth: Float, invScale: Float, moving: Bool)? = nil,
                               lightness: (params: SIMD4<Float>, recenter: SIMD4<Float>)? = nil,
                               flip: SIMD2<Float> = .zero,
                               wetInk: Bool = false) {
@@ -839,6 +866,7 @@ public final class CanvasRenderer {
             enc.setVertexBuffer(stampBuf, offset: 0, index: 1)
             var canvasSizeFlip = SIMD4<Float>(Float(canvasWidth), Float(canvasHeight), flip.x, flip.y)
             enc.setVertexBytes(&canvasSizeFlip, length: MemoryLayout<SIMD4<Float>>.size, index: 2)
+            bindMovingGrain(enc, grain)
             if wetInk, let wetPSO = wetInkScratchPSO, let basisBuf = wetBasisBuffer, let matBuf = wetMatBuffer {
                 enc.setRenderPipelineState(wetPSO)
                 enc.setFragmentTexture(canvas, index: 0)
@@ -847,20 +875,25 @@ public final class CanvasRenderer {
                 var doc = SIMD2<Float>(Float(canvasWidth), Float(canvasHeight))
                 enc.setFragmentBytes(&doc, length: MemoryLayout<SIMD2<Float>>.size, index: 2)
             } else if let shapeTexture {
-                if let lm = lightness, let pso = lightnessShapedStampPSO {
+                let movingOn = grain?.moving ?? false
+                if let lm = lightness,
+                   let pso = movingOn ? lightnessShapedStampMaxPSO : lightnessShapedStampPSO {
                     enc.setRenderPipelineState(pso)
                     enc.setFragmentTexture(shapeTexture, index: 0)
                     var p0 = lm.params
                     var p1 = lm.recenter
                     enc.setFragmentBytes(&p0, length: MemoryLayout<SIMD4<Float>>.size, index: 0)
                     enc.setFragmentBytes(&p1, length: MemoryLayout<SIMD4<Float>>.size, index: 1)
-                } else if let shapedPSO = shapedBrushStampPSO {
+                } else if let shapedPSO = movingOn ? shapedStampMaxPSO : shapedBrushStampPSO {
                     enc.setRenderPipelineState(shapedPSO)
                     enc.setFragmentTexture(shapeTexture, index: 0)
                 } else {
                     enc.setRenderPipelineState(brushStampPSO)
                     enc.setFragmentTexture(brushMaskTexture, index: 0)
                 }
+            } else if (grain?.moving ?? false), !wetInk, let maxPSO = brushStampMaxPSO {
+                enc.setRenderPipelineState(maxPSO)
+                enc.setFragmentTexture(brushMaskTexture, index: 0)
             } else {
                 enc.setRenderPipelineState(brushStampPSO)
                 enc.setFragmentTexture(brushMaskTexture, index: 0)
@@ -1395,6 +1428,8 @@ public final class CanvasRenderer {
             var canvasSizeFlip = SIMD4<Float>(Float(canvasWidth), Float(canvasHeight),
                                               isEraser ? 0 : activeFlip.x, isEraser ? 0 : activeFlip.y)
             enc.setVertexBytes(&canvasSizeFlip, length: MemoryLayout<SIMD4<Float>>.size, index: 2)
+            bindMovingGrain(enc, activeGrain)
+            let movingOn = !isEraser && (activeGrain?.moving ?? false)
             // Wet INK (P7 core): KM against the pristine canvas texture, source-over into
             // the scratch. Takes priority over every dry PSO; smudge never routes here.
             if !isEraser, activeWetInk, let wetPSO = wetInkScratchPSO,
@@ -1410,20 +1445,24 @@ public final class CanvasRenderer {
             // keep the procedural path. (Grain applies at scratch-COMPOSITE time, not per
             // dab — per-dab carving is refilled by overlapping stamps; see grainCompositor.)
             if !isEraser, let shapeTex = activeShapeTexture {
-                if let lm = activeLightness, let pso = lightnessShapedStampPSO {
+                if let lm = activeLightness,
+                   let pso = movingOn ? lightnessShapedStampMaxPSO : lightnessShapedStampPSO {
                     enc.setRenderPipelineState(pso)
                     enc.setFragmentTexture(shapeTex, index: 0)
                     var p0 = lm.params
                     var p1 = lm.recenter
                     enc.setFragmentBytes(&p0, length: MemoryLayout<SIMD4<Float>>.size, index: 0)
                     enc.setFragmentBytes(&p1, length: MemoryLayout<SIMD4<Float>>.size, index: 1)
-                } else if let shapedPSO = shapedBrushStampPSO {
+                } else if let shapedPSO = movingOn ? shapedStampMaxPSO : shapedBrushStampPSO {
                     enc.setRenderPipelineState(shapedPSO)
                     enc.setFragmentTexture(shapeTex, index: 0)
                 } else {
                     enc.setRenderPipelineState(brushStampPSO)
                     enc.setFragmentTexture(brushMaskTexture, index: 0)
                 }
+            } else if !isEraser, movingOn, let maxPSO = brushStampMaxPSO {
+                enc.setRenderPipelineState(maxPSO)
+                enc.setFragmentTexture(brushMaskTexture, index: 0)
             } else {
                 enc.setRenderPipelineState(isEraser ? eraserStampPSO : brushStampPSO)
                 enc.setFragmentTexture(brushMaskTexture, index: 0)
@@ -1547,6 +1586,29 @@ public final class CanvasRenderer {
     /// Wet-mix PSO: programmable framebuffer read (wetStampFragment reads [[color(0)]],
     /// mixes, returns the final pixel). Fixed-function blending off. Returns nil where
     /// framebuffer fetch is unsupported (Simulator) so the wet tool can degrade gracefully.
+    /// Max-blend variants of the dry stamp PSOs, used when MOVING grain is active:
+    /// coverage composes as MAX instead of accumulating, so the per-dab carve can't
+    /// beat against the overlap count (the rhythmic banding in the first dry-18
+    /// renders — 3-vs-4-dabs-deep oscillation showed through wherever per-dab alpha
+    /// dipped below 1). Within-stroke build-up doesn't exist for moving-grain media
+    /// (dry crayon/lead), so MAX is the right composition there.
+    private static func makeMaxBlendStampPSO(device: MTLDevice, library: MTLLibrary,
+                                             fragment: String) -> MTLRenderPipelineState? {
+        let desc = MTLRenderPipelineDescriptor()
+        desc.vertexFunction = library.makeFunction(name: "brushStampVertex")
+        desc.fragmentFunction = library.makeFunction(name: fragment)
+        desc.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
+        let ca = desc.colorAttachments[0]!
+        ca.isBlendingEnabled = true
+        ca.rgbBlendOperation = .max
+        ca.alphaBlendOperation = .max
+        ca.sourceRGBBlendFactor = .one
+        ca.destinationRGBBlendFactor = .one
+        ca.sourceAlphaBlendFactor = .one
+        ca.destinationAlphaBlendFactor = .one
+        return try? device.makeRenderPipelineState(descriptor: desc)
+    }
+
     /// Wet-ink scratch PSO: plain source-over into the scratch; the KM under-color is a
     /// TEXTURE sample of the pristine canvas (no framebuffer fetch → Simulator-safe).
     private static func makeWetInkScratchPSO(device: MTLDevice, library: MTLLibrary) -> MTLRenderPipelineState? {
@@ -1658,7 +1720,7 @@ public final class CanvasRenderer {
     /// texture(1) (the scratch keeps 0); params (depth, uvScaleX, uvScaleY, 0) at
     /// fragment buffer(1) — buffer(0) stays the compositor's opacity. The UV scale maps
     /// the unit quad to document pixels × invScale so grain tiles in DOCUMENT space.
-    private func bindGrainCompositor(_ enc: MTLRenderCommandEncoder, _ grain: (texture: MTLTexture, depth: Float, invScale: Float)) {
+    private func bindGrainCompositor(_ enc: MTLRenderCommandEncoder, _ grain: (texture: MTLTexture, depth: Float, invScale: Float, moving: Bool)) {
         enc.setFragmentTexture(grain.texture, index: 1)
         var params = SIMD4<Float>(grain.depth,
                                   Float(canvasWidth) * grain.invScale,
@@ -1772,12 +1834,28 @@ public final class CanvasRenderer {
 
     /// Resolve a brush's grain settings (P8): texture + depth + document-space UV scale.
     /// nil when the brush has no grain, depth ≈ 0, or the id is unknown.
-    func grainSettings(for brush: BrushConfig) -> (texture: MTLTexture, depth: Float, invScale: Float)? {
+    func grainSettings(for brush: BrushConfig) -> (texture: MTLTexture, depth: Float, invScale: Float, moving: Bool)? {
         guard brush.grainDepth > 0.005,
               let desc = GrainCatalog.descriptor(for: brush.grainID),
               let tex = grainTextures[desc.id] else { return nil }
         let tilePx = 256.0 * Double(desc.nativeScale) * Double(max(brush.grainScale, 0.05))
-        return (tex, Float(min(max(brush.grainDepth, 0), 1)), Float(1.0 / tilePx))
+        return (tex, Float(min(max(brush.grainDepth, 0), 1)), Float(1.0 / tilePx), brush.grainMoving)
+    }
+
+    /// Bind the moving-grain slot (texture(1) + fragment buffer(3)) for a dry stamp
+    /// pass: the grain when it's MOVING mode, else the disabled dummy. Every dry stamp
+    /// fragment declares the slot, so it must always be bound.
+    private func bindMovingGrain(_ enc: MTLRenderCommandEncoder,
+                                 _ grain: (texture: MTLTexture, depth: Float, invScale: Float, moving: Bool)?) {
+        var params: SIMD4<Float>
+        if let grain, grain.moving {
+            enc.setFragmentTexture(grain.texture, index: 1)
+            params = SIMD4<Float>(grain.depth, grain.invScale, 1, 0)
+        } else {
+            enc.setFragmentTexture(blackDummyTexture, index: 1)
+            params = SIMD4<Float>(0, 0, 0, 0)
+        }
+        enc.setFragmentBytes(&params, length: MemoryLayout<SIMD4<Float>>.size, index: 3)
     }
 
     /// `MetalCanvasView` resolves this when a stroke starts and assigns `activeShapeTexture`.
@@ -1891,6 +1969,7 @@ public final class CanvasRenderer {
         float  hardness;
         float  aspect;         // P4b: local-Y quad scale (pre-rotation); 1 = round
         float  wetTargetAlpha; // smudge alpha-carry; -1 = legacy coverage mode
+        float  arcU;           // moving grain: arc position along the stroke (canvas px)
     };
 
     struct StampVaryings {
@@ -1899,6 +1978,8 @@ public final class CanvasRenderer {
         float4 color;
         float  hardness;
         float  wetTargetAlpha; // consumed by wetStampFragment only
+        float  arcU;           // moving grain: arc position along the stroke (canvas px)
+        float  diamPx;         // dab diameter in canvas px (moving-grain UV scale)
     };
 
     vertex StampVaryings brushStampVertex(
@@ -1945,7 +2026,38 @@ public final class CanvasRenderer {
         out.color = inst.color;
         out.hardness = inst.hardness;
         out.wetTargetAlpha = inst.wetTargetAlpha;
+        out.arcU = inst.arcU;
+        out.diamPx = inst.radius * 2.0;
         return out;
+    }
+
+    // Moving grain (2026-07-16): carve the dab's coverage by the grain sampled in a
+    // STROKE-ANCHORED frame — u along the stroke (arcU + local-Y), v lateral (local-X)
+    // — so the tooth travels with the stroke (streaky dry media). The quad is oriented
+    // to the travel direction whenever moving grain is on (round tips are symmetric, so
+    // forcing orientation costs nothing). Same soft-HEIGHT carve as the document-space
+    // compositor. gp = (depth, invScale, enabled, 0); a black dummy texture + enabled=0
+    // make it an exact identity when off.
+    static inline float movingGrainCarve(float cov, StampVaryings in,
+                                         texture2d<float> grainTex, float4 gp) {
+        if (gp.z < 0.5 || gp.x <= 0.0) { return cov; }
+        constexpr sampler g(filter::linear, address::repeat);
+        // Anisotropic stroke frame: LATERAL frequency boosted 3.5×, ALONG compressed
+        // 0.45× — grain features become thin lines running WITH the stroke (crayon/lead
+        // streaks). Isotropic sampling read as fish-scale scumble; mild along-only
+        // compression was featureless at dab scale (dry-18 iterations 2–3). The extra
+        // smoothstep sharpens the coarse value-noise into distinct streak lines.
+        float2 guv = float2((in.texCoord.x - 0.5) * in.diamPx * 3.5,
+                            (in.arcU + (in.texCoord.y - 0.5) * in.diamPx) * 0.45) * gp.y;
+        float src = smoothstep(0.25, 0.85, grainTex.sample(g, guv).r);
+        float d = gp.x;
+        // MULTIPLICATIVE tooth, no compensation boost: the boost form (used once at
+        // composite time by the document-grain path) inflates when applied per dab and
+        // the stacking drowned the texture entirely (first dry-18 render — solid dark
+        // caterpillar). Per-dab multiplicative carving survives overlap because the
+        // moving UVs are CORRELATED across neighboring dabs (shared stroke frame), and
+        // the max-blend PSOs keep the overlap COUNT out of the density.
+        return cov * clamp(1.0 - d * src, 0.0, 1.0);
     }
 
     // Procedural soft-circle with adjustable hardness. Distance is computed from the
@@ -1958,13 +2070,16 @@ public final class CanvasRenderer {
     // mid/high range close to a plain inner-radius falloff and concentrates the extra
     // softening at the low end.
     fragment float4 brushStampFragment(
-        StampVaryings in [[stage_in]]
+        StampVaryings in [[stage_in]],
+        texture2d<float> movingGrainTex [[texture(1)]],
+        constant float4& movingGrainParams [[buffer(3)]]
     ) {
         float d = length(in.texCoord - 0.5) * 2.0;
         float aa = max(fwidth(d), 1e-4);
         float soft = 1.0 - in.hardness;
         float start = min(in.hardness, 1.0 - aa) - soft * soft * 0.85;
         float alpha = 1.0 - smoothstep(start, 1.0, d);
+        alpha = movingGrainCarve(alpha, in, movingGrainTex, movingGrainParams);
         return in.color * alpha;
     }
 
@@ -2026,7 +2141,9 @@ public final class CanvasRenderer {
         StampVaryings in [[stage_in]],
         texture2d<float> shapeTex [[texture(0)]],
         constant float4& lm [[buffer(0)]],  // (h, s, z, strength) — h/s/z now a FALLBACK; see below
-        constant float4& rc [[buffer(1)]]   // (meanLuma, gain, 0, 0) — coverage-art recentering
+        constant float4& rc [[buffer(1)]],  // (meanLuma, gain, 0, 0) — coverage-art recentering
+        texture2d<float> movingGrainTex [[texture(1)]],
+        constant float4& movingGrainParams [[buffer(3)]]
     ) {
         constexpr sampler shapeSampler(filter::linear, mip_filter::linear, address::clamp_to_zero);
         float m = shapeTex.sample(shapeSampler, in.texCoord).r;
@@ -2055,6 +2172,7 @@ public final class CanvasRenderer {
         float f = clamp((2.0 - 4.0 * z) * mc * mc + (4.0 * z - 1.0) * mc, 0.0, 1.0);
         float L = z + (f - z) * lm.w;
         float3 lin = lmS2L(lmHSL2RGB(hsl.x, hsl.y, L));
+        cov = movingGrainCarve(cov, in, movingGrainTex, movingGrainParams);
         float a = in.color.a * cov;   // flow × coverage, premultiplied out
         return float4(lin * a, a);
     }
@@ -2068,12 +2186,15 @@ public final class CanvasRenderer {
     // flow); scaling by coverage keeps it premultiplied for the source-over blend.
     fragment float4 shapedStampFragment(
         StampVaryings in [[stage_in]],
-        texture2d<float> shapeTex [[texture(0)]]
+        texture2d<float> shapeTex [[texture(0)]],
+        texture2d<float> movingGrainTex [[texture(1)]],
+        constant float4& movingGrainParams [[buffer(3)]]
     ) {
         constexpr sampler shapeSampler(filter::linear, mip_filter::linear, address::clamp_to_zero);
         float m = shapeTex.sample(shapeSampler, in.texCoord).r;
         float gamma = mix(1.8, 0.55, clamp(in.hardness, 0.0, 1.0));
         float cov = pow(max(m, 0.0), gamma);
+        cov = movingGrainCarve(cov, in, movingGrainTex, movingGrainParams);
         return in.color * cov;
     }
 
