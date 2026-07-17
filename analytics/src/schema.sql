@@ -131,3 +131,26 @@ CREATE TABLE IF NOT EXISTS test_run_images (
 -- Added after first deploy; harmless on fresh tables.
 ALTER TABLE test_run_images ADD COLUMN IF NOT EXISTS description TEXT;
 CREATE INDEX IF NOT EXISTS test_run_images_run ON test_run_images (run_id);
+
+-- Brush clone targets (2026-07-16): reference briefs for recreating Procreate-style
+-- brushes. Donald uploads stroke-sample + settings screenshots per target from the
+-- Brushes tab; Claude pulls them via fetch-targets.sh, builds a preset, and posts
+-- recreation ATTEMPT renders back to the same target for side-by-side review.
+CREATE TABLE IF NOT EXISTS brush_targets (
+  id          BIGSERIAL PRIMARY KEY,
+  name        TEXT NOT NULL,
+  note        TEXT,                        -- settings text, tuning intent, feedback
+  status      TEXT NOT NULL DEFAULT 'todo', -- todo | in_progress | matched
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS brush_target_images (
+  id          BIGSERIAL PRIMARY KEY,
+  target_id   BIGINT NOT NULL REFERENCES brush_targets(id) ON DELETE CASCADE,
+  kind        TEXT NOT NULL DEFAULT 'reference',  -- reference | settings | attempt
+  label       TEXT,
+  note        TEXT,
+  blob_key    TEXT NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS brush_target_images_target ON brush_target_images (target_id);

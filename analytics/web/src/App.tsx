@@ -8,6 +8,7 @@ import { Ops } from './pages/Ops';
 import { Gallery } from './pages/Gallery';
 import { Replay } from './pages/Replay';
 import { Tests } from './pages/Tests';
+import { BrushTargets } from './pages/BrushTargets';
 import { Launch } from './pages/Launch';
 
 type AuthState = 'loading' | 'authed' | 'anon';
@@ -47,6 +48,7 @@ export function App() {
           <Link to="/">Users</Link>
           <Link to="/gallery">Gallery</Link>
           <Link to="/tests">Tests</Link>
+          <Link to="/brushes">Brushes</Link>
           <Link to="/ops">Ops</Link>
         </nav>
         <button className="ghost" onClick={onLogout}>
@@ -60,6 +62,7 @@ export function App() {
         <Route path="/gallery" element={<Gallery />} />
         <Route path="/gallery/:streamId" element={<Replay />} />
         <Route path="/tests" element={<Tests />} />
+        <Route path="/brushes" element={<BrushTargets />} />
         <Route path="/ops" element={<Ops />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

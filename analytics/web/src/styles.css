@@ -213,3 +213,21 @@ select:focus { outline: 1px solid var(--accent); }
 }
 .lightbox-foot .spacer { flex: 1; }
 .tests-img-button { all: unset; cursor: zoom-in; display: block; width: 100%; }
+
+/* ─── Brushes tab (brush clone targets) ─────────────────────────────────── */
+.chip {
+  border: 1px solid var(--border, #d0d4dc);
+  background: transparent;
+  border-radius: 999px;
+  padding: 4px 12px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.chip-active {
+  border-color: var(--accent, #4460d8);
+  background: color-mix(in srgb, var(--accent, #4460d8) 12%, transparent);
+}
+button.danger {
+  color: #b3282d;
+  border-color: #b3282d;
+}

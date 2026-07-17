@@ -48,6 +48,120 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
 
     gated.get('/admin/api/me', async () => ({ ok: true }));
 
+    // ─── Brush clone targets (Brushes tab) ─────────────────────────────────
+    // Reference briefs for recreating Procreate-style brushes: name + notes +
+    // screenshots (stroke samples, settings panes). Claude pulls these via
+    // BrushHarness/fetch-targets.sh and posts attempt renders back.
+
+    gated.get('/admin/api/brush-targets', async () => {
+      const { rows: targets } = await query<{ id: string; name: string; note: string | null; status: string; created_at: string; updated_at: string }>(
+        `SELECT id, name, note, status, created_at, updated_at FROM brush_targets ORDER BY created_at DESC`,
+      );
+      if (targets.length === 0) return { targets: [] };
+      const { rows: images } = await query<{ id: string; target_id: string; kind: string; label: string | null; note: string | null; blob_key: string; created_at: string }>(
+        `SELECT id, target_id, kind, label, note, blob_key, created_at
+         FROM brush_target_images WHERE target_id = ANY($1::bigint[]) ORDER BY created_at`,
+        [targets.map((t) => t.id)],
+      );
+      const byTarget = new Map<string, unknown[]>();
+      for (const img of images) {
+        const list = byTarget.get(String(img.target_id)) ?? [];
+        list.push({ id: img.id, kind: img.kind, label: img.label, note: img.note, blob_key: img.blob_key, created_at: img.created_at });
+        byTarget.set(String(img.target_id), list);
+      }
+      return { targets: targets.map((t) => ({ ...t, images: byTarget.get(String(t.id)) ?? [] })) };
+    });
+
+    gated.post('/admin/api/brush-targets', async (request, reply) => {
+      const body = request.body as { name?: string; note?: string };
+      const name = (body?.name ?? '').trim();
+      if (!name) return reply.code(400).send({ error: 'name required' });
+      const { rows } = await query<{ id: string }>(
+        `INSERT INTO brush_targets (name, note) VALUES ($1, $2) RETURNING id`,
+        [name, body?.note ?? null],
+      );
+      return { ok: true, id: rows[0]!.id };
+    });
+
+    gated.patch('/admin/api/brush-targets/:id', async (request, reply) => {
+      const id = Number((request.params as { id: string }).id);
+      const body = request.body as { name?: string; note?: string; status?: string };
+      if (!Number.isFinite(id)) return reply.code(400).send({ error: 'bad id' });
+      await query(
+        `UPDATE brush_targets SET
+           name = COALESCE($2, name),
+           note = COALESCE($3, note),
+           status = COALESCE($4, status),
+           updated_at = now()
+         WHERE id = $1`,
+        [id, body?.name ?? null, body?.note ?? null, body?.status ?? null],
+      );
+      return { ok: true };
+    });
+
+    gated.delete('/admin/api/brush-targets/:id', async (request, reply) => {
+      const id = Number((request.params as { id: string }).id);
+      if (!Number.isFinite(id)) return reply.code(400).send({ error: 'bad id' });
+      await query(`DELETE FROM brush_targets WHERE id = $1`, [id]);
+      return { ok: true };
+    });
+
+    // Multipart upload: any number of file parts (fieldname 'image'); optional
+    // 'kind' field applies to all files in the request (reference | settings |
+    // attempt; default reference). Filenames become the initial labels.
+    gated.post('/admin/api/brush-targets/:id/images', async (request, reply) => {
+      const id = Number((request.params as { id: string }).id);
+      if (!Number.isFinite(id)) return reply.code(400).send({ error: 'bad id' });
+      const { rows: t } = await query(`SELECT id FROM brush_targets WHERE id = $1`, [id]);
+      if (t.length === 0) return reply.code(404).send({ error: 'no such target' });
+
+      let kind = 'reference';
+      const saved: { id: string; label: string }[] = [];
+      const parts = (request as unknown as { parts: () => AsyncIterableIterator<{ type: string; fieldname: string; value?: unknown; filename?: string; mimetype?: string; toBuffer: () => Promise<Buffer> }> }).parts();
+      for await (const part of parts) {
+        if (part.type === 'field') {
+          if (part.fieldname === 'kind') kind = String(part.value);
+          continue;
+        }
+        const buf = await part.toBuffer();
+        if (buf.length === 0) continue;
+        if (buf.length > 24 * 1024 * 1024) return reply.code(400).send({ error: 'image too large' });
+        const label = (part.filename ?? 'image').replace(/\.[a-zA-Z0-9]+$/, '');
+        const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const key = `brush-targets/${id}/${stamp}-${(part.filename ?? 'image.png').replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+        await blobStore.put(key, buf);
+        const { rows } = await query<{ id: string }>(
+          `INSERT INTO brush_target_images (target_id, kind, label, blob_key) VALUES ($1, $2, $3, $4) RETURNING id`,
+          [id, ['reference', 'settings', 'attempt'].includes(kind) ? kind : 'reference', label, key],
+        );
+        saved.push({ id: rows[0]!.id, label });
+      }
+      await query(`UPDATE brush_targets SET updated_at = now() WHERE id = $1`, [id]);
+      return { ok: true, images: saved };
+    });
+
+    gated.patch('/admin/api/brush-target-images/:id', async (request, reply) => {
+      const id = Number((request.params as { id: string }).id);
+      const body = request.body as { label?: string; note?: string; kind?: string };
+      if (!Number.isFinite(id)) return reply.code(400).send({ error: 'bad id' });
+      await query(
+        `UPDATE brush_target_images SET
+           label = COALESCE($2, label),
+           note = COALESCE($3, note),
+           kind = COALESCE($4, kind)
+         WHERE id = $1`,
+        [id, body?.label ?? null, body?.note ?? null, body?.kind ?? null],
+      );
+      return { ok: true };
+    });
+
+    gated.delete('/admin/api/brush-target-images/:id', async (request, reply) => {
+      const id = Number((request.params as { id: string }).id);
+      if (!Number.isFinite(id)) return reply.code(400).send({ error: 'bad id' });
+      await query(`DELETE FROM brush_target_images WHERE id = $1`, [id]);
+      return { ok: true };
+    });
+
     // Brush-test battery runs (newest first), images nested per run. Feeds the
     // Tests tab (visual gallery + cross-run side-by-sides; no pass/fail).
     gated.get('/admin/api/test-runs', async (request) => {

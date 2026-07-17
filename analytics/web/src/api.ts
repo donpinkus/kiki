@@ -228,6 +228,63 @@ export interface TestRun {
 
 export const listTestRuns = () => api<{ runs: TestRun[] }>('/admin/api/test-runs');
 
+// ─── Brush clone targets (Brushes tab) ──────────────────────────────────────
+
+export interface BrushTargetImage {
+  id: string;
+  kind: 'reference' | 'settings' | 'attempt';
+  label: string | null;
+  note: string | null;
+  blob_key: string;
+  created_at: string;
+}
+
+export interface BrushTarget {
+  id: string;
+  name: string;
+  note: string | null;
+  status: 'todo' | 'in_progress' | 'matched';
+  created_at: string;
+  updated_at: string;
+  images: BrushTargetImage[];
+}
+
+export const listBrushTargets = () => api<{ targets: BrushTarget[] }>('/admin/api/brush-targets');
+
+export const createBrushTarget = (name: string, note: string) =>
+  api<{ ok: boolean; id: string }>('/admin/api/brush-targets', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, note }),
+  });
+
+export const updateBrushTarget = (id: string, patch: { name?: string; note?: string; status?: string }) =>
+  api<{ ok: boolean }>(`/admin/api/brush-targets/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+
+export const deleteBrushTarget = (id: string) =>
+  api<{ ok: boolean }>(`/admin/api/brush-targets/${id}`, { method: 'DELETE' });
+
+export const uploadBrushTargetImages = (id: string, files: File[], kind: string) => {
+  const form = new FormData();
+  form.append('kind', kind);
+  for (const f of files) form.append('image', f, f.name);
+  return api<{ ok: boolean }>(`/admin/api/brush-targets/${id}/images`, { method: 'POST', body: form });
+};
+
+export const updateBrushTargetImage = (id: string, patch: { label?: string; note?: string; kind?: string }) =>
+  api<{ ok: boolean }>(`/admin/api/brush-target-images/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+
+export const deleteBrushTargetImage = (id: string) =>
+  api<{ ok: boolean }>(`/admin/api/brush-target-images/${id}`, { method: 'DELETE' });
+
 // ─── Launch analytics ────────────────────────────────────────────────────────
 
 export interface LaunchDaily {

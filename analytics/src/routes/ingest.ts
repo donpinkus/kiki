@@ -315,6 +315,43 @@ export const ingestRoute: FastifyPluginAsync = async (app) => {
     return reply.send({ ok: true, drawing_id: drawingId });
   });
 
+  // ─── Brush-target attempt upload (multipart, service key) ─────────────────
+  // Claude posts recreation renders against a brush target (Brushes tab shows
+  // them beside the references). Fields: target_id (required), label, note.
+  // File part: image (PNG).
+  app.post('/ingest/brush-target-attempt', async (request, reply) => {
+    try {
+      await authenticateIngest(request);
+    } catch (err) {
+      request.log.warn({ err: (err as Error).message }, 'brush-target attempt auth failed');
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    const fields: Record<string, string> = {};
+    let imageBuf: Buffer | null = null;
+    let filename = 'attempt.png';
+    const parts = (request as unknown as { parts: () => AsyncIterableIterator<MultipartPart> }).parts();
+    for await (const part of parts) {
+      if (part.type === 'field') fields[part.fieldname] = String(part.value);
+      else { imageBuf = await part.toBuffer(); filename = part.filename ?? filename; }
+    }
+    const targetId = Number(fields['target_id']);
+    if (!Number.isFinite(targetId)) return reply.code(400).send({ error: 'target_id required' });
+    if (!imageBuf || imageBuf.length === 0) return reply.code(400).send({ error: 'image required' });
+    if (imageBuf.length > 24 * 1024 * 1024) return reply.code(400).send({ error: 'image too large' });
+    const { rows: t } = await query(`SELECT id FROM brush_targets WHERE id = $1`, [targetId]);
+    if (t.length === 0) return reply.code(404).send({ error: 'no such target' });
+    const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const key = `brush-targets/${targetId}/attempts/${stamp}-${filename.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+    await blobStore.put(key, imageBuf);
+    const { rows } = await query<{ id: string }>(
+      `INSERT INTO brush_target_images (target_id, kind, label, note, blob_key)
+       VALUES ($1, 'attempt', $2, $3, $4) RETURNING id`,
+      [targetId, fields['label'] ?? null, fields['note'] ?? null, key],
+    );
+    await query(`UPDATE brush_targets SET status = 'in_progress', updated_at = now() WHERE id = $1 AND status = 'todo'`, [targetId]);
+    return { ok: true, id: rows[0]!.id };
+  });
+
   // ─── Brush fixture upload (multipart) ─────────────────────────────────────
   // Brush Studio's "Record strokes → Upload": the BrushFixture JSON (replayable in
   // BrushHarness) + an optional PNG snapshot of the canvas at capture time. Dev
@@ -450,6 +487,7 @@ export const ingestRoute: FastifyPluginAsync = async (app) => {
 interface MultipartPart {
   type: 'field' | 'file';
   fieldname: string;
+  filename?: string;
   value?: unknown;
   toBuffer(): Promise<Buffer>;
 }
