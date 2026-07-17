@@ -242,6 +242,14 @@ public final class CanvasRenderer {
         // from 48 to 64 (SIMD4 alignment) — the MSL mirror pads explicitly; keep both
         // declarations in sync.
         var grainMul: Float = 1.0
+        // Flat-sided interior dab (2026-07-16, the Procreate square-stamp insight): 1 =
+        // the procedural tip uses a stroke-aligned SUPERELLIPSE (x⁴+y⁴ metric — flat
+        // sides, rounded corners) so consecutive dabs slide into a mathematically flat
+        // edge (circle scallop sag ~0.35px at the spacing cap; superellipse ~0.003px).
+        // Only interior walk dabs of smooth-intent procedural strokes set it; first/cap
+        // dabs stay round so stroke ENDS keep the round brush-tip profile. (In the pad
+        // space of the 64-byte stride; two pad floats remain.)
+        var edgeFlat: Float = 0
     }
 
     /// Maximum stamps per frame. 240 Hz pencil × ~6 interpolated steps per touch
@@ -1979,9 +1987,9 @@ public final class CanvasRenderer {
         // Swift stride is 64 (SIMD4 alignment). SCALAR pads only — an MSL float3 is
         // itself 16-aligned and would inflate the GPU struct to 80 bytes, walking the
         // instanced fetch off-stride into garbage (stray-geometry bug, dry-19 iter 1).
+        float  edgeFlat;       // 1 = stroke-aligned superellipse interior dab
         float  _pad0;
         float  _pad1;
-        float  _pad2;
     };
 
     struct StampVaryings {
@@ -1993,6 +2001,7 @@ public final class CanvasRenderer {
         float  strokeAlong;    // moving grain: this POINT's arc position along the stroke (canvas px)
         float  strokeLat;      // moving grain: this POINT's lateral offset from the stroke spine (canvas px)
         float  grainMul;       // per-dab grain-depth multiplier
+        float  edgeFlat;       // 1 = superellipse (flat-sided) procedural dab
     };
 
     vertex StampVaryings brushStampVertex(
@@ -2053,6 +2062,7 @@ public final class CanvasRenderer {
         out.strokeAlong = inst.arcU + dot(rel, alongDir);
         out.strokeLat = dot(rel, latDir);
         out.grainMul = inst.grainMul;
+        out.edgeFlat = inst.edgeFlat;
         return out;
     }
 
@@ -2100,7 +2110,19 @@ public final class CanvasRenderer {
         texture2d<float> movingGrainTex [[texture(1)]],
         constant float4& movingGrainParams [[buffer(3)]]
     ) {
-        float d = length(in.texCoord - 0.5) * 2.0;
+        // Distance metric: circle for visible/cap dabs; stroke-aligned SUPERELLIPSE
+        // (x⁴+y⁴)^¼ for smooth-intent interior dabs — flat sides slide into a
+        // mathematically flat stroke edge (no scallop), rounded corners keep curves
+        // graceful. The quad is already rotated to the travel direction when edgeFlat
+        // is set.
+        float2 q = (in.texCoord - 0.5) * 2.0;
+        float d;
+        if (in.edgeFlat > 0.5) {
+            float2 q2 = q * q;
+            d = pow(dot(q2, q2), 0.25);
+        } else {
+            d = length(q);
+        }
         float aa = max(fwidth(d), 1e-4);
         float soft = 1.0 - in.hardness;
         float start = min(in.hardness, 1.0 - aa) - soft * soft * 0.85;

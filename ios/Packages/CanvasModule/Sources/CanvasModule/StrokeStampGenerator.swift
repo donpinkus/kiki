@@ -100,7 +100,17 @@ enum StrokeStampGenerator {
         // moving grain (its union edge is harder than accumulated source-over). Any
         // reduction is flow-COMPENSATED per dab so per-arc-length density is preserved:
         // a' = 1 − (1−a)^(s_render/s_nominal).
+        // A procedural tip with NO rotation semantics of its own — safe to orient to the
+        // stroke (for moving grain / the flat-sided superellipse) without changing look.
+        let rotationAgnostic = brush.shapeID == nil && brush.spacing <= 0.35
+            && brush.aspectRatio >= 0.999 && brush.tipAngle == 0
+            && brush.dynamics?.rotation == nil && brush.dynamics?.ratio == nil
         let smoothIntent = spacingFraction <= 0.35
+        // Flat-sided interior dabs (the Procreate square-stamp mechanism): procedural
+        // smooth-intent strokes slide a stroke-aligned superellipse — mathematically
+        // flat edge, no scallop at ANY spacing. First + end-cap dabs stay round so the
+        // stroke's ENDS keep the round tip profile.
+        let flatInterior = smoothIntent && rotationAgnostic
         let movingGrainOn = brush.grainMoving && brush.grainID != nil
         let sagKappa: CGFloat = movingGrainOn ? 0.3 : (0.35 + (1 - min(max(brush.hardness, 0), 1)) * 1.2)
         func renderSpacing(_ nominal: CGFloat, width: CGFloat) -> (spacing: CGFloat, flowComp: Float) {
@@ -126,10 +136,15 @@ enum StrokeStampGenerator {
         let rotationFollow: CGFloat = {
             if let f = brush.rotationFollow, brush.shapeID != nil { return max(-1, min(1, f)) }
             if orientsToStroke { return 1 }
-            // Moving grain needs the dab's local frame aligned to the travel direction
-            // (local-Y = along-stroke) — the round tip is symmetric, so orienting it is
-            // visually free.
-            return (brush.grainMoving && brush.grainID != nil) ? 1 : 0
+            // Moving grain AND the flat-sided interior dab both need the dab's local
+            // frame aligned to the travel direction (local-Y = along-stroke). Only for
+            // tips with NO rotation semantics of their own: a truly round symmetric tip
+            // orients for free, but an aspect nib / tipAngle / rotation-dynamics brush
+            // must keep its authored orientation (forcing follow silently flattened the
+            // 45° calligraphy nib into uniform width — dry-06 regression, caught in the
+            // superellipse battery review).
+            if brush.grainMoving && brush.grainID != nil { return 1 }
+            return rotationAgnostic ? 1 : 0
         }()
         // Static tip angle (calligraphy nib): added to every dab's rotation, before any
         // follow-stroke or dynamic component.
@@ -325,7 +340,8 @@ enum StrokeStampGenerator {
         var dabSerial: UInt64 = 0
         func appendDab(_ attr: (width: CGFloat, color: SIMD4<Float>, rotation: Float, offset: CGPoint,
                                 aspect: Float, scatterMags: SIMD3<Float>, spacingMul: CGFloat, grainMul: Float),
-                       x: CGFloat, y: CGFloat, dx: CGFloat, dy: CGFloat, arc: CGFloat = 0) {
+                       x: CGFloat, y: CGFloat, dx: CGFloat, dy: CGFloat, arc: CGFloat = 0,
+                       interior: Bool = false) {
             dabSerial &+= 1
             var attr = attr
             if flowCompRatio < 1 {
@@ -382,7 +398,8 @@ enum StrokeStampGenerator {
                     hardness: hardness,
                     aspect: attr.aspect,
                     arcU: Float(arc * scale),
-                    grainMul: attr.grainMul
+                    grainMul: attr.grainMul,
+                    edgeFlat: (interior && flatInterior) ? 1 : 0
                 ))
             }
         }
@@ -437,7 +454,7 @@ enum StrokeStampGenerator {
                                     roll: roll)
                 let width = attr.width
 
-                appendDab(attr, x: x, y: y, dx: dx, dy: dy, arc: walkArc + traveled)
+                appendDab(attr, x: x, y: y, dx: dx, dy: dy, arc: walkArc + traveled, interior: true)
 
                 let rs = renderSpacing(
                     max(width * spacingFraction * attr.spacingMul * taperDensity(walkArc + traveled), 0.5),
