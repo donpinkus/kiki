@@ -8,6 +8,7 @@ import { Ops } from './pages/Ops';
 import { Gallery } from './pages/Gallery';
 import { Replay } from './pages/Replay';
 import { Tests } from './pages/Tests';
+import { Launch } from './pages/Launch';
 
 type AuthState = 'loading' | 'authed' | 'anon';
 
@@ -42,6 +43,7 @@ export function App() {
       <div className="topbar">
         <h1>Kiki Insights</h1>
         <nav style={{ display: 'flex', gap: 16, flex: 1, marginLeft: 24 }}>
+          <Link to="/launch">Launch</Link>
           <Link to="/">Users</Link>
           <Link to="/gallery">Gallery</Link>
           <Link to="/tests">Tests</Link>
@@ -53,6 +55,7 @@ export function App() {
       </div>
       <Routes>
         <Route path="/" element={<Users />} />
+        <Route path="/launch" element={<Launch />} />
         <Route path="/users/:id" element={<UserDetail />} />
         <Route path="/gallery" element={<Gallery />} />
         <Route path="/gallery/:streamId" element={<Replay />} />

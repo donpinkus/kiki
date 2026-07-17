@@ -212,6 +212,139 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
       };
     });
 
+    // ─── Launch analytics (aggregate views for launch week) ─────────────────
+    // Everything derives from data already collected: events (iOS + backend
+    // dual-write), sessions, users. Days are Pacific (matches the rest of the
+    // dashboard). "Error event" = name matching error/fail — same heuristic as
+    // the user-timeline highlighting.
+    gated.get('/admin/api/launch', async (request) => {
+      // ?excludeTest=1 → drop test accounts (users.is_test_account) from every
+      // number on the page. Applied server-side: events rows don't carry the
+      // flag, so each query filters via the users table.
+      const excl = (request.query as { excludeTest?: string }).excludeTest === '1';
+      const [daily, newUsers, funnelRows, errorUsers, recentErrors, summary] = await Promise.all([
+        query(
+          `SELECT to_char(occurred_at AT TIME ZONE 'America/Los_Angeles', 'YYYY-MM-DD') AS day,
+                  count(DISTINCT user_id)::int AS dau,
+                  count(*) FILTER (WHERE name = 'drawing.created')::int AS drawings,
+                  count(*) FILTER (WHERE name = 'stream.started')::int AS streams,
+                  count(*) FILTER (WHERE name ~* 'error|fail')::int AS errors,
+                  count(*) FILTER (WHERE name = 'stream.ended'
+                    AND (properties->>'frames_received') ~ '^[0-9]+$'
+                    AND (properties->>'frames_received')::int = 0)::int AS dead_streams,
+                  COALESCE(sum((properties->>'frames_received')::int)
+                    FILTER (WHERE name = 'stream.ended'
+                      AND (properties->>'frames_received') ~ '^[0-9]+$'), 0)::int AS frames,
+                  round(percentile_cont(0.5) WITHIN GROUP (ORDER BY (properties->>'wait_ms')::float)
+                    FILTER (WHERE name = 'stream.first_frame' AND (properties->>'wait_ms') ~ '^[0-9.]+$'))::int AS ttfi_p50,
+                  round(percentile_cont(0.9) WITHIN GROUP (ORDER BY (properties->>'wait_ms')::float)
+                    FILTER (WHERE name = 'stream.first_frame' AND (properties->>'wait_ms') ~ '^[0-9.]+$'))::int AS ttfi_p90
+           FROM events
+           WHERE occurred_at > now() - interval '30 days'
+             AND ($1::bool = false OR user_id NOT IN
+                  (SELECT user_id::text FROM users WHERE is_test_account))
+           GROUP BY 1`,
+          [excl],
+        ),
+        query(
+          `SELECT to_char(created_at AT TIME ZONE 'America/Los_Angeles', 'YYYY-MM-DD') AS day,
+                  count(*)::int AS new_users
+           FROM users
+           WHERE created_at > now() - interval '30 days'
+             AND ($1::bool = false OR NOT is_test_account)
+           GROUP BY 1`,
+          [excl],
+        ),
+        // One row per user with funnel step flags + retention flags relative
+        // to their Pacific signup day. ≤ a few hundred users at launch scale.
+        query(
+          `SELECT u.user_id::text AS user_id,
+                  to_char(date_trunc('week', u.created_at AT TIME ZONE 'America/Los_Angeles'), 'YYYY-MM-DD') AS week,
+                  EXISTS (SELECT 1 FROM events e WHERE e.user_id = u.user_id::text
+                          AND e.name = 'drawing.opened') AS opened_drawing,
+                  EXISTS (SELECT 1 FROM events e WHERE e.user_id = u.user_id::text
+                          AND e.name = 'stream.first_frame') AS saw_image,
+                  EXISTS (SELECT 1 FROM events e WHERE e.user_id = u.user_id::text
+                          AND (e.occurred_at AT TIME ZONE 'America/Los_Angeles')::date
+                              > (u.created_at AT TIME ZONE 'America/Los_Angeles')::date) AS returned,
+                  EXISTS (SELECT 1 FROM events e WHERE e.user_id = u.user_id::text
+                          AND (e.occurred_at AT TIME ZONE 'America/Los_Angeles')::date
+                              = (u.created_at AT TIME ZONE 'America/Los_Angeles')::date + 1) AS d1,
+                  EXISTS (SELECT 1 FROM events e WHERE e.user_id = u.user_id::text
+                          AND (e.occurred_at AT TIME ZONE 'America/Los_Angeles')::date
+                              BETWEEN (u.created_at AT TIME ZONE 'America/Los_Angeles')::date + 1
+                                  AND (u.created_at AT TIME ZONE 'America/Los_Angeles')::date + 7) AS w1
+           FROM users u
+           WHERE ($1::bool = false OR NOT u.is_test_account)`,
+          [excl],
+        ),
+        query(
+          `SELECT e.user_id, u.email, count(*)::int AS errors, max(e.occurred_at) AS last_at
+           FROM events e
+           LEFT JOIN users u ON u.user_id::text = e.user_id
+           WHERE e.name ~* 'error|fail' AND e.occurred_at > now() - interval '7 days'
+             AND ($1::bool = false OR COALESCE(u.is_test_account, false) = false)
+           GROUP BY 1, 2
+           ORDER BY errors DESC
+           LIMIT 20`,
+          [excl],
+        ),
+        query(
+          `SELECT e.occurred_at, e.user_id, u.email, e.name, e.properties
+           FROM events e
+           LEFT JOIN users u ON u.user_id::text = e.user_id
+           WHERE e.name ~* 'error|fail'
+             AND ($1::bool = false OR COALESCE(u.is_test_account, false) = false)
+           ORDER BY e.occurred_at DESC
+           LIMIT 25`,
+          [excl],
+        ),
+        query(
+          `SELECT round(percentile_cont(0.5) WITHIN GROUP (ORDER BY (properties->>'wait_ms')::float))::int AS ttfi_p50_7d,
+                  round(percentile_cont(0.9) WITHIN GROUP (ORDER BY (properties->>'wait_ms')::float))::int AS ttfi_p90_7d
+           FROM events
+           WHERE name = 'stream.first_frame' AND (properties->>'wait_ms') ~ '^[0-9.]+$'
+             AND occurred_at > now() - interval '7 days'
+             AND ($1::bool = false OR user_id NOT IN
+                  (SELECT user_id::text FROM users WHERE is_test_account))`,
+          [excl],
+        ),
+      ]);
+
+      // Merge the two daily sources and aggregate the per-user funnel rows.
+      const byDay = new Map<string, Record<string, unknown>>();
+      for (const r of daily.rows) byDay.set(r['day'] as string, { ...r });
+      for (const r of newUsers.rows) {
+        const d: Record<string, unknown> = byDay.get(r['day'] as string) ?? { day: r['day'] };
+        d['new_users'] = r['new_users'];
+        byDay.set(r['day'] as string, d);
+      }
+
+      const funnel = { signed_up: 0, opened_drawing: 0, saw_image: 0, returned: 0 };
+      const cohortMap = new Map<string, { week: string; signups: number; d1: number; w1: number }>();
+      for (const r of funnelRows.rows) {
+        funnel.signed_up += 1;
+        if (r['opened_drawing']) funnel.opened_drawing += 1;
+        if (r['saw_image']) funnel.saw_image += 1;
+        if (r['returned']) funnel.returned += 1;
+        const wk = r['week'] as string;
+        const c = cohortMap.get(wk) ?? { week: wk, signups: 0, d1: 0, w1: 0 };
+        c.signups += 1;
+        if (r['d1']) c.d1 += 1;
+        if (r['w1']) c.w1 += 1;
+        cohortMap.set(wk, c);
+      }
+
+      return {
+        daily: [...byDay.values()],
+        funnel,
+        cohorts: [...cohortMap.values()].sort((a, b) => b.week.localeCompare(a.week)),
+        errorUsers: errorUsers.rows,
+        recentErrors: recentErrors.rows,
+        summary: summary.rows[0] ?? null,
+      };
+    });
+
     // ─── Session replays (capture gallery) ─────────────────────────────────
     // Streams grouped from capture_frames; poster = latest generated frame.
     // Optional ?user_id= scopes to one user (UserDetail's replay section).

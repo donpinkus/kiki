@@ -103,6 +103,89 @@ export function Spark14({ data }: { data: number[] }) {
   );
 }
 
+/** Generic last-N-days bar chart (Launch tab): auto-scaled to the series max,
+ * hover tooltip with date + formatted value, sparse month-boundary labels.
+ * `byDay` is a sparse YYYY-MM-DD → value map; missing days render as stubs. */
+export function DailyBars({
+  byDay,
+  days = 30,
+  color = BAR,
+  title,
+  fmtValue = (v: number) => String(v),
+}: {
+  byDay: Record<string, number | null | undefined>;
+  days?: number;
+  color?: string;
+  title: string;
+  fmtValue?: (v: number) => string;
+}) {
+  const [hover, setHover] = useState<number | null>(null);
+  const W = 6;
+  const GAP = 2;
+  const H = 64;
+  const list = Array.from({ length: days }, (_, i) => {
+    const d = new Date(Date.now() - (days - 1 - i) * 86_400_000);
+    const key = d.toLocaleDateString('en-CA');
+    return { key, d, v: byDay[key] ?? null };
+  });
+  const max = Math.max(1, ...list.map((x) => x.v ?? 0));
+  const tip: Tip | null =
+    hover === null
+      ? null
+      : {
+          x: hover * (W + GAP) + W / 2,
+          text: `${list[hover].d.toLocaleDateString([], { month: 'short', day: 'numeric' })} · ${
+            list[hover].v === null ? 'no data' : fmtValue(list[hover].v as number)
+          }`,
+        };
+
+  return (
+    <div className="card" style={{ padding: '12px 16px' }}>
+      <div className="muted" style={{ fontSize: 12, marginBottom: 8, display: 'flex', justifyContent: 'space-between' }}>
+        <span>{title}</span>
+        <span>max {fmtValue(max)}</span>
+      </div>
+      <div style={{ position: 'relative', paddingTop: 26 }}>
+        <BarTooltip tip={tip} />
+        <svg
+          width={list.length * (W + GAP) - GAP}
+          height={H}
+          role="img"
+          aria-label={`${title}, last ${days} days`}
+          onMouseLeave={() => setHover(null)}
+        >
+          {list.map((x, i) => {
+            const v = x.v ?? 0;
+            const h = v <= 0 ? 2 : Math.max(3, Math.round((v / max) * H));
+            return (
+              <rect
+                key={x.key}
+                x={i * (W + GAP)}
+                y={H - h}
+                width={W}
+                height={h}
+                rx={1.5}
+                fill={v <= 0 ? STUB : hover === i ? BAR_HOVER : color}
+              />
+            );
+          })}
+          {list.map((_, i) => (
+            <rect
+              key={`hit-${i}`}
+              x={i * (W + GAP) - GAP / 2}
+              y={0}
+              width={W + GAP}
+              height={H}
+              fill="transparent"
+              onMouseEnter={() => setHover(i)}
+            />
+          ))}
+        </svg>
+      </div>
+    </div>
+  );
+}
+
 /** Fill the day range from the first active day through today with zeros. */
 function fillDays(data: { day: string; minutes: number }[]): { day: string; minutes: number }[] {
   if (data.length === 0) return [];

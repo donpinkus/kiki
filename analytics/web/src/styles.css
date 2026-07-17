@@ -71,6 +71,9 @@ tr:hover td { background: var(--panel-2); }
   from { background: #33405e; }
 }
 
+/* Launch tab chart grid */
+.launch-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 12px; }
+
 /* Ops stat tiles */
 .stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
 .stat { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }

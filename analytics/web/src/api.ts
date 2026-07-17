@@ -227,3 +227,36 @@ export interface TestRun {
 }
 
 export const listTestRuns = () => api<{ runs: TestRun[] }>('/admin/api/test-runs');
+
+// ─── Launch analytics ────────────────────────────────────────────────────────
+
+export interface LaunchDaily {
+  day: string;
+  dau?: number;
+  new_users?: number;
+  drawings?: number;
+  streams?: number;
+  frames?: number;
+  dead_streams?: number;
+  errors?: number;
+  ttfi_p50?: number | null;
+  ttfi_p90?: number | null;
+}
+
+export interface LaunchData {
+  daily: LaunchDaily[];
+  funnel: { signed_up: number; opened_drawing: number; saw_image: number; returned: number };
+  cohorts: { week: string; signups: number; d1: number; w1: number }[];
+  errorUsers: { user_id: string; email: string | null; errors: number; last_at: string }[];
+  recentErrors: {
+    occurred_at: string;
+    user_id: string;
+    email: string | null;
+    name: string;
+    properties: Record<string, unknown>;
+  }[];
+  summary: { ttfi_p50_7d: number | null; ttfi_p90_7d: number | null } | null;
+}
+
+export const getLaunch = (excludeTest: boolean) =>
+  api<LaunchData>(`/admin/api/launch${excludeTest ? '?excludeTest=1' : ''}`);
