@@ -1,6 +1,6 @@
 # Kiki Insights
 
-Internal, per-user analytics microsite for Kiki. Where PostHog/Sentry give an
+Internal, per-user analytics microsite for Kiki. Where Sentry gives an
 aggregate view, this gives a **single user's full history**: every app open on a
 timeline, session durations, the complete event stream, and (once iOS uploads
 them) the drawings they made.
@@ -125,7 +125,7 @@ Both senders target the `/ingest` contract above:
 
 - **Backend dual-write** — `backend/src/modules/insights/client.ts` mirrors every
   `analytics/index.ts` event to `/ingest` (service key), batched/best-effort,
-  alongside PostHog. Enabled by setting `INSIGHTS_URL` + `INSIGHTS_INGEST_KEY` on
+  Enabled by setting `INSIGHTS_URL` + `INSIGHTS_INGEST_KEY` on
   the backend (no-op otherwise).
 - **iOS event mirror** — `ios/Kiki/App/InsightsSink.swift`; `Analytics.track`
   also posts to `/ingest` (Bearer = existing access token). Adds

@@ -122,8 +122,8 @@ async def websocket_stream(ws: WebSocket):
     )
     # Optional shared-secret gate for deployments where this server sits on a
     # public IP with the port open to the internet (Lambda Cloud), unlike the
-    # RunPod proxy whose per-pod hostname is effectively unguessable. No-op
-    # when KIKI_WS_TOKEN is unset (RunPod path unchanged).
+    # proxy with an unguessable hostname. No-op when KIKI_WS_TOKEN is unset
+    # (local dev unchanged).
     expected_token = os.environ.get("KIKI_WS_TOKEN", "")
     if expected_token and ws.query_params.get("token") != expected_token:
         logger.warning(

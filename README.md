@@ -1,6 +1,6 @@
 # Kiki
 
-Kiki is an iPad-native sketch-to-image prototype. The user draws on the left side of the canvas and receives a live AI interpretation on the right via a Fastify backend that relays canvas frames to fal.ai's hosted FLUX.2-klein realtime model. (A per-session RunPod FLUX.2-klein path remains as a dormant, revertable fallback via `IMAGE_PROVIDER=runpod`; the LTX video idle-state animation still runs on RunPod.)
+Kiki is an iPad-native sketch-to-image prototype. The user draws on the left side of the canvas and receives a live AI interpretation on the right via a Fastify backend that relays canvas frames to fal.ai's hosted FLUX.2-klein realtime model. (A self-hosted image path on Lambda Cloud H100s is available as a dev toggle via `IMAGE_PROVIDER=lambda`; the LTX video idle-state animation is archived pending a Lambda port — see `archive/video-ltx/`.)
 
 Current status: Phase 1 prototype.
 
@@ -38,13 +38,9 @@ cd backend
 npm run deploy
 ```
 
-For the full decision tree of pod operations — deploy, iterate on pod code, run experiments, SSH, terminate — see [`documents/references/pod-operations.md`](./documents/references/pod-operations.md).
-
 Environment vars in two places:
 - **Production** (Railway-hosted backend) — values live on Railway. Template is [`backend/.env.example`](./backend/.env.example); the team has current values set already.
-- **Local scripts** (`npm run deploy`, `npm run launch-test-pod`, etc.) — read from `<repo-root>/.env.local` (gitignored). Minimum set: `RUNPOD_API_KEY`, `NETWORK_VOLUMES_BY_DC`, `NETWORK_VOLUMES_BY_DC_VIDEO`. See pod-operations.md "Global prerequisites" for the full list.
-
-Pods themselves boot from stock `runpod/pytorch` and read app code off pre-populated network volumes; see `documents/references/provider-config.md`.
+- **Local scripts** — read from `<repo-root>/.env.local` (gitignored): `FAL_KEY`, `LAMBDA_API_KEY`, optional `SENTRY_DSN`. See `backend/scripts/README.md`.
 
 ### iOS
 
@@ -61,7 +57,7 @@ swift test --package-path ios/Packages/NetworkModule
 swift test --package-path ios/Packages/ResultModule
 ```
 
-### Pod-Side Server Utilities
+### Image-Server Utilities
 
 ```bash
 python3 model-servers/dev/image_client.py --help
@@ -70,22 +66,22 @@ python3 model-servers/dev/image_client.py --help
 ## Repository Layout
 
 - `ios/`: iPad app, SwiftUI views, app coordinator, local Swift packages
-- `backend/`: Fastify server, fal.ai image relay (`modules/fal/`) + RunPod orchestration (video + dormant image fallback)
-- `model-servers/`: Python WebSocket servers for RunPod pods — video idle-state (live) and the dormant image fallback
+- `backend/`: Fastify server, fal.ai image relay (`modules/fal/`), Lambda Cloud dev path (`modules/lambda/`)
+- `model-servers/`: Python image server (FLUX.2-klein), served on Lambda Cloud
+- `archive/`: removed-but-reusable code (LTX video system for the planned Lambda port)
 - `documents/`: decisions, plans, content safety, provider references
-- `backend/scripts/`: operational one-off scripts (network volume population, capacity probes)
+- `backend/scripts/`: deploy + Lambda Cloud tooling
 
 ## Key References
 
 - [`CLAUDE.md`](./CLAUDE.md): current architecture and product constraints
-- [`documents/references/pod-operations.md`](./documents/references/pod-operations.md): canonical decision tree for deploying / iterating / experimenting / SSHing / terminating pods (read this for any operations work)
 - [`documents/references/content-safety.md`](./documents/references/content-safety.md): App Store and safety requirements
-- [`documents/references/provider-config.md`](./documents/references/provider-config.md): orchestration architecture, network volumes, costs
+- [`documents/references/provider-config.md`](./documents/references/provider-config.md): provider architecture (fal + Lambda), billing, costs
 - [`documents/decisions.md`](./documents/decisions.md): implementation history and decisions
 
 ## Known Limitations
 
-- Auth is Sign in with Apple → JWT, with durable accounts in Postgres. The Apple in-app *subscription purchase* (StoreKit) isn't built yet — unsubscribed users hit a $10/month fal-spend cap and are blocked with a "subscribe" message; flagged test accounts are unlimited.
-- The live (fal.ai) image path reaches its first frame in ~1.5s. The dormant RunPod image fallback and the RunPod video idle-state pod still cold-start in ~1–3 min (pod setup + model warmup during provisioning).
+- Auth is Sign in with Apple → JWT, with durable accounts in Postgres. The Apple in-app *subscription purchase* (StoreKit 2) is built but not yet live in App Store Connect — unsubscribed users hit a $10/month fal-spend cap; flagged test accounts are unlimited.
+- The live (fal.ai) image path reaches its first frame in ~1.5s when the pool is warm (a keep-warm pinger maintains this); the Lambda dev path cold-starts in ~3 min when its instance isn't up.
 - Safety/compliance items called out in `CLAUDE.md` and `documents/references/content-safety.md` are not fully implemented yet.
 - Some planning docs remain useful context but are partially stale; trust the code and `CLAUDE.md` first.

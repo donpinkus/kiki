@@ -41,8 +41,7 @@ PIPELINE_VARIANT = os.getenv("FLUX_PIPELINE", "base")
 
 # torch.compile the transformer at load (measured 1.2-1.25x per-frame on H100 BF16,
 # pixel-identical output; ~80-90s one-time compile absorbed into warmup). Off by
-# default: on RunPod 5090 spot the compile cost/benefit is unmeasured. Set
-# FLUX_COMPILE=1 on Lambda serving instances (boot.sh).
+# default; set FLUX_COMPILE=1 on Lambda serving instances (boot.sh).
 USE_COMPILE = os.getenv("FLUX_COMPILE", "0") == "1"
 
 # The LTX-2.3 video config section was removed with the RunPod video path

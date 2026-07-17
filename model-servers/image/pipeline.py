@@ -71,7 +71,7 @@ class FluxKleinPipeline:
         # asyncio.to_thread could overlap frames.
         self._lock = threading.Lock()
         # Per-substage load timings (ms). Surfaced on /health so the orchestrator
-        # can record them as phase keys on pod.provision.completed in PostHog.
+        # can record them as phase keys in boot telemetry.
         self._phase_timings: dict[str, int] = {}
         # Read at __init__ (before load) so it's available even if load() crashes —
         # /health can still report the version that's deployed on this volume.

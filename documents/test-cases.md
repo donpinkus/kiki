@@ -62,7 +62,7 @@ Last updated: 2026-04-19
 
 ## Reliability & Edge Cases
 
-20. **Pod spot preemption.** If the GPU pod is reclaimed by RunPod (spot preemption), the backend transparently replaces it with a new pod. The user may see a brief interruption in generation but the app does not crash, freeze, or show a permanent error. Generation resumes automatically.
+20. **Upstream drop mid-session.** If the image provider connection drops mid-session (fal pool churn, network blip), the backend reconnects transparently. The user may see a brief interruption in generation but the app does not crash, freeze, or show a permanent error. Generation resumes automatically.
 
 21. **Pod provisioning failure.** If pod provisioning fails (no GPU capacity, container pull timeout, etc.), the app retries automatically with exponential backoff. The user sees provisioning status messages during retry, not a dead "Connecting..." state.
 

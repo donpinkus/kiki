@@ -14,6 +14,18 @@ Record implementation decisions here as they are made. Newest first. This preven
 
 ---
 
+### 2026-07-17 — Remove RunPod orchestration + PostHog; Kiki Insights is the analytics store
+
+**Context:** The production image path moved to fal.ai on 2026-06-06 and the Lambda Cloud H100 path became the in-progress self-hosted alternative; the RunPod image path had been dormant for six weeks and the LTX video idle-state was off. PostHog had been fully shadowed by Kiki Insights (every event dual-written) since 2026-06. Owner asked for a cleanup pass: eliminate RunPod entirely, archive what a future Lambda video port needs, drop PostHog, keep Sentry.
+
+**Decision:** Delete the pod-orchestration system wholesale — `modules/orchestrator/`, the Redis client + session registry + provision rate limiter, the `/v1/ops` cost endpoints, RunPod scripts/workflows, and the video relay path in `stream.ts`. `stream.ts` now serves exactly two providers (fal prod, lambda dev) and emits `connecting`/`ready` state transitions inline on the WS connection — no cross-connection broker, since with no pods there is no out-of-band lifecycle to fan out. Redis is gone entirely (it existed so pod sessions survived backend deploys; Postgres holds all remaining durable state). The LTX video serving code + design docs + perf investigations are archived in `archive/video-ltx/` with porting notes; iOS's video render path stays in place, inert. PostHog removed on both platforms; `Analytics.track` → InsightsSink only.
+
+**Alternatives considered:** Keeping a thin Redis-backed state broker for the fal path (rejected — the broker only mattered when provisioning outlived a single connection); archiving the backend orchestrator too (rejected — it's RunPod-shaped GraphQL code; a Lambda video port will look like the lambda devPool instead, and git history retains it at `d9e3c43`); keeping the provision rate limiter (rejected — it gated pod provisions; fal abuse is bounded by the $10/mo spend cap).
+
+**Consequences:** `IMAGE_PROVIDER` default changed `runpod`→`fal` (Railway already sets `fal` explicitly — no behavior change). `npm run deploy` is now plain `railway up` (no volume sync, no `.flux-app-version`/`.git-sha` stamping). Railway env vars RUNPOD_API_KEY, NETWORK_VOLUMES_BY_DC(_VIDEO), REDIS_URL (+ addon), VIDEO_POD_ENABLED, ONDEMAND_*, PREEMPTION_*, RECONCILE_*, POD_BOOT_*, COST_*, OPS_API_KEY, MAX_CONCURRENT_PROVISIONS, PUBLIC_KEY are unused and can be deleted; the 11 RunPod network volumes (~$49/mo) can be destroyed. iOS `state:'terminated'` handling never fires anymore (no idle reaper); signout no longer aborts server-side session state.
+
+---
+
 ### 2026-07-13 — Retraction: `CGColorSpaceCreateDeviceRGB()` is NOT Display P3 on iOS
 
 **Context:** A deep color-pipeline review flagged the two remaining `CGColorSpaceCreateDeviceRGB()` call sites (`EyedropperRing.sampleColor`, `DiskColorPicker.generateSBImage`) as bugs, based on the 2026-06-08 claim that DeviceRGB resolves to Display P3 on iPads. Double-checking that premise empirically overturned it.

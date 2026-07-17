@@ -26,22 +26,22 @@ cd backend && npm run dev          # Dev server
 cd backend && npm run build        # Build
 cd backend && npm test             # Run tests
 cd backend && npm run lint         # Lint
-cd backend && npm run deploy       # Deploy backend + pod app code (see documents/references/pod-operations.md)
+cd backend && npm run deploy       # Deploy to Railway (railway up + Sentry deploy markers)
 ```
 
 ## Architecture Decisions (Decided — Do Not Propose Alternatives)
 
 **iOS:** SwiftUI for UI. **Metal for drawing** (CAMetalLayer + CADisplayLink, instanced stamp-based brush engine — see Canvas Engine below). Swift Concurrency (actors, async/await) — no Combine. URLSession for networking — no third-party HTTP libs. SwiftData for persistence. 3 local Swift packages via SPM. AppCoordinator (@Observable) injected via environment.
 
-**Backend:** TypeScript + Fastify — no Express. Railway for hosting. Backend is both a WebSocket relay AND a pod orchestrator: it provisions per-session pods (JWT-authenticated), relays frames to them, and terminates pods idle > 30 min. Two pod kinds, different GPUs: **image pods on RTX 5090** (FLUX.2-klein, NVFP4 — now dormant; the live image path is fal hosted, see Generation below) and **video pods on H100 SXM 80 GB** (LTX-2.3 22B distilled FP8 + Gemma encoder — still the production video idle-state path). Two separate per-DC volume sets — image volumes in 5090-stocked DCs, video volumes in H100-SXM-stocked DCs (the GPU SKUs sit in disjoint DCs, so volumes can't be shared). Redis-backed session registry (survives deploys), semaphore caps concurrent cold starts. See `documents/references/provider-config.md` for the full ops picture.
+**Backend:** TypeScript + Fastify — no Express. Railway for hosting. The backend is a JWT-authenticated WebSocket relay (`routes/stream.ts`): it forwards canvas JPEGs to the image provider and streams generated frames back. Two providers, selected by `IMAGE_PROVIDER`: **fal** (production; hosted FLUX.2-klein, see Generation below) and **lambda** (dev toggle; our own image server on a Lambda Cloud H100). There is no pod orchestration and no Redis — the RunPod system (per-session GPU pods, session registry, reapers, cost monitor) was removed 2026-07-17 (`documents/decisions.md`); relays live and die with the WS connection, and Postgres holds all durable state. See `documents/references/provider-config.md` for the full ops picture.
 
-**Accounts & billing (Postgres):** A managed **Postgres** (Railway addon → required `DATABASE_URL`) is the durable system-of-record for **user accounts** (`users`: `user_id`, `apple_sub` UNIQUE, `email`, `is_test_account`, `subscription_status`, `subscription_expires_at`) and the **per-user monthly fal-spend cap** ledger (`monthly_usage`). Raw `pg` + idempotent `schema.sql` + `migrate.ts` at boot, in `backend/src/postgres/` (mirrors `analytics/`). Sign in with Apple → JWT upserts the `users` row (`routes/auth.ts`); the old Redis user hash is retired. **Cap:** unsubscribed users get `FREE_TIER_FAL_USD` (=$10) of fal drawing spend per UTC month — test accounts + active subscribers exempt; hard mid-session stop, metered PG-direct (`backend/src/modules/falBudget/`, enforced in `routes/stream.ts`). The Apple **subscription purchase flow (StoreKit 2) is built** (Stage 3): one auto-renewable product `com.don.Kiki.pro.monthly` (~$4/mo, monthly, no trial). iOS `SubscriptionManager` purchases + posts the verified `Transaction.jwsRepresentation` to JWT-authed `POST /v1/subscription/verify`; a public `POST /v1/app-store/notify` webhook (App Store Server Notifications V2) handles renew/cancel/refund/expire. Both verify the Apple JWS with the official `@apple/app-store-server-library` (no P8 key — verification needs only the committed Apple Root CA; no required new env vars, though `APPLE_APP_APPLE_ID` must be set before *production* StoreKit verification works — sandbox/TestFlight works without it). State is **derived from the transaction** (`active` iff not revoked && `expiresDate > now`), persisted on `users` (`original_transaction_id` binds the sub to a user; `subscription_last_signed_ms` is a monotonic ordering guard for out-of-order/duplicate webhooks), and the cap exemption now also requires `subscription_expires_at > now()` so a missed webhook self-heals. Code: `backend/src/modules/appstore/`, `backend/src/routes/{subscription,appStoreNotify}.ts`, iOS `App/SubscriptionManager.swift` + `Views/PaywallView.swift`. Still Donald-side before it's live: create the App Store Connect product + set the V2 notification URL to the webhook (both Sandbox + Production). Redis still owns the ephemeral session registry + provision rate limiter (not Postgres). See `documents/decisions.md` (2026-06-06).
+**Accounts & billing (Postgres):** A managed **Postgres** (Railway addon → required `DATABASE_URL`) is the durable system-of-record for **user accounts** (`users`: `user_id`, `apple_sub` UNIQUE, `email`, `is_test_account`, `subscription_status`, `subscription_expires_at`) and the **per-user monthly fal-spend cap** ledger (`monthly_usage`). Raw `pg` + idempotent `schema.sql` + `migrate.ts` at boot, in `backend/src/postgres/` (mirrors `analytics/`). Sign in with Apple → JWT upserts the `users` row (`routes/auth.ts`); the old Redis user hash is retired. **Cap:** unsubscribed users get `FREE_TIER_FAL_USD` (=$10) of fal drawing spend per UTC month — test accounts + active subscribers exempt; hard mid-session stop, metered PG-direct (`backend/src/modules/falBudget/`, enforced in `routes/stream.ts`). The Apple **subscription purchase flow (StoreKit 2) is built** (Stage 3): one auto-renewable product `com.don.Kiki.pro.monthly` (~$4/mo, monthly, no trial). iOS `SubscriptionManager` purchases + posts the verified `Transaction.jwsRepresentation` to JWT-authed `POST /v1/subscription/verify`; a public `POST /v1/app-store/notify` webhook (App Store Server Notifications V2) handles renew/cancel/refund/expire. Both verify the Apple JWS with the official `@apple/app-store-server-library` (no P8 key — verification needs only the committed Apple Root CA; no required new env vars, though `APPLE_APP_APPLE_ID` must be set before *production* StoreKit verification works — sandbox/TestFlight works without it). State is **derived from the transaction** (`active` iff not revoked && `expiresDate > now`), persisted on `users` (`original_transaction_id` binds the sub to a user; `subscription_last_signed_ms` is a monotonic ordering guard for out-of-order/duplicate webhooks), and the cap exemption now also requires `subscription_expires_at > now()` so a missed webhook self-heals. Code: `backend/src/modules/appstore/`, `backend/src/routes/{subscription,appStoreNotify}.ts`, iOS `App/SubscriptionManager.swift` + `Views/PaywallView.swift`. Still Donald-side before it's live: create the App Store Connect product + set the V2 notification URL to the webhook (both Sandbox + Production). See `documents/decisions.md` (2026-06-06).
 
-**Generation (live img2img):** **fal.ai hosted `fal-ai/flux-2/klein/realtime`** is the production image path, selected by `IMAGE_PROVIDER=fal` on the backend. The backend relays each canvas JPEG to fal over a per-session realtime WebSocket (msgpack, server-side `Authorization: Key $FAL_KEY` — no secret on the client) and streams generated frames back. ~1.5s to first frame (no pod cold start), ~250ms/frame at 3 steps, ~2 FPS. fal's conditioning is its img2img feedback loop (`output_feedback_strength`/`schedule_mu`), NOT our reference-mode VAE-concat — tune those params for look. Code: `backend/src/modules/fal/falImageRelay.ts` (a `StreamRelay` drop-in) + the `IMAGE_PROVIDER` branch in `routes/stream.ts`. fal emits no `queueEmpty`, so the relay synthesizes a `frame_meta{queueEmpty}` before each frame (same semantics as the pod) to keep the video idle-state trigger working. **Billing = time a warm runner is ATTACHED to your open connection** (~$0.00194/s). The **cold spin-up / enqueue wait is NOT billed** (no runner attached yet); an idle-open *warm* socket **IS** billed. This model reconciles both verification datasets: 2026-06-06 controlled runs (30.4 s open / 1 frame → $0.060 — warm-idle bills) and 2026-07-14 dashboard readback (7,526 s open of which ~6,700 s cold-wait → $1.46 ≈ the ~830 s warm-attached remainder). So the lazy-connect + `FAL_IDLE_CLOSE_MS` levers still matter (they cut warm-idle time), and `falBudget`'s open-seconds metering is approximately right for warm drawing sessions (slight overcount during cold waits only). Two cost levers in `falImageRelay.ts`: **lazy-connect** (no socket until the first stroke → opening a drawing without drawing is $0) and **`FAL_IDLE_CLOSE_MS`** (Railway env, set to `2000`; close the WS N ms after the last frame, reopen on the next stroke, so idle bills ~N s instead of ~30 s — `0` disables). fal force-closes idle sockets after ~30 s; the relay reconnects lazily. Full billing notes in `documents/references/provider-config.md`. **Keep-warm (2026-07-13):** fal's marketplace pool scales to zero (warmth lapses <15 min idle; cold spin-up ~1.7–3.5 min during which fal *silently drops* all inputs and clean-closes the WS ~30 s in — NOT settings-dependent, measured). `backend/src/modules/fal/falWarmer.ts` pings the endpoint every **2 min** (tiny 1-step frame; ~$1/day-ish, cheap under compute billing) so first strokes hit a warm pool. The 2-min cadence is a measured boundary, not a guess (binary-searched 2026-07-14): warmth holds at ≤120 s gaps (0% cold, n=61) and collapses at 150 s (60% cold) / 240 s (79% cold). Don't raise the interval above 120 s — the cost difference between cadences is negligible (cold waits aren't billed); the UX difference is total. Runtime dial lives in the `admin_config.fal_warmer` Postgres row — edited live from **Kiki Insights → Ops** (enabled / interval / daily off-window, default off 2–8 am America/Los_Angeles); env `FAL_WARMER_*` only seeds the row. Ping history in `fal_warmer_pings` (Insights Ops page + Sentry `event:fal.warm_ping`).
+**Generation (live img2img):** **fal.ai hosted `fal-ai/flux-2/klein/realtime`** is the production image path, selected by `IMAGE_PROVIDER=fal` on the backend. The backend relays each canvas JPEG to fal over a per-session realtime WebSocket (msgpack, server-side `Authorization: Key $FAL_KEY` — no secret on the client) and streams generated frames back. ~1.5s to first frame (no pod cold start), ~250ms/frame at 3 steps, ~2 FPS. fal's conditioning is its img2img feedback loop (`output_feedback_strength`/`schedule_mu`), NOT our reference-mode VAE-concat — tune those params for look. Code: `backend/src/modules/fal/falImageRelay.ts` (implements `ImageRelay`) + the fal branch in `routes/stream.ts`. fal emits no `queueEmpty`, so the relay synthesizes a `frame_meta{queueEmpty}` before each frame — kept so the future idle-state video trigger (archived, see below) can key off it unchanged. **Billing = time a warm runner is ATTACHED to your open connection** (~$0.00194/s). The **cold spin-up / enqueue wait is NOT billed** (no runner attached yet); an idle-open *warm* socket **IS** billed. This model reconciles both verification datasets: 2026-06-06 controlled runs (30.4 s open / 1 frame → $0.060 — warm-idle bills) and 2026-07-14 dashboard readback (7,526 s open of which ~6,700 s cold-wait → $1.46 ≈ the ~830 s warm-attached remainder). So the lazy-connect + `FAL_IDLE_CLOSE_MS` levers still matter (they cut warm-idle time), and `falBudget`'s open-seconds metering is approximately right for warm drawing sessions (slight overcount during cold waits only). Two cost levers in `falImageRelay.ts`: **lazy-connect** (no socket until the first stroke → opening a drawing without drawing is $0) and **`FAL_IDLE_CLOSE_MS`** (Railway env, set to `2000`; close the WS N ms after the last frame, reopen on the next stroke, so idle bills ~N s instead of ~30 s — `0` disables). fal force-closes idle sockets after ~30 s; the relay reconnects lazily. Full billing notes in `documents/references/provider-config.md`. **Keep-warm (2026-07-13):** fal's marketplace pool scales to zero (warmth lapses <15 min idle; cold spin-up ~1.7–3.5 min during which fal *silently drops* all inputs and clean-closes the WS ~30 s in — NOT settings-dependent, measured). `backend/src/modules/fal/falWarmer.ts` pings the endpoint every **2 min** (tiny 1-step frame; ~$1/day-ish, cheap under compute billing) so first strokes hit a warm pool. The 2-min cadence is a measured boundary, not a guess (binary-searched 2026-07-14): warmth holds at ≤120 s gaps (0% cold, n=61) and collapses at 150 s (60% cold) / 240 s (79% cold). Don't raise the interval above 120 s — the cost difference between cadences is negligible (cold waits aren't billed); the UX difference is total. Runtime dial lives in the `admin_config.fal_warmer` Postgres row — edited live from **Kiki Insights → Ops** (enabled / interval / daily off-window, default off 2–8 am America/Los_Angeles); env `FAL_WARMER_*` only seeds the row. Ping history in `fal_warmer_pings` (Insights Ops page + Sentry `event:fal.warm_ping`).
 
-**RunPod image path (dormant, revertable):** the prior path — FLUX.2-klein-4B on RunPod RTX 5090 spot with BFL's NVFP4 checkpoint over the BF16 pipeline, reference-mode VAE-concat conditioning, ~96s cold start (p95 ~157s), pods booting from stock `runpod/pytorch` and reading app code + venv off pre-populated weight volumes — is kept intact and selected by `IMAGE_PROVIDER=runpod` (the default). Revert = set the env back + redeploy. **Video idle-state animation stays on RunPod regardless of `IMAGE_PROVIDER`.**
+**Lambda image path (dev, in progress):** `IMAGE_PROVIDER=lambda` (or the per-session `?imageProvider=lambda` override, test accounts only) relays to our own image server (`model-servers/image/server.py`, FLUX.2-klein BF16 — H100 is Hopper, no NVFP4) on a Lambda Cloud H100: either a static `LAMBDA_IMAGE_URL` instance or the single-instance dev pool (`backend/src/modules/lambda/devPool.ts`, 30-min idle reap, redeploy re-adoption). Auth via `KIKI_WS_TOKEN` (HMAC of instance id). See `documents/plans/lambda-image-provider.md`.
 
-**Video idle-state animation:** LTX-2.3 22B distilled FP8 on H100 SXM 80 GB via Lightricks' official `ltx-pipelines.DistilledPipeline` (two-stage: half-res stage 1 + 2× upsample stage 2, 8+4 sigmas). Triggered when the image pod's `frame_meta.queueEmpty` flag fires (user paused drawing). Gemma-3-12B is the text encoder (gated — populate requires `HF_TOKEN` with Gemma terms accepted at huggingface.co). License is the **LTX-2 Community License Agreement** (NOT Apache-2.0, restricts commercial use ≥$10M revenue) — verify before App Store submission.
+**Video idle-state animation (archived, planned to return on Lambda):** the LTX-2.3 idle-state animation ran on RunPod H100 pods and was removed with the RunPod system. The serving code (pipeline, WS server, protocol test client), design docs, perf investigations, and Lambda porting notes live in `archive/video-ltx/` — read its README before reviving. iOS's video render path (`VideoEvent` parsing, `ResultState.videoStreaming/.videoLooping`, `LoopingVideoView`) is intact and inert until a backend sends `video_*` messages again. License gotcha for the revival: LTX-2 Community License Agreement (NOT Apache-2.0, restricts commercial use ≥$10M revenue) — verify before App Store submission.
 
 ## Navigation & Persistence
 
@@ -99,7 +99,7 @@ Data flows one direction: Canvas → Network → Result. Modules communicate thr
 
 ## Cost during dev/testing
 
-We do not optimize for cost during development, profiling, or one-off experiments. **Anything under $100 is negligible.** Don't waste time saving a few dollars by tearing down test pods between iterations, picking cheaper GPU SKUs that complicate debugging, or skipping a clean re-test because "we already paid for the data once." User-revenue scale dominates GPU spend by orders of magnitude; iteration speed is the real constraint. This applies to RunPod test pods, Railway redeploys, repeat profiler captures, and any other dev-time GPU/infra spend.
+We do not optimize for cost during development, profiling, or one-off experiments. **Anything under $100 is negligible.** Don't waste time saving a few dollars by tearing down test pods between iterations, picking cheaper GPU SKUs that complicate debugging, or skipping a clean re-test because "we already paid for the data once." User-revenue scale dominates GPU spend by orders of magnitude; iteration speed is the real constraint. This applies to Lambda test instances, Railway redeploys, repeat profiler captures, and any other dev-time GPU/infra spend.
 
 ## Debugging rigor (applies to every diagnosis)
 
@@ -126,12 +126,12 @@ When asked how a system behaves, trace the flow from its entrypoint (WS handler,
 | Project | Covers | DSN env var | Notes |
 |---|---|---|---|
 | `kiki-ios` | Swift app | (in iOS app config) | iOS app errors + crashes |
-| `kiki-backend` | Node/Fastify on Railway | `SENTRY_DSN` (Railway) | Backend orchestrator errors + structured logs |
-| `kiki-pod` | Python image+video pods | `SENTRY_DSN_POD` (Railway → forwarded to pod env by orchestrator) | Forwarded by `orchestrator.ts` BOOT_ENV when set |
+| `kiki-backend` | Node/Fastify on Railway | `SENTRY_DSN` (Railway) | Backend errors + structured logs |
+| `kiki-pod` | Python image server (`model-servers/`) | `SENTRY_DSN_POD` | **Currently dormant**: RunPod-era pods set it via BOOT_ENV; Lambda instances don't set it yet. Wire it into `boot.sh` if Lambda serving needs Sentry. |
 
-Pods log via stdlib `logging` → `LoggingIntegration` ships `INFO+` lines into Sentry's Logs product. Init lives in `model-servers/shared/sentry_init.py`, called from `image/server.py` (image) and `video/server.py` (video). `pod_kind:image|video` and `pod_id:<RUNPOD_POD_ID>` are attached **two ways**: as scope tags (covers errors/spans/transactions) and as log attributes via a `before_send_log` hook (covers the Logs product — scope tags don't propagate there, found out the hard way). No-op when `SENTRY_DSN_POD` is unset (local runs stay quiet).
+The Python image server logs via stdlib `logging` → `LoggingIntegration` ships `INFO+` lines into Sentry's Logs product. Init lives in `model-servers/shared/sentry_init.py`, called from `image/server.py`. `pod_kind` and `pod_id` are attached **two ways**: as scope tags (covers errors/spans/transactions) and as log attributes via a `before_send_log` hook (covers the Logs product — scope tags don't propagate there, found out the hard way). No-op when `SENTRY_DSN_POD` is unset (local runs stay quiet).
 
-**Pod logging conventions** — apply to every new `logger.X(...)` call in `model-servers/`:
+**Server logging conventions** — apply to every new `logger.X(...)` call in `model-servers/`:
 
 - **Use f-string body + `extra={...}`. Never positional `%s`/`%d`.** Positional args become opaque `message.parameter.0..N` indices in Sentry's Logs UI. f-strings render the body literally so the expanded view is human-readable, and `extra` keys auto-promote to top-level queryable attributes (Sentry SDK's `_extra_from_record` does this — same path used by `code.*` / `thread.*` / `process.*`).
 - **Use `extra={}` for fields you'd want to filter or aggregate on** (e.g. `gen_ms`, `frames`, `client_id`). Skip it for throwaway diagnostics — no value in indexing every transient string.
@@ -144,48 +144,44 @@ Pods log via stdlib `logging` → `LoggingIntegration` ships `INFO+` lines into 
 
 | `phase` value | When |
 |---|---|
-| `preparing` | Fresh launch through "able to draw". Pod: model load + warmup. Backend: orchestrator provisioning (WS-open slow path). iOS: loading state. User-language phrasing — the app is preparing to be ready. |
-| `drawing` | Active drawing, image stream live. Pod: per-frame generation. Backend: WS relay. iOS: stroke handling + preview. |
-| `animating` | User paused, video idle-state running. Pod: LTX inference + encode + stream (one block). Backend: relay (no `withPhase('animating')` wrapper — message-handler boundary; backend during video relay stays on `drawing` or unset). iOS: video preview. |
-| `reconnecting` | Recovering from a mid-session disconnect. Set by iOS + backend only; pod stays on `preparing` for any boot since it can't tell fresh-vs-reconnect. iOS detects via "warming after first frame already received." Backend wraps `handleUpstreamClose` recovery in `withPhase('reconnecting')`. |
+| `preparing` | Fresh launch through "able to draw". Backend: WS-open slow path (budget gate + relay wiring). iOS: loading state. Image server: model load + warmup. User-language phrasing — the app is preparing to be ready. |
+| `drawing` | Active drawing, image stream live. Backend: WS relay. iOS: stroke handling + preview. Image server: per-frame generation. |
+| `animating` | (Reserved for the video idle-state revival — see `archive/video-ltx/`.) iOS: video preview. |
+| `reconnecting` | Recovering from a mid-session disconnect. iOS detects via "warming after first frame already received." Backend wraps `handleUpstreamClose` recovery in `withPhase('reconnecting')`. |
 | `session_ending` | Session winding down. |
-| `deploying` | Ops-side: a deploy is in flight. Set by `backend/scripts/deploy.ts`, `sync-all-dcs.ts`, and `sync-flux-app.ts` via `backend/scripts/lib/deploy-sentry.ts`. Distinct from user-journey phases (deploys can run during active sessions). Lets you query "everything that happened during the last deploy" — including any pod boots that fired after a `sync-flux-app` finished. Requires `SENTRY_DSN` in `.env.local` for local CLI runs to ship to Sentry; no-op without it. |
+| `deploying` | Ops-side: a deploy is in flight. Set by `backend/scripts/deploy.ts` via `backend/scripts/lib/deploy-sentry.ts`. Distinct from user-journey phases (deploys can run during active sessions). Lets you query "everything that happened during the last deploy". Requires `SENTRY_DSN` in `.env.local` for local CLI runs to ship to Sentry; no-op without it. |
 
 **Mechanisms (all three layers shipped):**
 
-- **Pod-side:** `model-servers/shared/sentry_init.py` exports a `phase()` context manager backed by `contextvars.ContextVar`. Set with `with sentry_init.phase("drawing"):` — propagates through `asyncio.create_task` and `asyncio.to_thread` into all logs emitted within (Python 3.9+ copies contextvars snapshot into spawned tasks/threads).
+- **Image server (Python):** `model-servers/shared/sentry_init.py` exports a `phase()` context manager backed by `contextvars.ContextVar`. Set with `with sentry_init.phase("drawing"):` — propagates through `asyncio.create_task` and `asyncio.to_thread` into all logs emitted within (Python 3.9+ copies contextvars snapshot into spawned tasks/threads).
 - **Backend (TS):** `backend/src/modules/observability/phase.ts` exports `withPhase('preparing', async () => {...})` backed by Node `AsyncLocalStorage`. Wrap the section of code; `beforeSendLog` in `index.ts` reads the active phase at log-emit time and injects as `phase` attribute.
 - **iOS:** `ios/Kiki/App/Phase.swift` exports `Phase.set(.drawing)` (imperative, thread-safe via `OSAllocatedUnfairLock`). Imperative rather than `@TaskLocal` because URLSession WS delegate callbacks fire off-Task and TaskLocal doesn't propagate. Single-active-stream guarantees the global is unambiguous. The `Log.X` facade reads `Phase.current` at emit time.
 
-**Don't introduce pod-internal sub-phases** like `video_generate` / `video_encode` as separate top-level values — fold those into the user-journey phase (`animating`) and rely on existing structured fields (`gen_ms`, `encode_ms`) and `code.function.name` (auto-attached) for sub-stage discrimination. If a real cross-stack debugging need requires finer granularity, add a `subphase` attribute alongside.
+**Don't introduce server-internal sub-phases** as separate top-level values — fold them into the user-journey phase and rely on existing structured fields (`gen_ms` etc.) and `code.function.name` (auto-attached) for sub-stage discrimination. If a real cross-stack debugging need requires finer granularity, add a `subphase` attribute alongside.
 
-**Cross-stack user identity propagation.** All three layers tag every log + error event with `user_id`:
+**Cross-stack user identity propagation.** Every layer tags every log + error event with `user_id`:
 
 - **iOS:** `SentrySDK.setUser(User(userId:))` after sign-in (cleared on sign-out). `Log.X` facade injects `stream_id` from `StreamContext`.
-- **Backend:** `Sentry.setUser({id})` per-request (via `fastifyIntegration` async-context isolation) in `auth/index.ts` preHandler. `pinoIntegration` auto-captures Pino logs; `beforeSendLog` in `index.ts` normalizes camelCase → snake_case (`userId`→`user_id`, `podId`→`pod_id`, `videoPodId`→`video_pod_id`, `kind`→`pod_kind`, etc.) so cross-stack queries don't fragment. **Filter by `user_id:<X>` (the snake_case attribute), not `user.id:<X>` (the Sentry user model)** — the attribute is set deterministically per-log; the user model relies on ambient scope and can be wrong.
-- **Pod:** orchestrator's `bootEnvFor()` injects `KIKI_USER_ID` + `KIKI_STREAM_ID` into every freshly-provisioned pod's BOOT_ENV. `model-servers/shared/sentry_init.py` reads them once at startup, calls `sentry_sdk.set_user({id})` for errors/spans, and injects them as log attributes via `before_send_log`.
+- **Backend:** `Sentry.setUser({id})` per-request (via `fastifyIntegration` async-context isolation) in `auth/index.ts` preHandler. `pinoIntegration` auto-captures Pino logs; `beforeSendLog` in `index.ts` normalizes camelCase → snake_case (`userId`→`user_id`, etc.) so cross-stack queries don't fragment. **Filter by `user_id:<X>` (the snake_case attribute), not `user.id:<X>` (the Sentry user model)** — the attribute is set deterministically per-log; the user model relies on ambient scope and can be wrong.
+- **Image server:** `model-servers/shared/sentry_init.py` reads `KIKI_USER_ID` + `KIKI_STREAM_ID` from env at startup (RunPod-era; a shared Lambda instance serves multiple users, so per-user env attribution doesn't apply there — attribute by timestamp + backend logs instead).
 
-**Don't `Sentry.setUser` in long-lived contexts** (WS handlers, background timers, schedulers). The SDK's scope cleanup is aligned with HTTP request lifecycles via `fastifyIntegration`, not with WS-connection lifetimes. Setting user from a WS handler leaks onto the global scope and contaminates background-process logs (Cost tick, reaper, reconcile) with the most recent user's id — distorting `user_id:<X>` queries with rows that have nothing to do with that user. Backend WS-handler user attribution comes from the `userId` Pino structured field on every log call (see `routes/stream.ts` — every `request.log.X({userId, ...}, ...)` already carries it). For errors that need user attribution from inside the WS scope, pass `{ user: { id: userId } }` explicitly to `Sentry.captureException`.
+**Don't `Sentry.setUser` in long-lived contexts** (WS handlers, background timers, schedulers). The SDK's scope cleanup is aligned with HTTP request lifecycles via `fastifyIntegration`, not with WS-connection lifetimes. Setting user from a WS handler leaks onto the global scope and contaminates background-process logs with the most recent user's id — distorting `user_id:<X>` queries with rows that have nothing to do with that user. Backend WS-handler user attribution comes from the `userId` Pino structured field on every log call (see `routes/stream.ts` — every `request.log.X({userId, ...}, ...)` already carries it). For errors that need user attribution from inside the WS scope, pass `{ user: { id: userId } }` explicitly to `Sentry.captureException`.
 
-**Background-process callbacks must run via `inBackgroundScope('<name>', fn)`** from `backend/src/modules/observability/scope.ts`. Wraps the callback in `Sentry.withIsolationScope`, clears `setUser`, and tags `background_task: <name>`. Used by the cost monitor, the idle reaper, and the reconcile loop. New periodic timers should use the same helper so their logs (a) never inherit ambient user state and (b) are filterable as a class via `background_task:<name>`.
+**Background-process callbacks must run via `inBackgroundScope('<name>', fn)`** from `backend/src/modules/observability/scope.ts`. Wraps the callback in `Sentry.withIsolationScope`, clears `setUser`, and tags `background_task: <name>`. Used by the fal warmer and the Lambda dev-pool reaper. New periodic timers should use the same helper so their logs (a) never inherit ambient user state and (b) are filterable as a class via `background_task:<name>`.
 
-**Pod `stream_id` is "boot stream_id," not "current stream_id."** When a user reconnects within the same pod's idle window (30 min), the pod's `stream_id` attribute reflects the *original* connection. iOS + backend will emit a fresh `stream_id` for the new connection but the pod's logs keep the old one. Cross-reference by `user_id` + timestamp when this matters.
+**Server-side `preparing` heartbeat.** While the image server is in `phase: preparing` (model load), `preparing_heartbeat.py` emits a `preparing heartbeat:` log line every 15s with `host_rss_gib`, `cuda_alloc_gib`, `cuda_reserved_gib`, `elapsed_sec`. The trajectory tells "host RSS climbed then went silent" vs. "memory was fine, something else killed it." Threading-based (not asyncio) because pipeline.load() blocks the event loop for 60-90s.
 
-**Pod death tombstone.** Every pod termination/observed-death emits one `event:pod.death` log with `pod_id`, `pod_kind`, `user_id`, `dc`, `lifetime_ms`, `reason` — routed through the `markPodDead()` chokepoint in `orchestrator.ts`. Reasons: `idle_reaped`, `orphan_reconciled`, `replaced`, `provision_error`, `boot_stalled`, `manual`, `runpod_exited`, `unhealthy_timeout`. For `runpod_exited` / `boot_stalled` / `unhealthy_timeout`, `markPodDead` polls RunPod GraphQL for `desiredStatus` so we capture "EXITED" vs "RUNNING but unreachable." If pod was SIGKILLed (e.g., during model load — silent death), the tombstone is the only signal.
+**Cross-project search:** Sentry's UI page-filter handles "all projects" or any subset. The cross-stack `user_id`/`phase` attributes make project boundary effectively just permissions/alerts/quotas — not a data silo.
 
-**Pod-side `preparing` heartbeat.** While the pod is in `phase: preparing` (model load), `preparing_heartbeat.py` emits a `preparing heartbeat:` log line every 15s with `host_rss_gib`, `cuda_alloc_gib`, `cuda_reserved_gib`, `elapsed_sec`. Won't capture the SIGKILL itself (no log can — kernel doesn't give Python a final breath), but the trajectory tells "host RSS climbed past 65 GB then went silent" vs. "memory was fine, something else killed it." Threading-based (not asyncio) because pipeline.load() blocks the event loop for 60-90s.
+**Trace-id-based correlation across WebSocket** is *not* yet wired (Sentry auto-propagates `trace_id` for HTTP but not WS). v1 relies on `user_id` + timestamp for joining iOS → backend, which covers the common debugging queries. Add WS trace-id propagation as a follow-up if the user_id-based query proves insufficient.
 
-**Cross-project search:** Sentry's UI page-filter handles "all projects" or any subset. The cross-stack `user_id`/`pod_id`/`phase` attributes make project boundary effectively just permissions/alerts/quotas — not a data silo.
+**Clock skew across layers.** When stitching cross-stack logs by timestamp, ±1s drift between iOS / backend (Railway) is normal — all NTP-synced but not the same source. Don't over-interpret sub-second ordering.
 
-**Trace-id-based correlation across WebSocket** is *not* yet wired (Sentry auto-propagates `trace_id` for HTTP but not WS). v1 relies on `user_id` + timestamp for joining iOS → backend → pod, which covers the common debugging queries. Add WS trace-id propagation as a follow-up if the user_id-based query proves insufficient.
+**Errors UI vs Logs UI.** Sentry has two separate datasets, both filterable by `user_id`. The Errors UI shows `captureException` / `captureMessage` events with stack traces and grouping. The Logs UI shows lifecycle log lines (Pino on backend, `SentrySDK.logger.X` on iOS). When debugging, check both — different perspectives on the same incident.
 
-**Clock skew across layers.** When stitching cross-stack logs by timestamp, ±1s drift between iOS / backend (Railway) / pod (RunPod) is normal — all NTP-synced but not the same source. Don't over-interpret sub-second ordering.
+**Division of concerns:** Sentry owns errors and stdout/stderr logs exclusively; Kiki Insights owns product analytics events, per-user timelines, and session replay. (PostHog was removed 2026-07-17 — Insights had fully replaced it.)
 
-**Errors UI vs Logs UI.** Sentry has two separate datasets, both filterable by `user_id`. The Errors UI shows `captureException` / `captureMessage` events with stack traces and grouping. The Logs UI shows lifecycle log lines (Pino on backend, stdlib `logger` on pods, `SentrySDK.logger.X` on iOS). When debugging, check both — different perspectives on the same incident. The `pod.death` tombstone is in Logs (queryable as a record); `PodBootStallError` is in Errors (alerting + grouping); both fire for a stalled boot.
-
-**PostHog** stays in its lane: product analytics events only (per `feedback_single_observability.md`). Errors and stdout/stderr go to Sentry exclusively.
-
-**Kiki Insights** (`analytics/`) is our own **internal per-user analytics dashboard** — a standalone Railway service (`kiki-insights` in the `kiki-backend` project) at `https://kiki-insights-production.up.railway.app` (admin-password gated; password in the `ADMIN_PASSWORD` Railway var). It answers "what has *this one user* done over their whole time in Kiki" — login/session timeline, full event stream, and a drawings gallery — which the aggregate-first PostHog/Sentry views don't. It **shares the backend's Postgres**: reads the backend-owned `users` (identity, `is_test_account`, subscription) + `monthly_usage` (fal spend) and owns its own `events`/`sessions`/`drawings` tables; blobs live on a Railway volume behind a swappable `BlobStore`. It does **not** replace PostHog/Sentry — it complements them (mirrors the same events into a store we own, plus drawings). Events arrive via dual-write: the backend mirrors every `analytics/index.ts` event (`modules/insights/client.ts`, gated by `INSIGHTS_URL`+`INSIGHTS_INGEST_KEY`), and iOS mirrors every `Analytics.track` (`InsightsSink.swift`, gated by `insightsURL` in `AppCoordinator.init`). Deploy with `cd analytics && railway up --ci --service kiki-insights --path-as-root .` (the `--path-as-root .` is **required** — without it `railway up` uploads the repo root and the build fails). Full details + schema + setup: `analytics/README.md`.
+**Kiki Insights** (`analytics/`) is our own **internal per-user analytics dashboard** — a standalone Railway service (`kiki-insights` in the `kiki-backend` project) at `https://kiki-insights-production.up.railway.app` (admin-password gated; password in the `ADMIN_PASSWORD` Railway var). It answers "what has *this one user* done over their whole time in Kiki" — login/session timeline, full event stream, and a drawings gallery — which the aggregate-first Sentry views don't. It **shares the backend's Postgres**: reads the backend-owned `users` (identity, `is_test_account`, subscription) + `monthly_usage` (fal spend) and owns its own `events`/`sessions`/`drawings` tables; blobs live on a Railway volume behind a swappable `BlobStore`. It does **not** replace Sentry — Sentry keeps errors/logs; Insights is the product-analytics store. Events arrive from both layers: the backend sends every `modules/analytics/index.ts` event (`modules/insights/client.ts`, gated by `INSIGHTS_URL`+`INSIGHTS_INGEST_KEY`), and iOS sends every `Analytics.track` (`InsightsSink.swift`, gated by `insightsURL` in `AppCoordinator.init`). Deploy with `cd analytics && railway up --ci --service kiki-insights --path-as-root .` (the `--path-as-root .` is **required** — without it `railway up` uploads the repo root and the build fails). Full details + schema + setup: `analytics/README.md`.
 
 **Querying logs programmatically** (e.g. for analysis without copy-pasting): use the Sentry MCP server (`https://mcp.sentry.dev/mcp`) — registered at user scope on Donald's Claude Code config, exposes `search_events` / `search_issues` / `search_spans`. Avoids the manual "paste logs into chat" workflow.
 
@@ -195,58 +191,44 @@ Standard query patterns. Sentry → Logs UI, "all projects" page filter unless n
 
 | Question | Query |
 |---|---|
-| Full timeline of one user's session (iOS + backend + pod, all 3 layers) | `user_id:<X>` sorted ascending by time |
+| Full timeline of one user's session (iOS + backend) | `user_id:<X>` sorted ascending by time |
 | What happened during the user's preparing phase | `user_id:<X> phase:preparing` |
-| Replay today's incident (user went through 2 video pods) | `user_id:<X> phase:preparing pod_kind:video` |
-| Specific pod (any kind) | `pod_id:<X> OR video_pod_id:<X>` *(disjunction needed: backend uses separate fields for image vs. video pods on the same line; pod-side always uses `pod_id`)* |
-| All pod deaths | `event:pod.death` (add `reason:<X>` to scope) |
-| Pods that died unexpectedly (RunPod-side or health-fail) | `event:pod.death reason:runpod_exited OR reason:unhealthy_timeout OR reason:boot_stalled` |
+| One specific WS connection | `conn_id:<X>`; the whole user attempt across reconnects is `stream_id:<X>` |
+| Relay wiring failures for one user | `event:wire_relay_session_failed user_id:<X>` (one row with the per-attempt array) |
 | Logs we forgot to wrap in a phase | `user_id:<X> !has:phase` |
-| Verify deploy correlates with errors | `phase:deploying` (on Logs UI) +  Errors UI filtered by time around that deploy |
+| Verify deploy correlates with errors | `phase:deploying` (on Logs UI) + Errors UI filtered by time around that deploy |
 
 When a user reports an issue, default workflow:
-1. Get `user_id` from PostHog or in-app context.
+1. Get `user_id` from Kiki Insights or in-app context.
 2. `user_id:<X>` Logs query, sorted by time → see what happened.
 3. If phase-specific (e.g. "stuck on loading" → `phase:preparing`).
-4. If pod-specific death (`event:pod.death`).
-5. Cross-check Errors UI for stack traces around that timeframe.
+4. Cross-check Errors UI for stack traces around that timeframe.
+5. For session content ("my drawing looked wrong"), replay the session in Insights → Gallery.
 
 ### Reading wire_relay failures
 
-When the backend can't open a WS to a freshly-ready pod (`wire_relay_failed`), the symptom alone is consistent with several causes. The structured logs added in commit `<TBD>` capture enough detail to narrow without manual cross-referencing. `pod.ws_upgrade_unreachable` (low-card metric) and `wire_relay_session_failed` (rich forensic) fire on every fully-failed wire_relay session; `pod.ws.upgrade_attempt` / `pod.ws.accepted` / `pod.ws.first_send_ok` fire pod-side at each handshake transition; and `wire_relay_failed` per-attempt logs carry phase timings (`dnsMs`/`tcpMs`/`tlsMs`/`upgradeMs`), error codes (`errno`), and HTTP response details (`httpStatus`, `httpHeaders.cf-ray`/`server`, truncated `httpBodySample`).
+When the backend can't open a WS to the image provider (`wire_relay_failed`), the symptom alone is consistent with several causes. `wire_relay_session_failed` (rich forensic, one row per failed session) fires when every attempt failed; `wire_relay_failed` per-attempt logs carry phase timings (`dnsMs`/`tcpMs`/`tlsMs`/`upgradeMs`), error codes (`errno`), and HTTP response details (`httpStatus`, `httpHeaders`, truncated `httpBodySample`).
 
-Reading the patterns — *interpretation guide, not proof of cause*. A given query result may match multiple candidates; goal is to narrow.
+Reading the patterns — *interpretation guide, not proof of cause*:
 
 | If queries show… | …a candidate explanation that fits |
 |---|---|
-| `kind:timeout` + `health_probe_ok:true` + `runpod_status:RUNNING` + no `pod.ws.upgrade_attempt` on pod | Proxy-level drop: pod alive, /health works through proxy, only /ws traffic lost between proxy and pod |
-| `kind:unexpected_response` + `httpStatus:5xx` + `httpHeaders.cf-ray` populated | Cloudflare-style proxy upstream returned 5xx before reaching pod |
-| `kind:unexpected_response` + `httpStatus:5xx` + `httpHeaders.server:uvicorn` + traceback in `httpBodySample` | Pod-side route handler issue (FastAPI threw, etc.) |
-| `health_probe_ok:false` (timeout/error) + `runpod_status:RUNNING` | Pod's Uvicorn workers wedged (process alive, HTTP unresponsive) |
-| `runpod_status:EXITED` or `runtime:null` | Pod itself died |
+| `kind:unexpected_response` + `httpStatus:5xx` + `httpHeaders.server:uvicorn` + traceback in `httpBodySample` | Lambda image-server route handler issue (FastAPI threw, etc.) |
+| `errno:ECONNREFUSED` on the lambda path | Instance up but server not listening (boot.sh failed / venv broken) |
 | `errno:ENOTFOUND` / `EAI_AGAIN`, or `phaseTimings.dnsMs > 1000` | DNS / Railway-side network |
-| `phaseTimings.tlsMs > 5000` | TLS handshake slow (rare; possibly MITM or congested network) |
-| Same `pod_id` repeats across multiple incidents | Pod-specific (memory, route handler corruption) |
-| Each incident has unique `pod_id`, mostly different DCs | Spread = transient infra |
-| Pod has `event:pod.ws.upgrade_attempt` matching the failed connId timestamp | Rules out proxy-level drop — traffic reached pod, failure is between accept() and 'open' |
+| `phaseTimings.tlsMs > 5000` | TLS handshake slow (rare; congested network) |
+| fal-path failures | Check fal status + `fal_connections` history (Insights → Ops) — cold-pool spin-up silently drops inputs (see Keep-warm above) |
 
-**Note:** retry policy is intentionally NOT tuned in the same PR that added these logs. Future tuning should follow from the captured per-attempt timings + failure-kind distribution, not from any code-comment priors. The current behavior (1 retry @ 2s, 10s per-attempt timeout) was inherited from an unproven assumption ("RunPod proxy occasionally drops") and may or may not be correct — observation will tell.
-
-**Event-name family:** new dot-notation events for this debugging surface — `wire_relay_failed`, `wire_relay_open`, `wire_relay_session_failed`, `pod.ws_upgrade_unreachable`, `pod.ws.upgrade_attempt`, `pod.ws.accept_failed`, `pod.ws.accepted`, `pod.ws.first_send_ok`, `pod.app.startup`. Search by `event:<name>` in Sentry Logs UI; use `has:event` for the MCP-rewriting workaround documented elsewhere in this file.
+**Event-name family:** `wire_relay_failed`, `wire_relay_open`, `wire_relay_session_failed`. Search by `event:<name>` in Sentry Logs UI.
 
 ## Key References
 
 | When | Read |
 |------|------|
 | Content safety / App Store compliance | `documents/references/content-safety.md` |
-| **Pod operations — deploy / iterate / SSH / experiment / terminate** (decision tree, self-contained) | `documents/references/pod-operations.md` |
-| Provider/orchestration architecture, network volumes, costs | `documents/references/provider-config.md` |
-| Getting a model performant on RunPod (persistent-model architecture, OOM/perf diagnosis, dev iteration loop, lessons from LTX-2.3) | `documents/references/runpod-model-serving-playbook.md` |
-| Pod lifecycle edge cases (MUST-handle matrix)          | `backend/src/modules/orchestrator/orchestrator.ts` (file header) |
-| Two-pod video architecture (LTXV split) plan + context | `documents/plans/two-pod-video-architecture.md` + GitHub #25 |
+| Provider architecture (fal + Lambda), billing, costs | `documents/references/provider-config.md` |
+| Archived LTX video system + Lambda porting notes | `archive/video-ltx/README.md` |
 | UX test cases (must-pass manual checklist)              | `documents/test-cases.md` |
-| Cost monitoring, Discord alerts, pod lifecycle threads | `backend/src/modules/orchestrator/costMonitor.ts` |
-| Scale-to-100-users roadmap + workstream status | `documents/plans/scale-to-100-users.md` |
 | Metal canvas architecture plan (layers, smudge, etc.) | `documents/plans/metal-canvas-rewrite.md` |
 | Pro-brush roadmap (flow/opacity → stabilization → stamps → wet/oil paint; Procreate parity) | `documents/plans/pro-brush-roadmap.md` |
 | FLUX.2-klein capability notebook (potential features, not committed) | `documents/ideas/flux-klein-capabilities.md` |
@@ -254,56 +236,19 @@ Reading the patterns — *interpretation guide, not proof of cause*. A given que
 | Internal per-user analytics dashboard (Kiki Insights) — setup, schema, ingest contract, deploy | `analytics/README.md` |
 | **iOS TestFlight release** — always run `ios/scripts/testflight-release.sh` (one command: build+upload+distribute). Signing, API key, gotchas | `documents/references/testflight-release.md` |
 | Implementation decisions log | `documents/decisions.md` |
-| Removed features (ComfyUI, StreamDiffusion) | `documents/removed-features.md` |
+| Removed features (RunPod orchestration, PostHog, ComfyUI, StreamDiffusion) | `documents/removed-features.md` |
 | Product requirements | `PRD.md` |
 | System architecture | `TECHNICAL_ARCHITECTURE.md` |
 
 ## Deploy Process
 
-For the full decision tree of pod operations (deploy / iterate / SSH / experiment / terminate), see `documents/references/pod-operations.md`. The deploy process below is one branch of that tree — included here for the architecture context.
+**Backend:** `cd backend && npm run deploy` — wraps `railway up` with Sentry `phase:deploying` log markers. Any change under `backend/src/**` needs it. Plain `railway up` (from `backend/`) works too, just without the deploy markers.
 
-**`cd backend && npm run deploy`** — single command. The script (`scripts/deploy.ts`) handles both pod app code and backend together:
+**Kiki Insights:** `cd analytics && railway up --ci --service kiki-insights --path-as-root .` (the `--path-as-root .` is required).
 
-1. Reads `backend/.flux-app-version` (= model-servers tree hash from the last successful deploy).
-2. Compares to current `git rev-parse HEAD:model-servers`.
-3. **If they differ** → fans out `sync-flux-app.ts` to all configured DCs in parallel (`npm run sync-all`). Aborts deploy if any DC fails — fix and re-run.
-4. **If same** → skips the sync step (backend-only iteration; ~1 min total).
-5. Writes `backend/.flux-app-version` and `backend/.git-sha` (baked into the image so the orchestrator's drift check has its expected version), then runs `railway up`.
+**Lambda image server** (`model-servers/` changes): re-run `backend/scripts/lambda/setup-lambda.ts` for the region (rsyncs code + rebuilds venv if needed); a running instance keeps its in-memory copy until restarted. See `backend/scripts/lambda/README.md`.
 
-The two `.git-sha` / `.flux-app-version` files appear as untracked in `git status` after each deploy — that's expected (Railway CLI honors `.gitignore` during upload, so we deliberately keep them out of `.gitignore`; see `backend/.gitignore` comment).
-
-`npm run sync-all` is also exposed for ad-hoc syncs (e.g., recovering after a DC was skipped due to capacity exhaustion, without redeploying backend).
-
-Plain `railway up` still works but bypasses the auto-sync — drift can occur if `model-servers/` changed. The orchestrator's drift check (Sentry warning + PostHog `volume_status`) catches this on the next pod boot, so it's not silent — but `npm run deploy` is the canonical path.
-
-**Pod boot model:** Pods launch from stock `runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404` (hardcoded as `BASE_IMAGE` in `orchestrator.ts`) and read `/workspace/app/image/server.py` (or `video/server.py`) plus `/workspace/venv/` off the attached network volume. Existing running pods keep the old in-memory copy after a sync; new pods pick up changes on next provision. To force a user onto the new code, terminate their pod and let the orchestrator reprovision.
-
-Bumping `BASE_IMAGE` (e.g. CUDA / PyTorch upgrade) is not just a constant flip — the new image's Python/CUDA ABI must match `/workspace/venv/`, so the venv has to be rebuilt by deleting it and re-running `sync-flux-app.ts`.
-
-**Rollback to GHCR custom-image flow:** The pre-2026-04-23 architecture (custom image at `ghcr.io/donpinkus/kiki-flux-klein`, built by `.github/workflows/build-flux-image.yml`) is retained as inactive code for emergency rollback only. Procedure documented in `documents/decisions.md` 2026-04-23 entry.
-
-## SSHing into a running pod (dev iteration only)
-
-Pre-launch only: SSH on serving pods is gated behind the `PUBLIC_KEY` env var on Railway. When set, orchestrator forwards it into the pod's `BOOT_ENV` and an inline bootstrap in `BOOT_DOCKER_ARGS` writes `authorized_keys`, runs `ssh-keygen -A`, and starts sshd before exec'ing the python server. When `PUBLIC_KEY` is unset (prod default), the bootstrap is a no-op.
-
-**Why we bootstrap manually:** RunPod's stock `runpod/pytorch` image has a `start.sh` entrypoint that does SSH setup itself, but `BOOT_DOCKER_ARGS` overrides the entrypoint to launch the python server directly, so the image's setup never runs. Confirmed: setting `startSsh: true` in the GraphQL `podFindAndDeployOnDemand` call is *not* sufficient on its own — without the inline bootstrap, port 22 is exposed but sshd isn't running and direct TCP gets `Connection refused`.
-
-**Enable SSH for a session:**
-```bash
-# One-time
-PUB="$(cat ~/.ssh/id_ed25519.pub)"
-railway variable set "PUBLIC_KEY=$PUB"
-cd backend && npm run deploy   # backend-only change → fast path (~30s)
-# Existing pods keep the no-SSH path; terminate them to refresh
-```
-
-**Connect:** RunPod web console → pod → Connect tab → "**SSH over exposed TCP**" gives `ssh root@<ip> -p <port> -i ~/.ssh/id_ed25519`. **Use this form, not `ssh.runpod.io`.** The proxy form connects but rejects non-interactive commands ("Your SSH client doesn't support PTY") and doesn't support SCP/SFTP.
-
-**Iteration loop on a production pod is unsafe.** Doing `pkill + restart` on a `kiki-vsession-*` or `kiki-session-*` pod triggers the orchestrator's reaper: during the ~30s python restart, `/health` returns 502, the reaper detects the pod as unhealthy after 60s and terminates it. We hit this on 2026-04-30. **For iterating on pod code, use the test pod workflow instead — see `documents/references/pod-operations.md` Task 3.** Test pods use the `kiki-vtest-*` prefix which the reaper filters out.
-
-**If SSH refuses connection:** check `/tmp/ssh-bootstrap.log` on the pod (via RunPod web terminal — enable it from the Connect tab). The log captures all bootstrap output and tells you whether `ssh-keygen -A` failed, whether `service ssh start` worked, etc.
-
-**Disable SSH for prod:** unset `PUBLIC_KEY` in Railway env (no code change needed). Newly-spawned pods skip the bootstrap. Existing pods retain whichever path was active when they booted.
+**iOS:** rebuild + reinstall (simulator or device); TestFlight via `ios/scripts/testflight-release.sh`.
 
 ## Completion reporting
 
@@ -313,14 +258,13 @@ Format:
 
 - **Code state:** one of — `uncommitted` (working tree only) / `committed on main (local)` / `pushed to origin/main`.
 - **Ready to test?** `yes` or `no`. If `no`, list every step that remains before Donald can exercise the change. Common gates in this repo:
-  - **Backend (Railway) redeploy** — `cd backend && npm run deploy`. Required for any change under `backend/src/**`. If `model-servers/` also changed, this same command fans out `sync-flux-app.ts` to all DCs; call that out.
-  - **Pod sync only** — `cd backend && npm run sync-all`. Required for `model-servers/` or `ltx-server/` changes when backend itself didn't change.
-  - **Existing pods keep the old code in memory after a sync.** If Donald is mid-session, his pod must be terminated (or he must start a fresh session) to pick up the change. Say so when relevant.
+  - **Backend (Railway) redeploy** — `cd backend && npm run deploy`. Required for any change under `backend/src/**`.
+  - **Lambda image-server sync** — for `model-servers/` changes: re-run `setup-lambda.ts` and restart the instance (a running instance keeps the old code in memory).
   - **iOS rebuild + reinstall** — Swift changes don't hot-reload. Note simulator vs. device. Flag if SwiftData schema changed (state reset needed).
-  - **Env var / secret / third-party config** — name it explicitly (e.g. "set `PUBLIC_KEY` in Railway", "accept Gemma terms on HF").
+  - **Env var / secret / third-party config** — name it explicitly (e.g. "set `FAL_KEY` in Railway", "accept Gemma terms on HF").
 - **What to test:** one or two sentences on the golden path that verifies the change.
 
-If a step is something Donald has to run himself (e.g. RunPod web console click, App Store Connect change, anything requiring his credentials/2FA), say so explicitly rather than leaving it ambiguous.
+If a step is something Donald has to run himself (e.g. App Store Connect change, anything requiring his credentials/2FA), say so explicitly rather than leaving it ambiguous.
 
 ## Git Conventions
 

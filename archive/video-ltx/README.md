@@ -25,8 +25,8 @@ The backend orchestration + relay for video pods was deleted, not archived —
 it was RunPod-shaped (GraphQL provisioning, proxy URLs, network volumes) and a
 Lambda port will look like the image dev-pool instead. If you need it:
 
-- Last commit containing it: the parent of the `remove RunPod` commit
-  (`git log --oneline -- backend/src/modules/orchestrator` shows it).
+- Last commit containing it: `d9e3c43` (the parent of the removal commit
+  `b0fede2`, 2026-07-17).
 - Key deleted pieces: `backend/src/modules/orchestrator/` (video quartet in
   `orchestrator.ts`, `POD_CONFIGS.video` in `provisioner.ts`,
   `BOOT_DOCKER_ARGS_VIDEO` in `podBoot.ts`), the video relay block in

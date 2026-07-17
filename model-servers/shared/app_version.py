@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 def load_app_version() -> dict[str, str | bool]:
     """Read /workspace/app/.version.json — written by sync-flux-app.ts at deploy
-    time. Returns a flat dict that gets spread into /health so PostHog sees
+    time. Returns a flat dict that gets spread into /health so telemetry sees
     per-DC version skew on every cold start. Empty dict on missing/unreadable
     file (dev environments, manual pod boots)."""
     path = "/workspace/app/.version.json"
