@@ -49,7 +49,15 @@ export interface DevPoolState {
   lastError?: string;
   launchedAtMs?: number;
   readyAtMs?: number;
+  /** Rough seconds until ready while booting (measured ~10 min for the
+   * 9B-KV + torch.compile boot: VM ~3 min + load ~2 min + compile ~5 min).
+   * null when ready, unknown (still hunting capacity), or not applicable.
+   * Drives the iPad's "warming up, ready in ~X" UI. */
+  etaSeconds: number | null;
 }
+
+/** Measured full boot for the current serving config (9B-KV, FLUX_COMPILE=1). */
+const BOOT_ESTIMATE_MS = 10 * 60_000;
 
 let status: DevPoolStatusKind = 'none';
 let instanceId: string | undefined;
@@ -116,6 +124,10 @@ function statusMessage(): string {
 }
 
 export function getState(): DevPoolState {
+  let etaSeconds: number | null = null;
+  if (status === 'booting' && launchedAtMs !== undefined) {
+    etaSeconds = Math.max(15, Math.round((BOOT_ESTIMATE_MS - (Date.now() - launchedAtMs)) / 1000));
+  }
   return {
     status: enabled() ? status : 'disabled',
     instanceId,
@@ -126,6 +138,7 @@ export function getState(): DevPoolState {
     lastError,
     launchedAtMs,
     readyAtMs,
+    etaSeconds,
   };
 }
 

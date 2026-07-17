@@ -2386,6 +2386,33 @@ public final class MetalCanvasView: UIView {
         onStateChanged?()
     }
 
+    /// Import an image as a NEW top layer, hiding all existing layers
+    /// ("Edit" → pull the generated image onto the canvas). Returns false if
+    /// the layer limit is reached (nothing changes). Undo restores the whole
+    /// previous stack — layer count, visibility flags, and active index — in
+    /// ONE step, because this is a structure-mutating op like clearAll: a
+    /// `.layer` entry couldn't rebuild the removed layer or the visibility
+    /// flips. Redo replays it through the same compound entry.
+    public func importImageAsNewLayer(_ image: UIImage, name: String) -> Bool {
+        guard let cgImage = image.cgImage else { return false }
+        guard renderer.layers.count < CanvasRenderer.maxLayerCount else { return false }
+        if let current = renderer.snapshotLayerStack() {
+            undoSnapshots.append(.canvas(layers: current.layers, activeIndex: current.activeIndex, strokeCount: strokeCount))
+            trimUndoAndClearRedo()
+        }
+        for index in renderer.layers.indices where renderer.layers[index].isVisible {
+            renderer.toggleVisibility(at: index)
+        }
+        let newIndex = renderer.addLayer(name: name)
+        renderer.setActiveLayer(newIndex)
+        renderer.loadImageIntoCanvas(cgImage)
+        strokeCount += 1
+        isDirty = true
+        onDrawingChanged?()
+        onStateChanged?()
+        return true
+    }
+
     /// Load an image onto the canvas (e.g., "Send to Canvas"). Undoable like
     /// any stroke — the bake lands on the active layer.
     public func bakeImage(_ image: UIImage) {

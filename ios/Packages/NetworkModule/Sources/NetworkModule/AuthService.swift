@@ -199,6 +199,16 @@ public actor AuthService {
         public let status: String
         public let message: String
         public let ip: String?
+        /// Rough seconds until the H100 is ready while booting; nil when
+        /// ready/unknown. Drives the "warming up, ready in ~X" UI.
+        public let etaSeconds: Int?
+    }
+
+    /// Errors specific to POST /v1/sketchify.
+    public enum SketchifyError: Error, Sendable {
+        /// H100 not ready yet (503). Carries the pool's boot ETA when known.
+        case notReady(etaSeconds: Int?)
+        case failed(String)
     }
 
     private struct EmptyBody: Encodable {}
@@ -214,6 +224,48 @@ public actor AuthService {
             body: EmptyBody(),
             token: token
         )
+    }
+
+    /// Current Lambda dev-pool state (GET /v1/dev/lambda/status) — read-only,
+    /// does NOT kick a launch. Used by the Edit-button availability poll.
+    public func fetchLambdaPoolState() async throws -> LambdaPoolState {
+        let token = try await currentAccessToken()
+        let url = backendURL.appendingPathComponent("/v1/dev/lambda/status")
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        let (data, rawResponse) = try await urlSession.data(for: request)
+        guard let http = rawResponse as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw AuthError.invalidResponse
+        }
+        return try JSONDecoder().decode(LambdaPoolState.self, from: data)
+    }
+
+    /// Convert a generated image into an editable sketch (POST /v1/sketchify).
+    /// `mode` is "lines" or "lines_colors". Returns the sketch JPEG bytes.
+    /// Throws `SketchifyError.notReady` while the H100 is booting.
+    public func sketchify(imageJpeg: Data, mode: String) async throws -> Data {
+        let token = try await currentAccessToken()
+        let url = backendURL.appendingPathComponent("/v1/sketchify")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        struct Body: Encodable { let imageBase64: String; let mode: String }
+        request.httpBody = try JSONEncoder().encode(Body(imageBase64: imageJpeg.base64EncodedString(), mode: mode))
+        let (data, rawResponse) = try await urlSession.data(for: request)
+        guard let http = rawResponse as? HTTPURLResponse else { throw AuthError.invalidResponse }
+        if http.statusCode == 503 {
+            struct NotReady: Decodable { let etaSeconds: Int? }
+            let body = try? JSONDecoder().decode(NotReady.self, from: data)
+            throw SketchifyError.notReady(etaSeconds: body?.etaSeconds)
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            throw SketchifyError.failed("HTTP \(http.statusCode)")
+        }
+        struct Resp: Decodable { let imageBase64: String }
+        let resp = try JSONDecoder().decode(Resp.self, from: data)
+        guard let sketch = Data(base64Encoded: resp.imageBase64) else { throw AuthError.invalidResponse }
+        return sketch
     }
 
     /// Fetch the signed-in user's current free-tier usage (for the in-app

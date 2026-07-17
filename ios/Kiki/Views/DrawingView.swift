@@ -215,8 +215,52 @@ struct DrawingView: View {
                         .padding(PanelLayout.edgeInset)
                         .allowsHitTesting(false)
                         .zIndex(2)
+
+                        // Edit button rides the floating panel's geometry as a
+                        // hit-testable sibling (the panel itself deliberately
+                        // has allowsHitTesting(false) so strokes pass through).
+                        ZStack(alignment: .bottomTrailing) {
+                            Color.clear
+                            editButton.padding(4)
+                        }
+                        .frame(
+                            width: PanelLayout.baseSize(for: image, in: geometry.size).width,
+                            height: PanelLayout.baseSize(for: image, in: geometry.size).height
+                        )
+                        .scaleEffect(coordinator.panelScale)
+                        .offset(coordinator.panelOffset)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                        .padding(PanelLayout.edgeInset)
+                        .zIndex(3)
+                    }
+
+                    // Overlay layout renders the generated image inside the
+                    // canvas container; anchor the Edit button to the canvas
+                    // pane's bottom-right instead.
+                    if coordinator.drawingLayout == .overlay,
+                       coordinator.resultState.displayImage != nil {
+                        ZStack(alignment: .bottomTrailing) {
+                            Color.clear
+                            editButton.padding(4)
+                        }
+                        .frame(width: canvasSide, height: canvasSide)
+                        .zIndex(3)
+                    }
+
+                    // Transient toast ("Kiki's magic AI is still warming up…").
+                    if let banner = coordinator.transientBanner {
+                        Text(banner)
+                            .font(.callout.weight(.medium))
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 10)
+                            .background(.ultraThinMaterial, in: Capsule())
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                            .padding(.top, 12)
+                            .transition(.opacity)
+                            .zIndex(10)
                     }
                 }
+                .animation(.easeInOut(duration: 0.35), value: coordinator.transientBanner)
                 .background(KikiTheme.canvasBacking)
             }
             // Fill the bottom home-indicator safe-area inset so the (black) Metal
@@ -230,7 +274,13 @@ struct DrawingView: View {
         .animation(.easeInOut(duration: 0.3), value: coordinator.generationError != nil)
         .animation(.easeOut(duration: 0.25), value: coordinator.shouldShowQuickShapeTooltip)
         .ignoresSafeArea(.keyboard)
-        .onAppear { KeyboardDismissal.installIfNeeded() }
+        .onAppear {
+            KeyboardDismissal.installIfNeeded()
+            // Track H100 availability while drawing so the Edit button's
+            // enabled state stays honest without user interaction.
+            coordinator.startLambdaStatusPolling()
+        }
+        .onDisappear { coordinator.stopLambdaStatusPolling() }
         .task { coordinator.refreshUsage() }
         .fullScreenCover(isPresented: $coordinator.showStylePicker) {
             StylePickerView()
@@ -275,10 +325,15 @@ struct DrawingView: View {
                 PromptTitleBar()
             }
             .overlay(alignment: .bottomTrailing) {
-                if coordinator.canSwapStreamImageToCanvas {
-                    streamSwapBar
-                        .padding(12)
+                VStack(alignment: .trailing, spacing: 8) {
+                    if coordinator.canSwapStreamImageToCanvas {
+                        streamSwapBar
+                    }
+                    if coordinator.resultState.displayImage != nil {
+                        editButton
+                    }
                 }
+                .padding(4)
             }
 
             Rectangle()
@@ -293,6 +348,50 @@ struct DrawingView: View {
     }
 
     // MARK: - Private
+
+    /// "Edit" → sketchify the generated image onto the canvas as a new layer.
+    /// Ready: menu with the two import modes. Warming: dimmed button whose tap
+    /// explains ("warming up") via the transient banner. In-flight: spinner.
+    @ViewBuilder
+    private var editButton: some View {
+        if coordinator.sketchifyInProgress {
+            ProgressView()
+                .controlSize(.small)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 5)
+                .background(.ultraThinMaterial, in: Capsule())
+        } else if coordinator.lambdaPoolReady {
+            Menu {
+                Button {
+                    coordinator.sketchifyToCanvas(mode: .lines)
+                } label: {
+                    Label("Lines", systemImage: "pencil.and.outline")
+                }
+                Button {
+                    coordinator.sketchifyToCanvas(mode: .linesColors)
+                } label: {
+                    Label("Lines + color", systemImage: "paintpalette")
+                }
+            } label: {
+                editButtonLabel(enabled: true)
+            }
+        } else {
+            Button {
+                coordinator.showLambdaWarmingBanner()
+            } label: {
+                editButtonLabel(enabled: false)
+            }
+        }
+    }
+
+    private func editButtonLabel(enabled: Bool) -> some View {
+        Text("Edit")
+            .font(.caption.weight(.semibold))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 5)
+            .background(.ultraThinMaterial, in: Capsule())
+            .opacity(enabled ? 1 : 0.5)
+    }
 
     private var streamSwapBar: some View {
         Button {

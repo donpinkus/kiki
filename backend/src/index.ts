@@ -81,6 +81,7 @@ import { subscriptionRoute } from './routes/subscription.js';
 import { appStoreNotifyRoute } from './routes/appStoreNotify.js';
 import { usageRoute } from './routes/usage.js';
 import { lambdaDevRoute } from './routes/lambdaDev.js';
+import { sketchifyRoute } from './routes/sketchify.js';
 import { start as startLambdaDevPool, stop as stopLambdaDevPool } from './modules/lambda/devPool.js';
 import { installAuth } from './modules/auth/index.js';
 import { start as startFalWarmer, stop as stopFalWarmer } from './modules/fal/falWarmer.js';
@@ -123,6 +124,7 @@ await app.register(appStoreNotifyRoute);
 await app.register(usageRoute);
 await app.register(streamRoute);
 await app.register(lambdaDevRoute);
+await app.register(sketchifyRoute);
 
 // --- Sentry error handler (must be before custom error handler) ---
 Sentry.setupFastifyErrorHandler(app);

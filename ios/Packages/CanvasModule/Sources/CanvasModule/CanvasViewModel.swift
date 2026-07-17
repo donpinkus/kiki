@@ -288,6 +288,16 @@ public final class CanvasViewModel {
         updateState()
     }
 
+    /// Import an image as a new top layer, hiding existing layers ("Edit" →
+    /// pull generated image onto the canvas). Returns false when the layer
+    /// limit is reached. Single compound undo restores the prior stack.
+    public func importImageAsNewLayer(_ image: UIImage, name: String) -> Bool {
+        guard let canvasView else { return false }
+        let ok = canvasView.importImageAsNewLayer(image, name: name)
+        if ok { updateState() }
+        return ok
+    }
+
     public func resetViewTransform() {
         container?.resetTransform()
         scale = 1.0

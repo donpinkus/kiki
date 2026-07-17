@@ -722,6 +722,112 @@ final class AppCoordinator {
         }
     }
 
+    // MARK: - Edit → pull generated image onto canvas (sketchify)
+
+    /// Sketchify import modes — must match POST /v1/sketchify's `mode` values.
+    enum SketchifyMode: String {
+        case lines = "lines"
+        case linesColors = "lines_colors"
+    }
+
+    /// True when the Lambda H100 is serving — gates the Edit button. Kept
+    /// fresh by `startLambdaStatusPolling` while the drawing view is visible.
+    private(set) var lambdaPoolReady = false
+    /// Boot ETA (seconds) while the pool is warming; nil when ready/unknown.
+    private(set) var lambdaPoolEtaSeconds: Int?
+    /// True while a sketchify request is in flight (button shows a spinner).
+    private(set) var sketchifyInProgress = false
+    /// Transient toast text (e.g. the "warming up" notice). Auto-clears ~5s
+    /// after being set; DrawingView renders + animates it.
+    private(set) var transientBanner: String?
+
+    private var lambdaStatusPollTask: Task<Void, Never>?
+
+    /// Poll the dev-pool status every 15s while the drawing view is visible so
+    /// the Edit button's enabled state tracks the H100 without user action.
+    func startLambdaStatusPolling() {
+        guard lambdaStatusPollTask == nil, signedInUserId != nil else { return }
+        lambdaStatusPollTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                if let self {
+                    do {
+                        let state = try await self.authService.fetchLambdaPoolState()
+                        self.lambdaPoolReady = state.status == "ready"
+                        self.lambdaPoolEtaSeconds = state.etaSeconds
+                    } catch {
+                        self.lambdaPoolReady = false
+                    }
+                }
+                try? await Task.sleep(nanoseconds: 15_000_000_000)
+            }
+        }
+    }
+
+    func stopLambdaStatusPolling() {
+        lambdaStatusPollTask?.cancel()
+        lambdaStatusPollTask = nil
+    }
+
+    /// Show a toast for ~5 seconds. Later banners replace earlier ones; the
+    /// timed clear only fires if its own text is still showing.
+    func showTransientBanner(_ text: String) {
+        transientBanner = text
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            if self?.transientBanner == text { self?.transientBanner = nil }
+        }
+    }
+
+    /// The warming-up notice for Edit taps while the H100 isn't ready. Also
+    /// kicks ensure so the tap itself starts (or hurries) the boot.
+    func showLambdaWarmingBanner() {
+        ensureLambdaPool()
+        let eta: String
+        if let s = lambdaPoolEtaSeconds {
+            eta = s < 100 ? "~\(s) seconds" : "~\(Int((Double(s) / 60).rounded())) minutes"
+        } else {
+            eta = "a few minutes"
+        }
+        showTransientBanner("Kiki's magic AI is still warming up! Ready in \(eta).")
+    }
+
+    /// Edit → convert the current generated image to an editable sketch and
+    /// import it as a new canvas layer (existing layers kept, hidden). One
+    /// undo restores the previous layer stack.
+    func sketchifyToCanvas(mode: SketchifyMode) {
+        guard !sketchifyInProgress else { return }
+        guard let image = resultState.displayImage,
+              let jpeg = image.jpegData(compressionQuality: 0.92) else { return }
+        guard lambdaPoolReady else {
+            showLambdaWarmingBanner()
+            return
+        }
+        sketchifyInProgress = true
+        Task { @MainActor in
+            defer { sketchifyInProgress = false }
+            do {
+                let sketchData = try await authService.sketchify(imageJpeg: jpeg, mode: mode.rawValue)
+                guard let sketch = UIImage(data: sketchData) else {
+                    showTransientBanner("Couldn't read the sketch — try again.")
+                    return
+                }
+                if !canvasViewModel.importImageAsNewLayer(sketch, name: "AI Sketch") {
+                    showTransientBanner("Layer limit reached — delete a layer first.")
+                }
+            } catch AuthService.SketchifyError.notReady(let etaSeconds) {
+                lambdaPoolReady = false
+                lambdaPoolEtaSeconds = etaSeconds
+                showLambdaWarmingBanner()
+            } catch {
+                showTransientBanner("Sketchify failed — try again in a moment.")
+                Log.info("sketchify.failed", attributes: [
+                    "event": "sketchify.failed",
+                    "error": String(describing: error),
+                ])
+            }
+        }
+    }
+
     /// LTX-2.3 video override — square resolution (px). Session-only by design:
     /// not @AppStorage, so each app launch resets to the perf baseline (512).
     /// Step 3.5 benchmark needs deterministic baselines per launch.
