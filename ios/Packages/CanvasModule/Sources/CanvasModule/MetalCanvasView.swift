@@ -41,6 +41,14 @@ public final class MetalCanvasView: UIView {
 
     public var isEmpty: Bool { strokeCount == 0 }
 
+    /// True while a stroke is being drawn (between touchesBegan and the
+    /// stroke-end flatten). The in-flight stroke lives in the scratch texture
+    /// and is already composited into snapshots, but `strokeCount` — and thus
+    /// `isEmpty` — only advances at stroke end. Stream capture checks this so
+    /// the very first stroke on a blank canvas starts generating immediately
+    /// instead of waiting for the pencil to lift.
+    public var hasActiveStroke: Bool { activeStroke != nil }
+
     // MARK: - Callbacks
 
     public var onDrawingChanged: (() -> Void)?

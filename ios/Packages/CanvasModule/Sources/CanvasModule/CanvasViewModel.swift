@@ -297,7 +297,12 @@ public final class CanvasViewModel {
 
     public func captureSnapshot() -> SketchSnapshot? {
         guard let canvasView else { return nil }
-        guard !canvasView.isEmpty || hasBackgroundContent else { return nil }
+        // `hasActiveStroke` lets the FIRST stroke stream while still being
+        // drawn: `isEmpty` only flips once a stroke commits (strokeCount is
+        // stroke-end incremented), but the in-flight stroke is already in the
+        // snapshot via the scratch texture. Without it, a new user's first
+        // stroke generates nothing until they lift the pencil.
+        guard !canvasView.isEmpty || hasBackgroundContent || canvasView.hasActiveStroke else { return nil }
 
         let outputSize = canvasView.bounds.size
         guard outputSize.width > 0, outputSize.height > 0 else { return nil }
