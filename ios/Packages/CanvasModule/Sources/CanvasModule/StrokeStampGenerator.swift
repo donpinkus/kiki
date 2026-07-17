@@ -180,9 +180,9 @@ enum StrokeStampGenerator {
         func dabAttrs(x: CGFloat, y: CGFloat, force: CGFloat, altitude: CGFloat, azimuth: CGFloat,
                       dx: CGFloat, dy: CGFloat, dt: Double, roll: CGFloat = 0)
             -> (width: CGFloat, color: SIMD4<Float>, rotation: Float, offset: CGPoint, aspect: Float,
-                scatterMags: SIMD3<Float>, spacingMul: CGFloat) {
+                scatterMags: SIMD3<Float>, spacingMul: CGFloat, grainMul: Float) {
             guard hasDyn, var st = dynState else {
-                return (brush.effectiveWidth(force: force, altitude: altitude), color, strokeRotation(dx: dx, dy: dy), .zero, aspect, .zero, 1)
+                return (brush.effectiveWidth(force: force, altitude: altitude), color, strokeRotation(dx: dx, dy: dy), .zero, aspect, .zero, 1, 1)
             }
             let input = st.advance(
                 x: Double(x), y: Double(y), force: Double(force), altitude: Double(altitude),
@@ -254,7 +254,8 @@ enum StrokeStampGenerator {
             }
             // Speed→Spacing (Procreate Dynamics): per-dab multiplier on the NEXT walk gap.
             let spacingMul = dyn?.spacing != nil ? CGFloat(dyn!.spacing!.value(input)) : 1
-            return (w, col, rot, offset, dabAspect, mags, max(0.05, spacingMul))
+            let grainMul = dyn?.grain != nil ? Float(dyn!.grain!.value(input)) : 1
+            return (w, col, rot, offset, dabAspect, mags, max(0.05, spacingMul), grainMul)
         }
         // ---------------------------------------------------------------------------------
 
@@ -301,7 +302,7 @@ enum StrokeStampGenerator {
         var lastDabPos: CGPoint? = nil    // walk position of the previous dab (un-scattered)
         var dabSerial: UInt64 = 0
         func appendDab(_ attr: (width: CGFloat, color: SIMD4<Float>, rotation: Float, offset: CGPoint,
-                                aspect: Float, scatterMags: SIMD3<Float>, spacingMul: CGFloat),
+                                aspect: Float, scatterMags: SIMD3<Float>, spacingMul: CGFloat, grainMul: Float),
                        x: CGFloat, y: CGFloat, dx: CGFloat, dy: CGFloat, arc: CGFloat = 0) {
             dabSerial &+= 1
             var attr = attr
@@ -350,7 +351,8 @@ enum StrokeStampGenerator {
                     color: attr.color,
                     hardness: hardness,
                     aspect: attr.aspect,
-                    arcU: Float(arc * scale)
+                    arcU: Float(arc * scale),
+                    grainMul: attr.grainMul
                 ))
             }
         }

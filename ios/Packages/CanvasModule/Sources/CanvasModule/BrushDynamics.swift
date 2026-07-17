@@ -665,6 +665,11 @@ public struct BrushDynamics: Codable, Equatable, Sendable {
     /// Per-stroke HSV jitter of the ink color (one random shift per stroke). High img2img
     /// leverage (the model reads color). nil = no jitter.
     public var colorJitter: ColorJitter?
+    /// Grain strength (P8 leftover): per-dab multiplier on the MOVING grain's depth —
+    /// drive with pressure (default curve inverted-feel: harder press → tooth fills)
+    /// or a fuzzy sensor for grain flicker. Size-like fold. Document-space grain is not
+    /// per-dab (composite-time carve); its pressure response comes through flow.
+    public var grain: CurveOption?
     /// Darkness (Procreate Color Dynamics "Darkness" / Color Pressure darkness): per-dab
     /// darkening AMOUNT — value(input) 0 leaves the ink alone, 1 is black (the ink is
     /// multiplied by 1−value in sRGB space, a device-space darken like Krita's darken
@@ -686,7 +691,7 @@ public struct BrushDynamics: Codable, Equatable, Sendable {
                 rotation: CurveOption? = nil, scatter: CurveOption? = nil,
                 scatterLateral: CurveOption? = nil, scatterLinear: CurveOption? = nil,
                 ratio: CurveOption? = nil, spacing: CurveOption? = nil,
-                darkness: CurveOption? = nil,
+                darkness: CurveOption? = nil, grain: CurveOption? = nil,
                 colorJitter: ColorJitter? = nil, dabColorJitter: ColorJitter? = nil) {
         self.size = size
         self.flow = flow
@@ -697,6 +702,7 @@ public struct BrushDynamics: Codable, Equatable, Sendable {
         self.ratio = ratio
         self.spacing = spacing
         self.darkness = darkness
+        self.grain = grain
         self.colorJitter = colorJitter
         self.dabColorJitter = dabColorJitter
     }
@@ -705,11 +711,11 @@ public struct BrushDynamics: Codable, Equatable, Sendable {
     public var isInert: Bool {
         size == nil && flow == nil && rotation == nil
             && scatter == nil && scatterLateral == nil && scatterLinear == nil
-            && ratio == nil && spacing == nil && darkness == nil
+            && ratio == nil && spacing == nil && darkness == nil && grain == nil
             && (colorJitter?.isInert ?? true) && (dabColorJitter?.isInert ?? true)
     }
 
-    enum CodingKeys: String, CodingKey { case size, flow, rotation, scatter, scatterLateral, scatterLinear, ratio, spacing, darkness, colorJitter, dabColorJitter }
+    enum CodingKeys: String, CodingKey { case size, flow, rotation, scatter, scatterLateral, scatterLinear, ratio, spacing, darkness, grain, colorJitter, dabColorJitter }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         size = try c.decodeIfPresent(CurveOption.self, forKey: .size)
@@ -721,6 +727,7 @@ public struct BrushDynamics: Codable, Equatable, Sendable {
         ratio = try c.decodeIfPresent(CurveOption.self, forKey: .ratio)
         spacing = try c.decodeIfPresent(CurveOption.self, forKey: .spacing)
         darkness = try c.decodeIfPresent(CurveOption.self, forKey: .darkness)
+        grain = try c.decodeIfPresent(CurveOption.self, forKey: .grain)
         colorJitter = try c.decodeIfPresent(ColorJitter.self, forKey: .colorJitter)
         dabColorJitter = try c.decodeIfPresent(ColorJitter.self, forKey: .dabColorJitter)
     }

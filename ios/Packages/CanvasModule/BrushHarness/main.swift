@@ -831,6 +831,36 @@ runScene("dry-18-moving-grain",
                         bow: 90, force: { _ in 0.75 }))
 }
 
+runScene("dry-19-grain-curve",
+         """
+         Grain strength as a CurveOption (P8 leftover): per-dab depth multiplier on
+         MOVING grain. Both rows: the same moving-grain stroke with a pressure BELL
+         (light → hard → light).
+         - Row 1: constant grain (no curve) — even tooth end to end; only width follows
+           the bell.
+         - Row 2: grain driven by INVERTED pressure (hard press → multiplier ≈ 0) — the
+           pressed MIDDLE fills in smooth while the light ends stay toothy: the classic
+           pencil-on-paper response, now sensor-driven per dab.
+         """) { s in
+    func grainStroke(_ id: Int, _ y: CGFloat, curve: CurveOption?) -> Stroke {
+        var b = pen(.black, width: 60, flow: 0.9)
+        b.hardness = 0.7
+        b.grainID = "paper"
+        b.grainDepth = 0.7
+        b.grainMoving = true
+        b.dynamics = curve.map { BrushDynamics(grain: $0) }
+        return synthStroke(id: id, brush: b, from: CGPoint(x: 120, y: y), to: CGPoint(x: 904, y: y),
+                           force: { 0.15 + 0.8 * sin($0 * .pi) })
+    }
+    s.label("constant grain — even tooth, width follows the pressure bell", y: 180)
+    s.paint(grainStroke(480, 300, curve: nil))
+    s.label("grain x INVERTED pressure — pressed middle fills SMOOTH, light ends toothy", y: 560)
+    s.paint(grainStroke(481, 680, curve: CurveOption(
+        sensors: [SensorChannel(sensor: .pressure,
+                                curve: ResponseCurve(points: [ResponseCurve.Point(0, 1), ResponseCurve.Point(1, 0)]))],
+        useSameCurve: false)))
+}
+
 runScene("wet-01-blue-into-yellow",
          """
          Spectral pigment mixing (Kubelka-Munk): a WET blue stroke dragged left-to-right through a

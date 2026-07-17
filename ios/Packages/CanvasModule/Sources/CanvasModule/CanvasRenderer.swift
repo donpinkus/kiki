@@ -233,10 +233,15 @@ public final class CanvasRenderer {
         var wetTargetAlpha: Float = -1.0
         // Moving grain (2026-07-16): the dab's arc position along its stroke, in canvas
         // px — the along-stroke grain coordinate, so the tooth travels WITH the stroke
-        // (streaky dry media) instead of living in document space. Fills the last free
-        // float of the 48-byte stride — the struct is now exactly full; the next field
-        // added grows the stride to 64 (update the MSL mirror + this comment).
+        // (streaky dry media) instead of living in document space.
         var arcU: Float = 0
+        // Per-dab grain-depth multiplier (grain CurveOption, 2026-07-16): sensors drive
+        // how much tooth each dab shows — pressure fills the tooth, light touch reveals
+        // it. Consumed by movingGrainCarve only (document grain gets its pressure
+        // response through flow at the composite carve). This field grew the stride
+        // from 48 to 64 (SIMD4 alignment) — the MSL mirror pads explicitly; keep both
+        // declarations in sync.
+        var grainMul: Float = 1.0
     }
 
     /// Maximum stamps per frame. 240 Hz pencil × ~6 interpolated steps per touch
@@ -1970,6 +1975,13 @@ public final class CanvasRenderer {
         float  aspect;         // P4b: local-Y quad scale (pre-rotation); 1 = round
         float  wetTargetAlpha; // smudge alpha-carry; -1 = legacy coverage mode
         float  arcU;           // moving grain: arc position along the stroke (canvas px)
+        float  grainMul;       // per-dab grain-depth multiplier (grain CurveOption)
+        // Swift stride is 64 (SIMD4 alignment). SCALAR pads only — an MSL float3 is
+        // itself 16-aligned and would inflate the GPU struct to 80 bytes, walking the
+        // instanced fetch off-stride into garbage (stray-geometry bug, dry-19 iter 1).
+        float  _pad0;
+        float  _pad1;
+        float  _pad2;
     };
 
     struct StampVaryings {
@@ -1980,6 +1992,7 @@ public final class CanvasRenderer {
         float  wetTargetAlpha; // consumed by wetStampFragment only
         float  arcU;           // moving grain: arc position along the stroke (canvas px)
         float  diamPx;         // dab diameter in canvas px (moving-grain UV scale)
+        float  grainMul;       // per-dab grain-depth multiplier
     };
 
     vertex StampVaryings brushStampVertex(
@@ -2028,6 +2041,7 @@ public final class CanvasRenderer {
         out.wetTargetAlpha = inst.wetTargetAlpha;
         out.arcU = inst.arcU;
         out.diamPx = inst.radius * 2.0;
+        out.grainMul = inst.grainMul;
         return out;
     }
 
@@ -2050,7 +2064,7 @@ public final class CanvasRenderer {
         float2 guv = float2((in.texCoord.x - 0.5) * in.diamPx * 3.5,
                             (in.arcU + (in.texCoord.y - 0.5) * in.diamPx) * 0.45) * gp.y;
         float src = smoothstep(0.25, 0.85, grainTex.sample(g, guv).r);
-        float d = gp.x;
+        float d = clamp(gp.x * in.grainMul, 0.0, 1.0);
         // MULTIPLICATIVE tooth, no compensation boost: the boost form (used once at
         // composite time by the document-grain path) inflates when applied per dab and
         // the stacking drowned the texture entirely (first dry-18 render — solid dark
