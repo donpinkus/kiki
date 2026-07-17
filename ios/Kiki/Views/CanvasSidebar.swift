@@ -77,12 +77,14 @@ struct CanvasSidebar: View {
         .padding(.vertical, 16)
         .padding(.horizontal, 10)
         .background(
-            .ultraThinMaterial,
+            KikiTheme.sidebarBackground,
             in: UnevenRoundedRectangle(
                 cornerRadii: .init(topLeading: 0, bottomLeading: 0, bottomTrailing: 16, topTrailing: 16)
             )
         )
-        .shadow(color: .black.opacity(0.15), radius: 8, x: 2, y: 0)
+        .shadow(color: .black.opacity(0.25), radius: 8, x: 2, y: 0)
+        // Procreate-style chrome is always dark (matches DrawingTopBar).
+        .environment(\.colorScheme, .dark)
     }
 
     // MARK: - Helpers
@@ -137,10 +139,10 @@ private struct VerticalSizeSlider: View {
 
             ZStack(alignment: .top) {
                 Capsule()
-                    .fill(.quaternary)
+                    .fill(KikiTheme.sliderTrack)
                     .frame(width: trackWidth)
                 Capsule()
-                    .fill(.tint)
+                    .fill(KikiTheme.sliderFill)
                     .frame(width: trackWidth, height: max(height - thumbY, trackWidth))
                     .frame(maxHeight: .infinity, alignment: .bottom)
                 Circle()

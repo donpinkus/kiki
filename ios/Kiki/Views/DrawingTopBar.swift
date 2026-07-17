@@ -17,12 +17,9 @@ struct DrawingTopBar: View {
             Button {
                 showSettings = true
             } label: {
-                Image(systemName: "gearshape")
-                    .font(.system(size: 18, weight: .medium))
-                    .foregroundStyle(Color.primary)
-                    .frame(width: 36, height: 36)
+                chromeIcon("gearshape")
             }
-            .tint(Color.primary)
+            .tint(KikiTheme.icon)
             .popover(isPresented: $showSettings) {
                 SettingsPanel()
                     .frame(width: 400, height: 600)
@@ -33,9 +30,9 @@ struct DrawingTopBar: View {
             } label: {
                 Text("Gallery")
                     .font(.subheadline.weight(.medium))
-                    .foregroundStyle(Color.primary)
+                    .foregroundStyle(KikiTheme.icon)
             }
-            .tint(Color.primary)
+            .tint(KikiTheme.icon)
 
             // Share — exports the current generated result. The native iOS
             // share sheet (presented below) provides Save to Files + the app
@@ -64,9 +61,9 @@ struct DrawingTopBar: View {
             } label: {
                 Text("Share")
                     .font(.subheadline.weight(.medium))
-                    .foregroundStyle(Color.primary)
+                    .foregroundStyle(KikiTheme.icon)
             }
-            .tint(Color.primary)
+            .tint(KikiTheme.icon)
             .disabled(!(coordinator.canShare || coordinator.canShareVideo))
 
             UsageMeterView()
@@ -89,6 +86,10 @@ struct DrawingTopBar: View {
                 TextField("Describe what you want…", text: $coordinator.promptText)
                     .textFieldStyle(.plain)
                     .font(.subheadline)
+                    .foregroundStyle(KikiTheme.icon)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(KikiTheme.buttonCircle, in: Capsule())
                     .frame(minWidth: 120, maxWidth: 400)
             }
 
@@ -121,10 +122,7 @@ struct DrawingTopBar: View {
             Button {
                 coordinator.showLayerPanel.toggle()
             } label: {
-                Image(systemName: "square.on.square")
-                    .font(.system(size: 18, weight: .medium))
-                    .foregroundStyle(Color.primary)
-                    .frame(width: 36, height: 36)
+                chromeIcon("square.on.square")
             }
             .popover(isPresented: $coordinator.showLayerPanel) {
                 LayerPanelView()
@@ -135,7 +133,11 @@ struct DrawingTopBar: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
-        .background(.bar)
+        .background(KikiTheme.barBackground)
+        // Procreate-style chrome is always dark; forcing dark resolves
+        // .primary/.secondary in bar content AND presented popovers to light-
+        // on-dark, matching the reference's dark panels.
+        .environment(\.colorScheme, .dark)
         .sheet(item: $shareItem) { item in
             ShareSheet(activityItems: [item.url])
         }
@@ -183,14 +185,20 @@ struct DrawingTopBar: View {
 
     // MARK: - Helpers
 
+    /// Procreate-style chrome button: gray icon in a dark circle.
+    private func chromeIcon(_ icon: String, color: Color = KikiTheme.icon) -> some View {
+        Image(systemName: icon)
+            .font(.system(size: 17, weight: .medium))
+            .foregroundStyle(color)
+            .frame(width: KikiTheme.buttonDiameter, height: KikiTheme.buttonDiameter)
+            .background(Circle().fill(KikiTheme.buttonCircle))
+    }
+
     private func toolButton(icon: String, tool: DrawingTool) -> some View {
         Button {
             coordinator.currentTool = tool
         } label: {
-            Image(systemName: icon)
-                .font(.system(size: 18, weight: .medium))
-                .foregroundStyle(coordinator.currentTool == tool ? Color.accentColor : .primary)
-                .frame(width: 36, height: 36)
+            chromeIcon(icon, color: coordinator.currentTool == tool ? Color.accentColor : KikiTheme.icon)
         }
     }
 
@@ -198,10 +206,7 @@ struct DrawingTopBar: View {
         Button {
             action()
         } label: {
-            Image(systemName: icon)
-                .font(.system(size: 18, weight: .medium))
-                .foregroundStyle(disabled ? .tertiary : .primary)
-                .frame(width: 36, height: 36)
+            chromeIcon(icon, color: disabled ? KikiTheme.iconDim : KikiTheme.icon)
         }
         .disabled(disabled)
     }

@@ -104,9 +104,32 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
 
     // MARK: - Setup
 
+    /// Procreate-style canvas surround: dark gray backing with a slightly
+    /// lighter 1pt grid. A pattern color keeps it a plain `backgroundColor`
+    /// (no extra layer, doesn't ride the canvas transform — the grid stays
+    /// screen-fixed behind the document, like Procreate's). Colors mirror
+    /// `KikiTheme.canvasBacking` in the app target; keep in sync by eye.
+    private static let canvasBackingPattern: UIColor = {
+        let cell: CGFloat = 44
+        let backing = UIColor(white: 0.135, alpha: 1)
+        let line = UIColor(white: 0.175, alpha: 1)
+        let format = UIGraphicsImageRendererFormat()
+        format.preferredRange = .standard  // sRGB — match canvas color convention
+        format.opaque = true
+        let tile = UIGraphicsImageRenderer(size: CGSize(width: cell, height: cell), format: format)
+            .image { ctx in
+                backing.setFill()
+                ctx.fill(CGRect(x: 0, y: 0, width: cell, height: cell))
+                line.setFill()
+                ctx.fill(CGRect(x: 0, y: 0, width: cell, height: 1))
+                ctx.fill(CGRect(x: 0, y: 0, width: 1, height: cell))
+            }
+        return UIColor(patternImage: tile)
+    }()
+
     private func setup() {
         clipsToBounds = true
-        backgroundColor = .black
+        backgroundColor = Self.canvasBackingPattern
 
         // transformView is sized in layoutSubviews — either filling the
         // container (when drawingSurfaceSide == 0) or held as a centered

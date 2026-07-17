@@ -219,7 +219,7 @@ struct DrawingView: View {
                         .zIndex(2)
                     }
                 }
-                .background(Color(.systemGray6))
+                .background(KikiTheme.canvasBacking)
             }
             // Fill the bottom home-indicator safe-area inset so the (black) Metal
             // canvas reaches the physical bottom edge like it already does on the
