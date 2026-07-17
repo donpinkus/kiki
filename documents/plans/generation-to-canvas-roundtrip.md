@@ -83,3 +83,31 @@ same cost (one generation either way).
 - App-side: import mechanics (layer vs flatten), resolution (sketchify at 768²,
   canvas is 2048² — upscale strategy for import), undo semantics.
 - Latency UX: one generation (~1 s incl. overhead) — fine as a tap action.
+
+## Layer-splitting expansion (ON HOLD — awaiting SAM 3 gated access, 2026-07-17)
+
+Next evolution: import splits into layers per object-SUBJECT (all falling leaves =
+one layer), toggle one-layer vs multi-layer, plus tap/text selection of specific
+objects. Chosen tool: **SAM 3** (facebook/sam3 + sam3.1, HF, transformers
+Sam3Model/Sam3Processor) — its promptable CONCEPT segmentation returns all
+instances of a text concept (union = one layer), and point prompts cover
+tap-to-import. Access requested by Donald (gated, pending approval; token got 403).
+
+Designed experiment (ready to run on one H100 session, images already staged from
+the round-trip work):
+1. Concept→layer grouping on the island image (petals/clouds = multi-instance test).
+2. Auto-layering vocabularies (easy UX, no user selection):
+   (a) prompt-noun concepts (sessions name their subjects; residual → background
+   layer) — recommended first; (b) SAM everything-mode + embedding/spatial
+   clustering (fully automatic; grouping quality is the risk); (c) VLM captioner
+   → concepts (only if (a)'s residual behavior disappoints). Plan: (a) with (b)
+   as residual fallback, layer-count cap of 3-8.
+3. Tap-prompt demo (point → object mask → single-object import).
+4. Mask-transfer check: masks from generated image G applied to sketchified S
+   (geometry shifts slightly between generations — measure, maybe dilate; or
+   segment S directly).
+5. Note: layered import leaves holes behind lifted objects — options: transparent
+   holes (Procreate-like), cheap inpaint (cv2/LaMa) on background layer.
+Fallback if SAM 3 disappoints: GroundingDINO + SAM 2.1 (both ungated).
+Use a SEPARATE venv on the instance (latest transformers) — do not touch the
+shared NFS venv (pinned transformers 4.57 for klein).
