@@ -99,6 +99,7 @@ struct BrushSettingsPopover: View {
                 BrushSliderRow("Charge", value: $coordinator.toolWetCharge, range: 0.05...1.0, help: Self.help["Charge"]!)
                 BrushSliderRow("Refill", value: $coordinator.toolWetRefill, range: 0.0...1.0, help: Self.help["Refill"]!)
                 BrushSliderRow("Wet jitter", value: $coordinator.toolWetJitter, range: 0.0...1.0, help: Self.help["Wet jitter"]!)
+                BrushSliderRow("Blur", value: $coordinator.toolWetBlur, range: 0.0...1.0, help: Self.help["Blur"]!)
             }
 
             Divider()
@@ -189,7 +190,10 @@ struct BrushSettingsPopover: View {
             high: "Instantly — the brush always lays pure ink, no matter what it crosses."),
         "Wet jitter": BrushHelp(summary: "Randomly varies how much paint each dab deposits — organic patchiness.",
             low: "Even deposit along the stroke.",
-            high: "Some dabs land soaked, others nearly dry.")
+            high: "Some dabs land soaked, others nearly dry."),
+        "Blur": BrushHelp(summary: "Softens the smudge — dragged edges melt instead of staying crisp (Smudge mode only).",
+            low: "Crisp smudge — edges keep their definition as they drag.",
+            high: "Soft melt — the smudge averages what it crosses and feathers its rim.")
     ]
 }
 

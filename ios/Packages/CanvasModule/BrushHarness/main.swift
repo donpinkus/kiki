@@ -170,7 +170,7 @@ final class Scene {
             let stamps = walker.advance(
                 stroke: stroke, scale: 1, clipPath: nil,
                 sample: { [renderer] x, y in renderer.sampleLayerColor(x: x, y: y) },
-                sampleAveraged: { [renderer] x, y in renderer.sampleLayerColorAveraged(x: x, y: y) },
+                sampleAveraged: { [renderer] x, y, r in renderer.sampleLayerColorAveraged(x: x, y: y, radius: r) },
                 mix: { [renderer] a, b, t in renderer.kmMixCPU(a, b, t) })
             renderer.commitStampsToCanvas(stamps, strokeOpacity: Float(stroke.brush.opacity), wetInk: true)
             return
@@ -201,7 +201,7 @@ final class Scene {
                         }
                         return s
                     },
-                    sampleAveraged: { [renderer] x, y in renderer.sampleLayerColorAveraged(x: x, y: y) },
+                    sampleAveraged: { [renderer] x, y, r in renderer.sampleLayerColorAveraged(x: x, y: y, radius: r) },
                     mix: { [renderer] a, b, t in renderer.kmMixCPU(a, b, t) })
                 if !stamps.isEmpty {
                     renderer.applyWetStamps(stamps)
@@ -1244,6 +1244,32 @@ runScene("wet-12-wetness-jitter",
         b.wetJitter = j
         s.paint(synthStroke(id: 500 + i, brush: b,
                             from: CGPoint(x: 80, y: y), to: CGPoint(x: 944, y: y)))
+    }
+}
+
+runScene("wet-13-smudge-blur",
+         """
+         Smudge Blur sweep (Procreate Wet Mix "Blur"): the same drag across a crisp
+         red/blue boundary, only Blur changes — 0 / 0.5 / 1.0 top to bottom (Smear 0.3).
+         Blur MORPHS the smudge into a blur tool:
+         - 0: pure SMUDGE — red drags INTO the blue as a long directional tongue.
+         - 0.5: half-way — a shorter drag with a softened transition.
+         - 1.0: pure BLUR — no directional drag at all; the boundary melts IN PLACE
+           (the load is the local neighborhood average every dab, which is an identity
+           over uniform paint — only structure softens). Compare the in-band boundary
+           softness against the crisp boundary above/below the drag path.
+         """) { s in
+    for (i, bl) in [CGFloat(0.0), 0.5, 1.0].enumerated() {
+        let y = CGFloat(230 + i * 280)
+        s.label(String(format: "blur %.1f", bl), y: y - 90)
+        s.paint(synthStroke(id: 510 + i, brush: pen(red, width: 90),
+                            from: CGPoint(x: 140, y: y), to: CGPoint(x: 500, y: y), force: { _ in 1 }))
+        s.paint(synthStroke(id: 515 + i, brush: pen(blue, width: 90),
+                            from: CGPoint(x: 500, y: y), to: CGPoint(x: 860, y: y), force: { _ in 1 }))
+        var b = wet(red, width: 54, mix: 0.6, smear: 0.3, smudge: true)
+        b.wetBlur = bl
+        s.paint(synthStroke(id: 520 + i, brush: b,
+                            from: CGPoint(x: 300, y: y), to: CGPoint(x: 740, y: y)))
     }
 }
 

@@ -51,7 +51,7 @@ struct WetStrokeWalker {
         scale: CGFloat,
         clipPath: CGPath?,
         sample: (Int, Int) -> (color: SIMD3<Float>, alpha: Float)?,
-        sampleAveraged: (Int, Int) -> (color: SIMD3<Float>, alpha: Float)?,
+        sampleAveraged: (Int, Int, Int) -> (color: SIMD3<Float>, alpha: Float)?,
         mix: (SIMD3<Float>, SIMD3<Float>, Float) -> SIMD3<Float>
     ) -> [CanvasRenderer.StampInstance] {
         guard stroke.points.count > lastPointIndex else { return [] }
@@ -64,7 +64,12 @@ struct WetStrokeWalker {
         // (the fixture-3 "poor mixing" report). Opacity 1 is unchanged either way.
         let dep = Float(max(0, min(1, brush.wetStrength)))
         let baseColor = SIMD3<Float>(s2l(brush.color.red), s2l(brush.color.green), s2l(brush.color.blue))
-        let hardness = Float(brush.hardness)
+        // Blur (smudge only): neighborhood-averaged pickup + softened dab rim, so the
+        // smudge MELTS edges instead of dragging them crisply. Radius scales with blur
+        // and brush size (capped — the CPU read is per dab).
+        let blur = brush.wetSmudge ? Float(max(0, min(1, brush.wetBlur))) : 0
+        let blurRadius = blur > 0 ? max(1, min(8, Int(blur * Float(brush.baseWidth) * 0.12))) : 0
+        let hardness = Float(brush.hardness) * (1 - 0.6 * blur)
         let aspect = Float(min(max(brush.aspectRatio, 0.05), 1))
         let spacingFrac = max(brush.spacing, 0.02)
         let pickup = Float(max(0, min(1, brush.wetPickup)))   // how fast the load picks up canvas color
@@ -85,7 +90,7 @@ struct WetStrokeWalker {
         if lastPointIndex == 0 {
             if brush.wetSmudge,
                let p0 = stroke.points.first,
-               let s = sampleAveraged(Int(p0.position.x * scale), Int(p0.position.y * scale)) {
+               let s = sampleAveraged(Int(p0.position.x * scale), Int(p0.position.y * scale), max(1, blurRadius)) {
                 // 3×3-averaged seed: one texel is jittery on noisy paint (the GPU deposit
                 // sees a soft-coverage footprint, the seed shouldn't hinge on one pixel).
                 load = s.alpha > 0.02 ? s.color : baseColor
@@ -121,12 +126,16 @@ struct WetStrokeWalker {
                 radius: Float(width * 0.5 * scale), rotation: 0,
                 color: SIMD4<Float>(load.x, load.y, load.z, dep), hardness: hardness, aspect: aspect,
                 wetTargetAlpha: brush.wetSmudge ? loadAlpha : remaining))
-            if let s = sample(cx, cy) {
+            if let s = blurRadius > 0 ? sampleAveraged(cx, cy, blurRadius) : sample(cx, cy) {
+                // Blur floors the pickup rate: at blur 1 the load IS the local
+                // neighborhood average every dab, so the deposit paints a box-blur of
+                // what it crosses (true melt) instead of dragging a lagging color.
+                let pickupEff = max(pickup, blur)
                 if s.alpha > 0.05 {
-                    load = mix(load, s.color, pickup * s.alpha)
+                    load = mix(load, s.color, pickupEff * s.alpha)
                 }
                 if brush.wetSmudge {
-                    loadAlpha += (s.alpha - loadAlpha) * pickup
+                    loadAlpha += (s.alpha - loadAlpha) * pickupEff
                 }
             }
             // Refill (ink only): pull the load back toward the brush's own ink — the

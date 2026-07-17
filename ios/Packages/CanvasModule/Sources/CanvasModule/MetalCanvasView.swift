@@ -1060,7 +1060,7 @@ public final class MetalCanvasView: UIView {
         let newStamps = walker.advance(
             stroke: stroke, scale: canvasScale, clipPath: lassoClipPath,
             sample: { [renderer] x, y in renderer.sampleLayerColor(x: x, y: y) },
-            sampleAveraged: { [renderer] x, y in renderer.sampleLayerColorAveraged(x: x, y: y) },
+            sampleAveraged: { [renderer] x, y, r in renderer.sampleLayerColorAveraged(x: x, y: y, radius: r) },
             mix: { [renderer] a, b, t in renderer.kmMixCPU(a, b, t) })
         wetWalker = walker
 
@@ -1078,7 +1078,7 @@ public final class MetalCanvasView: UIView {
         let newStamps = walker.advance(
             stroke: stroke, scale: canvasScale, clipPath: lassoClipPath,
             sample: { [renderer] x, y in renderer.sampleLayerColor(x: x, y: y) },
-            sampleAveraged: { [renderer] x, y in renderer.sampleLayerColorAveraged(x: x, y: y) },
+            sampleAveraged: { [renderer] x, y, r in renderer.sampleLayerColorAveraged(x: x, y: y, radius: r) },
             mix: { [renderer] a, b, t in renderer.kmMixCPU(a, b, t) })
         wetWalker = walker
         guard !newStamps.isEmpty else { return }

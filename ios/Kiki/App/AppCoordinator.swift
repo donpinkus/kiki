@@ -173,6 +173,13 @@ final class AppCoordinator {
             applyTool()
         }
     }
+    /// Wet Blur ("Blur", smudge softness): neighborhood pickup + soft rim.
+    var toolWetBlur: CGFloat = 0.0 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
     /// Wetness Jitter ("Wet jitter"): per-dab random deposit patchiness.
     var toolWetJitter: CGFloat = 0.0 {
         didSet {
@@ -2066,6 +2073,7 @@ final class AppCoordinator {
                 wetCharge: toolWetCharge,
                 wetRefill: toolWetRefill,
                 wetJitter: toolWetJitter,
+                wetBlur: toolWetBlur,
                 shapeID: toolShapeID,
                 aspectRatio: toolAspect,
                 grainID: toolGrainID,

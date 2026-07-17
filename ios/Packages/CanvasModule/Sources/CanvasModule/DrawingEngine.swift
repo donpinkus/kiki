@@ -161,6 +161,11 @@ public struct BrushConfig: Codable, Sendable {
     /// starts at full Mix and dries toward a faint tint as the reservoir runs out
     /// (half-life 180…3600px on the 2048² document, quadratic in Charge).
     public var wetCharge: CGFloat
+    /// Wet Blur [0,1] (Procreate Wet Mix "Blur"/"Grade", smudge only): softens the
+    /// smudge — the pickup samples a NEIGHBORHOOD average (radius grows with blur and
+    /// brush size) instead of a point, and the smudge dab's rim softens, so dragged
+    /// edges melt instead of staying crisp. 0 = crisp point smudge (default).
+    public var wetBlur: CGFloat
     /// Wetness Jitter [0,1] (Procreate Wet Mix): per-dab random reduction of the deposit
     /// weight — some dabs land wet and full, others nearly dry, giving the stroke an
     /// organic patchiness. 0 = even deposit (default). Deterministic per dab (stroke id
@@ -271,6 +276,7 @@ public struct BrushConfig: Codable, Sendable {
         wetCharge: CGFloat = 1.0,
         wetRefill: CGFloat = 0.0,
         wetJitter: CGFloat = 0.0,
+        wetBlur: CGFloat = 0.0,
         shapeID: String? = nil,
         aspectRatio: CGFloat = 1.0,
         grainID: String? = nil,
@@ -310,6 +316,7 @@ public struct BrushConfig: Codable, Sendable {
         self.wetCharge = wetCharge
         self.wetRefill = wetRefill
         self.wetJitter = wetJitter
+        self.wetBlur = wetBlur
         self.shapeID = shapeID
         self.aspectRatio = aspectRatio
         self.grainID = grainID
@@ -367,7 +374,7 @@ public struct BrushConfig: Codable, Sendable {
         case dynamics, wetSmudge, aspectRatio, stabilization, pressureSmoothing
         case grainID, grainDepth, grainScale, spacingJitter, tipLightness
         case stampCount, stampCountJitter, rotationFollow, flipX, flipY, fallOff, tipAngle
-        case wetCharge, wetRefill, wetJitter
+        case wetCharge, wetRefill, wetJitter, wetBlur
         case taperStart, taperEnd, taperOpacity, grainMoving
     }
 
@@ -403,6 +410,7 @@ public struct BrushConfig: Codable, Sendable {
         wetCharge = try container.decodeIfPresent(CGFloat.self, forKey: .wetCharge) ?? 1.0
         wetRefill = try container.decodeIfPresent(CGFloat.self, forKey: .wetRefill) ?? 0.0
         wetJitter = try container.decodeIfPresent(CGFloat.self, forKey: .wetJitter) ?? 0.0
+        wetBlur = try container.decodeIfPresent(CGFloat.self, forKey: .wetBlur) ?? 0.0
         // Phase 3 — default nil (procedural round) so pre-Phase-3 configs decode unchanged.
         shapeID = try container.decodeIfPresent(String.self, forKey: .shapeID)
         // P4b — default 1 (round) so configs saved before aspect decode unchanged.
@@ -455,6 +463,7 @@ public struct BrushConfig: Codable, Sendable {
         try container.encode(wetCharge, forKey: .wetCharge)
         try container.encode(wetRefill, forKey: .wetRefill)
         try container.encode(wetJitter, forKey: .wetJitter)
+        try container.encode(wetBlur, forKey: .wetBlur)
         try container.encodeIfPresent(shapeID, forKey: .shapeID)
         // aspectRatio was decoded-but-never-encoded from P4b (2026-07-15 fix): saved
         // brushes / recorded fixtures silently lost their aspect on round-trip.
