@@ -68,6 +68,8 @@ struct DrawingTopBar: View {
 
             UsageMeterView()
 
+            KikiAIStatusBadge()
+
             Spacer()
 
             // MARK: Center — Style, Prompt
@@ -226,5 +228,128 @@ private extension Color {
         var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
         UIColor(self).getRed(&r, green: &g, blue: &b, alpha: &a)
         return (0.299 * r + 0.587 * g + 0.114 * b) < 0.55
+    }
+}
+
+// MARK: - Kiki's AI status badge
+
+/// Ambient H100 status: a dot + "Kiki's AI" label. Green = ready (sketch
+/// magic available), pink = warming up, red = provisioning error, gray =
+/// off/unknown. Tapping opens a popover with the honest details (elapsed
+/// warm-up time + ETA, or the provisioning error) and a wake-up action.
+/// Post-launch this may go away if a warm pool makes readiness permanent.
+struct KikiAIStatusBadge: View {
+    @Environment(AppCoordinator.self) private var coordinator
+    @State private var showDetails = false
+
+    private var dotColor: Color {
+        switch coordinator.lambdaPoolState?.status {
+        case "ready": return .green
+        case "launching", "booting", "none": return .pink
+        case "error": return .red
+        default: return .gray
+        }
+    }
+
+    private var label: String {
+        switch coordinator.lambdaPoolState?.status {
+        case "ready": return "Kiki's AI"
+        case "launching", "booting", "none": return "Kiki's AI · warming up"
+        case "error": return "Kiki's AI · error"
+        default: return "Kiki's AI"
+        }
+    }
+
+    var body: some View {
+        Button {
+            showDetails = true
+        } label: {
+            HStack(spacing: 5) {
+                Circle()
+                    .fill(dotColor)
+                    .frame(width: 7, height: 7)
+                Text(label)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(KikiTheme.icon)
+            }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 5)
+            .background(KikiTheme.buttonCircle, in: Capsule())
+        }
+        .popover(isPresented: $showDetails) {
+            KikiAIStatusDetails()
+                .frame(width: 300)
+                .padding()
+        }
+    }
+}
+
+private struct KikiAIStatusDetails: View {
+    @Environment(AppCoordinator.self) private var coordinator
+
+    var body: some View {
+        // 1s tick so "elapsed" counts up live while the popover is open.
+        TimelineView(.periodic(from: .now, by: 1)) { _ in
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Kiki's AI")
+                    .font(.headline)
+
+                switch coordinator.lambdaPoolState?.status {
+                case "ready":
+                    Label("Ready — sketch magic is available.", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                case "launching":
+                    Label("Finding a GPU…", systemImage: "hourglass")
+                        .foregroundStyle(.pink)
+                    warmingDetail
+                case "booting", "none":
+                    Label("Warming up…", systemImage: "flame")
+                        .foregroundStyle(.pink)
+                    warmingDetail
+                case "error":
+                    Label("Error fetching Kiki's AI", systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red)
+                    if let err = coordinator.lambdaPoolState?.lastError {
+                        Text(err)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                    Button("Try again") { coordinator.ensureLambdaPool() }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                default:
+                    Text("Status unknown — Kiki's AI may be asleep.")
+                        .foregroundStyle(.secondary)
+                    Button("Wake up") { coordinator.ensureLambdaPool() }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                }
+
+                Text("Powers the Edit button — turning generated images back into editable sketches.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .font(.subheadline)
+        }
+    }
+
+    @ViewBuilder
+    private var warmingDetail: some View {
+        let elapsed: Int? = coordinator.lambdaPoolState?.launchedAtMs.map {
+            max(0, Int(Date().timeIntervalSince1970 - $0 / 1000))
+        }
+        HStack(spacing: 12) {
+            if let elapsed {
+                Text("\(elapsed)s elapsed")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            if let eta = coordinator.lambdaPoolState?.etaSeconds {
+                Text("~\(eta)s remaining")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 }

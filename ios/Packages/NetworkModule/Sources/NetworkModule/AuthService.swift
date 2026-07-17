@@ -202,6 +202,11 @@ public actor AuthService {
         /// Rough seconds until the H100 is ready while booting; nil when
         /// ready/unknown. Drives the "warming up, ready in ~X" UI.
         public let etaSeconds: Int?
+        /// Provisioning error detail when status == "error".
+        public let lastError: String?
+        /// Epoch ms when the instance launch began — the status badge derives
+        /// "Xs elapsed" from this while warming.
+        public let launchedAtMs: Double?
     }
 
     /// Errors specific to POST /v1/sketchify.

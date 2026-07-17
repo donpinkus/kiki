@@ -735,6 +735,9 @@ final class AppCoordinator {
     private(set) var lambdaPoolReady = false
     /// Boot ETA (seconds) while the pool is warming; nil when ready/unknown.
     private(set) var lambdaPoolEtaSeconds: Int?
+    /// Full last-known pool state — drives the "Kiki's AI" status badge
+    /// (dot color, elapsed-while-warming, provisioning error details).
+    private(set) var lambdaPoolState: AuthService.LambdaPoolState?
     /// True while a sketchify request is in flight (button shows a spinner).
     private(set) var sketchifyInProgress = false
     /// Transient toast text (e.g. the "warming up" notice). Auto-clears ~5s
@@ -752,10 +755,12 @@ final class AppCoordinator {
                 if let self {
                     do {
                         let state = try await self.authService.fetchLambdaPoolState()
+                        self.lambdaPoolState = state
                         self.lambdaPoolReady = state.status == "ready"
                         self.lambdaPoolEtaSeconds = state.etaSeconds
                     } catch {
                         self.lambdaPoolReady = false
+                        self.lambdaPoolState = nil
                     }
                 }
                 try? await Task.sleep(nanoseconds: 15_000_000_000)
