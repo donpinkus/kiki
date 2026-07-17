@@ -1440,18 +1440,51 @@ final class AppCoordinator {
                     self.startStreamSession(request: request, backendWsURL: wsURL)
                 }
             } catch {
+                // Only credential failures justify signing out (which wipes
+                // Keychain). Transport errors (offline, DNS) and backend 5xx
+                // (Railway redeploy) are transient: keep credentials, show a
+                // banner, and auto-retry — never a manual "Try Again".
+                let isCredentialFailure: Bool
+                switch error {
+                case AuthService.AuthError.noToken,
+                     AuthService.AuthError.refreshFailed,
+                     AuthService.AuthError.backendRejected:
+                    isCredentialFailure = true
+                default:
+                    isCredentialFailure = false
+                }
                 await MainActor.run {
-                    streamLog.error("Auth token fetch failed: \(error.localizedDescription)")
+                    streamLog.error("Auth token fetch failed: \(error.localizedDescription) credentialFailure=\(isCredentialFailure)")
                     SentrySDK.capture(error: error) { scope in
                         scope.setTag(value: "stream.authTokenFetch", key: "op")
+                        scope.setTag(value: isCredentialFailure ? "credential" : "transient", key: "failure_class")
                     }
-                    startupTx.finish(status: .unauthenticated)
+                    startupTx.finish(status: isCredentialFailure ? .unauthenticated : .aborted)
                     self.pendingStartupTransaction = nil
-                    self.streamReadiness = .failed(message: "Please sign in again")
-                    self.generationError = "Please sign in again"
-                    self.signOut()
+                    if isCredentialFailure {
+                        self.streamReadiness = .failed(message: "Please sign in again")
+                        self.generationError = "Please sign in again"
+                        self.signOut()
+                    } else {
+                        self.streamReadiness = .failed(message: "Connecting…")
+                        self.generationError = "No connection — retrying…"
+                        self.scheduleStreamStartRetry()
+                    }
                 }
             }
+        }
+    }
+
+    /// Auto-retry for transient token-fetch failures at stream start. Keeps
+    /// retrying every 5s while the user is still on the drawing screen and no
+    /// session has been established; goes quiet as soon as either changes.
+    private func scheduleStreamStartRetry() {
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(5))
+            guard let self else { return }
+            guard self.currentScreen == .drawing, self.streamSession == nil else { return }
+            streamLog.info("Retrying stream start after transient auth failure")
+            self.startStream()
         }
     }
 
@@ -1718,13 +1751,9 @@ final class AppCoordinator {
         switch readiness {
         case .disconnected:
             resultState = lastSuccessfulImage.map { .preview(image: $0) } ?? .empty
-        case .warming(let message, let startedAt):
-            // `startedAt` is server-authoritative (orchestrator's session.createdAt
-            // threaded through state events), so the progress bar reflects the
-            // real pod-warm-cycle origin even after gallery↔drawing nav.
+        case .warming(let message, _):
             resultState = .provisioning(
                 message: message,
-                startedAt: startedAt,
                 previousImage: lastSuccessfulImage
             )
         case .ready:

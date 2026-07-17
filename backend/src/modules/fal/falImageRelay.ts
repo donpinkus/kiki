@@ -139,13 +139,23 @@ export class FalImageRelay implements ImageRelay {
    * img2img, and it survives a reconnect so a stroke right after fal's idle
    * close isn't lost. */
   private pendingFrame: Buffer | null = null;
+  /** requestId (from the config active when the pending frame was queued)
+   * that rides with `pendingFrame` — replaced together under latest-wins. */
+  private pendingRequestId: string | null = null;
 
   /** Monotonic id stamped on each frame sent to fal. */
   private sentSeq = 0;
-  /** FIFO of seqs sent to fal awaiting a result. Length 0 after a result is
-   * matched ⇒ no newer sketch pending ⇒ queueEmpty (user paused). Mirrors the
-   * pod's `latest_frame is None` check. Cleared on (re)connect. */
-  private inFlightSeqs: number[] = [];
+  /** FIFO of sends to fal awaiting a result, each carrying the client
+   * requestId active when its frame was queued (null for live frames).
+   * Length 0 after a result is matched ⇒ no newer sketch pending ⇒
+   * queueEmpty (user paused). Mirrors the pod's `latest_frame is None`
+   * check. Cleared on (re)connect. */
+  private inFlightSeqs: Array<{ seq: number; requestId: string | null }> = [];
+  /** requestId from the most recent sendConfig. The pod echoes the config's
+   * requestId on the frame_meta of every result generated under it; iOS
+   * pairs style-preview responses by that echo (StreamSession.sendPreview),
+   * so the synthesized frame_meta must carry it too. */
+  private currentRequestId: string | null = null;
 
   private connectMs = 0;
 
@@ -309,14 +319,14 @@ export class FalImageRelay implements ImageRelay {
       // Match this result to the oldest outstanding send (FIFO; fal returns
       // one result per input at our ~2 FPS cadence). queueEmpty ⇔ nothing
       // newer is still pending after removing it — same semantics as the pod.
-      this.inFlightSeqs.shift();
+      const matched = this.inFlightSeqs.shift();
       const queueEmpty = this.inFlightSeqs.length === 0;
 
       // Synthesize the frame_meta the downstream code expects, THEN the binary.
-      // stream.ts sniffs frame_meta → sets nextImageBinaryQueueEmpty → the
-      // following binary forwards as {type:'frame'} and fires the video trigger.
+      // requestId echoes the client config that produced this result (style
+      // previews pair on it); null for live frames — same as the pod.
       this.messageHandler?.(
-        JSON.stringify({ type: 'frame_meta', requestId: null, queueEmpty }),
+        JSON.stringify({ type: 'frame_meta', requestId: matched?.requestId ?? null, queueEmpty }),
         false,
       );
       this.messageHandler?.(jpeg, true);
@@ -451,11 +461,18 @@ export class FalImageRelay implements ImageRelay {
     if (typeof payload['seed'] === 'number' && Number.isFinite(payload['seed'])) {
       next['seed'] = Math.trunc(payload['seed']);
     }
+    // Pairing id for style previews (absent/null on live configs). Not a fal
+    // param — echoed back on the synthesized frame_meta of results produced
+    // under this config.
+    this.currentRequestId = typeof payload['requestId'] === 'string' ? payload['requestId'] : null;
     this.params = next;
   }
 
   sendFrame(jpeg: Buffer): void {
-    this.pendingFrame = jpeg; // latest-wins
+    // latest-wins, together with the requestId active at queue time (a live
+    // frame overwriting a queued preview frame must also clear its id).
+    this.pendingFrame = jpeg;
+    this.pendingRequestId = this.currentRequestId;
     this.flush();
   }
 
@@ -466,10 +483,12 @@ export class FalImageRelay implements ImageRelay {
       return;
     }
     const jpeg = this.pendingFrame;
+    const requestId = this.pendingRequestId;
     this.pendingFrame = null;
+    this.pendingRequestId = null;
     const dataUri = `data:image/jpeg;base64,${jpeg.toString('base64')}`;
     const seq = ++this.sentSeq;
-    this.inFlightSeqs.push(seq);
+    this.inFlightSeqs.push({ seq, requestId });
     const msg = { ...this.params, image_url: dataUri, sync_mode: true };
     try {
       this.ws.send(this.packr.pack(msg));
@@ -483,6 +502,7 @@ export class FalImageRelay implements ImageRelay {
       this.log('warn', 'fal.send_failed', { err: (err as Error).message });
       this.inFlightSeqs.pop();
       this.pendingFrame = jpeg; // put it back; retry on next tick/reconnect
+      this.pendingRequestId = requestId;
     }
   }
 

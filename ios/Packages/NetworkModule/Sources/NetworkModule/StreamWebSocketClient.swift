@@ -6,8 +6,13 @@ import Sentry
 /// (auth, entitlement, rate-limit). Carries the verbatim `message` field so
 /// callers can render it without reaching for a hardcoded fallback string.
 public struct ServerRejectedError: Error, Sendable {
+    /// Machine-readable deny reason (e.g. "free_limit_reached"), when the
+    /// backend sent one. Lets callers branch (paywall vs. plain banner)
+    /// identically to mid-session `{type:'error'}` messages.
+    public let code: String?
     public let message: String
-    public init(message: String) {
+    public init(code: String? = nil, message: String) {
+        self.code = code
         self.message = message
     }
 }
@@ -254,7 +259,7 @@ public actor StreamWebSocketClient {
                         scope.setTag(value: "ws.connect.server_error", key: "op")
                         scope.setExtra(value: status.message ?? "(no message)", key: "serverMessage")
                     }
-                    throw ServerRejectedError(message: status.message ?? "Server error")
+                    throw ServerRejectedError(code: status.code, message: status.message ?? "Server error")
                 }
                 statusContinuation.yield(status)
             }

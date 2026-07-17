@@ -37,16 +37,11 @@ public struct GenerationProgress: Equatable, Sendable {
 /// Represents the current state of the result pane.
 public enum ResultState {
     case empty
-    /// Backend GPU pod is being provisioned. `startedAt` is the
-    /// server-authoritative pod-warm-cycle origin used to compute elapsed
-    /// time for a smooth progress bar across many `message` updates. `nil`
-    /// during the pre-WS-open window before we've received it from the
-    /// server — the UI hides the progress bar entirely in that case so it
-    /// can't render at 0% and look like the cycle is restarting.
-    /// `previousImage`, when present, is shown dimmed underneath the
-    /// warm-up overlay so the user keeps seeing their last result while
-    /// we reconnect.
-    case provisioning(message: String, startedAt: Date?, previousImage: UIImage?)
+    /// The stream is connecting (fal relay wiring; usually ~1–2s, but a cold
+    /// fal pool can take a couple of minutes). `previousImage`, when present,
+    /// is shown dimmed underneath the overlay so the user keeps seeing their
+    /// last result while we reconnect.
+    case provisioning(message: String, previousImage: UIImage?)
     case generating(progress: GenerationProgress, previousImage: UIImage?)
     case preview(image: UIImage)
     case streaming(image: UIImage, frameCount: Int = 0)
@@ -88,7 +83,7 @@ public enum ResultState {
         switch self {
         case .empty:
             return nil
-        case .provisioning(_, _, let previousImage):
+        case .provisioning(_, let previousImage):
             return previousImage
         case .generating(_, let previousImage):
             return previousImage

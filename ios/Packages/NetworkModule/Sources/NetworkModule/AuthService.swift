@@ -13,7 +13,12 @@ public actor AuthService {
     public enum AuthError: Error, Sendable {
         case noToken
         case appleSignInFailed(String)
+        /// The backend rejected the credentials themselves (401/403). This is
+        /// the only error class that justifies clearing the Keychain.
         case backendRejected(String)
+        /// The backend answered with a non-auth failure (5xx, 429, proxy
+        /// pages during a redeploy). Transient — never clear credentials.
+        case serverError(status: Int, message: String)
         case refreshFailed(String)
         case invalidResponse
     }
@@ -138,11 +143,41 @@ public actor AuthService {
         if !needsRefresh {
             return bundle.accessToken
         }
-        try await refresh(using: bundle.refreshToken)
+        try await ensureFreshToken()
         guard let refreshed = currentBundle() else {
             throw AuthError.refreshFailed("no token after refresh")
         }
         return refreshed.accessToken
+    }
+
+    /// Single-flight refresh. The backend rotates refresh tokens one-time-use,
+    /// so two concurrent refreshes with the same stored token would race: the
+    /// first wins, the second gets `invalid_refresh_token` and (pre-fix) wiped
+    /// the winner's fresh Keychain bundle. Cold launch fires several
+    /// near-simultaneous `currentAccessToken()` callers (entitlements, usage,
+    /// stream, lambda pool), so this coalescing is load-bearing, not hygiene.
+    private var inFlightRefresh: Task<Void, Error>?
+
+    private func ensureFreshToken() async throws {
+        if let existing = inFlightRefresh {
+            try await existing.value
+            return
+        }
+        let task = Task<Void, Error> {
+            // Cleared by the task itself (not the awaiter) so an awaiting
+            // caller's cancellation can't open the slot while the refresh is
+            // still in flight.
+            defer { self.inFlightRefresh = nil }
+            // Re-read inside the task: the bundle may have been rotated by a
+            // refresh that completed between the caller's check and now.
+            guard let bundle = self.currentBundle() else { throw AuthError.noToken }
+            if bundle.accessExpiresAt.timeIntervalSinceNow >= Self.refreshThresholdSeconds {
+                return
+            }
+            try await self.refresh(using: bundle.refreshToken)
+        }
+        inFlightRefresh = task
+        try await task.value
     }
 
     /// Submit a StoreKit 2 `Transaction.jwsRepresentation` to the backend for
@@ -192,7 +227,10 @@ public actor AuthService {
         let (data, rawResponse) = try await urlSession.data(for: request)
         guard let http = rawResponse as? HTTPURLResponse else { throw AuthError.invalidResponse }
         if !(200..<300).contains(http.statusCode) {
-            throw AuthError.backendRejected("HTTP \(http.statusCode)")
+            if http.statusCode == 401 || http.statusCode == 403 {
+                throw AuthError.backendRejected("HTTP \(http.statusCode)")
+            }
+            throw AuthError.serverError(status: http.statusCode, message: "HTTP \(http.statusCode)")
         }
         do {
             return try JSONDecoder().decode(UsageResponse.self, from: data)
@@ -323,10 +361,15 @@ public actor AuthService {
         }
 
         if !(200..<300).contains(http.statusCode) {
-            if let parsed = try? JSONDecoder().decode(BackendError.self, from: data) {
-                throw AuthError.backendRejected(parsed.message ?? parsed.error ?? "HTTP \(http.statusCode)")
+            let message = (try? JSONDecoder().decode(BackendError.self, from: data))
+                .flatMap { $0.message ?? $0.error } ?? "HTTP \(http.statusCode)"
+            // Only 401/403 mean "your credentials are bad." Everything else
+            // (5xx during a Railway redeploy, 429, proxy error pages) is
+            // transient and must NOT trigger the credential-wiping paths.
+            if http.statusCode == 401 || http.statusCode == 403 {
+                throw AuthError.backendRejected(message)
             }
-            throw AuthError.backendRejected("HTTP \(http.statusCode)")
+            throw AuthError.serverError(status: http.statusCode, message: message)
         }
 
         do {

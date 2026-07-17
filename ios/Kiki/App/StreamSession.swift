@@ -246,21 +246,36 @@ final class StreamSession {
             preconditionFailure("sendPreview requires config.requestId to be set")
         }
 
-        return try await withCheckedThrowingContinuation { cont in
-            pendingPreviewContinuations[requestId] = cont
-            Task { [weak self] in
-                guard let self else { return }
-                do {
-                    try await self.client.sendConfig(config)
-                    try await self.client.sendFrame(jpeg)
-                } catch {
-                    // Send failed — fail the continuation if it's still pending.
-                    // (Receive loop may have already resolved it; that's fine.)
-                    if let stranded = self.pendingPreviewContinuations.removeValue(forKey: requestId) {
-                        stranded.resume(throwing: error)
+        // Cancellation-aware: without the handler, a caller-side timeout
+        // (StylePreviewController.withTimeout's task group) could never fire —
+        // the group must await this child, and a bare CheckedContinuation
+        // ignores cancellation, so the "20s bound" silently became "until
+        // picker dismissal".
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { cont in
+                pendingPreviewContinuations[requestId] = cont
+                Task { [weak self] in
+                    guard let self else { return }
+                    do {
+                        try await self.client.sendConfig(config)
+                        try await self.client.sendFrame(jpeg)
+                    } catch {
+                        // Send failed — fail the continuation if it's still pending.
+                        // (Receive loop may have already resolved it; that's fine.)
+                        self.failPendingPreview(requestId: requestId, error: error)
                     }
                 }
             }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.failPendingPreview(requestId: requestId, error: CancellationError())
+            }
+        }
+    }
+
+    private func failPendingPreview(requestId: String, error: Error) {
+        if let stranded = pendingPreviewContinuations.removeValue(forKey: requestId) {
+            stranded.resume(throwing: error)
         }
     }
 
@@ -443,6 +458,11 @@ final class StreamSession {
                 // fail identically. setReadiness(.failed) also makes
                 // attemptReconnect a no-op (line 348 guard).
                 await client.disconnect()
+                // Route the machine-readable code the same way mid-session
+                // errors do, so e.g. an over-cap user gets the paywall (not
+                // just a red banner) whether the deny arrives at connect or
+                // mid-session.
+                onServerError?(serverError.code, serverError.message)
                 setReadiness(.failed(message: serverError.message))
                 return
             } catch {
