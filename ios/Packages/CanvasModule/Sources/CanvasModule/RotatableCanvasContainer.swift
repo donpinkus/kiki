@@ -538,7 +538,6 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
     /// layer each tick. When inactive, both views hide and the canvas stops
     /// touching the overlay path (zero added work in split-screen/fullscreen).
     public func setOverlayActive(_ active: Bool) {
-        NSLog("%@", "🔬OVL container.setOverlayActive(\(active)) ENTER bounds=\(bounds.size) overlayStrokeView.bounds=\(overlayStrokeView.bounds.size)")
         generatedImageView.isHidden = !active
         overlayStrokeView.isHidden = !active
         // Configure the overlay metal layer's device once, then hand it to the
@@ -549,7 +548,6 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
         } else {
             canvasView.overlayStrokeLayer = nil
         }
-        NSLog("%@", "🔬OVL container.setOverlayActive(\(active)) DONE")
     }
 
     /// Push the generated image to display locked over the canvas (overlay mode).

@@ -105,7 +105,6 @@ public struct CanvasView: UIViewRepresentable {
         }
         // Apply initial overlay drawing-mode state (via the view model so it survives a
         // container re-create).
-        NSLog("%@", "🔬OVL CanvasView.makeUIView overlayActive=\(overlayActive) hasImage=\(overlayImage != nil)")
         viewModel.setOverlayActive(overlayActive)
         viewModel.setOverlayImage(overlayImage)
         return container
@@ -125,7 +124,6 @@ public struct CanvasView: UIViewRepresentable {
         uiView.canvasView.devFadePeriod = devFadePeriod
         // Push overlay drawing-mode state on every update (image changes ~2 FPS while
         // streaming). Routed through the view model — idempotent setters.
-        NSLog("%@", "🔬OVL CanvasView.updateUIView overlayActive=\(overlayActive) hasImage=\(overlayImage != nil)")
         viewModel.setOverlayActive(overlayActive)
         viewModel.setOverlayImage(overlayImage)
     }

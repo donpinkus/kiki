@@ -1208,7 +1208,6 @@ final class AppCoordinator {
             backgroundImageData: drawing.backgroundImageData
         ))
 
-        NSLog("%@", "🔬OVL AppCoordinator.openDrawing → .drawing  layout=\(drawingLayout.rawValue)  hasLastImage=\(lastSuccessfulImage != nil)")
         currentScreen = .drawing
         isSuppressingObservation = false
 

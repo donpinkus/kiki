@@ -12,8 +12,6 @@ struct DrawingView: View {
 
     var body: some View {
         @Bindable var coordinator = coordinator
-        let _ = NSLog("%@", "🔬OVL DrawingView.body render")
-        let _ = Self._printChanges()
 
         VStack(spacing: 0) {
             DrawingTopBar()

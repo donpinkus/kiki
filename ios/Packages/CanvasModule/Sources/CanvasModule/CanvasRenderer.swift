@@ -252,10 +252,16 @@ public final class CanvasRenderer {
         var edgeFlat: Float = 0
     }
 
-    /// Maximum stamps per frame. 240 Hz pencil × ~6 interpolated steps per touch
-    /// × double-buffer safety = ~3000. Generous headroom.
-    private static let maxStampsPerFrame = 4096
-    private let stampBuffer: MTLBuffer
+    /// Initial stamp-buffer capacity. 240 Hz pencil × ~6 interpolated steps per
+    /// touch ≈ 3000 covers the incremental case, but the brush path regenerates
+    /// the ENTIRE stroke's stamps every frame (and funnels the same buffer into
+    /// the permanent flatten), so a long dense stroke can exceed any fixed cap.
+    /// The buffer grows by doubling on demand; the hard ceiling only bounds
+    /// pathological cases (64 B/stamp × 262144 = 16 MB).
+    private static let initialStampCapacity = 4096
+    private static let maxStampCapacity = 262_144
+    private var stampBuffer: MTLBuffer
+    private var stampCapacity = CanvasRenderer.initialStampCapacity
     private(set) var stampCount: Int = 0
 
     // MARK: - Init
@@ -312,7 +318,7 @@ public final class CanvasRenderer {
         self.quadVertexBuffer = qbuf
 
         // Stamp instance buffer.
-        let stampBufSize = Self.maxStampsPerFrame * MemoryLayout<StampInstance>.stride
+        let stampBufSize = Self.initialStampCapacity * MemoryLayout<StampInstance>.stride
         guard let sbuf = device.makeBuffer(length: stampBufSize, options: .storageModeShared) else { return nil }
         self.stampBuffer = sbuf
 
@@ -372,26 +378,21 @@ public final class CanvasRenderer {
         // Document resolution is fixed for the canvas's lifetime: allocate once,
         // then short-circuit on every subsequent layout pass.
         guard side != canvasWidth || side != canvasHeight else {
-            NSLog("%@", "🔬OVL configureDocument side=\(side) SHORT-CIRCUIT (already \(canvasWidth)×\(canvasHeight))")
             return
         }
-        NSLog("%@", "🔬OVL configureDocument side=\(side) ALLOCATING")
 
         canvasWidth = side
         canvasHeight = side
 
         let desc = makeLayerDescriptor()
         guard let tex = device.makeTexture(descriptor: desc) else {
-            NSLog("%@", "🔬OVL configureDocument makeTexture FAILED")
             canvasWidth = 0; canvasHeight = 0
             return
         }
-        NSLog("%@", "🔬OVL configureDocument → clearTexture(layer)")
         clearTexture(tex)
         layers = [Layer(id: UUID(), name: "Layer 1", isVisible: true, texture: tex)]
         activeLayerIndex = 0
         scratchTexture = device.makeTexture(descriptor: desc)
-        NSLog("%@", "🔬OVL configureDocument DONE (scratch=\(scratchTexture != nil))")
     }
 
     // MARK: - Layer Management
@@ -447,6 +448,56 @@ public final class CanvasRenderer {
         }
     }
 
+    /// A full snapshot of one layer (bytes + metadata) for compound undo
+    /// entries that must survive layer-structure changes (clearAll).
+    struct LayerStackSnapshot {
+        let id: UUID
+        let name: String
+        let isVisible: Bool
+        let data: Data
+    }
+
+    /// Stable id for a layer index (nil if out of range).
+    func layerID(at index: Int) -> UUID? {
+        guard index >= 0, index < layers.count else { return nil }
+        return layers[index].id
+    }
+
+    /// Current index of a layer id (nil if the layer was deleted).
+    func layerIndex(id: UUID) -> Int? {
+        layers.firstIndex { $0.id == id }
+    }
+
+    /// Snapshot every layer (bytes + metadata) plus the active index.
+    /// Returns nil if any layer read fails — a partial stack snapshot would
+    /// restore a corrupted document.
+    func snapshotLayerStack() -> (layers: [LayerStackSnapshot], activeIndex: Int)? {
+        var snaps: [LayerStackSnapshot] = []
+        for (i, layer) in layers.enumerated() {
+            guard let data = snapshotLayer(at: i) else { return nil }
+            snaps.append(LayerStackSnapshot(id: layer.id, name: layer.name, isVisible: layer.isVisible, data: data))
+        }
+        return (snaps, activeLayerIndex)
+    }
+
+    /// Rebuild the whole layer stack from a snapshot (inverse of
+    /// `snapshotLayerStack`). Used to undo/redo clearAll.
+    func restoreLayerStack(_ snaps: [LayerStackSnapshot], activeIndex: Int) {
+        guard !snaps.isEmpty else { return }
+        var rebuilt: [Layer] = []
+        for snap in snaps {
+            let desc = makeLayerDescriptor()
+            guard let tex = device.makeTexture(descriptor: desc) else { return }
+            clearTexture(tex)
+            rebuilt.append(Layer(id: snap.id, name: snap.name, isVisible: snap.isVisible, texture: tex))
+        }
+        layers = rebuilt
+        activeLayerIndex = min(max(0, activeIndex), layers.count - 1)
+        for (i, snap) in snaps.enumerated() {
+            restoreLayer(at: i, from: snap.data)
+        }
+    }
+
     /// Reset to a single empty layer. Used by clearAll.
     func resetToSingleLayer() {
         let desc = makeLayerDescriptor()
@@ -463,10 +514,28 @@ public final class CanvasRenderer {
     }
 
     func appendStamp(_ stamp: StampInstance) {
-        guard stampCount < Self.maxStampsPerFrame else { return }
-        let ptr = stampBuffer.contents().bindMemory(to: StampInstance.self, capacity: Self.maxStampsPerFrame)
+        if stampCount == stampCapacity {
+            guard growStampBuffer() else { return } // at the hard ceiling — drop
+        }
+        let ptr = stampBuffer.contents().bindMemory(to: StampInstance.self, capacity: stampCapacity)
         ptr[stampCount] = stamp
         stampCount += 1
+    }
+
+    /// Double the stamp buffer. The old buffer is only swapped out of the
+    /// property — any in-flight command buffer that encoded it keeps its own
+    /// retain, so this is safe mid-stroke.
+    private func growStampBuffer() -> Bool {
+        guard stampCapacity < Self.maxStampCapacity else { return false }
+        let newCapacity = min(stampCapacity * 2, Self.maxStampCapacity)
+        guard let newBuf = device.makeBuffer(
+            length: newCapacity * MemoryLayout<StampInstance>.stride,
+            options: .storageModeShared
+        ) else { return false }
+        memcpy(newBuf.contents(), stampBuffer.contents(), stampCount * MemoryLayout<StampInstance>.stride)
+        stampBuffer = newBuf
+        stampCapacity = newCapacity
+        return true
     }
 
     // MARK: - Rendering
@@ -475,7 +544,6 @@ public final class CanvasRenderer {
     /// all visible layers + scratch into the given drawable texture.
     func renderFrame(drawable: CAMetalDrawable, isErasing: Bool) {
         guard !layers.isEmpty, let scratch = scratchTexture else {
-            NSLog("%@", "🔬OVL renderer.renderFrame GUARD-RETURN (layers=\(layers.count) scratch=\(scratchTexture != nil)) — main drawable NOT presented")
             return
         }
         guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
@@ -550,18 +618,14 @@ public final class CanvasRenderer {
     /// the document isn't configured yet or the texture already exists.
     func ensureOverlayStrokeTexture() {
         guard overlayStrokeTexture == nil, canvasWidth > 0, canvasHeight > 0 else {
-            NSLog("%@", "🔬OVL ensureOverlayStrokeTexture SKIP (texExists=\(overlayStrokeTexture != nil) canvasW=\(canvasWidth))")
             return
         }
-        NSLog("%@", "🔬OVL ensureOverlayStrokeTexture ALLOCATING (canvasW=\(canvasWidth))")
         let desc = makeLayerDescriptor()
         guard let tex = device.makeTexture(descriptor: desc) else {
-            NSLog("%@", "🔬OVL ensureOverlayStrokeTexture makeTexture FAILED")
             return
         }
         clearTexture(tex)
         overlayStrokeTexture = tex
-        NSLog("%@", "🔬OVL ensureOverlayStrokeTexture DONE")
     }
 
     /// Wipe the overlay-stroke accumulation texture to fully transparent. Called on
@@ -615,15 +679,11 @@ public final class CanvasRenderer {
     /// → hard UI freeze. (Root cause of the 2026-06-22 gallery freeze.)
     func renderOverlayFrame(layer: CAMetalLayer) {
         guard let overlay = overlayStrokeTexture, let scratch = scratchTexture else {
-            NSLog("%@", "🔬OVL renderOverlayFrame GUARD-RETURN (overlayTex=\(overlayStrokeTexture != nil) scratch=\(scratchTexture != nil)) — NOT acquiring drawable")
             return
         }
-        NSLog("%@", "🔬OVL renderOverlayFrame → overlay layer.nextDrawable() drawableSize=\(layer.drawableSize)")
         guard let drawable = layer.nextDrawable() else {
-            NSLog("%@", "🔬OVL renderOverlayFrame overlay nextDrawable() == nil — skip")
             return
         }
-        NSLog("%@", "🔬OVL renderOverlayFrame got overlay drawable")
         guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
 
         let rpd = MTLRenderPassDescriptor()
@@ -1543,9 +1603,7 @@ public final class CanvasRenderer {
         cmdBuf.commit()
         // waitUntilCompleted is acceptable here — clearTexture runs once during
         // canvas resize, not on the per-frame hot path.
-        NSLog("%@", "🔬OVL clearTexture → waitUntilCompleted (main=\(Thread.isMainThread))")
         cmdBuf.waitUntilCompleted()
-        NSLog("%@", "🔬OVL clearTexture waitUntilCompleted RETURNED")
     }
 
     // MARK: - Pipeline State Builders
