@@ -1990,8 +1990,8 @@ public final class CanvasRenderer {
         float4 color;
         float  hardness;
         float  wetTargetAlpha; // consumed by wetStampFragment only
-        float  arcU;           // moving grain: arc position along the stroke (canvas px)
-        float  diamPx;         // dab diameter in canvas px (moving-grain UV scale)
+        float  strokeAlong;    // moving grain: this POINT's arc position along the stroke (canvas px)
+        float  strokeLat;      // moving grain: this POINT's lateral offset from the stroke spine (canvas px)
         float  grainMul;       // per-dab grain-depth multiplier
     };
 
@@ -2039,8 +2039,19 @@ public final class CanvasRenderer {
         out.color = inst.color;
         out.hardness = inst.hardness;
         out.wetTargetAlpha = inst.wetTargetAlpha;
-        out.arcU = inst.arcU;
-        out.diamPx = inst.radius * 2.0;
+        // Moving grain: the POINT's stroke-frame coordinates, computed per VERTEX from
+        // canvas position (affine → exact under interpolation). Projecting the canvas
+        // offset onto the dab's travel direction makes the coordinates independent of
+        // the dab's own diameter — overlapping dabs of DIFFERENT widths agree exactly
+        // on the grain value at a shared canvas point. (The first per-dab texCoord
+        // formulation normalized by each dab's diameter, so a varying-width stroke
+        // sampled different grain per dab and max-blend exposed every circle boundary
+        // — the "overlapping circles" report on dry-19.)
+        float2 alongDir = float2(-s, c);   // local +y (travel) after rotation
+        float2 latDir = float2(c, s);      // local +x (lateral) after rotation
+        float2 rel = canvasPos - inst.center;
+        out.strokeAlong = inst.arcU + dot(rel, alongDir);
+        out.strokeLat = dot(rel, latDir);
         out.grainMul = inst.grainMul;
         return out;
     }
@@ -2061,8 +2072,9 @@ public final class CanvasRenderer {
         // streaks). Isotropic sampling read as fish-scale scumble; mild along-only
         // compression was featureless at dab scale (dry-18 iterations 2–3). The extra
         // smoothstep sharpens the coarse value-noise into distinct streak lines.
-        float2 guv = float2((in.texCoord.x - 0.5) * in.diamPx * 3.5,
-                            (in.arcU + (in.texCoord.y - 0.5) * in.diamPx) * 0.45) * gp.y;
+        // Coordinates are the POINT's stroke-frame position (see brushStampVertex) —
+        // dab-size-independent, so overlapping dabs agree and the interior is seamless.
+        float2 guv = float2(in.strokeLat * 3.5, in.strokeAlong * 0.45) * gp.y;
         float src = smoothstep(0.25, 0.85, grainTex.sample(g, guv).r);
         float d = clamp(gp.x * in.grainMul, 0.0, 1.0);
         // MULTIPLICATIVE tooth, no compensation boost: the boost form (used once at
