@@ -86,6 +86,7 @@ struct BrushSettingsPopover: View {
                     .foregroundColor(.secondary)
                 BrushSliderRow("Mix", value: $coordinator.toolWetStrength, range: 0.05...1.0, help: Self.help["Mix"]!)
                 BrushSliderRow("Smear", value: $coordinator.toolWetPickup, range: 0.0...1.0, help: Self.help["Smear"]!)
+                BrushSliderRow("Charge", value: $coordinator.toolWetCharge, range: 0.05...1.0, help: Self.help["Charge"]!)
             }
 
             Divider()
@@ -164,7 +165,10 @@ struct BrushSettingsPopover: View {
             high: "Covers in a single pass."),
         "Smear": BrushHelp(summary: "How much the brush picks up and carries the colors it crosses.",
             low: "No pickup — always lays your color, no blending trail.",
-            high: "Soaks up and drags color along the stroke (smudgy, blends).")
+            high: "Soaks up and drags color along the stroke (smudgy, blends)."),
+        "Charge": BrushHelp(summary: "How much paint is loaded on the brush — it runs out as you stroke.",
+            low: "A dab's worth: the stroke dries to a faint tint within a short distance.",
+            high: "Bottomless — deposits at full strength forever.")
     ]
 }
 

@@ -29,6 +29,8 @@ struct WetStrokeWalker {
 
     private var lastPointIndex = 0
     private var lastSpacing: CGFloat
+    /// Total arc length walked (document px) — drives the Charge reservoir decay.
+    private var arcTotal: CGFloat = 0
     /// TRUE arc length walked since the last emitted stamp, carried across segments AND
     /// across `advance` batches (same fix as the dry walk, 2026-07-15: measuring this as
     /// the chord from the last stamp point starves deposit on tight scribbles and opens
@@ -64,6 +66,10 @@ struct WetStrokeWalker {
         let aspect = Float(min(max(brush.aspectRatio, 0.05), 1))
         let spacingFrac = max(brush.spacing, 0.02)
         let pickup = Float(max(0, min(1, brush.wetPickup)))   // how fast the load picks up canvas color
+        // Charge (P7): finite paint reservoir. deposit weight × 0.5^(arc/halfLife);
+        // charge 1 = bottomless (identity — pre-Charge strokes byte-identical).
+        let charge = max(0, min(1, brush.wetCharge))
+        let chargeHalfLife: CGFloat = charge >= 0.999 ? .infinity : 180 + 3420 * charge * charge
 
         // Fresh paint load at the start of a stroke. SMUDGE seeds the load (color AND
         // alpha) from the CANVAS under the first dab — push existing paint, introduce no
@@ -94,11 +100,17 @@ struct WetStrokeWalker {
         func emit(_ pos: CGPoint, _ width: CGFloat) {
             guard clipPath.map({ $0.contains(pos) }) ?? true else { return }
             let cx = Int(pos.x * scale), cy = Int(pos.y * scale)
+            // Charge: the reservoir level rides in wetTargetAlpha for INK stamps — the
+            // scratch fragment scales its deposited alpha by it (the KM weight in
+            // color.a stays pure Mix; over bare paper only alpha can express dryness).
+            // Ink stamps never reach the RMW pipeline, so the smudge ≥0 convention is
+            // safe to reuse. Smudge keeps packing its carried alpha, unchanged.
+            let remaining = chargeHalfLife.isFinite ? Float(pow(0.5, Double(arcTotal / chargeHalfLife))) : 1
             newStamps.append(CanvasRenderer.StampInstance(
                 center: SIMD2<Float>(Float(pos.x * scale), Float(pos.y * scale)),
                 radius: Float(width * 0.5 * scale), rotation: 0,
                 color: SIMD4<Float>(load.x, load.y, load.z, dep), hardness: hardness, aspect: aspect,
-                wetTargetAlpha: brush.wetSmudge ? loadAlpha : -(1 + Float(max(0, min(1, brush.opacity))))))
+                wetTargetAlpha: brush.wetSmudge ? loadAlpha : remaining))
             if let s = sample(cx, cy) {
                 if s.alpha > 0.05 {
                     load = mix(load, s.color, pickup * s.alpha)
@@ -159,6 +171,7 @@ struct WetStrokeWalker {
             // Post-loop `traveled` sits one gap past the last stamp (emitted or carried);
             // this recovers the arc walked since it either way (see dry-walk fix).
             arcSinceLastStamp = segDist - (traveled - spacing)
+            arcTotal += segDist
         }
 
         lastPointIndex = stroke.points.count

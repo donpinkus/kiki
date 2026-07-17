@@ -1010,6 +1010,31 @@ runScene("wet-08-overlap-opacity",
     s.paint(synthStroke(id: 406, brush: blue50, from: CGPoint(x: 900, y: 620), to: CGPoint(x: 640, y: 880), force: { _ in 0.8 }))
 }
 
+runScene("wet-09-charge-sweep",
+         """
+         Charge sweep (P7 Wet Mix vocabulary): the paint reservoir runs out over drawn
+         distance. The same long wet drag (blue over white, then THROUGH a yellow patch at
+         the far end), only Charge changes — 1.0 / 0.5 / 0.15 top to bottom (Mix 0.8,
+         Smear 0.15, full opacity).
+         - Charge 1.0: bottomless — full-strength ink the whole way, strong entry into
+           the yellow.
+         - Charge 0.5: the deposit visibly dries over the crossing (~1000px half-life).
+         - Charge 0.15: dries to a faint tint within a few hundred px; by the yellow patch
+           it deposits almost nothing (the patch stays clean).
+         """) { s in
+    for (i, c) in [CGFloat(1.0), 0.5, 0.15].enumerated() {
+        let y = CGFloat(220 + i * 280)
+        s.label(String(format: "charge %.2f", c), y: y - 80)
+        s.paint(synthStroke(id: 410 + i, brush: pen(yellow, width: 100),
+                            from: CGPoint(x: 700, y: y), to: CGPoint(x: 944, y: y),
+                            force: { _ in 1 }))
+        var b = wet(blue, width: 44, mix: 0.8, smear: 0.15)
+        b.wetCharge = c
+        s.paint(synthStroke(id: 415 + i, brush: b,
+                            from: CGPoint(x: 80, y: y), to: CGPoint(x: 990, y: y)))
+    }
+}
+
 // MARK: - Fixture replay (recorded on iPad via Brush Studio → "Record strokes")
 // `BrushFixture` is the module's shared contract type (Sources/CanvasModule/BrushFixture.swift).
 

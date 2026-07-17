@@ -159,6 +159,13 @@ final class AppCoordinator {
     /// The last-applied curated preset id (chip highlight in the popover). Purely
     /// informational — manual knob tweaks after applying don't clear it (v1).
     var activeCuratedPresetID: String?
+    /// Wet Charge ("Charge", P7): finite paint reservoir; 1 = bottomless.
+    var toolWetCharge: CGFloat = 1.0 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
     /// Static tip angle ("Angle", radians): the nib's base orientation (calligraphy).
     var toolTipAngle: CGFloat = 0 {
         didSet {
@@ -523,7 +530,7 @@ final class AppCoordinator {
 
     // MARK: - Layout
 
-    var drawingLayout: DrawingLayout = .splitScreen {
+    var drawingLayout: DrawingLayout = .overlay {
         didSet {
             UserDefaults.standard.set(drawingLayout.rawValue, forKey: "drawingLayout")
             // Clear any in-flight panel hole so it can't linger across a layout
@@ -636,6 +643,45 @@ final class AppCoordinator {
     /// own default is 2.3 (looser/more restyling). Default 1.2 (more adherence).
     var streamScheduleMu: Double = 1.2 { didSet { syncStreamConfig() } }
 
+    /// Which backend image path serves this device's stream: "fal" (hosted
+    /// realtime) or "lambda" (our own FLUX pipeline on a Lambda Cloud H100 —
+    /// reference-mode VAE-concat conditioning, the adherence A/B). Sent as
+    /// `?imageProvider=` on the stream WS; the backend honors it for TEST
+    /// ACCOUNTS only. Unlike the config-push params above this is a WS query
+    /// param, so changing it reconnects the stream. Persisted.
+    var imageProvider: String = UserDefaults.standard.string(forKey: "imageProvider") ?? "fal" {
+        didSet {
+            guard imageProvider != oldValue else { return }
+            UserDefaults.standard.set(imageProvider, forKey: "imageProvider")
+            if imageProvider == "lambda" { ensureLambdaPool() }
+            if streamSession != nil { resumeStream() }
+        }
+    }
+
+    /// Last known Lambda dev-pool state line, shown under the provider picker
+    /// in Settings ("H100 ready at <ip>" / "Instance booting (~3 min)…").
+    private(set) var lambdaPoolStatus: String = ""
+
+    /// Fire-and-forget: ask the backend to spin up (or keep) the Lambda H100.
+    /// Called at sign-in/app-open and when the provider toggle flips to
+    /// lambda, so the instance is warming before it's needed. No-op when
+    /// signed out; backend 403s for non-test accounts (status shows that).
+    func ensureLambdaPool() {
+        guard signedInUserId != nil else { return }
+        Task { @MainActor in
+            do {
+                let state = try await authService.ensureLambdaPool()
+                self.lambdaPoolStatus = state.message
+                Log.info("lambda.pool_state", attributes: [
+                    "event": "lambda.pool_state",
+                    "status": state.status,
+                ])
+            } catch {
+                self.lambdaPoolStatus = "unavailable: \(error.localizedDescription)"
+            }
+        }
+    }
+
     /// LTX-2.3 video override — square resolution (px). Session-only by design:
     /// not @AppStorage, so each app launch resets to the perf baseline (512).
     /// Step 3.5 benchmark needs deterministic baselines per launch.
@@ -731,17 +777,14 @@ final class AppCoordinator {
                 await subscriptionManager.refreshEntitlements()
             }
             refreshUsage()
+            // Pre-warm the Lambda H100 dev instance at every launch of a
+            // signed-in (test) account so it's ready if the provider toggle
+            // flips to lambda. Backend-gated; harmless 403 otherwise.
+            ensureLambdaPool()
 
-            // If no drawings exist, go directly to a new drawing
-            let descriptor = FetchDescriptor<Drawing>(sortBy: [SortDescriptor(\.updatedAt, order: .reverse)])
-            let count = (try? modelContext.fetchCount(descriptor)) ?? 0
-            if count == 0 {
-                let drawing = Drawing()
-                modelContext.insert(drawing)
-                try? modelContext.save()
-                currentDrawingId = drawing.id
-                currentScreen = .drawing
-            }
+            // A user who has never made a drawing with content goes directly
+            // to a drawing instead of the gallery.
+            routeToDrawingIfNoContent()
         }
 
         applyTool()
@@ -877,18 +920,14 @@ final class AppCoordinator {
                     "event": "auth.signed_in",
                     "user_id": userId,
                 ])
+                // Pre-warm the Lambda H100 dev instance on fresh sign-in
+                // (mirrors the relaunch hook in init).
+                self.ensureLambdaPool()
             }
 
-            // After sign-in, route to gallery (or create a new drawing if none exist).
-            let descriptor = FetchDescriptor<Drawing>(sortBy: [SortDescriptor(\.updatedAt, order: .reverse)])
-            let count = (try? self.modelContext.fetchCount(descriptor)) ?? 0
-            if count == 0 {
-                let drawing = Drawing()
-                self.modelContext.insert(drawing)
-                try? self.modelContext.save()
-                self.currentDrawingId = drawing.id
-                self.currentScreen = .drawing
-            } else {
+            // After sign-in, route to gallery — or straight into a drawing
+            // when the user has never made one with content.
+            if !self.routeToDrawingIfNoContent() {
                 self.currentScreen = .gallery
             }
 
@@ -1048,6 +1087,30 @@ final class AppCoordinator {
     }
 
     // MARK: - Gallery / Persistence
+
+    /// New-user routing: someone who has never made a drawing with content
+    /// lands directly in a drawing, not an empty gallery. "Never made" means
+    /// no drawing has content (`isContentEmpty`), not merely count == 0 — a
+    /// blank auto-created drawing persists when the app is killed before
+    /// `navigateToGallery()`'s cleanup runs, and must not strand the user in
+    /// a gallery with one empty tile. Reuses the newest blank drawing when
+    /// one exists instead of stacking new ones. Returns true when it routed.
+    @discardableResult
+    private func routeToDrawingIfNoContent() -> Bool {
+        let descriptor = FetchDescriptor<Drawing>(sortBy: [SortDescriptor(\.updatedAt, order: .reverse)])
+        let drawings = (try? modelContext.fetch(descriptor)) ?? []
+        guard drawings.allSatisfy(\.isContentEmpty) else { return false }
+        if let existing = drawings.first {
+            currentDrawingId = existing.id
+        } else {
+            let drawing = Drawing()
+            modelContext.insert(drawing)
+            try? modelContext.save()
+            currentDrawingId = drawing.id
+        }
+        currentScreen = .drawing
+        return true
+    }
 
     func newDrawing() {
         saveCurrentDrawing()
@@ -1299,7 +1362,11 @@ final class AppCoordinator {
         var components = URLComponents(url: backendURL, resolvingAgainstBaseURL: false)!
         components.scheme = backendURL.scheme == "https" ? "wss" : "ws"
         components.path = "/v1/stream"
-        components.queryItems = [URLQueryItem(name: "streamId", value: streamId)]
+        components.queryItems = [
+            URLQueryItem(name: "streamId", value: streamId),
+            // Dev A/B toggle — backend honors it for test accounts only.
+            URLQueryItem(name: "imageProvider", value: imageProvider),
+        ]
         guard let wsURL = components.url else {
             streamLog.error("Failed to construct WebSocket URL from \(self.backendURL.absoluteString)")
             SentrySDK.capture(message: "stream.startup: failed to construct WebSocket URL") { scope in
@@ -1964,6 +2031,7 @@ final class AppCoordinator {
                 wetStrength: toolWetStrength,
                 wetPickup: toolWetPickup,
                 wetSmudge: toolWetSmudge,
+                wetCharge: toolWetCharge,
                 shapeID: toolShapeID,
                 aspectRatio: toolAspect,
                 grainID: toolGrainID,

@@ -2183,10 +2183,13 @@ public final class CanvasRenderer {
         brushRT = clamp(brushRT, 0.0, 1.0);
         float3 corrected = clamp(mixLin + (1.0 - w) * (under - dstRT) + w * (brushLin - brushRT), 0.0, 1.0);
 
-        // Deposit source-over into the scratch: coverage-alpha, KM-mixed color. Within-
-        // stroke overlaps saturate coverage (solid wet ink); the OPACITY ceiling applies
-        // once, at the flatten — same Glaze split as the dry brush.
-        return float4(corrected * cov, cov);
+        // Deposit source-over into the scratch: coverage-alpha scaled by the CHARGE
+        // reservoir level (wetTargetAlpha carries it for ink stamps — a drying brush
+        // deposits a fainter glaze), KM-mixed color. Within-stroke overlaps saturate
+        // toward the reservoir level; the OPACITY ceiling applies once, at the flatten —
+        // same Glaze split as the dry brush.
+        float a = cov * clamp(in.wetTargetAlpha, 0.0, 1.0);
+        return float4(corrected * a, a);
     }
 
     fragment float4 wetStampFragment(
