@@ -79,10 +79,14 @@ internals; several of our internals (per-sensor curves, spectral KM) exceed Proc
    slider) + pressure smoothing (config) + catch-up-on-lift. Offline-asserted (passthrough,
    rate-independence, wobble energy 9×, catch-up exact); harness scene dry-07.
    Still open from P3: velocity-aware Bézier emission (curvature upgrade) — deferred.
-2. ~~P8 — Grain~~ **DONE 2026-07-15** (`30a9c59`): three procedural document-space grains
-   (paper/canvas/speckle), carved at scratch-COMPOSITE time (per-dab carving rejected in
-   harness — overlap refills tooth), Grain picker + depth in the popover. Harness dry-08.
-   Still open from P8: Moving-mode grain (streaky), grain strength as a CurveOption.
+2. ~~P8 — Grain~~ **COMPLETE 2026-07-16** (`30a9c59` + `e4bd4cf` + `488534a`): three
+   procedural document-space grains carved at composite time (dry-08); Moving-mode grain
+   — stroke-anchored anisotropic streaks via per-dab carve + max-blend stamp PSOs, with
+   a "Moving grain" popover toggle (dry-18, 3 harness iterations); grain strength as a
+   per-dab CurveOption on moving grain (dry-19; StampInstance stride 48→64).
+2b. **Richer taper DONE 2026-07-16** (`b39a973`): per-end lengths + taper-opacity fade
+   + the beaded-tip fix (taper-aware walk density — tapers now run solid to razor
+   points; dry-17).
 3. ~~Cheap-knobs batch~~ **DONE 2026-07-15** (`1704690` + `c19058a` + `4b5a87c`):
    ratio/Roundness CurveOption, spacing jitter, barrel-roll sensor (dry-09); stamp
    Count/Count Jitter, lateral/linear scatter split, signed follow-stroke Rotation knob,
@@ -92,9 +96,15 @@ internals; several of our internals (per-sensor curves, spectral KM) exceed Proc
    sRGB space (LightnessMap.swift oracle + MSL mirror), per-shape mean-luma recentering +
    coarse-mip neighborhood damping for coverage-authored tip art (both failure modes
    caught in dry-10 renders). "Tip lightness" popover slider.
-5. **P7 — Wet rework**, adopting **Procreate's Wet Mix vocabulary as the control surface**
-   (Dilution/Charge/Attack/Pull/Grade/Blur over our KM+reservoir internals). **Device pass
-   DONE 2026-07-16 (fixture-3)** — verdict: mechanics OK, four findings. Fixed same day:
+5. **P7 — Wet rework: CORE SHIPPED 2026-07-16** (`b5c1bb2` wet-ink-through-scratch —
+   per-stroke wet layer, KM vs pristine base, true opacity glazing, Simulator support;
+   `4a53299` Charge finite reservoir; `86083f1` Refill/resaturation; invariant pins in
+   wet-08/09/10/11 + offline decay asserts). The dial set is Mix/Smear/Charge/Refill/
+   Opacity, all orthogonal (wet-06/07 grids). Dilution is intentionally NOT a separate
+   knob: our Mix already waters against paint and Opacity is the glaze ceiling — a third
+   alpha-ish dial would overlap both. Remaining P7: Grade/Blur (smudge quality), Wetness
+   Jitter. Earlier device pass (fixture-3) — verdict: mechanics OK, four findings. Fixed
+   same day:
    opacity alpha-ceiling (was deposit-rate only, imperceptible), wet-walk chord-vs-arc gaps
    + width-collapse refinement (tiltSensitivity 1.0 swings width 69→325px within a stroke),
    deposit no longer double-charges opacity. Remaining, THE P7 INPUTS: (a) "white glow" =
