@@ -1,0 +1,25 @@
+# Video (LTX-2.3) server requirements — extracted from model-servers/requirements.txt
+# when the RunPod video path was removed (2026-07-17). Combine with the image
+# server's shared deps (fastapi, uvicorn, websockets, Pillow, sentry-sdk) when
+# reviving on Lambda.
+#
+# Torch + torchvision came from the runpod/pytorch base image (2.9.1 + cu128).
+# On Lambda VMs, install torch explicitly (H100 = Hopper, no Blackwell constraint).
+
+# transformers>=4.52 required by ltx-core.
+transformers>=4.52,<5
+
+# Lightricks doesn't publish to PyPI. Install from the LTX-2 monorepo, pinned
+# to a specific SHA so model loading doesn't break on upstream main churn.
+# Both packages must be present — ltx-pipelines depends on ltx-core.
+# License: LTX-2 Community License Agreement (NOT Apache-2.0). Verify before
+# any commercial deployment.
+ltx-core @ git+https://github.com/Lightricks/LTX-2.git@41d924371612b692c0fd1e4d9d94c3dfb3c02cb3#subdirectory=packages/ltx-core
+ltx-pipelines @ git+https://github.com/Lightricks/LTX-2.git@41d924371612b692c0fd1e4d9d94c3dfb3c02cb3#subdirectory=packages/ltx-pipelines
+
+# MP4 encoder uses imageio-ffmpeg (bundled static ffmpeg, ~30 MB).
+# ltx-pipelines exposes a PyAV-based encode_video() but its API expects a
+# tensor iterator, file path, and pre-computed video_chunks_number — different
+# shape than our streamed-then-muxed output. Our _encode_mp4 has been hardened
+# (tempfile output, ffmpeg 7.x compatible).
+imageio-ffmpeg>=0.4.9
