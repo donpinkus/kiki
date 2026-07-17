@@ -159,6 +159,13 @@ final class AppCoordinator {
     /// The last-applied curated preset id (chip highlight in the popover). Purely
     /// informational — manual knob tweaks after applying don't clear it (v1).
     var activeCuratedPresetID: String?
+    /// Wet Refill ("Refill"): pull the carried load back toward the ink over distance.
+    var toolWetRefill: CGFloat = 0.0 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
     /// Wet Charge ("Charge", P7): finite paint reservoir; 1 = bottomless.
     var toolWetCharge: CGFloat = 1.0 {
         didSet {
@@ -2032,6 +2039,7 @@ final class AppCoordinator {
                 wetPickup: toolWetPickup,
                 wetSmudge: toolWetSmudge,
                 wetCharge: toolWetCharge,
+                wetRefill: toolWetRefill,
                 shapeID: toolShapeID,
                 aspectRatio: toolAspect,
                 grainID: toolGrainID,

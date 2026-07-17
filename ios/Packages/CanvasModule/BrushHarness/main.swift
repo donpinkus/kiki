@@ -1035,6 +1035,30 @@ runScene("wet-09-charge-sweep",
     }
 }
 
+runScene("wet-10-refill-sweep",
+         """
+         Refill sweep (Painter "resaturation"): the brush re-loads its own ink over
+         distance, so picked-up color DISSIPATES. Each row: a blue wet drag THROUGH a
+         yellow patch in the middle, continuing over white — only Refill changes
+         (0 / 0.15 / 0.5; Mix 0.8, Smear 0.6 so the crossing contaminates hard).
+         - Refill 0: exits the patch green and STAYS green to the end (today's behavior).
+         - Refill 0.15: exits green, fades back to pure blue over a few hundred px.
+         - Refill 0.5: barely turns — the ink re-asserts within a few dabs, and even
+           inside the patch the deposit stays blue-green rather than going full yellow.
+         """) { s in
+    for (i, r) in [CGFloat(0.0), 0.15, 0.5].enumerated() {
+        let y = CGFloat(220 + i * 280)
+        s.label(String(format: "refill %.2f", r), y: y - 80)
+        s.paint(synthStroke(id: 430 + i, brush: pen(yellow, width: 100),
+                            from: CGPoint(x: 330, y: y), to: CGPoint(x: 600, y: y),
+                            force: { _ in 1 }))
+        var b = wet(blue, width: 44, mix: 0.8, smear: 0.6)
+        b.wetRefill = r
+        s.paint(synthStroke(id: 435 + i, brush: b,
+                            from: CGPoint(x: 80, y: y), to: CGPoint(x: 990, y: y)))
+    }
+}
+
 // MARK: - Fixture replay (recorded on iPad via Brush Studio → "Record strokes")
 // `BrushFixture` is the module's shared contract type (Sources/CanvasModule/BrushFixture.swift).
 

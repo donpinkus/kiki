@@ -68,6 +68,7 @@ struct WetStrokeWalker {
         let pickup = Float(max(0, min(1, brush.wetPickup)))   // how fast the load picks up canvas color
         // Charge (P7): finite paint reservoir. deposit weight × 0.5^(arc/halfLife);
         // charge 1 = bottomless (identity — pre-Charge strokes byte-identical).
+        let refill = Float(max(0, min(1, brush.wetRefill)))
         let charge = max(0, min(1, brush.wetCharge))
         let chargeHalfLife: CGFloat = charge >= 0.999 ? .infinity : 180 + 3420 * charge * charge
 
@@ -118,6 +119,13 @@ struct WetStrokeWalker {
                 if brush.wetSmudge {
                     loadAlpha += (s.alpha - loadAlpha) * pickup
                 }
+            }
+            // Refill (ink only): pull the load back toward the brush's own ink — the
+            // well is bottomless, so contamination picked up above dissipates over the
+            // following dabs and the stroke returns to pure ink. Applied AFTER pickup:
+            // at refill 1 the brush re-loads fully every dab (pickup never sticks).
+            if !brush.wetSmudge, refill > 0 {
+                load = mix(load, baseColor, refill)
             }
         }
 

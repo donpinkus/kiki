@@ -87,6 +87,7 @@ struct BrushSettingsPopover: View {
                 BrushSliderRow("Mix", value: $coordinator.toolWetStrength, range: 0.05...1.0, help: Self.help["Mix"]!)
                 BrushSliderRow("Smear", value: $coordinator.toolWetPickup, range: 0.0...1.0, help: Self.help["Smear"]!)
                 BrushSliderRow("Charge", value: $coordinator.toolWetCharge, range: 0.05...1.0, help: Self.help["Charge"]!)
+                BrushSliderRow("Refill", value: $coordinator.toolWetRefill, range: 0.0...1.0, help: Self.help["Refill"]!)
             }
 
             Divider()
@@ -168,7 +169,10 @@ struct BrushSettingsPopover: View {
             high: "Soaks up and drags color along the stroke (smudgy, blends)."),
         "Charge": BrushHelp(summary: "How much paint is loaded on the brush — it runs out as you stroke.",
             low: "A dab's worth: the stroke dries to a faint tint within a short distance.",
-            high: "Bottomless — deposits at full strength forever.")
+            high: "Bottomless — deposits at full strength forever."),
+        "Refill": BrushHelp(summary: "How fast the brush re-loads its own color after picking up paint it crossed.",
+            low: "Never — picked-up color rides along until you cross something else.",
+            high: "Instantly — the brush always lays pure ink, no matter what it crosses.")
     ]
 }
 
