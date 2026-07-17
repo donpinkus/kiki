@@ -173,6 +173,13 @@ final class AppCoordinator {
             applyTool()
         }
     }
+    /// Wetness Jitter ("Wet jitter"): per-dab random deposit patchiness.
+    var toolWetJitter: CGFloat = 0.0 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
     /// Wet Charge ("Charge", P7): finite paint reservoir; 1 = bottomless.
     var toolWetCharge: CGFloat = 1.0 {
         didSet {
@@ -2055,6 +2062,7 @@ final class AppCoordinator {
                 wetSmudge: toolWetSmudge,
                 wetCharge: toolWetCharge,
                 wetRefill: toolWetRefill,
+                wetJitter: toolWetJitter,
                 shapeID: toolShapeID,
                 aspectRatio: toolAspect,
                 grainID: toolGrainID,

@@ -31,6 +31,8 @@ struct WetStrokeWalker {
     private var lastSpacing: CGFloat
     /// Total arc length walked (document px) — drives the Charge reservoir decay.
     private var arcTotal: CGFloat = 0
+    /// Dab counter for the Wetness Jitter hash stream (cross-batch persistent).
+    private var dabCounter: UInt64 = 0
     /// TRUE arc length walked since the last emitted stamp, carried across segments AND
     /// across `advance` batches (same fix as the dry walk, 2026-07-15: measuring this as
     /// the chord from the last stamp point starves deposit on tight scribbles and opens
@@ -70,6 +72,10 @@ struct WetStrokeWalker {
         // charge 1 = bottomless (identity — pre-Charge strokes byte-identical).
         let refill = Float(max(0, min(1, brush.wetRefill)))
         let chargeHalfLife = brush.wetChargeHalfLife
+        // Wetness Jitter: per-dab random deposit reduction (deterministic — stroke seed
+        // + dab counter — so replay/undo are identical). Ink mode only.
+        let wetJitter = Float(max(0, min(1, brush.wetJitter)))
+        let jitterSeed = StrokeStampGenerator.strokeSeed(stroke.id)
 
         // Fresh paint load at the start of a stroke. SMUDGE seeds the load (color AND
         // alpha) from the CANVAS under the first dab — push existing paint, introduce no
@@ -105,7 +111,11 @@ struct WetStrokeWalker {
             // color.a stays pure Mix; over bare paper only alpha can express dryness).
             // Ink stamps never reach the RMW pipeline, so the smudge ≥0 convention is
             // safe to reuse. Smudge keeps packing its carried alpha, unchanged.
-            let remaining = chargeHalfLife.isFinite ? Float(pow(0.5, Double(arcTotal / chargeHalfLife))) : 1
+            var remaining = chargeHalfLife.isFinite ? Float(pow(0.5, Double(arcTotal / chargeHalfLife))) : 1
+            if !brush.wetSmudge, wetJitter > 0 {
+                dabCounter &+= 1
+                remaining *= 1 - wetJitter * Float(brushHash01(jitterSeed, dabCounter, 0x3E7))
+            }
             newStamps.append(CanvasRenderer.StampInstance(
                 center: SIMD2<Float>(Float(pos.x * scale), Float(pos.y * scale)),
                 radius: Float(width * 0.5 * scale), rotation: 0,

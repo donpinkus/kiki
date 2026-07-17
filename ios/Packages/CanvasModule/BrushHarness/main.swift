@@ -1227,6 +1227,26 @@ runScene("wet-11-charge-refill-invariants",
                         from: CGPoint(x: 60, y: 660), to: CGPoint(x: 990, y: 660)))
 }
 
+runScene("wet-12-wetness-jitter",
+         """
+         Wetness Jitter sweep (Procreate Wet Mix): per-dab random deposit reduction —
+         organic patchiness. Same blue wet drag over white, only Wet Jitter changes:
+         0 / 0.5 / 0.9 top to bottom (Mix 0.8, full opacity).
+         - 0: even, uniform glaze end to end.
+         - 0.5: gentle patchiness — density breathes dab to dab.
+         - 0.9: strongly broken, some dabs nearly dry (deterministic per stroke — a
+           replay reproduces the same patches).
+         """) { s in
+    for (i, j) in [CGFloat(0.0), 0.5, 0.9].enumerated() {
+        let y = CGFloat(220 + i * 280)
+        s.label(String(format: "wet jitter %.1f", j), y: y - 80)
+        var b = wet(blue, width: 50, mix: 0.8, smear: 0.1)
+        b.wetJitter = j
+        s.paint(synthStroke(id: 500 + i, brush: b,
+                            from: CGPoint(x: 80, y: y), to: CGPoint(x: 944, y: y)))
+    }
+}
+
 // MARK: - Fixture replay (recorded on iPad via Brush Studio → "Record strokes")
 // `BrushFixture` is the module's shared contract type (Sources/CanvasModule/BrushFixture.swift).
 

@@ -98,6 +98,7 @@ struct BrushSettingsPopover: View {
                 BrushSliderRow("Smear", value: $coordinator.toolWetPickup, range: 0.0...1.0, help: Self.help["Smear"]!)
                 BrushSliderRow("Charge", value: $coordinator.toolWetCharge, range: 0.05...1.0, help: Self.help["Charge"]!)
                 BrushSliderRow("Refill", value: $coordinator.toolWetRefill, range: 0.0...1.0, help: Self.help["Refill"]!)
+                BrushSliderRow("Wet jitter", value: $coordinator.toolWetJitter, range: 0.0...1.0, help: Self.help["Wet jitter"]!)
             }
 
             Divider()
@@ -185,7 +186,10 @@ struct BrushSettingsPopover: View {
             high: "Bottomless — deposits at full strength forever."),
         "Refill": BrushHelp(summary: "How fast the brush re-loads its own color after picking up paint it crossed.",
             low: "Never — picked-up color rides along until you cross something else.",
-            high: "Instantly — the brush always lays pure ink, no matter what it crosses.")
+            high: "Instantly — the brush always lays pure ink, no matter what it crosses."),
+        "Wet jitter": BrushHelp(summary: "Randomly varies how much paint each dab deposits — organic patchiness.",
+            low: "Even deposit along the stroke.",
+            high: "Some dabs land soaked, others nearly dry.")
     ]
 }
 
