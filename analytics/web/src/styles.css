@@ -231,3 +231,30 @@ button.danger {
   color: #b3282d;
   border-color: #b3282d;
 }
+
+/* Brush targets: capture checklist + upload zones */
+.capture-guide {
+  margin-top: 12px;
+  padding: 10px 14px;
+  background: rgba(125, 125, 160, 0.08);
+  border: 1px solid rgba(125, 125, 160, 0.2);
+  border-radius: 10px;
+  max-width: 900px;
+}
+.capture-guide summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 13px;
+}
+.upload-zone {
+  flex: 1;
+  min-width: 320px;
+  max-width: 460px;
+  padding: 12px 14px;
+  border: 1.5px dashed rgba(125, 125, 160, 0.4);
+  border-radius: 10px;
+  outline: none;
+}
+.upload-zone:focus {
+  border-color: #4a7dde;
+}

@@ -17,6 +17,113 @@ const KINDS: BrushTargetImage['kind'][] = ['reference', 'settings', 'attempt'];
 const STATUSES = ['todo', 'in_progress', 'matched'] as const;
 const fmtWhen = (iso: string) => new Date(iso).toLocaleString();
 
+const NOTES_PLACEHOLDER = `Brush brief — anything the screenshots don't say:
+• Procreate name + brush set (e.g. "Peppermint — Sketching")
+• Size / opacity the samples were drawn at
+• How it feels: pressure response, texture, speed behavior
+• Later: feedback on Claude's attempts (what's off, what's close)`;
+
+// What to capture, priority-ordered. Shown inline so the capture session
+// doesn't need a chat lookup.
+function CaptureChecklist() {
+  return (
+    <details className="capture-guide">
+      <summary>📸 What to capture (priority order)</summary>
+      <ol style={{ margin: '8px 0 4px 18px', fontSize: 13, lineHeight: 1.6 }}>
+        <li><strong>Shape + Grain source images</strong> — open Shape Source → Edit and Grain
+          Source → Edit and screenshot the texture FULLSCREEN. These import into Kiki directly,
+          so they're worth more than every settings pane combined.</li>
+        <li><strong>Stroke samples</strong> (on white, brush at a normal size): light→hard
+          pressure sweep · slow S-curve · fast flick · self-crossing scribble at ~50% opacity
+          (shows glaze/blending) · one zoomed-in edge close-up.</li>
+        <li><strong>Settings panes that matter most</strong>: Stroke Path · Shape · Grain ·
+          Rendering (mode + blending) · Taper · Apple Pencil → Pressure · Wet Mix (only if it's
+          a wet/blending brush).</li>
+        <li>Skip unless unusual: Stabilization, Dynamics, Properties, Materials, About.</li>
+      </ol>
+      <p className="muted" style={{ fontSize: 12, margin: '6px 0 2px' }}>
+        Screenshots beat video — each pane arrives sharp and complete. A screen recording works
+        as a fallback (frames get extracted), but pause ~1s on each pane if you go that route.
+      </p>
+    </details>
+  );
+}
+
+// Drag-drop + paste + file-pick upload area for one image kind.
+function UploadZone({ targetId, kind, title, hint, onDone }: {
+  targetId: string; kind: string; title: string; hint: string; onDone: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [flash, setFlash] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  const doUpload = async (files: File[]) => {
+    const images = files.filter((f) => f.type.startsWith('image/'));
+    if (images.length === 0) return;
+    setBusy(true);
+    try {
+      await uploadBrushTargetImages(targetId, images, kind);
+      setFlash(`${images.length} uploaded ✓`);
+      setTimeout(() => setFlash(null), 2500);
+      onDone();
+    } finally {
+      setBusy(false);
+      if (fileRef.current) fileRef.current.value = '';
+    }
+  };
+
+  const pasteFromClipboard = async () => {
+    try {
+      const items = await navigator.clipboard.read();
+      const files: File[] = [];
+      for (const item of items) {
+        const type = item.types.find((t) => t.startsWith('image/'));
+        if (type) {
+          const blob = await item.getType(type);
+          files.push(new File([blob], `pasted-${Date.now()}.png`, { type }));
+        }
+      }
+      if (files.length === 0) {
+        setFlash('No image on the clipboard');
+        setTimeout(() => setFlash(null), 2500);
+      }
+      await doUpload(files);
+    } catch {
+      setFlash('Clipboard blocked — focus this box + ⌘V, or Choose files');
+      setTimeout(() => setFlash(null), 4000);
+    }
+  };
+
+  return (
+    <div
+      className="upload-zone"
+      tabIndex={0}
+      onPaste={(e) => {
+        const files = Array.from(e.clipboardData.files);
+        if (files.length > 0) { e.preventDefault(); void doUpload(files); }
+      }}
+      onDragOver={(e) => e.preventDefault()}
+      onDrop={(e) => { e.preventDefault(); void doUpload(Array.from(e.dataTransfer.files)); }}
+    >
+      <div style={{ display: 'flex', gap: 10, alignItems: 'baseline', flexWrap: 'wrap' }}>
+        <strong style={{ fontSize: 13 }}>{title}</strong>
+        <span className="muted" style={{ fontSize: 12 }}>{hint}</span>
+      </div>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 8, flexWrap: 'wrap' }}>
+        <button onClick={() => fileRef.current?.click()} disabled={busy}>Choose files…</button>
+        <button onClick={() => void pasteFromClipboard()} disabled={busy}>Paste screenshot</button>
+        <span className="muted" style={{ fontSize: 12 }}>
+          {busy ? 'Uploading…' : flash ?? 'or drop images here / focus + ⌘V'}
+        </span>
+      </div>
+      <input
+        ref={fileRef} type="file" accept="image/*" multiple style={{ display: 'none' }}
+        onChange={(e) => void doUpload(Array.from(e.target.files ?? []))}
+      />
+    </div>
+  );
+}
+
 function ImageCard({ img, onChanged }: { img: BrushTargetImage; onChanged: () => void }) {
   const [label, setLabel] = useState(img.label ?? '');
   const [note, setNote] = useState(img.note ?? '');
@@ -30,7 +137,7 @@ function ImageCard({ img, onChanged }: { img: BrushTargetImage; onChanged: () =>
         <select value={img.kind} onChange={async (e) => { await updateBrushTargetImage(img.id, { kind: e.target.value }); onChanged(); }}>
           {KINDS.map((k) => <option key={k} value={k}>{k}</option>)}
         </select>
-        <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="label" style={{ flex: 1, minWidth: 0 }} />
+        <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="label (e.g. Shape pane)" style={{ flex: 1, minWidth: 0 }} />
       </div>
       <textarea
         value={note}
@@ -56,20 +163,13 @@ function ImageCard({ img, onChanged }: { img: BrushTargetImage; onChanged: () =>
 function TargetPanel({ target, onChanged }: { target: BrushTarget; onChanged: () => void }) {
   const [note, setNote] = useState(target.note ?? '');
   const [editingNote, setEditingNote] = useState(false);
-  const [uploading, setUploading] = useState(false);
-  const [uploadKind, setUploadKind] = useState('reference');
-  const fileRef = useRef<HTMLInputElement>(null);
   useEffect(() => { setNote(target.note ?? ''); setEditingNote(false); }, [target.id]);
 
-  const upload = async (files: FileList | null) => {
-    if (!files || files.length === 0) return;
-    setUploading(true);
-    try {
-      await uploadBrushTargetImages(target.id, Array.from(files), uploadKind);
+  const rename = async () => {
+    const name = prompt('Rename target', target.name)?.trim();
+    if (name && name !== target.name) {
+      await updateBrushTarget(target.id, { name });
       onChanged();
-    } finally {
-      setUploading(false);
-      if (fileRef.current) fileRef.current.value = '';
     }
   };
 
@@ -82,7 +182,9 @@ function TargetPanel({ target, onChanged }: { target: BrushTarget; onChanged: ()
   return (
     <div>
       <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-        <h2 style={{ margin: 0 }}>{target.name}</h2>
+        <h2 style={{ margin: 0, cursor: 'pointer' }} onClick={rename} title="Click to rename">
+          {target.name} <span className="muted" style={{ fontSize: 14 }}>✎</span>
+        </h2>
         <select
           value={target.status}
           onChange={async (e) => { await updateBrushTarget(target.id, { status: e.target.value }); onChanged(); }}
@@ -91,14 +193,6 @@ function TargetPanel({ target, onChanged }: { target: BrushTarget; onChanged: ()
         </select>
         <span className="muted" style={{ fontSize: 12 }}>updated {fmtWhen(target.updated_at)}</span>
         <span className="spacer" />
-        <label style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 13 }}>
-          upload as
-          <select value={uploadKind} onChange={(e) => setUploadKind(e.target.value)}>
-            <option value="reference">reference</option>
-            <option value="settings">settings</option>
-          </select>
-        </label>
-        <input ref={fileRef} type="file" accept="image/*" multiple onChange={(e) => upload(e.target.files)} disabled={uploading} />
         <button
           className="danger"
           onClick={async () => {
@@ -107,11 +201,26 @@ function TargetPanel({ target, onChanged }: { target: BrushTarget; onChanged: ()
         >Delete target</button>
       </div>
 
+      <CaptureChecklist />
+
+      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 12 }}>
+        <UploadZone
+          targetId={target.id} kind="reference" onDone={onChanged}
+          title="Stroke samples"
+          hint="pressure sweep · S-curve · fast flick · 50%-opacity scribble · edge close-up"
+        />
+        <UploadZone
+          targetId={target.id} kind="settings" onDone={onChanged}
+          title="Settings + source textures"
+          hint="Shape/Grain editors fullscreen, then the settings panes"
+        />
+      </div>
+
       <div style={{ marginTop: 12 }}>
         {editingNote ? (
           <div>
             <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={8} style={{ width: '100%' }}
-              placeholder="Brush brief: Procreate settings as text, what the brush should feel like, feedback on attempts…" />
+              placeholder={NOTES_PLACEHOLDER} />
             <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
               <button onClick={async () => { await updateBrushTarget(target.id, { note }); setEditingNote(false); onChanged(); }}>Save notes</button>
               <button onClick={() => { setNote(target.note ?? ''); setEditingNote(false); }}>Cancel</button>
@@ -121,7 +230,7 @@ function TargetPanel({ target, onChanged }: { target: BrushTarget; onChanged: ()
           <div onClick={() => setEditingNote(true)} style={{ cursor: 'text' }} title="Click to edit">
             {target.note
               ? <div className="lightbox-desc" style={{ maxWidth: 900 }}><Markdown>{target.note}</Markdown></div>
-              : <span className="muted">No notes yet — click to add the brush brief (settings text, feel, feedback).</span>}
+              : <span className="muted">No notes yet — click to add the brush brief (Procreate name/set, size used, feel, feedback).</span>}
           </div>
         )}
       </div>
