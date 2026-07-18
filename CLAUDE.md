@@ -17,6 +17,13 @@ swift test --package-path ios/Packages/CanvasModule
 # Lint & format
 swiftlint --path ios/
 swiftformat ios/
+
+# Physical-iPad dev loop (iPad connected + unlocked; no Xcode GUI, no sudo).
+# Claude can run the full debug cycle autonomously: deploy a build, screenshot
+# the iPad screen to SEE the result, and read Kiki's live device logs.
+ios/scripts/ipad.sh deploy            # build + install + relaunch on the iPad
+ios/scripts/ipad.sh screenshot        # capture iPad screen → prints PNG path (Read it to view)
+ios/scripts/ipad.sh logs 15           # stream Kiki process syslog for N seconds
 ```
 
 ### Backend
