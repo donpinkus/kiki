@@ -80,9 +80,13 @@ struct SignInView: View {
                 return
             }
             isSigningIn = true
+            // credential.email is populated ONLY on the very first Apple
+            // authorization — a one-shot second carrier of the address (the
+            // token's email claim is the primary). Missing it is unrecoverable.
+            let firstAuthEmail = credential.email
             Task {
                 do {
-                    try await coordinator.signInWithApple(identityToken: identityToken)
+                    try await coordinator.signInWithApple(identityToken: identityToken, email: firstAuthEmail)
                     await MainActor.run { isSigningIn = false }
                 } catch {
                     await MainActor.run {

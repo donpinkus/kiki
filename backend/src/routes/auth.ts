@@ -26,6 +26,8 @@ import { upsertUserByAppleSub, getUserEmail } from '../postgres/users.js';
 interface AppleLoginBody {
   identityToken: string;
   nonce?: string;
+  /** First-authorization-only credential.email fallback (client-asserted). */
+  email?: string;
 }
 
 interface RefreshBody {
@@ -48,6 +50,12 @@ export const authRoute: FastifyPluginAsync = async (fastify) => {
           properties: {
             identityToken: { type: 'string', minLength: 1 },
             nonce: { type: 'string' },
+            // ASAuthorizationAppleIDCredential.email — iOS populates it only
+            // on the FIRST authorization (one-shot). Client-asserted, NOT
+            // Apple-signed: used strictly as a fallback when the verified
+            // token lacks the email claim, and only ever for contact info
+            // (identity is keyed on apple_sub alone).
+            email: { type: 'string', maxLength: 320 },
           },
         },
       },
@@ -55,14 +63,32 @@ export const authRoute: FastifyPluginAsync = async (fastify) => {
     async (request, reply) => {
       try {
         const { appleSub, email } = await verifyAppleIdentityToken(request.body.identityToken);
-        const user = await upsertUserByAppleSub(appleSub, email);
+        const fallbackEmail =
+          !email && typeof request.body.email === 'string' && request.body.email.includes('@')
+            ? request.body.email
+            : undefined;
+        const user = await upsertUserByAppleSub(appleSub, email ?? fallbackEmail);
         const accessToken = await signAccess(user.userId);
         const refreshToken = await signRefresh(user.userId);
 
         request.log.info(
-          { userId: user.userId, appleSub: appleSub.slice(0, 8) + '...', newUser: user.isNew },
+          {
+            userId: user.userId,
+            appleSub: appleSub.slice(0, 8) + '...',
+            newUser: user.isNew,
+            emailSource: email ? 'token' : fallbackEmail ? 'credential_fallback' : 'none',
+          },
           'Apple sign-in success',
         );
+        if (user.isNew && !user.email) {
+          // The first authorization is the ONLY time Apple sends the email —
+          // a new user landing without one is permanently unreachable unless
+          // they revoke+reauthorize or we set it manually (Insights).
+          request.log.warn(
+            { userId: user.userId, event: 'auth.signup_no_email' },
+            'new user signed up with no email captured (one-shot missed)',
+          );
+        }
 
         return reply.send({
           accessToken,

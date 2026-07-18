@@ -36,6 +36,11 @@ public actor AuthService {
     private struct AppleLoginRequest: Codable {
         let identityToken: String
         let nonce: String?
+        /// `ASAuthorizationAppleIDCredential.email` — populated by iOS only on
+        /// the FIRST authorization, never again. Sent as a fallback carrier:
+        /// the backend prefers the Apple-signed email claim inside the
+        /// identity token and uses this only when that claim is absent.
+        let email: String?
     }
 
     private struct TokenResponse: Codable {
@@ -117,9 +122,11 @@ public actor AuthService {
     }
 
     /// Exchanges an Apple identity token for a backend-issued access+refresh pair.
-    /// Call from the Sign in with Apple completion handler.
-    public func signInWithApple(identityToken: String, nonce: String?) async throws {
-        let body = AppleLoginRequest(identityToken: identityToken, nonce: nonce)
+    /// Call from the Sign in with Apple completion handler. Pass the
+    /// credential's `.email` when present — it's a first-authorization-only
+    /// one-shot; missing it means the address is unrecoverable.
+    public func signInWithApple(identityToken: String, nonce: String?, email: String? = nil) async throws {
+        let body = AppleLoginRequest(identityToken: identityToken, nonce: nonce, email: email)
         do {
             let response: TokenResponse = try await post(path: "/v1/auth/apple", body: body)
             try save(from: response)

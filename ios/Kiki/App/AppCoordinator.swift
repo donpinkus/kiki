@@ -1024,11 +1024,12 @@ final class AppCoordinator {
     // MARK: - Auth
 
     /// Exchange an Apple identity token for a backend JWT pair, then navigate
-    /// to the main app. Called from SignInView.
-    func signInWithApple(identityToken: String) async throws {
+    /// to the main app. Called from SignInView. `email` is the credential's
+    /// first-authorization-only one-shot value (nil on every later sign-in).
+    func signInWithApple(identityToken: String, email: String? = nil) async throws {
         let transaction = SentrySDK.startTransaction(name: "auth.signIn", operation: "auth.signIn")
         do {
-            try await authService.signInWithApple(identityToken: identityToken, nonce: nil)
+            try await authService.signInWithApple(identityToken: identityToken, nonce: nil, email: email)
             transaction.finish()
         } catch {
             SentrySDK.capture(error: error) { scope in
