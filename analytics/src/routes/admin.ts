@@ -353,7 +353,7 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
       // number on the page. Applied server-side: events rows don't carry the
       // flag, so each query filters via the users table.
       const excl = (request.query as { excludeTest?: string }).excludeTest === '1';
-      const [daily, newUsers, funnelRows, errorUsers, recentErrors, summary, providers] = await Promise.all([
+      const [daily, newUsers, funnelRows, errorUsers, recentErrors, summary, providers, h100Waterfall, h100Pool, drawingOpened, drawingStages] = await Promise.all([
         query(
           `SELECT to_char(occurred_at AT TIME ZONE 'America/Los_Angeles', 'YYYY-MM-DD') AS day,
                   count(DISTINCT user_id)::int AS dau,
@@ -453,7 +453,8 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
                   FILTER (WHERE (properties->>'time_to_provider_ms') ~ '^[0-9.]+$'))::int AS wait_p90_ms,
                 COALESCE(sum((properties->>'frames_delivered')::int), 0)::bigint AS frames,
                 COALESCE(sum((properties->>'upstream_disconnects')::int), 0)::int AS disconnects,
-                COALESCE(sum((properties->>'upstream_reconnects')::int), 0)::int AS reconnects
+                COALESCE(sum((properties->>'upstream_reconnects')::int), 0)::int AS reconnects,
+                count(*) FILTER (WHERE (properties->>'upstream_disconnects')::int > 0)::int AS sessions_with_disconnect
          FROM events
          WHERE name = 'stream.provider_session'
            AND occurred_at > now() - interval '7 days'
@@ -462,7 +463,133 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
          GROUP BY 1
          ORDER BY sessions DESC`,
         [excl],
-      )
+      ),
+      // ─── H100 waterfall: session-side stages (7d) ────────────────────────
+      // Seven cumulative stages over ALL provider sessions:
+      //   sessions → requested H100 (intent auto|lambda) → found (an instance
+      //   existed) → warmed (a READY instance existed) → connected (lambda
+      //   relay opened) → ≥1 H100 frame → held (no downgrade, no drop).
+      // Stage fields shipped by trackProviderSession; rows predating them are
+      // counted in `sessions` but reported as `untracked` for stages 2+.
+      (() => {
+        const wired = `COALESCE((properties->>'lambda_wired')::bool, false)`;
+        const bounced = `COALESCE((properties->>'lambda_bounced')::bool, false)`;
+        const downgraded = `COALESCE((properties->>'lambda_downgraded')::bool, false)`;
+        const disconnects = `COALESCE((properties->>'upstream_disconnects')::int, 0)`;
+        const requested = `properties->>'requested_provider' IN ('auto', 'lambda')`;
+        // Warmed = a ready instance existed for this session: it wired, or
+        // auto resolved while the pool was ready, or an explicit-lambda
+        // session got an assignment (final provider lambda, not bounced).
+        const warmed = `(${wired} OR properties->>'pool_status_at_resolve' = 'ready'
+          OR (properties->>'provider' = 'lambda' AND NOT ${bounced}))`;
+        // Found = warmed, or an instance existed but was still warming.
+        const found = `(${warmed} OR properties->>'pool_status_at_resolve' = 'booting'
+          OR properties->>'pool_status_at_bounce' = 'booting')`;
+        return query(
+          `SELECT count(*)::int AS sessions,
+                  count(*) FILTER (WHERE properties ? 'requested_provider')::int AS tracked,
+                  count(*) FILTER (WHERE ${requested})::int AS requested,
+                  count(*) FILTER (WHERE ${requested} AND ${found})::int AS found,
+                  count(*) FILTER (WHERE ${requested} AND ${warmed})::int AS warmed,
+                  count(*) FILTER (WHERE ${wired})::int AS connected,
+                  count(*) FILTER (WHERE COALESCE((properties->>'lambda_frames')::int, 0) > 0)::int AS h100_frames,
+                  count(*) FILTER (WHERE ${wired} AND NOT ${downgraded} AND ${disconnects} = 0)::int AS held,
+                  count(*) FILTER (WHERE ${downgraded})::int AS downgraded,
+                  count(*) FILTER (WHERE ${wired} AND NOT ${downgraded} AND ${disconnects} > 0)::int AS dropped,
+                  -- Session-side transition timings (min/median/max) for the
+                  -- side-by-side duration widget.
+                  min((properties->>'time_to_provider_ms')::int) FILTER (WHERE ${wired}) AS connect_min_ms,
+                  round(percentile_cont(0.5) WITHIN GROUP (ORDER BY (properties->>'time_to_provider_ms')::float)
+                    FILTER (WHERE ${wired} AND (properties->>'time_to_provider_ms') ~ '^[0-9.]+$'))::int AS connect_med_ms,
+                  max((properties->>'time_to_provider_ms')::int) FILTER (WHERE ${wired}) AS connect_max_ms,
+                  min((properties->>'lambda_first_frame_ms')::int) AS ff_min_ms,
+                  round(percentile_cont(0.5) WITHIN GROUP (ORDER BY (properties->>'lambda_first_frame_ms')::float)
+                    FILTER (WHERE (properties->>'lambda_first_frame_ms') ~ '^[0-9.]+$'))::int AS ff_med_ms,
+                  max((properties->>'lambda_first_frame_ms')::int) AS ff_max_ms
+           FROM events
+           WHERE name = 'stream.provider_session'
+             AND occurred_at > now() - interval '7 days'
+             AND ($1::bool = false OR user_id NOT IN
+                  (SELECT user_id::text FROM users WHERE is_test_account))`,
+          [excl],
+        );
+      })(),
+      // ─── H100 waterfall: pool-side stages + timings (7d, infra events — no
+      // test-account dimension). search = capacity request → granted;
+      // boot = granted → OUR /health ok.
+      query(
+        `SELECT count(*) FILTER (WHERE event = 'launch_requested')::int AS launch_requests,
+                count(*) FILTER (WHERE event = 'launched')::int AS capacity_granted,
+                count(*) FILTER (WHERE event = 'ready' AND duration_ms > 5000)::int AS became_ready,
+                count(*) FILTER (WHERE event = 'launch_failed')::int AS launch_failed,
+                count(*) FILTER (WHERE event = 'instance_dead')::int AS died,
+                round(percentile_cont(0.5) WITHIN GROUP (ORDER BY duration_ms)
+                  FILTER (WHERE event = 'launched'))::int AS search_p50_ms,
+                min(duration_ms) FILTER (WHERE event = 'launched') AS search_min_ms,
+                max(duration_ms) FILTER (WHERE event = 'launched') AS search_max_ms,
+                -- duration > 5s: excludes adoption-era 'ready' rows whose
+                -- launchedAtMs was the redeploy adoption time, not a boot.
+                round(percentile_cont(0.5) WITHIN GROUP (ORDER BY duration_ms)
+                  FILTER (WHERE event = 'ready' AND duration_ms > 5000))::int AS boot_p50_ms,
+                min(duration_ms) FILTER (WHERE event = 'ready' AND duration_ms > 5000) AS boot_min_ms,
+                max(duration_ms) FILTER (WHERE event = 'ready' AND duration_ms > 5000) AS boot_max_ms
+         FROM lambda_pool_events
+         WHERE ts > now() - interval '7 days'`,
+      ).catch((err: { code?: string }) => {
+        // Table is backend-owned; absent until the backend deploy that
+        // creates it. Don't let that 500 the whole Launch payload.
+        if (err.code === '42P01') return { rows: [] as Record<string, unknown>[] };
+        throw err;
+      }),
+      // ─── Drawing-experience waterfall (7d): one funnel per canvas open ───
+      // Stage 1 comes from drawing.opened; every later stage is measured on
+      // the matching drawing.closed event (generation_count / strokes_added /
+      // session_duration_ms) — a canvas open without a close (app killed
+      // mid-session) can't be staged and is surfaced as the gap in stage 2.
+      query(
+        `SELECT count(*)::int AS opened
+         FROM events
+         WHERE name = 'drawing.opened' AND occurred_at > now() - interval '7 days'
+           AND ($1::bool = false OR user_id NOT IN
+                (SELECT user_id::text FROM users WHERE is_test_account))`,
+        [excl],
+      ),
+      (() => {
+        const gen = `COALESCE((properties->>'generation_count')::int, 0)`;
+        // strokes_added ships with the next iOS build; older closes fall back
+        // to "generated something ⇒ must have stroked".
+        const stroked = `(COALESCE((properties->>'strokes_added')::int, 0) > 0
+          OR ((properties->>'strokes_added') IS NULL AND ${gen} > 0))`;
+        const durOk = `(properties->>'session_duration_ms') ~ '^[0-9.]+$'`;
+        const durI = `(properties->>'session_duration_ms')::int`;
+        const durF = `(properties->>'session_duration_ms')::float`;
+        const stages: Array<[string, string]> = [
+          ['closed', 'true'],
+          ['stroked', stroked],
+          ['gen1', `${gen} >= 1`],
+          ['gen10', `${gen} > 10`],
+          ['gen50', `${gen} > 50`],
+          ['gen100', `${gen} > 100`],
+        ];
+        const cols = stages
+          .map(
+            ([k, cond]) => `
+                count(*) FILTER (WHERE ${cond})::int AS ${k},
+                min(${durI}) FILTER (WHERE ${cond} AND ${durOk}) AS ${k}_min_ms,
+                round(percentile_cont(0.5) WITHIN GROUP (ORDER BY ${durF})
+                  FILTER (WHERE ${cond} AND ${durOk}))::int AS ${k}_med_ms,
+                max(${durI}) FILTER (WHERE ${cond} AND ${durOk}) AS ${k}_max_ms`,
+          )
+          .join(',');
+        return query(
+          `SELECT ${cols}
+           FROM events
+           WHERE name = 'drawing.closed' AND occurred_at > now() - interval '7 days'
+             AND ($1::bool = false OR user_id NOT IN
+                  (SELECT user_id::text FROM users WHERE is_test_account))`,
+          [excl],
+        );
+      })()
       ]);
 
       // Merge the two daily sources and aggregate the per-user funnel rows.
@@ -497,6 +624,12 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
         recentErrors: recentErrors.rows,
         summary: summary.rows[0] ?? null,
         providers: providers.rows,
+        h100_waterfall: h100Waterfall.rows[0] ?? null,
+        h100_pool: h100Pool.rows[0] ?? null,
+        drawing_funnel: {
+          opened: (drawingOpened.rows[0]?.['opened'] as number) ?? 0,
+          ...(drawingStages.rows[0] ?? {}),
+        },
       };
     });
 

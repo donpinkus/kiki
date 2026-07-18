@@ -59,6 +59,26 @@ export function trackProviderSession(props: {
   upstreamDisconnects: number;
   upstreamReconnects: number;
   lambdaBounced: boolean;
+  /** Pool status at the bounce moment ('launching' = still searching for
+   * H100 capacity, 'booting' = instance warming, 'none'/'error' = pool cold
+   * or failed). Null when the session wasn't bounced. Powers the H100
+   * waterfall's failed-at-which-stage attribution. */
+  poolStatusAtBounce: string | null;
+  /** Pre-resolution provider ask: 'auto' (launch mode), or an explicit
+   * 'lambda'/'fal' override. 'auto'+'lambda' = "requested an H100". */
+  providerIntent: string;
+  /** Pool status when 'auto' resolved ('booting' = an H100 existed but wasn't
+   * warm — the found-vs-warmed waterfall distinction). Null for non-auto. */
+  poolStatusAtResolve: string | null;
+  /** The lambda relay reached open — the session was CONNECTED to an H100. */
+  lambdaWired: boolean;
+  /** Frames served by the H100 specifically (a downgraded session's later
+   * frames are fal's and excluded). */
+  lambdaFrames: number;
+  /** Wired → first H100 frame (ms); null when no H100 frame was served. */
+  lambdaFirstFrameMs: number | null;
+  /** Session had the H100 and lost it (finished on fal). */
+  lambdaDowngraded: boolean;
   everReachedReady: boolean;
 }): void {
   capture(props.userId, 'stream.provider_session', {
@@ -70,6 +90,13 @@ export function trackProviderSession(props: {
     upstream_disconnects: props.upstreamDisconnects,
     upstream_reconnects: props.upstreamReconnects,
     lambda_bounced: props.lambdaBounced,
+    pool_status_at_bounce: props.poolStatusAtBounce,
+    requested_provider: props.providerIntent,
+    pool_status_at_resolve: props.poolStatusAtResolve,
+    lambda_wired: props.lambdaWired,
+    lambda_frames: props.lambdaFrames,
+    lambda_first_frame_ms: props.lambdaFirstFrameMs,
+    lambda_downgraded: props.lambdaDowngraded,
     ever_reached_ready: props.everReachedReady,
   });
 }

@@ -114,3 +114,25 @@ CREATE TABLE IF NOT EXISTS fal_connections (
 CREATE INDEX IF NOT EXISTS fal_connections_opened ON fal_connections (opened_at);
 CREATE INDEX IF NOT EXISTS fal_connections_source_opened ON fal_connections (source, opened_at);
 CREATE INDEX IF NOT EXISTS fal_connections_user ON fal_connections (user_id, opened_at);
+
+-- Lambda H100 pool lifecycle events (modules/lambda/devPool.ts) — one row per
+-- stage transition, powering the Insights Launch tab's H100 waterfall:
+--   launch_requested  → we asked Lambda for capacity (search begins)
+--   launched          → capacity granted; duration_ms = search time
+--   ready             → instance passed OUR /health; duration_ms = boot/warm time
+--   launch_failed     → search or boot gave up; detail = reason
+--   instance_dead     → ready instance failed 3 health checks (terminated)
+--   idle_terminate    → scaled down after 30 min idle
+--   adopted           → existing instance re-registered after backend redeploy
+-- Pruned to 30 days by the pool tick.
+CREATE TABLE IF NOT EXISTS lambda_pool_events (
+  id            BIGSERIAL PRIMARY KEY,
+  ts            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  event         TEXT NOT NULL,
+  instance_name TEXT,
+  region        TEXT,
+  duration_ms   INTEGER,
+  detail        TEXT
+);
+CREATE INDEX IF NOT EXISTS lambda_pool_events_ts ON lambda_pool_events (ts);
+CREATE INDEX IF NOT EXISTS lambda_pool_events_event ON lambda_pool_events (event, ts);

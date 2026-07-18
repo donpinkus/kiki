@@ -17,6 +17,7 @@ import {
   releaseStream as poolReleaseStream,
   touchInstance as poolTouchInstance,
   hasReady as poolHasReady,
+  getState as poolGetState,
   reportFailure as poolReportFailure,
 } from '../modules/lambda/devPool.js';
 import { trackSessionClosed, trackProviderSession } from '../modules/analytics/index.js';
@@ -172,6 +173,20 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       // for H100 capacity, 'booting' = warming, 'none'/'error' = not even
       // trying) — the waterfall's "how far did this session get" resolution.
       let poolStatusAtBounce: string | null = null;
+      // ─── H100 waterfall stage tracking (Insights Launch tab) ──────────
+      // Each flag marks the furthest stage this session reached on the H100
+      // path; trackProviderSession ships them at close. providerIntent is the
+      // PRE-resolution ask ('auto'/'lambda'/'fal'); poolStatusAtResolve is the
+      // pool's state at the auto-resolution moment ('booting' = an instance
+      // existed but wasn't warm — "found but not warmed").
+      let providerIntent: string = config.IMAGE_PROVIDER;
+      let poolStatusAtResolve: string | null = null;
+      let lambdaWired = false;
+      let lambdaFrames = 0;
+      let lambdaDowngraded = false;
+      // Wired → first H100 frame (ms) — the connected→first-frame transition
+      // in the waterfall timing widget. Null until the first lambda frame.
+      let lambdaFirstFrameMs: number | null = null;
       // True when `imageProvider` was resolved from 'auto' (the launch mode).
       // Auto sessions degrade to fal MID-SESSION when the lambda upstream dies
       // with no replacement instance — the drawing keeps flowing. Explicit
@@ -305,6 +320,12 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             upstreamReconnects,
             lambdaBounced,
             poolStatusAtBounce,
+            providerIntent,
+            poolStatusAtResolve,
+            lambdaWired,
+            lambdaFrames,
+            lambdaFirstFrameMs,
+            lambdaDowngraded,
             everReachedReady,
           });
         }
@@ -387,6 +408,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         if ((requestedProvider === 'fal' || requestedProvider === 'lambda') && source === 'jwt') {
           if (await isTestAccount(uid)) {
             imageProvider = requestedProvider;
+            providerIntent = requestedProvider;
             request.log.info(
               { userId, connId, streamId, imageProvider, event: 'image_provider_override' },
               'per-session image provider override (test account)',
@@ -405,6 +427,9 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       if (imageProvider === 'auto') {
         touchDevPool();
         providerResolvedFromAuto = true;
+        // Waterfall stage attribution: the pool's state RIGHT NOW is what this
+        // session experienced ('booting' = H100 found but not yet warm).
+        poolStatusAtResolve = poolGetState().status;
         imageProvider = poolHasReady() || config.LAMBDA_IMAGE_URL ? 'lambda' : 'fal';
         request.log.info(
           { userId, connId, streamId, imageProvider, event: 'image_provider_auto' },
@@ -503,6 +528,10 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             socket.send(JSON.stringify({ type: 'frame', data: base64 }));
             framesDelivered += 1;
             if (imageProvider === 'lambda') {
+              lambdaFrames += 1;
+              if (lambdaFrames === 1) {
+                lambdaFirstFrameMs = Date.now() - (wiredAtMs ?? sessionStartMs);
+              }
               lambdaUnbilledFrames += 1;
               if (lambdaUnbilledFrames >= 25) billLambdaFrames();
             }
@@ -583,6 +612,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         );
         relay = newRelay;
         wiredAtMs ??= Date.now();
+        if (imageProvider === 'lambda') lambdaWired = true;
         currentUpstreamUrl = upstreamUrl;
         if (lastConfig) newRelay.sendConfig(lastConfig);
       };
@@ -756,6 +786,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
                 'auto-resolved lambda session downgraded to fal mid-session',
               );
               billLambdaFrames(); // flush frames already served on lambda
+              if (lambdaWired) lambdaDowngraded = true; // waterfall: had the H100, lost it
               imageProvider = 'fal';
               falMeteringEnabled = lambdaMeteringEnabled;
               lambdaMeteringEnabled = false;
@@ -805,6 +836,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             'auto-resolved lambda session downgraded to fal',
           );
           billLambdaFrames(); // flush any frames already served on lambda
+          if (lambdaWired) lambdaDowngraded = true; // waterfall: had the H100, lost it
           imageProvider = 'fal';
           falMeteringEnabled = lambdaMeteringEnabled;
           lambdaMeteringEnabled = false;

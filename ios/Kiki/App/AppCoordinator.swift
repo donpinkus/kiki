@@ -691,6 +691,10 @@ final class AppCoordinator {
     /// littering NSTemporaryDirectory across many idle/draw cycles.
     private var currentVideoMP4URL: URL?
     private(set) var streamFrameCount = 0
+    /// Strokes completed during the CURRENT canvas session (reset on every
+    /// drawing open). Shipped as `strokes_added` on `drawing.closed` — powers
+    /// the Insights drawing-experience waterfall's "first stroke made" stage.
+    private var sessionStrokeCount = 0
 
     // -- Stream parameters --
 
@@ -981,9 +985,12 @@ final class AppCoordinator {
         canvasViewModel.onColorPicked = { [weak self] uiColor in
             self?.currentColor = Color(uiColor: uiColor)
         }
-        // DEV stroke recorder: capture completed strokes while recording is on.
+        // Per-session stroke counter (drawing.closed analytics) + DEV stroke
+        // recorder: capture completed strokes while recording is on.
         canvasViewModel.onStrokeCompleted = { [weak self] stroke in
-            guard let self, self.isRecordingStrokes else { return }
+            guard let self else { return }
+            self.sessionStrokeCount += 1
+            guard self.isRecordingStrokes else { return }
             self.recordedStrokes.append(stroke)
         }
         // Supply the current brush color to the canvas ring preview
@@ -1434,6 +1441,7 @@ final class AppCoordinator {
         try? modelContext.save()
         currentDrawingId = drawing.id
         currentDrawingOpenedAt = Date()
+        sessionStrokeCount = 0
 
         // Reset all state
         promptText = ""
@@ -1465,6 +1473,7 @@ final class AppCoordinator {
 
         currentDrawingId = drawing.id
         currentDrawingOpenedAt = Date()
+        sessionStrokeCount = 0
 
         // Restore settings
         promptText = drawing.promptText
@@ -1516,6 +1525,7 @@ final class AppCoordinator {
                 "drawing_id": drawingId.uuidString,
                 "session_duration_ms": sessionMs,
                 "generation_count": streamFrameCount,
+                "strokes_added": sessionStrokeCount,
             ])
         }
         currentDrawingOpenedAt = nil

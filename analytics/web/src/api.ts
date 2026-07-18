@@ -311,6 +311,45 @@ export interface ProviderStatsRow {
   frames: number | string; // bigint may arrive as string
   disconnects: number;
   reconnects: number;
+  sessions_with_disconnect?: number;
+}
+
+/** Session-side H100 waterfall (7d, ALL provider sessions). Cumulative:
+ * sessions ⊇ requested ⊇ found ⊇ warmed ⊇ connected ⊇ h100_frames ⊇ held.
+ * `downgraded` + `dropped` decompose the connected→held losses; `untracked`
+ * (sessions − tracked) predate stage instrumentation. */
+export interface H100Waterfall {
+  sessions: number;
+  tracked: number;
+  requested: number;
+  found: number;
+  warmed: number;
+  connected: number;
+  h100_frames: number;
+  held: number;
+  downgraded: number;
+  dropped: number;
+  connect_min_ms: number | null;
+  connect_med_ms: number | null;
+  connect_max_ms: number | null;
+  ff_min_ms: number | null;
+  ff_med_ms: number | null;
+  ff_max_ms: number | null;
+}
+
+/** Pool-side lifecycle counts + stage timings (7d). */
+export interface H100Pool {
+  launch_requests: number;
+  capacity_granted: number;
+  became_ready: number;
+  launch_failed: number;
+  died: number;
+  search_p50_ms: number | null;
+  search_min_ms: number | null;
+  search_max_ms: number | null;
+  boot_p50_ms: number | null;
+  boot_min_ms: number | null;
+  boot_max_ms: number | null;
 }
 
 export interface LaunchData {
@@ -327,7 +366,16 @@ export interface LaunchData {
   }[];
   summary: { ttfi_p50_7d: number | null; ttfi_p90_7d: number | null } | null;
   providers: ProviderStatsRow[];
+  h100_waterfall: H100Waterfall | null;
+  h100_pool: H100Pool | null;
+  drawing_funnel: DrawingFunnel | null;
 }
+
+/** Drawing-experience waterfall: `opened` from drawing.opened; every other
+ * key from drawing.closed aggregates — stage counts (closed, stroked, gen1,
+ * gen10, gen50, gen100) plus `<stage>_min_ms` / `<stage>_med_ms` /
+ * `<stage>_max_ms` session-duration stats. */
+export type DrawingFunnel = { opened: number } & Record<string, number | null>;
 
 export const getLaunch = (excludeTest: boolean) =>
   api<LaunchData>(`/admin/api/launch${excludeTest ? '?excludeTest=1' : ''}`);
