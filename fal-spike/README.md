@@ -8,8 +8,10 @@ endpoint.
 
 The production code is **not** here — it's `backend/src/modules/fal/falImageRelay.ts`
 (a `StreamRelay` drop-in) plus the `IMAGE_PROVIDER` branch in
-`backend/src/routes/stream.ts`. The RunPod image path is dormant (revert =
-`IMAGE_PROVIDER=runpod` + redeploy). Video idle-state animation stays on RunPod.
+`backend/src/routes/stream.ts`. (The RunPod system was removed entirely on
+2026-07-17 — see `documents/removed-features.md`; the self-hosted path is now
+the Lambda Cloud H100 pool, and video idle-state animation is archived in
+`archive/video-ltx/`.)
 
 > History: an earlier spike tried to deploy *our own* klein pipeline onto fal
 > **Serverless** and was blocked on serverless access (2026-06-02). The hosted

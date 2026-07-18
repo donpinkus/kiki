@@ -1,5 +1,11 @@
 # Spike: Auto-Captioning VLM Evaluation
 
+> **⚠️ Likely superseded (2026-07-18).** This spike was scoped for the pre-fal
+> preview/refine REST architecture. The live path is continuous img2img
+> streaming with a per-drawing prompt + style suffix; there is no caption step,
+> and nothing in `decisions.md` commits to one. Revisit deliberately (as a new
+> plan against the streaming architecture) before executing any tasks below.
+
 ## Goal
 Determine whether on-device auto-captioning is viable for the no-prompt experience, or if we need server-side captioning.
 

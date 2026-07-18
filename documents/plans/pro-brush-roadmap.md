@@ -2,6 +2,11 @@
 
 **Written:** 2026-06-06 · **Status updated:** 2026-06-07
 
+> **Note (2026-07-18):** the per-feature phasing below is superseded by
+> `unified-brush-engine.md` (committed target architecture — phases map onto it
+> as additive parameters, its §6). For current brush work also see
+> `documents/research/krita-brush/` (Brush Studio / Procreate-parity workstream).
+
 ## Status (2026-06-07)
 
 Shipped to `origin/main` and verified on device:
@@ -53,7 +58,7 @@ Wet-paint follow-ups / known tradeoffs:
 
 ## Context
 
-Kiki's Metal canvas engine (see `metal-canvas-rewrite.md`) ships a single hardcoded
+Kiki's Metal canvas engine (see `completed/metal-canvas-rewrite.md`) ships a single hardcoded
 soft-circle stamp brush. It's good enough to sketch with, but it is a long way from
 Procreate-class expressiveness — and the headline want is **wet/oil paint** where
 colors physically mix and smear instead of layering as flat opaque coats.
@@ -307,7 +312,7 @@ underlying color. The user's headline ask.
   stamp-to-stamp: loads from canvas (Pull/Charge), unloads to canvas (Attack), depletes
   along the stroke, recharges on lift.
 - **Smudge** = the zero-charge / pure-pull special case — read `dst`, carry it forward,
-  redeposit. This finally delivers the Metal smudge deferred in `metal-canvas-rewrite.md`.
+  redeposit. This finally delivers the Metal smudge deferred in `completed/metal-canvas-rewrite.md`.
 - Extend undo to wet brushes (they touch the layer directly — reuse the eraser's
   snapshot-at-`touchesBegan` pattern).
 

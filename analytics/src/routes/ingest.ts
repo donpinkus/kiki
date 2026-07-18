@@ -9,11 +9,11 @@
  * timeline can render durations without recomputing on read.
  */
 
-import type { FastifyPluginAsync } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type { PoolClient } from 'pg';
-import { authenticateIngest } from '../auth.js';
+import { authenticateIngest, type IngestPrincipal } from '../auth.js';
 import { pool, query } from '../db.js';
-import { blobStore } from '../blobStore.js';
+import { blobStore, randomStamp, safeFilename } from '../blobStore.js';
 
 interface IncomingEvent {
   name?: string;
@@ -34,6 +34,34 @@ function toDate(value: string | number | undefined): Date {
   if (typeof value === 'number') return new Date(value);
   const d = new Date(value);
   return Number.isNaN(d.getTime()) ? new Date() : d;
+}
+
+/**
+ * Authenticate an ingest call; on failure send the 401 (or the 403 for
+ * iOS-source calls to backend-only routes) and return null so the handler
+ * can bail with a bare `return`. `label` keys the auth-failure log line;
+ * `backendOnlyError` is the exact 403 message for backend/service-key-only
+ * routes (checked AFTER successful auth, preserving the original order).
+ */
+async function authOrReject(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  label: string,
+  opts?: { backendOnlyError?: string },
+): Promise<IngestPrincipal | null> {
+  let principal: IngestPrincipal;
+  try {
+    principal = await authenticateIngest(request);
+  } catch (err) {
+    request.log.warn({ err: (err as Error).message }, `${label} auth failed`);
+    await reply.code(401).send({ error: 'unauthorized' });
+    return null;
+  }
+  if (opts?.backendOnlyError && principal.source === 'ios') {
+    await reply.code(403).send({ error: opts.backendOnlyError });
+    return null;
+  }
+  return principal;
 }
 
 function numProp(props: Record<string, unknown> | undefined, key: string): number | undefined {
@@ -93,16 +121,10 @@ export const ingestRoute: FastifyPluginAsync = async (app) => {
   // session. Query params: stream_id, user_id, kind (sketch|generated),
   // seq (int, per-kind), ts (epoch ms at relay time).
   app.post('/ingest/capture', async (request, reply) => {
-    let principal;
-    try {
-      principal = await authenticateIngest(request);
-    } catch (err) {
-      request.log.warn({ err: (err as Error).message }, 'capture ingest auth failed');
-      return reply.code(401).send({ error: 'unauthorized' });
-    }
-    if (principal.source === 'ios') {
-      return reply.code(403).send({ error: 'capture ingest is backend-only' });
-    }
+    const principal = await authOrReject(request, reply, 'capture ingest', {
+      backendOnlyError: 'capture ingest is backend-only',
+    });
+    if (!principal) return;
 
     const q = request.query as Record<string, string | undefined>;
     const streamId = q['stream_id'];
@@ -143,16 +165,10 @@ export const ingestRoute: FastifyPluginAsync = async (app) => {
   // ─── Session replay prompt change (JSON) ───────────────────────────────────
   // Backend-only: the prompt text that was live from `ts` onward in a stream.
   app.post('/ingest/capture-prompt', async (request, reply) => {
-    let principal;
-    try {
-      principal = await authenticateIngest(request);
-    } catch (err) {
-      request.log.warn({ err: (err as Error).message }, 'capture-prompt ingest auth failed');
-      return reply.code(401).send({ error: 'unauthorized' });
-    }
-    if (principal.source === 'ios') {
-      return reply.code(403).send({ error: 'capture-prompt ingest is backend-only' });
-    }
+    const principal = await authOrReject(request, reply, 'capture-prompt ingest', {
+      backendOnlyError: 'capture-prompt ingest is backend-only',
+    });
+    if (!principal) return;
 
     const b = (request.body ?? {}) as Record<string, unknown>;
     const streamId = b['stream_id'];
@@ -184,13 +200,8 @@ export const ingestRoute: FastifyPluginAsync = async (app) => {
   });
 
   app.post('/ingest', async (request, reply) => {
-    let principal;
-    try {
-      principal = await authenticateIngest(request);
-    } catch (err) {
-      request.log.warn({ err: (err as Error).message }, 'ingest auth failed');
-      return reply.code(401).send({ error: 'unauthorized' });
-    }
+    const principal = await authOrReject(request, reply, 'ingest');
+    if (!principal) return;
 
     const body = request.body as IngestBody | undefined;
     const events = body?.events;
@@ -247,13 +258,8 @@ export const ingestRoute: FastifyPluginAsync = async (app) => {
   //         user_id (only for service-key callers).
   // Files:  thumbnail, generated  (JPEG). Both optional; upsert merges.
   app.post('/ingest/drawing', async (request, reply) => {
-    let principal;
-    try {
-      principal = await authenticateIngest(request);
-    } catch (err) {
-      request.log.warn({ err: (err as Error).message }, 'drawing ingest auth failed');
-      return reply.code(401).send({ error: 'unauthorized' });
-    }
+    const principal = await authOrReject(request, reply, 'drawing ingest');
+    if (!principal) return;
 
     const fields: Record<string, string> = {};
     let thumbnailKey: string | null = null;
@@ -320,12 +326,7 @@ export const ingestRoute: FastifyPluginAsync = async (app) => {
   // them beside the references). Fields: target_id (required), label, note.
   // File part: image (PNG).
   app.post('/ingest/brush-target-attempt', async (request, reply) => {
-    try {
-      await authenticateIngest(request);
-    } catch (err) {
-      request.log.warn({ err: (err as Error).message }, 'brush-target attempt auth failed');
-      return reply.code(401).send({ error: 'unauthorized' });
-    }
+    if (!(await authOrReject(request, reply, 'brush-target attempt'))) return;
     const fields: Record<string, string> = {};
     let imageBuf: Buffer | null = null;
     let filename = 'attempt.png';
@@ -340,8 +341,8 @@ export const ingestRoute: FastifyPluginAsync = async (app) => {
     if (imageBuf.length > 24 * 1024 * 1024) return reply.code(400).send({ error: 'image too large' });
     const { rows: t } = await query(`SELECT id FROM brush_targets WHERE id = $1`, [targetId]);
     if (t.length === 0) return reply.code(404).send({ error: 'no such target' });
-    const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const key = `brush-targets/${targetId}/attempts/${stamp}-${filename.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+    const stamp = randomStamp();
+    const key = `brush-targets/${targetId}/attempts/${stamp}-${safeFilename(filename)}`;
     await blobStore.put(key, imageBuf);
     const { rows } = await query<{ id: string }>(
       `INSERT INTO brush_target_images (target_id, kind, label, note, blob_key)
@@ -349,7 +350,7 @@ export const ingestRoute: FastifyPluginAsync = async (app) => {
       [targetId, fields['label'] ?? null, fields['note'] ?? null, key],
     );
     await query(`UPDATE brush_targets SET status = 'in_progress', updated_at = now() WHERE id = $1 AND status = 'todo'`, [targetId]);
-    return { ok: true, id: rows[0]!.id };
+    return { ok: true, id: rows[0]?.id };
   });
 
   // ─── Brush fixture upload (multipart) ─────────────────────────────────────
@@ -359,13 +360,8 @@ export const ingestRoute: FastifyPluginAsync = async (app) => {
   // Fields: name, note, stroke_count, user_id (only for service-key callers).
   // Files:  fixture (application/json, required), snapshot (PNG, optional).
   app.post('/ingest/fixture', async (request, reply) => {
-    let principal;
-    try {
-      principal = await authenticateIngest(request);
-    } catch (err) {
-      request.log.warn({ err: (err as Error).message }, 'fixture ingest auth failed');
-      return reply.code(401).send({ error: 'unauthorized' });
-    }
+    const principal = await authOrReject(request, reply, 'fixture ingest');
+    if (!principal) return;
 
     const fields: Record<string, string> = {};
     let fixtureBuf: Buffer | null = null;
@@ -397,7 +393,7 @@ export const ingestRoute: FastifyPluginAsync = async (app) => {
       return reply.code(400).send({ error: `fixture is not valid BrushFixture JSON: ${(err as Error).message}` });
     }
 
-    const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const stamp = randomStamp();
     const fixtureKey = `fixtures/${stamp}/fixture.json`;
     await blobStore.put(fixtureKey, fixtureBuf);
     let snapshotKey: string | null = null;
@@ -424,19 +420,13 @@ export const ingestRoute: FastifyPluginAsync = async (app) => {
   // scene name, e.g. "wet-02-smudge.png". No pass/fail semantics — the Tests tab
   // is a visual-inspection gallery by design.
   app.post('/ingest/test-run', async (request, reply) => {
-    let principal;
-    try {
-      principal = await authenticateIngest(request);
-    } catch (err) {
-      request.log.warn({ err: (err as Error).message }, 'test-run ingest auth failed');
-      return reply.code(401).send({ error: 'unauthorized' });
-    }
-    if (principal.source === 'ios') {
-      return reply.code(403).send({ error: 'test-run ingest is service-key only' });
-    }
+    const principal = await authOrReject(request, reply, 'test-run ingest', {
+      backendOnlyError: 'test-run ingest is service-key only',
+    });
+    if (!principal) return;
 
     const fields: Record<string, string> = {};
-    const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const stamp = randomStamp();
     const images: { scene: string; key: string }[] = [];
 
     const parts = (request as unknown as { parts: () => AsyncIterableIterator<MultipartPart & { filename?: string } > }).parts();
@@ -457,7 +447,7 @@ export const ingestRoute: FastifyPluginAsync = async (app) => {
     if (images.length === 0) return reply.code(400).send({ error: 'at least one image part required' });
 
     // Optional scene → description map (harness manifest.json, shipped by publish-run.sh).
-    let descriptions: Record<string, string> = {};
+    const descriptions: Record<string, string> = {};
     if (fields['descriptions']) {
       try {
         const parsed = JSON.parse(fields['descriptions']) as Record<string, unknown>;
@@ -471,7 +461,8 @@ export const ingestRoute: FastifyPluginAsync = async (app) => {
       `INSERT INTO test_runs (git_sha, note) VALUES ($1, $2) RETURNING id`,
       [fields['git_sha'] ?? null, fields['note'] ?? null],
     );
-    const runId = run.rows[0]!.id;
+    const runId = run.rows[0]?.id;
+    if (!runId) return reply.code(500).send({ error: 'insert returned no row' });
     for (const img of images) {
       await query(
         `INSERT INTO test_run_images (run_id, scene, blob_key, description) VALUES ($1, $2, $3, $4)`,

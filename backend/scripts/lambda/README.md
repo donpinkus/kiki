@@ -29,6 +29,17 @@ tsx scripts/lambda/instances.ts --terminate-all
 Generated frames from the bench land in `scripts/lambda/out/` for eyeballing
 adherence (input sketch: `test-sketch.jpg`, override with `--image`).
 
+Also here (run against the DEPLOYED backend, not local):
+
+```bash
+# Post-deploy smoke test: mint a test-account JWT and exercise the dev-pool
+# endpoints end to end
+tsx scripts/lambda/smoke-ensure.ts
+
+# Soak test: N concurrent WS clients on /v1/stream — validates pool failover,
+# autoscale, and downgrade-to-fal (see lambda-image-provider.md "Production soak")
+tsx scripts/lambda/soak.mts
+
 ## Video (LTX-2.3 idle-state animation, dedicated H100)
 
 The video path runs on its own filesystem (`kiki-video-<region>`) and its own

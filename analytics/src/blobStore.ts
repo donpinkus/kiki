@@ -59,3 +59,13 @@ class VolumeBlobStore implements BlobStore {
 }
 
 export const blobStore: BlobStore = new VolumeBlobStore(config.BLOB_DIR);
+
+/** Unique-enough stamp for blob keys (upload time + 6 random base36 chars). */
+export function randomStamp(): string {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/** Make an uploaded filename safe to embed in a blob key/path. */
+export function safeFilename(name: string): string {
+  return name.replace(/[^a-zA-Z0-9._-]/g, '_');
+}

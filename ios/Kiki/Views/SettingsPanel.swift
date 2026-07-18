@@ -21,7 +21,7 @@ struct SettingsPanel: View {
                         coordinator.streamSeed = nil
                         coordinator.streamResolution = 1024
                         coordinator.streamScheduleMu = 1.2
-                        coordinator.streamCaptureFPS = 2
+                        coordinator.streamCaptureFPS = 5
                         coordinator.drawingLayout = .overlay
                         coordinator.videoResolution = 512
                         coordinator.videoFrames = 145

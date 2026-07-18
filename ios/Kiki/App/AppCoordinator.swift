@@ -356,11 +356,6 @@ final class AppCoordinator {
         }
     }
 
-    /// Debug: A/B the wet draw-order experiment (per-stamp vs instanced draws).
-    var wetOrderingPerStamp = false {
-        didSet { canvasViewModel.setWetOrderingPerStamp(wetOrderingPerStamp) }
-    }
-
     /// Whether the full-page Brush Studio is shown (fullScreenCover from DrawingView).
     /// The single brush-editing surface — the old settings popover + docked dev panel
     /// were folded into it (2026-07-17).
@@ -1151,10 +1146,6 @@ final class AppCoordinator {
 
     func redo() {
         canvasViewModel.redo()
-    }
-
-    func clear() {
-        canvasViewModel.clear()
     }
 
     func swapStreamImageToCanvas() {

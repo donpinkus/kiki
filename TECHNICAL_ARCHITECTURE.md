@@ -237,7 +237,7 @@ For the preview fast path, the backend acts as an authenticated proxy between th
 | generation_events  | id, user_id, session_id, request_id, mode, provider, latency_ms, status, content_filter_result, created_at | Append-only event log for observability, debugging, and content safety auditing.    |
 | content_filter_log | id, generation_event_id, filter_type (prompt\|image), result, categories, created_at                       | Detailed log of content filter decisions. Required for App Store compliance audits. |
 
-**Note:** We do not store sketch images or prompts on the server beyond the lifecycle of the generation request, except in content_filter_log entries for flagged content. This is a privacy-by-design decision aligned with our App Store consent disclosures.
+**Note:** ~~We do not store sketch images or prompts on the server beyond the lifecycle of the generation request~~ **SUPERSEDED (owner decision 2026-07-15):** a throttled sample of each session's sketch + generated frames IS captured server-side to Kiki Insights for admin replay (14-day retention, kill switch `SESSION_CAPTURE_ENABLED`). Privacy policy + App Store data-collection disclosure must state this before any external build — see CLAUDE.md constraint #6.
 
 ## 7. Performance Architecture
 

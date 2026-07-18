@@ -1368,7 +1368,7 @@ Phased plan. Each phase is independently shippable to internal testers.
 ### Phase 4: Telemetry + tuning
 - [ ] Log every Verdict + full feature vector + raw stroke (for replay).
 - [ ] Build offline replay harness — re-run recognizer on logged strokes, measure rates.
-- [ ] PostHog events: `stroke.snap.committed`, `stroke.snap.abstained`, `stroke.snap.undone`.
+- [ ] Insights analytics events (`Analytics.track`; PostHog removed 2026-07-17): `stroke.snap.committed`, `stroke.snap.abstained`, `stroke.snap.undone`.
 - [ ] Margin sweep on real data.
 
 ### Phase 5: Discoverability

@@ -1,6 +1,7 @@
-"""Sentry init shared between image/server.py (image pod) and video/server.py.
+"""Sentry init for image/server.py (and the archived video server — see
+archive/video-ltx/, planned Lambda revival).
 
-No-op when SENTRY_DSN_POD is unset, so local runs and dev pods stay quiet.
+No-op when SENTRY_DSN_POD is unset, so local runs and dev instances stay quiet.
 RUNPOD_POD_ID (legacy name from the RunPod era) identifies the serving host when set.
 """
 from __future__ import annotations
@@ -17,8 +18,9 @@ from sentry_sdk.integrations.logging import LoggingIntegration
 
 # Cross-stack phase vocabulary (shared with backend + iOS):
 #   preparing | drawing | animating | reconnecting | session_ending
-# Pods set: preparing, session_ending, drawing, animating.
-# reconnecting is iOS/backend only — pod can't tell fresh boot from reconnect.
+# The image server sets: preparing, drawing, session_ending. (`animating` was
+# only ever set by the archived video server — reserved for its revival.)
+# reconnecting is iOS/backend only — the server can't tell fresh boot from reconnect.
 _phase: ContextVar[str | None] = ContextVar("kiki_phase", default=None)
 
 
@@ -39,7 +41,7 @@ def phase(name: str) -> Iterator[None]:
 
 # Cosmetic: suppress the per-boot transformers warning
 # `Using a slow image processor as use_fast is unset and a slow processor
-# was saved with this model.` It fires once on every video pod boot from
+# was saved with this model.` It fires once on every server boot from
 # transformers' image-processor loader and adds noise to Sentry Logs
 # without surfacing actionable signal. Set in module scope so it applies
 # regardless of whether SENTRY_DSN_POD is set (the noise exists locally

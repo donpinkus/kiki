@@ -36,7 +36,7 @@ assert(r.ok && j.accepted === 3, `ingest accepted 3 events (got ${JSON.stringify
 r = await fetch(`${BASE}/ingest`, {
   method: 'POST',
   headers: { 'Content-Type': 'application/json', 'x-insights-key': SVC },
-  body: JSON.stringify({ events: [{ name: 'pod.provision.completed', user_id: USER, properties: { dc: 'US-NC-1' } }] }),
+  body: JSON.stringify({ events: [{ name: 'stream.provider_session', user_id: USER, properties: { provider: 'lambda' } }] }),
 });
 j = await r.json();
 assert(r.ok && j.accepted === 1, 'backend service-key ingest accepted');

@@ -10,8 +10,8 @@ Protocol:
     - Text frame (JSON): { "type": "frame_meta", "requestId": "..."|null, "queueEmpty": <bool> }
         Always sent immediately before each generated binary. `queueEmpty`
         is true when the input buffer was empty at frame-completion time —
-        the backend uses this as the trigger to dispatch the just-sent
-        image to the video pod for animation.
+        kept as the trigger signal for the idle-state video animation
+        (archived, planned revival — see archive/video-ltx/).
     - Binary frame: Generated JPEG bytes
 
 Frame dropping:
@@ -23,8 +23,8 @@ Correlation:
   `requestId` lets the client route responses to specific requests (used by
   the style-preview picker). The value is snapshotted into cfg at generation
   start so it survives config updates that arrive mid-generation. The same
-  ID propagates to the video pod via the backend, so a single grep matches
-  the full lifecycle.
+  ID propagates through the backend, so a single grep matches the full
+  lifecycle.
 """
 from __future__ import annotations
 
@@ -34,6 +34,7 @@ import json
 import logging
 import os
 import random
+import secrets
 import time
 from contextlib import asynccontextmanager
 
@@ -125,7 +126,11 @@ async def websocket_stream(ws: WebSocket):
     # proxy with an unguessable hostname. No-op when KIKI_WS_TOKEN is unset
     # (local dev unchanged).
     expected_token = os.environ.get("KIKI_WS_TOKEN", "")
-    if expected_token and ws.query_params.get("token") != expected_token:
+    # compare_digest: constant-time compare — a plain != short-circuits per
+    # character and leaks a timing oracle on a public-IP port.
+    if expected_token and not secrets.compare_digest(
+        ws.query_params.get("token", ""), expected_token
+    ):
         logger.warning(
             f"WS rejected: bad token from {client_ip or '?'}",
             extra={"event": "pod.ws.bad_token", "client_ip": client_ip},
@@ -185,7 +190,8 @@ async def websocket_stream(ws: WebSocket):
     # Per-send dropped counter for the diagnostic log; reset after each emit.
     frames_dropped_since_last_send = 0
     # Count of false->true transitions on queueEmpty (i.e. distinct trigger
-    # opportunities for the video pod). Useful in disconnect summary + /health.
+    # opportunities for the archived idle-state video animation). Useful in
+    # disconnect summary + /health.
     queue_drained_count = 0
     # Last queueEmpty value seen, for edge detection.
     prev_queue_empty: bool | None = None
@@ -299,9 +305,9 @@ async def websocket_stream(ws: WebSocket):
                         await ws.send_bytes(result_jpeg)
                         frames_processed += 1
 
-                        # Edge log: false -> true transition. This is the moment
-                        # the backend will dispatch the just-sent image to the
-                        # video pod. Single grep target during triage.
+                        # Edge log: false -> true transition — the moment the
+                        # archived idle-state video trigger would fire. Single
+                        # grep target during triage.
                         if queue_empty and prev_queue_empty is not True:
                             queue_drained_count += 1
                             logger.info(
@@ -329,6 +335,10 @@ async def websocket_stream(ws: WebSocket):
                             await ws.send_text(json.dumps({
                                 "type": "status",
                                 "status": "error",
+                                # requestId lets a client awaiting a specific
+                                # request (style-preview picker) fail THAT
+                                # request instead of stalling uncorrelated.
+                                "requestId": cfg.get("requestId"),
                                 "message": str(e),
                             }))
                         except Exception:

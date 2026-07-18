@@ -63,6 +63,12 @@ const CONNECT_TIMEOUT_MS = 15_000;
  * long unbroken drawing session can't overshoot the spend cap by more than
  * ~this window of spend. Rides the per-frame flush path (no separate timer). */
 const USAGE_REPORT_THROTTLE_MS = 10_000;
+/** If fal has been silent this long since the oldest unanswered send, treat
+ * the in-flight inputs as silently dropped (cold-window/garble) — without an
+ * escape hatch, one orphaned seq pins the idle-close re-arm loop forever,
+ * keeping the socket open (billable) until fal's ~30s timeout and freezing
+ * queueEmpty at false. Warm fal answers in well under a second. */
+const STALE_INFLIGHT_MS = 10_000;
 
 /** Minimal logger shape — accepts a Fastify/pino logger or any structured
  * logger. Optional; falls back to Sentry breadcrumbs only. */
@@ -171,10 +177,21 @@ export class FalImageRelay implements ImageRelay {
    * moment a first frame lands, `now - awaitingSince` is how long the user
    * has been staring at nothing, including fal's cold-window closes. */
   private awaitingSince: number | null = null;
+  /** Wall time of the last decoded result from fal (baselined to socket-open
+   * time on connect). Drives the orphaned-in-flight escape in idleClose():
+   * unlike awaitingSince (cleared on EVERY result), this detects "one seq
+   * among many was silently dropped" — fal has answered recently ⇒ not
+   * stale; fal silent for STALE_INFLIGHT_MS with work outstanding ⇒ the
+   * remainder will never come. */
+  private lastResultAt = 0;
 
   // ─── Usage accounting (for the fal-spend cap) ──────────────────────────
   /** Sum of fully-closed connection spans (ms). Excludes idle gaps between
-   * reconnects — only time the socket was actually open, matching fal billing. */
+   * reconnects — only time the socket was actually open. APPROXIMATES fal
+   * billing conservatively: fal bills warm-runner-ATTACHED time, and an open
+   * socket during a cold spin-up (no runner attached, inputs dropped) is not
+   * billed by fal but IS counted here — slight overcount during cold waits
+   * only (see CLAUDE.md fal billing notes). */
   private cumulativeClosedMs = 0;
   /** Wall time the current socket opened, or null when closed. */
   private openedAt: number | null = null;
@@ -220,6 +237,12 @@ export class FalImageRelay implements ImageRelay {
     const start = Date.now();
     return new Promise<void>((resolve, reject) => {
       let settled = false;
+      // True once THIS socket became `this.ws` (the 'open' handler ran).
+      // A socket that timed out mid-connect never adopts — its delayed
+      // 'close'/'error'/'message' events must not touch relay state, or a
+      // stale close could null a NEWER live socket and mis-finalize its
+      // open span (billing) while fal keeps the real socket open.
+      let adopted = false;
       const ws = new WebSocket(FAL_REALTIME_URL, {
         perMessageDeflate: false,
         headers: { Authorization: `Key ${this.falKey}` },
@@ -235,10 +258,12 @@ export class FalImageRelay implements ImageRelay {
       ws.on('open', () => {
         if (settled) return;
         settled = true;
+        adopted = true;
         clearTimeout(timeout);
         this.ws = ws;
         this.opened = true;
         this.openedAt = Date.now();
+        this.lastResultAt = Date.now();
         this.connectMs = Date.now() - start;
         this.connOpenedAt = Date.now();
         this.connFramesSent = 0;
@@ -261,6 +286,9 @@ export class FalImageRelay implements ImageRelay {
       });
 
       ws.on('message', (data: WebSocket.RawData, isBinary: boolean) => {
+        // Only the current socket's messages count — a stale not-adopted (or
+        // superseded) socket must not feed frames/seq-matching.
+        if (this.ws !== ws) return;
         this.handleUpstreamMessage(data as Buffer, isBinary);
       });
 
@@ -271,6 +299,9 @@ export class FalImageRelay implements ImageRelay {
           reject(new Error(`fal realtime closed before open (code=${code})`));
           return;
         }
+        // Never adopted (connect-timeout teardown): nothing to finalize — the
+        // relay may already be running on a newer socket.
+        if (!adopted) return;
         this.handleUpstreamClose(code, reason?.toString('utf-8') ?? '');
       });
 
@@ -281,6 +312,7 @@ export class FalImageRelay implements ImageRelay {
           reject(err);
           return;
         }
+        if (!adopted) return; // stale socket's error — not ours anymore
         // Post-open error: log; the 'close' that follows drives reconnect.
         this.log('warn', 'fal.error', { err: err.message });
         this.errorHandler?.(err);
@@ -296,6 +328,9 @@ export class FalImageRelay implements ImageRelay {
         decoded = this.packr.unpack(data) as typeof decoded;
       } catch (err) {
         this.log('warn', 'fal.decode_failed', { err: (err as Error).message });
+        // Still a response to our oldest input — consume its seq so the FIFO
+        // stays aligned and the orphan doesn't pin idle-close/queueEmpty.
+        this.inFlightSeqs.shift();
         return;
       }
       const content = decoded?.images?.[0]?.content;
@@ -303,11 +338,13 @@ export class FalImageRelay implements ImageRelay {
         this.log('warn', 'fal.no_image_in_message', {
           keys: decoded ? Object.keys(decoded).join(',') : null,
         });
+        this.inFlightSeqs.shift(); // same: response consumed, no usable image
         return;
       }
       const jpeg = Buffer.isBuffer(content) ? content : Buffer.from(content);
 
       const now = Date.now();
+      this.lastResultAt = now;
       this.connFramesReceived += 1;
       if (this.connFirstFrameMs === null && this.connOpenedAt !== null) {
         this.connFirstFrameMs = now - this.connOpenedAt;
@@ -410,8 +447,23 @@ export class FalImageRelay implements ImageRelay {
     // queueEmpty:true frame_meta that fires the video idle-state animation).
     // Re-arm and wait for the queue to drain.
     if (this.inFlightSeqs.length > 0 || this.pendingFrame) {
-      this.armIdleTimer();
-      return;
+      // Escape hatch: fal can silently drop inputs (cold window, garbled
+      // result) — a seq that will never be answered would otherwise re-arm
+      // this timer forever, keeping the socket open and billable until fal's
+      // ~30s cutoff and pinning queueEmpty at false. If fal hasn't produced
+      // any result for STALE_INFLIGHT_MS while work is outstanding, the
+      // remainder is never coming — abandon it and proceed with the close.
+      const stale = Date.now() - this.lastResultAt > STALE_INFLIGHT_MS;
+      if (!stale || this.pendingFrame) {
+        this.armIdleTimer();
+        return;
+      }
+      this.log('warn', 'fal.inflight_abandoned', {
+        count: this.inFlightSeqs.length,
+        silentMs: Date.now() - this.lastResultAt,
+      });
+      this.inFlightSeqs = [];
+      this.awaitingSince = null;
     }
     // Mark as our idle-close (NOT closedByUs — that would block reconnect).
     // handleUpstreamClose logs it and leaves the relay reconnectable.

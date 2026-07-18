@@ -58,6 +58,9 @@ struct SpeedPaintReplayView: View {
 
     @State private var player = AVPlayer()
     @State private var loopObserver: NSObjectProtocol?
+    /// Mirrors AVPlayerLayer.isReadyForDisplay (via KVO in PlayerLayerView) —
+    /// the definitive "is the screen actually getting frames" signal.
+    @State private var layerReadyForDisplay = false
 
     var body: some View {
         NavigationStack {
@@ -143,7 +146,6 @@ struct SpeedPaintReplayView: View {
             guard !Task.isCancelled else { return }
             startEagerExport()
         }
-        .onAppear { startLooping() }
         .onDisappear {
             player.pause()
             if let loopObserver { NotificationCenter.default.removeObserver(loopObserver) }
@@ -155,9 +157,16 @@ struct SpeedPaintReplayView: View {
         ZStack {
             RoundedRectangle(cornerRadius: 12)
                 .fill(Color(.secondarySystemBackground))
-            PlayerLayerView(player: player)
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-                .opacity(isComposing ? 0.4 : 1)
+            PlayerLayerView(player: player, onReadyForDisplay: { ready in
+                guard ready != layerReadyForDisplay else { return }
+                layerReadyForDisplay = ready
+                Analytics.track(.replayPreviewFailed, properties: [
+                    "status": "layer_display",
+                    "ready_for_display": ready,
+                ])
+            })
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .opacity(isComposing ? 0.4 : 1)
             if isComposing {
                 ProgressView().controlSize(.large)
             }
@@ -211,7 +220,17 @@ struct SpeedPaintReplayView: View {
         }
         let item = AVPlayerItem(asset: built.composition)
         item.videoComposition = built.videoComposition
-        player.replaceCurrentItem(with: item)
+        // Fresh player per item: reusing one AVPlayer across item swaps is
+        // the one factor common to every black-preview incarnation (both the
+        // old VideoPlayer file path and the composition path), and stale-
+        // player reuse with videoCompositions is a known wedge. External
+        // playback off so frames can't silently route to another screen.
+        player.pause()
+        let newPlayer = AVPlayer(playerItem: item)
+        newPlayer.allowsExternalPlayback = false
+        newPlayer.actionAtItemEnd = .none
+        player = newPlayer
+        installLoopObserver()
         player.play()
         hasPreview = true
         watchItemStatus(item)
@@ -250,12 +269,37 @@ struct SpeedPaintReplayView: View {
                 Log.info("replay.preview_item_ready", attributes: [
                     "event": "replay.preview_item_ready",
                 ])
+                // Deep probe 2s in: the item said ready but the screen may
+                // still be empty — capture everything that distinguishes
+                // "playing but not displayed" from "not playing at all".
+                try? await Task.sleep(for: .seconds(2))
+                guard item === player.currentItem else { return }
+                let t1 = item.currentTime().seconds
+                try? await Task.sleep(for: .milliseconds(600))
+                guard item === player.currentItem else { return }
+                let probe: [String: Any] = [
+                    "status": "probe",
+                    "rate": player.rate,
+                    "time_control": player.timeControlStatus.rawValue,
+                    "waiting_reason": player.reasonForWaitingToPlay?.rawValue ?? "none",
+                    "time_before_s": t1,
+                    "time_after_s": item.currentTime().seconds,
+                    "presentation_w": Double(item.presentationSize.width),
+                    "presentation_h": Double(item.presentationSize.height),
+                    "external_playback": player.isExternalPlaybackActive,
+                    "layer_ready_for_display": layerReadyForDisplay,
+                    "error_log_events": item.errorLog()?.events.count ?? 0,
+                ]
+                Analytics.track(.replayPreviewFailed, properties: probe)
+                Log.info("replay.preview_probe", attributes: probe.merging(["event": "replay.preview_probe"]) { a, _ in a })
             }
         }
     }
 
-    private func startLooping() {
-        player.actionAtItemEnd = .none
+    /// (Re)install the end-of-item loop. Called after each player swap so the
+    /// closure's `player` read (through @State storage) matches the live one.
+    private func installLoopObserver() {
+        if let loopObserver { NotificationCenter.default.removeObserver(loopObserver) }
         loopObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime,
             object: nil,
@@ -377,20 +421,29 @@ private struct ReplayShareItem: Identifiable {
 /// the autoplay loop needs no playback controls anyway.
 private struct PlayerLayerView: UIViewRepresentable {
     let player: AVPlayer
+    var onReadyForDisplay: ((Bool) -> Void)?
 
     final class LayerView: UIView {
         override static var layerClass: AnyClass { AVPlayerLayer.self }
         var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
+        var observation: NSKeyValueObservation?
+        var onReady: ((Bool) -> Void)?
     }
 
     func makeUIView(context: Context) -> LayerView {
         let view = LayerView()
         view.playerLayer.videoGravity = .resizeAspect
         view.playerLayer.player = player
+        view.onReady = onReadyForDisplay
+        view.observation = view.playerLayer.observe(\.isReadyForDisplay, options: [.initial, .new]) { [weak view] layer, _ in
+            let ready = layer.isReadyForDisplay
+            DispatchQueue.main.async { view?.onReady?(ready) }
+        }
         return view
     }
 
     func updateUIView(_ view: LayerView, context: Context) {
         view.playerLayer.player = player
+        view.onReady = onReadyForDisplay
     }
 }

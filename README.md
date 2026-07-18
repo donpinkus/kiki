@@ -7,8 +7,8 @@ Current status: Phase 1 prototype.
 ## Architecture
 
 - `ios/` contains the SwiftUI app and local Swift packages for canvas, networking, and result display.
-- `backend/` contains the Fastify API, WebSocket relay, per-session pod orchestrator, and a Postgres-backed account store (user accounts + monthly fal-spend ledger).
-- `model-servers/` contains the Python WebSocket server that runs inside the provisioned GPU pod.
+- `backend/` contains the Fastify API, WebSocket relay (fal.ai + Lambda Cloud H100 image providers), and a Postgres-backed account store (user accounts + monthly drawing-spend ledger).
+- `model-servers/` contains the Python WebSocket image server (FLUX.2-klein), served on Lambda Cloud H100 instances.
 - `documents/` contains implementation decisions, provider references, safety requirements, and roadmap material.
 
 For the detailed working guide, read [`CLAUDE.md`](./CLAUDE.md). For agent-oriented onboarding, read [`AGENTS.md`](./AGENTS.md).

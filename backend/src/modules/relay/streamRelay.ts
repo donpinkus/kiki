@@ -124,6 +124,15 @@ interface NodeError extends Error {
 export class StreamRelay {
   private upstream: WebSocket | null = null;
   private opened = false;
+  /** Set by close(): suppresses the closeHandler for the ws 'close' event
+   * that follows a deliberate teardown. Without this, a caller closing a
+   * live relay (e.g. wireRelay's defensive `relay?.close()` before rewiring)
+   * would fire its own upstream-close recovery against the replacement
+   * relay — a reconnect storm. Today's call graph only ever closes dead/
+   * null relays so the storm can't happen, but the guard makes that safety
+   * structural instead of an unstated call-graph invariant. (The fal relay
+   * guards the same hazard with its own closedByUs flag.) */
+  private closedByUs = false;
   private readonly url: string;
   /** Phase timings captured during the most recent connect(). Caller can
    *  read after `connect()` resolves (success path) or from a thrown
@@ -282,7 +291,9 @@ export class StreamRelay {
         this.breadcrumb('post-open close', {
           code,
           reason: reason.toString('utf-8'),
+          closedByUs: this.closedByUs,
         });
+        if (this.closedByUs) return;
         this.closeHandler?.(code, reason.toString('utf-8'));
       });
 
@@ -415,6 +426,7 @@ export class StreamRelay {
   }
 
   close(): void {
+    this.closedByUs = true;
     if (this.upstream) {
       this.upstream.close();
       this.upstream = null;

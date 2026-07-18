@@ -1,5 +1,5 @@
-# Railway-deployed backend. Node + Fastify only — GPU orchestration happens
-# on RunPod pods via their HTTP API.
+# Railway-deployed backend. Node + Fastify only — image generation happens
+# on fal.ai / Lambda Cloud, reached over WebSocket from the relay.
 FROM node:22-slim
 
 WORKDIR /app

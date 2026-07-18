@@ -1,4 +1,4 @@
-"""Shared deploy-version helper for both image and video pods."""
+"""Shared deploy-version helper for the model servers."""
 
 from __future__ import annotations
 

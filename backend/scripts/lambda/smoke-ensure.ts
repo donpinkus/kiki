@@ -8,7 +8,9 @@ import { SignJWT } from 'jose';
 
 const secret = new TextEncoder().encode(process.env['JWT_ACCESS_SECRET']!);
 const userId = process.env['USER_ID']!;
-const backend = process.env['BACKEND'] ?? 'https://kiki-backend-production.up.railway.app';
+// NOTE: the no-suffix kiki-backend-production domain is a STALE duplicate
+// service — the real production backend is the -eb81 variant.
+const backend = process.env['BACKEND'] ?? 'https://kiki-backend-production-eb81.up.railway.app';
 const poll = process.argv.includes('--poll');
 
 const token = await new SignJWT({ typ: 'access' })

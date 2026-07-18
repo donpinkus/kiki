@@ -14,7 +14,7 @@
  *   5. Terminates the setup instance (unless --keep).
  *
  * The filesystem is multi-attach: one populated filesystem per region serves any
- * number of concurrently launched instances (same pattern as our RunPod volumes).
+ * number of concurrently launched instances.
  *
  * Usage (from backend/):
  *   tsx scripts/lambda/setup-lambda.ts --region us-east-1 --type gpu_1x_h100_pcie
@@ -40,9 +40,10 @@ const FLUX_REPO = 'black-forest-labs/FLUX.2-klein-4B';
 // same python major.minor that serving instances boot with.
 const OS_IMAGE_FAMILY = 'lambda-stack-24-04';
 const EXPECTED_PY = '3.12';
-// Pin torch to match the RunPod base image (runpod/pytorch torch 2.9.1+cu128) so
-// pipeline behavior is comparable across providers. Lambda Stack images ship a
-// recent driver; cu128 wheels need driver >= 525 (CUDA 12 minor-version compat).
+// Pin torch 2.9.1+cu128 — the version the pipeline was validated on (originally
+// to match the RunPod-era base image; keep pinned so behavior stays comparable
+// across environments). Lambda Stack images ship a recent driver; cu128 wheels
+// need driver >= 525 (CUDA 12 minor-version compat).
 const TORCH_SPEC = 'torch==2.9.1 torchvision --index-url https://download.pytorch.org/whl/cu128';
 
 function getArg(flag: string): string | undefined {

@@ -101,7 +101,7 @@ Implementation is being tracked in a GitHub issue (linked at top of issue body) 
 
 ### Phase 0d: Kill switch + telemetry + discoverability
 - [ ] `quickShapeEnabled` settings toggle (default OFF for first internal build)
-- [ ] PostHog events: `stroke.snap.committed`, `stroke.snap.abstained`, `stroke.snap.undone_within_2s`
+- [ ] Insights analytics events (`Analytics.track`; PostHog removed 2026-07-17): `stroke.snap.committed`, `stroke.snap.abstained`, `stroke.snap.undone_within_2s`
 - [ ] Replay log: per-Verdict feature snapshot
 - [ ] First-stroke-of-session tooltip
 - [ ] Internal beta testing (off-by-default flag flipped on for development builds)

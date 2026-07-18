@@ -70,8 +70,7 @@ const wsToken = randomBytes(16).toString('hex');
 
 // cloud-init: write per-instance env, then launch boot.sh detached via
 // systemd-run (runcmd blocks cloud-init's final stage otherwise — the server
-// never exits). Restart=on-failure gives us the same respawn the RunPod dev
-// loop had.
+// never exits). Restart=on-failure respawns the server if it crashes.
 const USER_DATA = `#cloud-config
 write_files:
   - path: /etc/kiki.env
