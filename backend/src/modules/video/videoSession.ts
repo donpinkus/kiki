@@ -64,8 +64,14 @@ export interface VideoSessionOptions {
   /** True while the iPad WS is open. */
   isClientOpen: () => boolean;
   /** A completed MP4 was delivered to the iPad (fires AFTER the stale guard —
-   * never for cancelled/stale renders). Metering + Insights capture hook. */
-  onVideoDelivered?: (mp4: Buffer, meta: Record<string, unknown>) => void;
+   * never for cancelled/stale renders). Metering + Insights capture +
+   * analytics hook. `info.waitMs` = fire → delivery (the user-perceived
+   * wait); `info.source` = what fired it ('idle_timer'/'manual'/…). */
+  onVideoDelivered?: (
+    mp4: Buffer,
+    meta: Record<string, unknown>,
+    info: { source: string; waitMs: number },
+  ) => void;
   log: FastifyBaseLogger;
   ctx: { userId: string | null; connId: string; streamId: string | null };
 }
@@ -116,6 +122,9 @@ export class VideoSession {
    * drawing) when the user sketched after the fire, even if the requestId
    * still matches (our video_cancel raced the finished render). */
   private inFlightSketchSeq = 0;
+  /** Fire bookkeeping for the delivery hook's wait/source attribution. */
+  private inFlightFiredAtMs = 0;
+  private inFlightSource = '';
   private requestCounter = 0;
 
   // ── protocol state (preamble → binary pairing, mirrors old wireVideoRelay)
@@ -353,6 +362,8 @@ export class VideoSession {
     relay.sendConfig(payload);
     this.inFlightRequestId = reqId;
     this.inFlightSketchSeq = this.lastSketchSeq;
+    this.inFlightFiredAtMs = Date.now();
+    this.inFlightSource = source;
     this.firedThisIdle = true;
     this.stats.videoTriggered += 1;
     // Tell the iPad a video is generating (auto AND manual triggers) so the
@@ -419,7 +430,10 @@ export class VideoSession {
       // A finished MP4 actually reached the iPad — the billing/capture
       // moment (stale + cancelled renders never get here).
       if (wrapperType === 'video_complete_data') {
-        this.opts.onVideoDelivered?.(buf, wrap?.meta ?? {});
+        this.opts.onVideoDelivered?.(buf, wrap?.meta ?? {}, {
+          source: this.inFlightSource,
+          waitMs: this.inFlightFiredAtMs > 0 ? Date.now() - this.inFlightFiredAtMs : 0,
+        });
       }
       return;
     }

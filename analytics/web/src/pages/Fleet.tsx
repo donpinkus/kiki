@@ -1,0 +1,223 @@
+/**
+ * GPU Fleet — the user-experienced quality of both H100 systems, plus the
+ * fleet lifecycle behind it.
+ *
+ * Reading order mirrors the operator's questions, top to bottom:
+ *   1. Are users getting GPUs? (acquisition cards, image | video)
+ *   2. How long did they wait? (wait percentiles, in the same cards)
+ *   3. How good is it once they're on? (gen times, render ratio, stability)
+ *   4. What has the fleet been doing? (lifecycle counts + raw event strip)
+ *   5. Is it getting better or worse? (14-day daily trend)
+ *
+ * Orchestration is VARIABLE by design (capacity-bound searches, idle reaps,
+ * kill-switch drains) — so every rate is shown with its denominator, and the
+ * event strip keeps the raw truth one glance away from the aggregates.
+ */
+import { useEffect, useState } from 'react';
+import { getFleet, type FleetData } from '../api';
+
+const fmtMs = (v: number | null | undefined): string =>
+  v == null ? '—' : v >= 10_000 ? `${Math.round(v / 1000)}s` : v >= 1000 ? `${(v / 1000).toFixed(1)}s` : `${v}ms`;
+
+const pct = (num: number | undefined, den: number | undefined): string =>
+  !den ? '—' : `${Math.round(((num ?? 0) / den) * 100)}%`;
+
+/** Event → pill class: good (green), transitional (amber), bad (red). */
+const EVENT_CLS: Record<string, string> = {
+  ready: 'warm',
+  launched: 'warm',
+  adopted: 'warm',
+  launch_requested: 'cold',
+  idle_terminate: 'cold',
+  disabled_terminate: 'cold',
+  launch_failed: 'fail',
+  instance_dead: 'fail',
+  boot_stalled: 'fail',
+};
+
+export function Fleet() {
+  const [data, setData] = useState<FleetData | null>(null);
+  const [excludeTest, setExcludeTest] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const load = () =>
+      getFleet(excludeTest)
+        .then(setData)
+        .catch((e) => setError(String(e)));
+    load();
+    const t = setInterval(load, 30_000);
+    return () => clearInterval(t);
+  }, [excludeTest]);
+
+  if (error) return <div className="container"><div className="card fail">{error}</div></div>;
+  if (!data) return <div className="container muted">Loading…</div>;
+
+  const img = data.image;
+  const vid = data.video;
+  const imgRatio = img?.sketches_sent ? (img.frames_delivered / img.sketches_sent) : null;
+  const h100Ratio = img?.h100_sketches_sent ? (img.h100_frames_delivered / img.h100_sketches_sent) : null;
+
+  return (
+    <div className="container">
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div className="section-title">GPU fleet — last 7 days</div>
+        <label style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 13, cursor: 'pointer' }}>
+          <input type="checkbox" checked={excludeTest} onChange={(e) => setExcludeTest(e.target.checked)} />
+          Exclude test accounts
+        </label>
+      </div>
+
+      {/* ── 1+2: acquisition + waits, one card per system ── */}
+      <div className="section-title">Do users get a GPU — and how long do they wait?</div>
+      <div className="stat-row">
+        <div className="stat">
+          <div className="label">Image · sessions on the H100</div>
+          <div className="value">{pct(img?.wired, img?.requested)}</div>
+          <div className="sub">
+            {img?.wired ?? 0} of {img?.requested ?? 0} that wanted one · {img?.framed ?? 0} saw ≥1 H100 frame
+            {(img?.sessions ?? 0) > (img?.requested ?? 0)
+              ? ` · ${(img?.sessions ?? 0) - (img?.requested ?? 0)} pinned fal`
+              : ''}
+          </div>
+        </div>
+        <div className="stat">
+          <div className="label">Image · wait for the H100</div>
+          <div className="value">{fmtMs(img?.wait_p50_ms)}</div>
+          <div className="sub">
+            p90 {fmtMs(img?.wait_p90_ms)} · first frame p50 {fmtMs(img?.first_frame_p50_ms)}
+          </div>
+        </div>
+        <div className="stat">
+          <div className="label">Video · sessions with an animation</div>
+          <div className="value">{pct(vid?.sessions_delivered, vid?.video_sessions)}</div>
+          <div className="sub">
+            {vid?.sessions_delivered ?? 0} of {vid?.video_sessions ?? 0} video-path sessions · {vid?.videos_delivered ?? 0}/{vid?.videos_triggered ?? 0} videos delivered
+          </div>
+        </div>
+        <div className="stat">
+          <div className="label">Video · wait for an animation</div>
+          <div className="value">{fmtMs(vid?.wait_p50_ms)}</div>
+          <div className="sub">
+            p90 {fmtMs(vid?.wait_p90_ms)} · trigger → on-screen ({vid?.manual_count ?? 0} manual)
+          </div>
+        </div>
+      </div>
+
+      {/* ── 3: quality once they're on ── */}
+      <div className="section-title">Quality once they're on it</div>
+      <div className="stat-row">
+        <div className="stat">
+          <div className="label">Image gen time</div>
+          <div className="value">{fmtMs(img?.gen_p50_ms)}</div>
+          <div className="sub">per frame, session-p50 median · p90 {fmtMs(img?.gen_p90_ms)}</div>
+        </div>
+        <div className="stat">
+          <div className="label">Render ratio</div>
+          <div className="value">{h100Ratio == null ? (imgRatio == null ? '—' : `${Math.round(imgRatio * 100)}%`) : `${Math.round(h100Ratio * 100)}%`}</div>
+          <div className="sub">
+            frames rendered / sketches sent{h100Ratio != null ? ' (H100 sessions)' : ''} — &lt;100% = stale
+            sketches dropped under load (by design; falling = contention)
+          </div>
+        </div>
+        <div className="stat">
+          <div className="label">Video gen time</div>
+          <div className="value">{fmtMs(vid?.gen_p50_ms)}</div>
+          <div className="sub">per animation · p90 {fmtMs(vid?.gen_p90_ms)}</div>
+        </div>
+        <div className="stat">
+          <div className="label">Stability</div>
+          <div className="value">{(img?.downgraded ?? 0) + (img?.disconnected ?? 0)}</div>
+          <div className="sub">
+            {img?.downgraded ?? 0} downgraded to fal · {img?.disconnected ?? 0} sessions with drops · videos: {vid?.videos_cancelled ?? 0} cancelled (drew again) / {vid?.videos_failed ?? 0} failed
+          </div>
+        </div>
+      </div>
+
+      {/* ── 4: fleet lifecycle ── */}
+      <div className="section-title">Fleet lifecycle (7d)</div>
+      <div className="card" style={{ padding: 0 }}>
+        <table>
+          <thead>
+            <tr>
+              <th>Pool</th><th>Launches</th><th>Capacity granted</th><th>Became ready</th>
+              <th>Search p50 / max</th><th>Boot p50 / max</th><th>Died</th><th>Stalled</th>
+              <th>Idle-reaped</th><th>Drained</th>
+            </tr>
+          </thead>
+          <tbody>
+            {data.pools.map((p) => (
+              <tr key={p.pool}>
+                <td><strong>{p.pool}</strong></td>
+                <td>{p.launch_requests}</td>
+                <td>{p.capacity_granted}</td>
+                <td>{p.became_ready}</td>
+                <td>{fmtMs(p.search_p50_ms)} / {fmtMs(p.search_max_ms)}</td>
+                <td>{fmtMs(p.boot_p50_ms)} / {fmtMs(p.boot_max_ms)}</td>
+                <td>{p.died}</td>
+                <td>{p.boot_stalled}</td>
+                <td>{p.idle_reaped}</td>
+                <td>{p.drained}</td>
+              </tr>
+            ))}
+            {data.pools.length === 0 && (
+              <tr><td colSpan={10} className="muted">No pool events in the last 7 days.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+        Search = capacity request → granted (capacity-bound, unpredictable — max matters).
+        Boot = granted → serving (consistent; the popover's progress bar uses its estimate).
+        Drained = the Ops kill switch terminating instances.
+      </div>
+
+      {/* ── raw event strip ── */}
+      <div className="section-title">Recent fleet events</div>
+      <div className="card" style={{ padding: 0 }}>
+        <table>
+          <thead>
+            <tr><th>When</th><th>Pool</th><th>Event</th><th>Instance</th><th>Duration</th><th>Detail</th></tr>
+          </thead>
+          <tbody>
+            {data.recent_events.map((e, i) => (
+              <tr key={i}>
+                <td style={{ whiteSpace: 'nowrap' }}>{new Date(e.ts).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</td>
+                <td>{e.pool}</td>
+                <td><span className={`pill ${EVENT_CLS[e.event] ?? ''}`}>{e.event}</span></td>
+                <td className="muted" style={{ fontSize: 12 }}>{e.instance_name?.replace(/^kiki-(serve|video)-/, '…') ?? ''}</td>
+                <td>{fmtMs(e.duration_ms)}</td>
+                <td className="muted" style={{ fontSize: 12, maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis' }}>{e.detail ?? ''}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* ── 5: daily trend ── */}
+      <div className="section-title">Daily trend (14d)</div>
+      <div className="card" style={{ padding: 0 }}>
+        <table>
+          <thead>
+            <tr>
+              <th>Day</th><th>Sessions</th><th>On H100</th><th>Wait p50</th>
+              <th>Render ratio</th><th>Animations</th>
+            </tr>
+          </thead>
+          <tbody>
+            {data.daily.map((d) => (
+              <tr key={d.day}>
+                <td>{d.day}</td>
+                <td>{d.sessions}</td>
+                <td>{pct(d.wired, d.sessions)}</td>
+                <td>{fmtMs(d.wait_p50_ms)}</td>
+                <td>{d.sketches ? `${Math.round((d.frames / d.sketches) * 100)}%` : '—'}</td>
+                <td>{d.videos}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}

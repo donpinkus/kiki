@@ -20,7 +20,7 @@ import {
   getState as poolGetState,
   reportFailure as poolReportFailure,
 } from '../modules/lambda/devPool.js';
-import { trackSessionClosed, trackProviderSession } from '../modules/analytics/index.js';
+import { trackSessionClosed, trackProviderSession, trackVideoGeneration } from '../modules/analytics/index.js';
 import { VideoSession } from '../modules/video/videoSession.js';
 import {
   poolEnabled as videoPoolEnabled,
@@ -56,6 +56,13 @@ function extractQueryParam(rawUrl: string | undefined, name: string): string | n
   } catch {
     return null;
   }
+}
+
+/** Nearest-rank percentile of an unsorted sample; null when empty. */
+function percentile(samples: number[], p: number): number | null {
+  if (samples.length === 0) return null;
+  const sorted = [...samples].sort((a, b) => a - b);
+  return sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))] ?? null;
 }
 
 interface Identity {
@@ -241,6 +248,15 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       let poolStatusAtResolve: string | null = null;
       let lambdaWired = false;
       let lambdaFrames = 0;
+      /** Binary sketch frames the iPad sent (relayed or coalesced). With
+       * framesDelivered this yields the RENDER RATIO — under load the image
+       * server keeps only the newest queued sketch per client, so
+       * delivered/sent < 1 is the by-design degradation the GPU Fleet tab
+       * watches. */
+      let sketchesSent = 0;
+      /** Per-frame generation times parsed from lambda frame_meta (capped
+       * sample; fal emits no timing). Reported as p50/p90 at close. */
+      const imageGenMsSamples: number[] = [];
       let lambdaDowngraded = false;
       // Wired → first H100 frame (ms) — the connected→first-frame transition
       // in the waterfall timing widget. Null until the first lambda frame.
@@ -422,6 +438,9 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             lambdaDowngraded,
             everReachedReady,
             videoStats: videoSession?.getStats() ?? null,
+            sketchesSent,
+            imageGenMsP50: percentile(imageGenMsSamples, 0.5),
+            imageGenMsP90: percentile(imageGenMsSamples, 0.9),
           });
         }
         cleanupOnDisconnect();
@@ -666,16 +685,29 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             if (!clientDisconnected && socket.readyState === socket.OPEN) socket.send(text);
           },
           isClientOpen: () => !clientDisconnected && socket.readyState === socket.OPEN,
-          onVideoDelivered: (mp4, meta) => {
+          onVideoDelivered: (mp4, meta, info) => {
             billVideoGeneration();
             ensureFrameCapture()?.captureVideo(mp4);
+            const genMs = typeof meta['genMs'] === 'number' ? meta['genMs'] : null;
+            if (userId) {
+              trackVideoGeneration({
+                userId,
+                streamId,
+                source: info.source,
+                waitMs: info.waitMs,
+                genMs,
+                bytes: mp4.length,
+              });
+            }
             request.log.info(
               {
                 userId,
                 connId,
                 streamId,
                 bytes: mp4.length,
-                genMs: typeof meta['genMs'] === 'number' ? meta['genMs'] : undefined,
+                genMs: genMs ?? undefined,
+                waitMs: info.waitMs,
+                source: info.source,
                 event: 'video_delivered',
               },
               'video_delivered',
@@ -757,7 +789,17 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             videoSession?.noteGeneratedFrame(buf);
           } else {
             // Forward text frames (frame_meta, status, error) to the iPad
-            // unchanged.
+            // unchanged — sampling lambda frame_meta.genMs on the way past
+            // for the session's generation-time distribution (tiny parse,
+            // ~3/s; fal frame_metas are synthesized without timing).
+            if (imageProvider === 'lambda' && imageGenMsSamples.length < 500) {
+              try {
+                const meta = JSON.parse(String(data)) as Record<string, unknown>;
+                if (meta['type'] === 'frame_meta' && typeof meta['genMs'] === 'number') {
+                  imageGenMsSamples.push(meta['genMs']);
+                }
+              } catch { /* non-JSON text frame — forward as-is */ }
+            }
             socket.send(data);
           }
         });

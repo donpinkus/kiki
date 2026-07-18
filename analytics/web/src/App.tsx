@@ -10,6 +10,7 @@ import { Replay } from './pages/Replay';
 import { Tests } from './pages/Tests';
 import { BrushTargets } from './pages/BrushTargets';
 import { Launch } from './pages/Launch';
+import { Fleet } from './pages/Fleet';
 
 type AuthState = 'loading' | 'authed' | 'anon';
 
@@ -45,6 +46,7 @@ export function App() {
         <h1>Kiki Insights</h1>
         <nav style={{ display: 'flex', gap: 16, flex: 1, marginLeft: 24 }}>
           <Link to="/launch">Launch</Link>
+          <Link to="/fleet">GPU Fleet</Link>
           <Link to="/">Users</Link>
           <Link to="/gallery">Gallery</Link>
           <Link to="/tests">Tests</Link>
@@ -58,6 +60,7 @@ export function App() {
       <Routes>
         <Route path="/" element={<Users />} />
         <Route path="/launch" element={<Launch />} />
+        <Route path="/fleet" element={<Fleet />} />
         <Route path="/users/:id" element={<UserDetail />} />
         <Route path="/gallery" element={<Gallery />} />
         <Route path="/gallery/:streamId" element={<Replay />} />

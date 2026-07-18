@@ -301,6 +301,9 @@ async def websocket_stream(ws: WebSocket):
                             "type": "frame_meta",
                             "requestId": request_id,
                             "queueEmpty": queue_empty,
+                            # Per-frame generation time — the backend folds it
+                            # into stream.provider_session (Insights GPU Fleet).
+                            "genMs": gen_ms,
                         }))
                         await ws.send_bytes(result_jpeg)
                         frames_processed += 1

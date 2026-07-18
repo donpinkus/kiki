@@ -702,6 +702,133 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
       };
     });
 
+    // ─── GPU Fleet (dedicated tab): the user-experienced quality of both
+    // H100 systems + the fleet lifecycle behind it. Session-side numbers come
+    // from stream.provider_session / stream.video_generation; infra-side from
+    // lambda_pool_events. All 7d unless noted; ?excludeTest=1 as elsewhere.
+    gated.get('/admin/api/fleet', async (request) => {
+      const excl = (request.query as { excludeTest?: string }).excludeTest === '1';
+      const EXCL = `($1::bool = false OR user_id NOT IN
+        (SELECT user_id::text FROM users WHERE is_test_account))`;
+      const wired = `COALESCE((properties->>'lambda_wired')::bool, false)`;
+      const [image, video, pools, recentEvents, daily] = await Promise.all([
+        // Image system: acquisition + waits + generation + render ratio.
+        query(
+          `SELECT count(*)::int AS sessions,
+                  count(*) FILTER (WHERE properties->>'requested_provider' IN ('auto','lambda'))::int AS requested,
+                  count(*) FILTER (WHERE ${wired})::int AS wired,
+                  count(*) FILTER (WHERE COALESCE((properties->>'lambda_frames')::int,0) > 0)::int AS framed,
+                  count(*) FILTER (WHERE COALESCE((properties->>'lambda_downgraded')::bool,false))::int AS downgraded,
+                  count(*) FILTER (WHERE COALESCE((properties->>'upstream_disconnects')::int,0) > 0)::int AS disconnected,
+                  round(percentile_cont(0.5) WITHIN GROUP (ORDER BY (properties->>'time_to_provider_ms')::float)
+                    FILTER (WHERE ${wired} AND (properties->>'time_to_provider_ms') ~ '^[0-9.]+$'))::int AS wait_p50_ms,
+                  round(percentile_cont(0.9) WITHIN GROUP (ORDER BY (properties->>'time_to_provider_ms')::float)
+                    FILTER (WHERE ${wired} AND (properties->>'time_to_provider_ms') ~ '^[0-9.]+$'))::int AS wait_p90_ms,
+                  round(percentile_cont(0.5) WITHIN GROUP (ORDER BY (properties->>'lambda_first_frame_ms')::float)
+                    FILTER (WHERE (properties->>'lambda_first_frame_ms') ~ '^[0-9.]+$'))::int AS first_frame_p50_ms,
+                  round(percentile_cont(0.5) WITHIN GROUP (ORDER BY (properties->>'image_gen_ms_p50')::float)
+                    FILTER (WHERE (properties->>'image_gen_ms_p50') ~ '^[0-9.]+$'))::int AS gen_p50_ms,
+                  round(percentile_cont(0.9) WITHIN GROUP (ORDER BY (properties->>'image_gen_ms_p90')::float)
+                    FILTER (WHERE (properties->>'image_gen_ms_p90') ~ '^[0-9.]+$'))::int AS gen_p90_ms,
+                  COALESCE(sum((properties->>'frames_delivered')::int), 0)::int AS frames_delivered,
+                  COALESCE(sum((properties->>'sketches_sent')::int), 0)::int AS sketches_sent,
+                  COALESCE(sum((properties->>'frames_delivered')::int)
+                    FILTER (WHERE ${wired}), 0)::int AS h100_frames_delivered,
+                  COALESCE(sum((properties->>'sketches_sent')::int)
+                    FILTER (WHERE ${wired}), 0)::int AS h100_sketches_sent
+           FROM events
+           WHERE name = 'stream.provider_session'
+             AND occurred_at > now() - interval '7 days' AND ${EXCL}`,
+          [excl],
+        ),
+        // Video system: delivery funnel + waits + generation times.
+        query(
+          `WITH sessions AS (
+             SELECT count(*) FILTER (WHERE (properties->>'video_triggered') IS NOT NULL)::int AS video_sessions,
+                    count(*) FILTER (WHERE COALESCE((properties->>'video_triggered')::int,0) > 0)::int AS sessions_triggered,
+                    count(*) FILTER (WHERE COALESCE((properties->>'video_completed')::int,0) > 0)::int AS sessions_delivered,
+                    COALESCE(sum((properties->>'video_triggered')::int),0)::int AS videos_triggered,
+                    COALESCE(sum((properties->>'video_completed')::int),0)::int AS videos_delivered,
+                    COALESCE(sum((properties->>'video_cancelled')::int),0)::int AS videos_cancelled,
+                    COALESCE(sum((properties->>'video_failed')::int),0)::int AS videos_failed
+             FROM events
+             WHERE name = 'stream.provider_session'
+               AND occurred_at > now() - interval '7 days' AND ${EXCL}
+           ), deliveries AS (
+             SELECT count(*)::int AS delivered_events,
+                    count(*) FILTER (WHERE properties->>'source' = 'manual')::int AS manual_count,
+                    round(percentile_cont(0.5) WITHIN GROUP (ORDER BY (properties->>'wait_ms')::float))::int AS wait_p50_ms,
+                    round(percentile_cont(0.9) WITHIN GROUP (ORDER BY (properties->>'wait_ms')::float))::int AS wait_p90_ms,
+                    round(percentile_cont(0.5) WITHIN GROUP (ORDER BY (properties->>'gen_ms')::float)
+                      FILTER (WHERE (properties->>'gen_ms') ~ '^[0-9.]+$'))::int AS gen_p50_ms,
+                    round(percentile_cont(0.9) WITHIN GROUP (ORDER BY (properties->>'gen_ms')::float)
+                      FILTER (WHERE (properties->>'gen_ms') ~ '^[0-9.]+$'))::int AS gen_p90_ms
+             FROM events
+             WHERE name = 'stream.video_generation'
+               AND occurred_at > now() - interval '7 days' AND ${EXCL}
+           )
+           SELECT * FROM sessions, deliveries`,
+          [excl],
+        ),
+        // Fleet lifecycle per pool.
+        query(
+          `SELECT pool,
+                  count(*) FILTER (WHERE event = 'launch_requested')::int AS launch_requests,
+                  count(*) FILTER (WHERE event = 'launched')::int AS capacity_granted,
+                  count(*) FILTER (WHERE event = 'ready' AND duration_ms > 5000)::int AS became_ready,
+                  count(*) FILTER (WHERE event = 'launch_failed')::int AS launch_failed,
+                  count(*) FILTER (WHERE event = 'instance_dead')::int AS died,
+                  count(*) FILTER (WHERE event = 'boot_stalled')::int AS boot_stalled,
+                  count(*) FILTER (WHERE event = 'idle_terminate')::int AS idle_reaped,
+                  count(*) FILTER (WHERE event = 'disabled_terminate')::int AS drained,
+                  round(percentile_cont(0.5) WITHIN GROUP (ORDER BY duration_ms)
+                    FILTER (WHERE event = 'launched'))::int AS search_p50_ms,
+                  max(duration_ms) FILTER (WHERE event = 'launched') AS search_max_ms,
+                  round(percentile_cont(0.5) WITHIN GROUP (ORDER BY duration_ms)
+                    FILTER (WHERE event = 'ready' AND duration_ms > 5000))::int AS boot_p50_ms,
+                  max(duration_ms) FILTER (WHERE event = 'ready' AND duration_ms > 5000) AS boot_max_ms
+           FROM lambda_pool_events
+           WHERE ts > now() - interval '7 days'
+           GROUP BY pool ORDER BY pool`,
+        ).catch((err: { code?: string }) => {
+          if (err.code === '42P01' || err.code === '42703') return { rows: [] as Record<string, unknown>[] };
+          throw err;
+        }),
+        // Raw recent lifecycle events — the debugging strip.
+        query(
+          `SELECT ts, pool, event, instance_name, duration_ms, detail
+           FROM lambda_pool_events
+           ORDER BY ts DESC LIMIT 40`,
+        ).catch((err: { code?: string }) => {
+          if (err.code === '42P01' || err.code === '42703') return { rows: [] as Record<string, unknown>[] };
+          throw err;
+        }),
+        // 14-day daily trend of the experienced quality.
+        query(
+          `SELECT to_char(occurred_at AT TIME ZONE 'America/Los_Angeles', 'YYYY-MM-DD') AS day,
+                  count(*)::int AS sessions,
+                  count(*) FILTER (WHERE ${wired})::int AS wired,
+                  round(percentile_cont(0.5) WITHIN GROUP (ORDER BY (properties->>'time_to_provider_ms')::float)
+                    FILTER (WHERE ${wired} AND (properties->>'time_to_provider_ms') ~ '^[0-9.]+$'))::int AS wait_p50_ms,
+                  COALESCE(sum((properties->>'frames_delivered')::int),0)::int AS frames,
+                  COALESCE(sum((properties->>'sketches_sent')::int),0)::int AS sketches,
+                  COALESCE(sum((properties->>'video_completed')::int),0)::int AS videos
+           FROM events
+           WHERE name = 'stream.provider_session'
+             AND occurred_at > now() - interval '14 days' AND ${EXCL}
+           GROUP BY 1 ORDER BY 1 DESC`,
+          [excl],
+        ),
+      ]);
+      return {
+        image: image.rows[0] ?? null,
+        video: video.rows[0] ?? null,
+        pools: pools.rows,
+        recent_events: recentEvents.rows,
+        daily: daily.rows,
+      };
+    });
+
     // ─── Session replays (capture gallery) ─────────────────────────────────
     // Streams grouped from capture_frames; poster = latest generated frame.
     // Optional ?user_id= scopes to one user (UserDetail's replay section).

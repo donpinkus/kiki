@@ -49,6 +49,27 @@ export function trackSessionClosed(props: {
  * "how long until the H100 was serving me". `lambdaBounced` marks sessions
  * that requested lambda but were turned away (lambda_not_ready).
  */
+/** One DELIVERED animation (post-stale-guard). wait_ms is the full
+ * user-perceived fire→delivery latency (queueing + generation + transfer);
+ * gen_ms is the instance's pure generation time from video_complete meta.
+ * Powers the GPU Fleet tab's video latency distributions. */
+export function trackVideoGeneration(props: {
+  userId: string;
+  streamId: string | null;
+  source: string;
+  waitMs: number;
+  genMs: number | null;
+  bytes: number;
+}): void {
+  capture(props.userId, 'stream.video_generation', {
+    stream_id: props.streamId,
+    source: props.source,
+    wait_ms: props.waitMs,
+    gen_ms: props.genMs,
+    bytes: props.bytes,
+  });
+}
+
 export function trackProviderSession(props: {
   userId: string;
   streamId: string | null;
@@ -89,6 +110,14 @@ export function trackProviderSession(props: {
     videoCancelled: number;
     videoFailed: number;
   } | null;
+  /** Binary sketch frames the client sent — frames_delivered/sketches_sent
+   * is the render ratio (the image server drops stale queued sketches under
+   * load by design). */
+  sketchesSent: number;
+  /** Per-session image generation-time percentiles (lambda frame_meta.genMs
+   * samples; null on fal-only sessions or pre-genMs instances). */
+  imageGenMsP50: number | null;
+  imageGenMsP90: number | null;
 }): void {
   capture(props.userId, 'stream.provider_session', {
     stream_id: props.streamId,
@@ -107,6 +136,9 @@ export function trackProviderSession(props: {
     lambda_first_frame_ms: props.lambdaFirstFrameMs,
     lambda_downgraded: props.lambdaDowngraded,
     ever_reached_ready: props.everReachedReady,
+    sketches_sent: props.sketchesSent,
+    image_gen_ms_p50: props.imageGenMsP50,
+    image_gen_ms_p90: props.imageGenMsP90,
     video_triggered: props.videoStats?.videoTriggered ?? null,
     video_completed: props.videoStats?.videoCompleted ?? null,
     video_cancelled: props.videoStats?.videoCancelled ?? null,

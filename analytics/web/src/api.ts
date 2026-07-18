@@ -211,6 +211,55 @@ export interface VideoFlagStatus {
   updatedAt: string | null;
 }
 
+export interface FleetImage {
+  sessions: number; requested: number; wired: number; framed: number;
+  downgraded: number; disconnected: number;
+  wait_p50_ms: number | null; wait_p90_ms: number | null;
+  first_frame_p50_ms: number | null;
+  gen_p50_ms: number | null; gen_p90_ms: number | null;
+  frames_delivered: number; sketches_sent: number;
+  h100_frames_delivered: number; h100_sketches_sent: number;
+}
+
+export interface FleetVideo {
+  video_sessions: number; sessions_triggered: number; sessions_delivered: number;
+  videos_triggered: number; videos_delivered: number;
+  videos_cancelled: number; videos_failed: number;
+  delivered_events: number; manual_count: number;
+  wait_p50_ms: number | null; wait_p90_ms: number | null;
+  gen_p50_ms: number | null; gen_p90_ms: number | null;
+}
+
+export interface FleetPoolRow {
+  pool: string;
+  launch_requests: number; capacity_granted: number; became_ready: number;
+  launch_failed: number; died: number; boot_stalled: number;
+  idle_reaped: number; drained: number;
+  search_p50_ms: number | null; search_max_ms: number | null;
+  boot_p50_ms: number | null; boot_max_ms: number | null;
+}
+
+export interface FleetEventRow {
+  ts: string; pool: string; event: string;
+  instance_name: string | null; duration_ms: number | null; detail: string | null;
+}
+
+export interface FleetDailyRow {
+  day: string; sessions: number; wired: number;
+  wait_p50_ms: number | null; frames: number; sketches: number; videos: number;
+}
+
+export interface FleetData {
+  image: FleetImage | null;
+  video: FleetVideo | null;
+  pools: FleetPoolRow[];
+  recent_events: FleetEventRow[];
+  daily: FleetDailyRow[];
+}
+
+export const getFleet = (excludeTest: boolean) =>
+  api<FleetData>(`/admin/api/fleet${excludeTest ? '?excludeTest=1' : ''}`);
+
 export const getVideoFlag = () => api<VideoFlagStatus>('/admin/api/ops/video');
 
 export const putVideoFlag = (enabled: boolean) =>
