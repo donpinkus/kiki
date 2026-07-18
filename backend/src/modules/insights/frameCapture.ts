@@ -38,10 +38,15 @@ export function captureEnabled(): boolean {
 
 const MAX_PROMPTS_PER_STREAM = 200;
 const MAX_PROMPT_CHARS = 2000;
+/** Completed animations per stream kept in Insights (rare events — one per
+ * idle pause / Animate tap that survives the stale guard). */
+const MAX_VIDEOS_PER_STREAM = 40;
+const MAX_VIDEO_BYTES = 25 * 1024 * 1024;
 
 export class FrameCapture {
   private readonly seq = { sketch: 0, generated: 0 };
   private readonly lastAt = { sketch: 0, generated: 0 };
+  private videoSeq = 0;
   private inflight = 0;
   private warnedOnce = false;
   private promptSeq = 0;
@@ -85,6 +90,49 @@ export class FrameCapture {
           this.logger?.warn(
             { event: 'capture.ingest_rejected', status: res.status, streamId: this.streamId },
             'frame capture rejected by Insights (logging once per stream)',
+          );
+        }
+      })
+      .catch(() => {
+        /* unreachable Insights must never surface into the relay */
+      })
+      .finally(() => {
+        this.inflight -= 1;
+      });
+  }
+
+  /** Store a DELIVERED animation MP4 (post-stale-guard — never cancelled or
+   * out-of-date renders). Same pipeline as frames: blob + capture_frames row,
+   * kind='video'; the Gallery associates it with the stream's drawing. */
+  captureVideo(mp4: Buffer): void {
+    if (!captureEnabled()) return;
+    if (mp4.length === 0 || mp4.length > MAX_VIDEO_BYTES) return;
+    if (this.videoSeq >= MAX_VIDEOS_PER_STREAM) return;
+    if (this.inflight >= MAX_INFLIGHT) return;
+    const seq = ++this.videoSeq;
+    const params = new URLSearchParams({
+      stream_id: this.streamId,
+      user_id: this.userId,
+      kind: 'video',
+      seq: String(seq),
+      ts: String(Date.now()),
+    });
+    this.inflight += 1;
+    void fetch(`${config.INSIGHTS_URL.replace(/\/$/, '')}/ingest/capture?${params}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'video/mp4',
+        'x-insights-key': config.INSIGHTS_INGEST_KEY,
+      },
+      body: new Uint8Array(mp4),
+      signal: AbortSignal.timeout(30_000),
+    })
+      .then((res) => {
+        if (!res.ok && !this.warnedOnce) {
+          this.warnedOnce = true;
+          this.logger?.warn(
+            { event: 'capture.ingest_rejected', status: res.status, streamId: this.streamId },
+            'video capture rejected by Insights (logging once per stream)',
           );
         }
       })

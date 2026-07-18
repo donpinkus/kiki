@@ -384,7 +384,33 @@ export interface LaunchData {
   providers: ProviderStatsRow[];
   h100_waterfall: H100Waterfall | null;
   h100_pool: H100Pool | null;
+  video_pool: VideoPool | null;
+  video_generation: VideoGeneration | null;
   drawing_funnel: DrawingFunnel | null;
+}
+
+/** Video pool lifecycle counts (7d, lambda_pool_events pool='video'). */
+export interface VideoPool {
+  launch_requests: number;
+  capacity_granted: number;
+  became_ready: number;
+  launch_failed: number;
+  died: number;
+  boot_stalled: number;
+  drained: number;
+  search_p50_ms: number | null;
+  boot_p50_ms: number | null;
+}
+
+/** Video generation funnel (7d, stream.provider_session video_* counters). */
+export interface VideoGeneration {
+  video_sessions: number;
+  sessions_triggered: number;
+  sessions_delivered: number;
+  videos_triggered: number;
+  videos_delivered: number;
+  videos_cancelled: number;
+  videos_failed: number;
 }
 
 /** Drawing-experience waterfall: `opened` from drawing.opened; every other

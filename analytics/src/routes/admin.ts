@@ -386,7 +386,7 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
       const EXCL_EVENTS = `($1::bool = false OR user_id NOT IN
                   (SELECT user_id::text FROM users WHERE is_test_account))`;
       const EXCL_JOINED = `($1::bool = false OR COALESCE(u.is_test_account, false) = false)`;
-      const [daily, newUsers, funnelRows, errorUsers, recentErrors, summary, providers, h100Waterfall, h100Pool, drawingOpened, drawingStages] = await Promise.all([
+      const [daily, newUsers, funnelRows, errorUsers, recentErrors, summary, providers, h100Waterfall, h100Pool, drawingOpened, drawingStages, videoPool, videoGen] = await Promise.all([
         query(
           `SELECT to_char(occurred_at AT TIME ZONE 'America/Los_Angeles', 'YYYY-MM-DD') AS day,
                   count(DISTINCT user_id)::int AS dau,
@@ -618,7 +618,45 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
              AND ${EXCL_EVENTS}`,
           [excl],
         );
-      })()
+      })(),
+      // ─── VIDEO pool waterfall (7d): same infra stages as the image pool,
+      // pool='video' (launch → capacity → ready; deaths, boot stalls, and
+      // drain terminations from the Insights kill switch). ─────────────────
+      query(
+        `SELECT count(*) FILTER (WHERE event = 'launch_requested')::int AS launch_requests,
+                count(*) FILTER (WHERE event = 'launched')::int AS capacity_granted,
+                count(*) FILTER (WHERE event = 'ready' AND duration_ms > 5000)::int AS became_ready,
+                count(*) FILTER (WHERE event = 'launch_failed')::int AS launch_failed,
+                count(*) FILTER (WHERE event = 'instance_dead')::int AS died,
+                count(*) FILTER (WHERE event = 'boot_stalled')::int AS boot_stalled,
+                count(*) FILTER (WHERE event = 'disabled_terminate')::int AS drained,
+                round(percentile_cont(0.5) WITHIN GROUP (ORDER BY duration_ms)
+                  FILTER (WHERE event = 'launched'))::int AS search_p50_ms,
+                round(percentile_cont(0.5) WITHIN GROUP (ORDER BY duration_ms)
+                  FILTER (WHERE event = 'ready' AND duration_ms > 5000))::int AS boot_p50_ms
+         FROM lambda_pool_events
+         WHERE ts > now() - interval '7 days' AND pool = 'video'`,
+      ).catch((err: { code?: string }) => {
+        if (err.code === '42P01' || err.code === '42703') return { rows: [] as Record<string, unknown>[] };
+        throw err;
+      }),
+      // ─── Video generation funnel (7d) from stream.provider_session's
+      // video_* counters: sessions with a video path → ≥1 trigger →
+      // ≥1 delivered; totals for rate math. ────────────────────────────────
+      query(
+        `SELECT count(*) FILTER (WHERE (properties->>'video_triggered') IS NOT NULL)::int AS video_sessions,
+                count(*) FILTER (WHERE COALESCE((properties->>'video_triggered')::int, 0) > 0)::int AS sessions_triggered,
+                count(*) FILTER (WHERE COALESCE((properties->>'video_completed')::int, 0) > 0)::int AS sessions_delivered,
+                COALESCE(sum((properties->>'video_triggered')::int), 0)::int AS videos_triggered,
+                COALESCE(sum((properties->>'video_completed')::int), 0)::int AS videos_delivered,
+                COALESCE(sum((properties->>'video_cancelled')::int), 0)::int AS videos_cancelled,
+                COALESCE(sum((properties->>'video_failed')::int), 0)::int AS videos_failed
+         FROM events
+         WHERE name = 'stream.provider_session'
+           AND occurred_at > now() - interval '7 days'
+           AND ${EXCL_EVENTS}`,
+        [excl],
+      ),
       ]);
 
       // Merge the two daily sources and aggregate the per-user funnel rows.
@@ -655,6 +693,8 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
         providers: providers.rows,
         h100_waterfall: h100Waterfall.rows[0] ?? null,
         h100_pool: h100Pool.rows[0] ?? null,
+        video_pool: videoPool.rows[0] ?? null,
+        video_generation: videoGen.rows[0] ?? null,
         drawing_funnel: {
           opened: (drawingOpened.rows[0]?.['opened'] as number) ?? 0,
           ...(drawingStages.rows[0] ?? {}),

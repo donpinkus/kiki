@@ -80,6 +80,15 @@ export function trackProviderSession(props: {
   /** Session had the H100 and lost it (finished on fal). */
   lambdaDowngraded: boolean;
   everReachedReady: boolean;
+  /** Video-session counters (null when the session had no video path —
+   * feature off or never configured). Powers the Launch tab's video
+   * acquisition/success metrics. */
+  videoStats: {
+    videoTriggered: number;
+    videoCompleted: number;
+    videoCancelled: number;
+    videoFailed: number;
+  } | null;
 }): void {
   capture(props.userId, 'stream.provider_session', {
     stream_id: props.streamId,
@@ -98,5 +107,9 @@ export function trackProviderSession(props: {
     lambda_first_frame_ms: props.lambdaFirstFrameMs,
     lambda_downgraded: props.lambdaDowngraded,
     ever_reached_ready: props.everReachedReady,
+    video_triggered: props.videoStats?.videoTriggered ?? null,
+    video_completed: props.videoStats?.videoCompleted ?? null,
+    video_cancelled: props.videoStats?.videoCancelled ?? null,
+    video_failed: props.videoStats?.videoFailed ?? null,
   });
 }

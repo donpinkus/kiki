@@ -121,6 +121,29 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       // per 4-step frame (590ms @ $4.29/hr H100), charged at $0.001 to absorb
       // pool idle overhead. Batched writes every 25 frames; fail-open like fal.
       let lambdaMeteringEnabled = false;
+      // Video metering: flat per-DELIVERED-video charge into the same ledger
+      // (stale/cancelled renders never bill — the hook fires post-guard).
+      let videoMeteringEnabled = false;
+      const billVideoGeneration = (): void => {
+        if (!videoMeteringEnabled) return;
+        const uidNow = userId;
+        if (!uidNow) return;
+        void addMonthlySpendUsd(uidNow, config.VIDEO_USD_PER_GENERATION)
+          .then((total) => {
+            if (clientDisconnected || socket.readyState !== socket.OPEN) return;
+            socket.send(JSON.stringify({ type: 'usage', spendUsd: total, capUsd: config.FREE_TIER_FAL_USD }));
+            if (total >= config.FREE_TIER_FAL_USD) {
+              request.log.info(
+                { userId: uidNow, connId, streamId, spendUsd: total, event: 'free_limit_reached' },
+                'AI spend cap reached mid-session (video) — cutting stream',
+              );
+              sendLimitReachedAndClose();
+            }
+          })
+          .catch(() => {
+            // Fail-open: a dropped ~$0.05 write is preferable to blocking video.
+          });
+      };
       let lambdaUnbilledFrames = 0;
       let lambdaBillInFlight = false;
       const LAMBDA_USD_PER_FRAME = 0.001;
@@ -398,6 +421,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             lambdaFirstFrameMs,
             lambdaDowngraded,
             everReachedReady,
+            videoStats: videoSession?.getStats() ?? null,
           });
         }
         cleanupOnDisconnect();
@@ -548,6 +572,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
           }
           falMeteringEnabled = imageProvider === 'fal' && !budget.exempt;
           lambdaMeteringEnabled = imageProvider === 'lambda' && !budget.exempt;
+          videoMeteringEnabled = !budget.exempt;
         } catch (err) {
           // Fail-open: if the budget DB is unreachable, let the user draw rather
           // than hang or hard-deny. Enable metering so spend resumes capping
@@ -558,6 +583,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
           );
           falMeteringEnabled = imageProvider === 'fal';
           lambdaMeteringEnabled = imageProvider === 'lambda';
+          videoMeteringEnabled = true;
         }
       }
 
@@ -607,6 +633,21 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             if (!clientDisconnected && socket.readyState === socket.OPEN) socket.send(text);
           },
           isClientOpen: () => !clientDisconnected && socket.readyState === socket.OPEN,
+          onVideoDelivered: (mp4, meta) => {
+            billVideoGeneration();
+            ensureFrameCapture()?.captureVideo(mp4);
+            request.log.info(
+              {
+                userId,
+                connId,
+                streamId,
+                bytes: mp4.length,
+                genMs: typeof meta['genMs'] === 'number' ? meta['genMs'] : undefined,
+                event: 'video_delivered',
+              },
+              'video_delivered',
+            );
+          },
           log: request.log,
           ctx: { userId, connId, streamId },
         });

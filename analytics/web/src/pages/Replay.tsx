@@ -232,6 +232,29 @@ export function Replay() {
           Skip idle
         </label>
       </div>
+
+      {/* Generated animations (kind=video): every DELIVERED animation for
+          this session, newest last. Served from the blob store as MP4. */}
+      {detail && detail.frames.some((f) => f.kind === 'video') && (
+        <div className="card" style={{ marginTop: 12 }}>
+          <div className="section-title">Animations</div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>
+            {detail.frames
+              .filter((f) => f.kind === 'video')
+              .map((f) => (
+                <video
+                  key={f.seq}
+                  src={f.url}
+                  controls
+                  loop
+                  muted
+                  playsInline
+                  style={{ width: 280, borderRadius: 8, background: '#000' }}
+                />
+              ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

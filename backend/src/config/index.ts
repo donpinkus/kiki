@@ -99,6 +99,11 @@ export interface AppConfig {
    * sketch frame (provided a generated image newer than that sketch exists).
    * Default 3000 (product decision 2026-07-18). */
   readonly VIDEO_IDLE_TRIGGER_MS: number;
+  /** Flat charge per DELIVERED video into monthly_usage (the unified free
+   * tier). Raw cost ≈ $0.024/video (~20s H100 @ $4.29/hr); charged higher to
+   * absorb video-pool idle overhead. Exempt users (test accounts, active
+   * subscribers) are never billed. */
+  readonly VIDEO_USD_PER_GENERATION: number;
   /** fal.ai API key — server-side only (CLAUDE.md #3: no secrets on client).
    * Used as `Authorization: Key <FAL_KEY>` on the fal realtime WS upgrade.
    * Required when `IMAGE_PROVIDER=fal`; ignored otherwise. */
@@ -263,6 +268,7 @@ function validateConfig(): AppConfig {
     LAMBDA_VIDEO_POOL_MAX: Number(process.env['LAMBDA_VIDEO_POOL_MAX'] ?? 1),
     LAMBDA_VIDEO_POOL_TARGET_STREAMS: Number(process.env['LAMBDA_VIDEO_POOL_TARGET_STREAMS'] ?? 8),
     VIDEO_IDLE_TRIGGER_MS: Number(process.env['VIDEO_IDLE_TRIGGER_MS'] ?? 3000),
+    VIDEO_USD_PER_GENERATION: Number(process.env['VIDEO_USD_PER_GENERATION'] ?? 0.05),
     FAL_KEY: falKey,
     FAL_IDLE_CLOSE_MS: Number(process.env['FAL_IDLE_CLOSE_MS'] ?? 0),
     FAL_WARMER_ENABLED: process.env['FAL_WARMER_ENABLED'] !== 'false',
