@@ -33,6 +33,7 @@
 import type { FastifyBaseLogger } from 'fastify';
 
 import { config } from '../../config/index.js';
+import { seedAndReadAdminConfig } from '../adminConfig/index.js';
 import { query } from '../../postgres/client.js';
 import { inBackgroundScope } from '../observability/scope.js';
 import { recordFalConnection, WARM_THRESHOLD_MS } from './falConnectionLog.js';
@@ -78,14 +79,7 @@ function envDefaults(): WarmerConfig {
  * bad Insights write can never wedge the loop). */
 async function loadConfig(): Promise<WarmerConfig> {
   const def = envDefaults();
-  const res = await query<{ value: Partial<WarmerConfig> }>(
-    `INSERT INTO admin_config (key, value)
-     VALUES ('fal_warmer', $1)
-     ON CONFLICT (key) DO UPDATE SET key = admin_config.key
-     RETURNING value`,
-    [JSON.stringify(def)],
-  );
-  const v = res.rows[0]?.value ?? {};
+  const v = await seedAndReadAdminConfig('fal_warmer', def);
   return {
     enabled: typeof v.enabled === 'boolean' ? v.enabled : def.enabled,
     intervalMs:

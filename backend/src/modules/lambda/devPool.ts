@@ -13,11 +13,10 @@
  * so the LAMBDA_POOL_TARGET_STREAMS dial is a UX knob, not a stability one.
  */
 
-import type { FastifyBaseLogger } from 'fastify';
 import { config } from '../../config/index.js';
 import { createInstancePool } from './instancePool.js';
 
-export type { DevPoolState, DevPoolStatusKind } from './instancePool.js';
+export type { PoolState, PoolStatusKind } from './instancePool.js';
 
 const pool = createInstancePool({
   kind: 'image',
@@ -36,20 +35,9 @@ const pool = createInstancePool({
   bootEstimateMs: 10 * 60_000,
 });
 
-export const touch = pool.touch;
-export const hasReady = pool.hasReady;
-export const reportFailure = pool.reportFailure;
-export const acquireStream = pool.acquireStream;
-export const releaseStream = pool.releaseStream;
-export const touchInstance = pool.touchInstance;
-export const wsUrl = pool.wsUrl;
-export const ensure = pool.ensure;
-export const getState = pool.getState;
-
-export function start(logger: FastifyBaseLogger): void {
-  pool.start(logger);
-}
-
-export function stop(): void {
-  pool.stop();
-}
+// The factory returns plain closures, so destructuring is safe — these are
+// the flat exports the call sites were written against.
+export const {
+  touch, hasReady, reportFailure, acquireStream, releaseStream,
+  touchInstance, wsUrl, ensure, getState, start, stop,
+} = pool;

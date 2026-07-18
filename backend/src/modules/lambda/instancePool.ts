@@ -39,7 +39,7 @@ const OS_IMAGE_FAMILY = 'lambda-stack-24-04';
 const HEALTH_TIMEOUT_MS = 5_000;
 const HEALTH_FAILS_TO_KILL = 3;
 
-export type DevPoolStatusKind = 'disabled' | 'none' | 'launching' | 'booting' | 'ready' | 'error';
+export type PoolStatusKind = 'disabled' | 'none' | 'launching' | 'booting' | 'ready' | 'error';
 
 export interface PoolInstanceSummary {
   name: string;
@@ -49,8 +49,8 @@ export interface PoolInstanceSummary {
   ageMs: number;
 }
 
-export interface DevPoolState {
-  status: DevPoolStatusKind;
+export interface PoolState {
+  status: PoolStatusKind;
   instanceId?: string;
   ip?: string;
   region: string;
@@ -108,8 +108,8 @@ export interface InstancePool {
   releaseStream(name: string): void;
   touchInstance(name: string): void;
   wsUrl(): string | null;
-  ensure(): DevPoolState;
-  getState(): DevPoolState;
+  ensure(): PoolState;
+  getState(): PoolState;
   start(logger: FastifyBaseLogger): void;
   stop(): void;
 }
@@ -269,6 +269,16 @@ runcmd:
     return assignableInstances().length > 0;
   }
 
+  /** Least-loaded assignable instance, or null. Pure — mutation stays at
+   * call sites. */
+  function leastLoadedReady(): PoolInstance | null {
+    return assignableInstances().sort((a, b) => a.activeStreams - b.activeStreams)[0] ?? null;
+  }
+
+  function wsUrlFor(inst: PoolInstance): string {
+    return `${scheme()}://${inst.ip}:${PORT}/ws?token=${wsToken(inst.name)}`;
+  }
+
   /** A relay failed to reach this instance (connect refused/timeout mid-
    * session). Mark it suspect so assignment skips it NOW instead of waiting
    * out the probe cycle; the tick's probes then either clear it (transient
@@ -286,12 +296,11 @@ runcmd:
   /** Assign a stream to the least-loaded ready instance. Null when none. */
   function acquireStream(): { name: string; url: string } | null {
     lastInterestMs = Date.now();
-    const ready = assignableInstances().sort((a, b) => a.activeStreams - b.activeStreams);
-    const inst = ready[0];
+    const inst = leastLoadedReady();
     if (!inst) return null;
     inst.activeStreams += 1;
     inst.lastActivityMs = Date.now();
-    return { name: inst.name, url: `${scheme()}://${inst.ip}:${PORT}/ws?token=${wsToken(inst.name)}` };
+    return { name: inst.name, url: wsUrlFor(inst) };
   }
 
   /** Release a stream slot (on session close or re-assignment). */
@@ -309,15 +318,14 @@ runcmd:
 
   /** One-shot URL (sketchify): least-loaded ready instance, no slot held. */
   function wsUrl(): string | null {
-    const ready = assignableInstances().sort((a, b) => a.activeStreams - b.activeStreams);
-    const inst = ready[0];
+    const inst = leastLoadedReady();
     if (!inst?.ip) return null;
     touchInstance(inst.name);
-    return `${scheme()}://${inst.ip}:${PORT}/ws?token=${wsToken(inst.name)}`;
+    return wsUrlFor(inst);
   }
 
   /** User interest: make sure at least one instance exists/is coming. */
-  function ensure(): DevPoolState {
+  function ensure(): PoolState {
     lastInterestMs = Date.now();
     if (enabled() && instances.size === 0 && launchesInFlight === 0) {
       lastError = undefined;
@@ -326,13 +334,13 @@ runcmd:
     return getState();
   }
 
-  function getState(): DevPoolState {
+  function getState(): PoolState {
     const list = [...instances.values()];
     const ready = list.filter((i) => i.status === 'ready');
     const booting = list.filter((i) => i.status === 'booting');
     const launching = launchesInFlight > 0 || list.some((i) => i.status === 'launching');
 
-    let status: DevPoolStatusKind;
+    let status: PoolStatusKind;
     if (!enabled()) status = 'disabled';
     else if (ready.length > 0) status = 'ready';
     else if (booting.length > 0) status = 'booting';
@@ -353,7 +361,7 @@ runcmd:
       readyAtMs = ready[0]?.readyAtMs;
     }
 
-    const messages: Record<DevPoolStatusKind, string> = {
+    const messages: Record<PoolStatusKind, string> = {
       disabled: `Lambda ${spec.label} pool disabled`,
       none: 'No instance',
       launching: `Requesting ${spec.label} capacity…`,

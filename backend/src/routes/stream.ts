@@ -24,7 +24,7 @@ import { trackSessionClosed, trackProviderSession } from '../modules/analytics/i
 import { VideoSession } from '../modules/video/videoSession.js';
 import {
   poolEnabled as videoPoolEnabled,
-  hasReady as videoPoolHasReady,
+  getState as videoPoolGetState,
   touch as touchVideoPool,
   acquireStream as videoPoolAcquire,
   releaseStream as videoPoolRelease,
@@ -587,26 +587,47 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         }
       }
 
-      // ─── Video availability push (drives the iPad's dual status badge +
-      // whether animation UX is shown at all). 'off' = kill switch off (or
-      // no video path configured) → iOS hides the Animate button and the
-      // video segment of the status badge; 'warming' = enabled but no ready
-      // instance yet; 'ready' = a video H100 is serving. Pushed on change
-      // only (checked every 15s + once at wiring), so a mid-session Insights
-      // flag flip propagates to open sessions within ~75s (flag poll 60s +
-      // push check 15s).
-      const computeVideoAvailability = (): 'off' | 'warming' | 'ready' => {
-        if (config.LAMBDA_VIDEO_URL) return 'ready'; // static dev override
-        if (!videoPoolEnabled()) return 'off';
-        return videoPoolHasReady() ? 'ready' : 'warming';
+      // ─── System availability push: BOTH H100 systems in one message,
+      // driving the iPad's dual status badge and whether animation UX is
+      // shown at all. This is the availability channel for EVERYONE — the
+      // detailed /v1/dev/lambda/status poll is test-account-gated, so real
+      // users' badges depend on this push alone.
+      //   image: 'ready' (assignable instance) | 'warming' (launching/
+      //          booting) | 'off' (pool disabled / asleep / error — fal
+      //          serves images either way).
+      //   video: 'off' = kill switch off (iOS hides all animation UX);
+      //          'warming'; 'ready'. etaSeconds rides along while warming.
+      // Pushed on change only (checked every 15s + once at wiring), so a
+      // mid-session Insights flag flip reaches open sessions within ~75s
+      // (flag poll 60s + push check 15s).
+      const availabilityOf = (
+        status: string,
+      ): 'off' | 'warming' | 'ready' =>
+        status === 'ready' ? 'ready' : status === 'booting' || status === 'launching' ? 'warming' : 'off';
+      const computeSystemAvailability = (): Record<string, unknown> => {
+        const image = poolGetState();
+        let video: { availability: string; etaSeconds: number | null };
+        if (config.LAMBDA_VIDEO_URL) {
+          video = { availability: 'ready', etaSeconds: null }; // static dev override
+        } else if (!videoPoolEnabled()) {
+          video = { availability: 'off', etaSeconds: null };
+        } else {
+          const vp = videoPoolGetState();
+          video = { availability: availabilityOf(vp.status), etaSeconds: vp.etaSeconds };
+        }
+        return {
+          type: 'system_availability',
+          image: { availability: availabilityOf(image.status), etaSeconds: image.etaSeconds },
+          video,
+        };
       };
-      let lastVideoAvailability: string | null = null;
+      let lastAvailabilityJson: string | null = null;
       const pushVideoAvailability = (): void => {
         if (clientDisconnected || socket.readyState !== socket.OPEN) return;
-        const v = computeVideoAvailability();
-        if (v === lastVideoAvailability) return;
-        lastVideoAvailability = v;
-        socket.send(JSON.stringify({ type: 'video_availability', availability: v }));
+        const payload = JSON.stringify(computeSystemAvailability());
+        if (payload === lastAvailabilityJson) return;
+        lastAvailabilityJson = payload;
+        socket.send(payload);
       };
       videoAvailTimer = setInterval(pushVideoAvailability, 15_000);
       videoAvailTimer.unref?.();

@@ -33,7 +33,6 @@ const ws = new WebSocket(`${BACKEND}/v1/stream?streamId=${streamId}`, {
   perMessageDeflate: false,
 });
 
-const log: string[] = [];
 const events: { t: number; type: string; extra?: string }[] = [];
 const t0 = Date.now();
 const note = (type: string, extra?: string): void => {
@@ -43,7 +42,6 @@ const note = (type: string, extra?: string): void => {
 
 let imageFrames = 0;
 let videoCompletes = 0;
-let lastVideoCompleteAt = 0;
 
 ws.on('open', () => {
   note('ws_open');
@@ -61,12 +59,16 @@ ws.on('message', (data: Buffer, isBinary: boolean) => {
     const m = JSON.parse(data.toString()) as Record<string, unknown>;
     switch (m['type']) {
       case 'state': note('state', String(m['state'])); break;
-      case 'video_availability': note('video_availability', String(m['availability'])); break;
+      case 'system_availability': {
+        const img = (m['image'] ?? {}) as Record<string, unknown>;
+        const vid = (m['video'] ?? {}) as Record<string, unknown>;
+        note('system_availability', `image=${String(img['availability'])} video=${String(vid['availability'])}`);
+        break;
+      }
       case 'video_started': note('video_started', String(m['requestId'])); break;
       case 'video_frame_data': break; // noisy
       case 'video_complete_data': {
         videoCompletes += 1;
-        lastVideoCompleteAt = Date.now();
         const meta = (m['meta'] ?? {}) as Record<string, unknown>;
         note('video_complete_data', `req=${String(meta['requestId'])} bytes=${String(m['data']).length}`);
         break;
@@ -128,7 +130,7 @@ console.log('streamId:', streamId);
 console.log('\nSummary:', JSON.stringify({
   imageFrames,
   videoCompletes,
-  availability: events.filter((e) => e.type === 'video_availability').map((e) => e.extra),
+  availability: events.filter((e) => e.type === 'system_availability').map((e) => e.extra),
   started: events.filter((e) => e.type === 'video_started').length,
   cancelled: events.filter((e) => e.type === 'video_cancelled').length,
 }, null, 2));

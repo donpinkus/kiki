@@ -20,7 +20,7 @@
 
 import type { FastifyBaseLogger } from 'fastify';
 import { config } from '../../config/index.js';
-import { query } from '../../postgres/client.js';
+import { seedAndReadAdminConfig } from '../adminConfig/index.js';
 import { inBackgroundScope } from '../observability/scope.js';
 
 const REFRESH_MS = 60_000;
@@ -36,15 +36,10 @@ export function videoGenerationEnabled(): boolean {
 
 /** Load from Postgres, seeding the row from env iff absent. */
 export async function refreshVideoFlag(): Promise<boolean> {
-  const res = await query<{ value: { enabled?: unknown } }>(
-    `INSERT INTO admin_config (key, value)
-     VALUES ('video_generation', $1)
-     ON CONFLICT (key) DO UPDATE SET key = admin_config.key
-     RETURNING value`,
-    [JSON.stringify({ enabled: config.LAMBDA_VIDEO_POOL_ENABLED })],
-  );
-  const v = res.rows[0]?.value;
-  cached = typeof v?.enabled === 'boolean' ? v.enabled : config.LAMBDA_VIDEO_POOL_ENABLED;
+  const v = await seedAndReadAdminConfig('video_generation', {
+    enabled: config.LAMBDA_VIDEO_POOL_ENABLED,
+  });
+  cached = typeof v.enabled === 'boolean' ? v.enabled : config.LAMBDA_VIDEO_POOL_ENABLED;
   loadedOnce = true;
   return cached;
 }

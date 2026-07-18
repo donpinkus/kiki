@@ -235,6 +235,15 @@ struct KikiAIStatusBadge: View {
     static let warmPink = Color(red: 1.0, green: 0.71, blue: 0.82)
 
     private var dotColor: Color {
+        // The WS push reaches every user; the polled state (test accounts
+        // only — the REST endpoint 403s otherwise) refines it when present.
+        if let pushed = coordinator.imageAvailability, coordinator.lambdaPoolState == nil {
+            switch pushed {
+            case .ready: return .green
+            case .warming: return Self.warmPink
+            case .off: return Self.warmPink // asleep — same soft state as "none"
+            }
+        }
         switch coordinator.lambdaPoolState?.status {
         case "ready": return .green
         case "launching", "booting", "none": return Self.warmPink

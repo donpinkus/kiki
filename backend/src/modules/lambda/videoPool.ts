@@ -31,12 +31,11 @@
  * adoption never grabs one.
  */
 
-import type { FastifyBaseLogger } from 'fastify';
 import { config } from '../../config/index.js';
 import { videoGenerationEnabled } from '../video/videoFlag.js';
 import { createInstancePool } from './instancePool.js';
 
-export type { DevPoolState, DevPoolStatusKind } from './instancePool.js';
+export type { PoolState, PoolStatusKind } from './instancePool.js';
 
 const pool = createInstancePool({
   kind: 'video',
@@ -57,26 +56,14 @@ const pool = createInstancePool({
   bootEstimateMs: 10 * 60_000,
 });
 
-export const touch = pool.touch;
-export const hasReady = pool.hasReady;
-export const reportFailure = pool.reportFailure;
-export const acquireStream = pool.acquireStream;
-export const releaseStream = pool.releaseStream;
-export const touchInstance = pool.touchInstance;
-export const wsUrl = pool.wsUrl;
-export const ensure = pool.ensure;
-export const getState = pool.getState;
+// The factory returns plain closures, so destructuring is safe.
+export const { touch, hasReady, reportFailure } = pool;
+export const {
+  acquireStream, releaseStream, touchInstance, wsUrl, ensure, getState, start, stop,
+} = pool;
 
 /** True when the video pool is configured on (used by stream.ts to decide
  * whether to create a pool-backed VideoSession at all). */
 export function poolEnabled(): boolean {
   return videoGenerationEnabled() && config.LAMBDA_API_KEY.length > 0;
-}
-
-export function start(logger: FastifyBaseLogger): void {
-  pool.start(logger);
-}
-
-export function stop(): void {
-  pool.stop();
 }

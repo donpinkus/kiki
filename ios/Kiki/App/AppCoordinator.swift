@@ -544,6 +544,11 @@ final class AppCoordinator {
     }
     var videoAvailability: VideoAvailability = .off
 
+    /// IMAGE system availability from the same push. Unlike the detailed
+    /// lambdaPoolState (test-account-gated REST poll), this reaches EVERY
+    /// user — the badge prefers it when present. nil until the first push.
+    var imageAvailability: VideoAvailability?
+
     /// Animate modal (prompt editor) visibility.
     var showAnimateModal = false
 
@@ -2101,13 +2106,6 @@ final class AppCoordinator {
     }
 
     /// Direct map from stream readiness to `resultState`. The single rule:
-    /// True when there's a generated image the Animate button could animate.
-    /// (While animating the button is disabled anyway; the backend also
-    /// fail-safes with a synthesized video_cancelled if state races.)
-    var canAnimate: Bool {
-        lastSuccessfulImage != nil
-    }
-
     /// Manual Animate button tap: optimistically flip to the disabled
     /// "Animating" state (confirmed by the backend's `video_started`, reset
     /// by video_complete/video_cancelled) and ask the backend to fire the
@@ -2213,12 +2211,13 @@ final class AppCoordinator {
                     scope.setTag(value: "video.mp4_write", key: "op")
                 }
             }
-        case .availability(let raw):
-            let availability = VideoAvailability(rawValue: raw) ?? .off
-            if availability != videoAvailability {
-                videoAvailability = availability
-                streamLog.info("[result] video_availability → \(raw)")
+        case .availability(let image, _, let video, _):
+            let videoValue = VideoAvailability(rawValue: video) ?? .off
+            if videoValue != videoAvailability {
+                videoAvailability = videoValue
+                streamLog.info("[result] video availability → \(video)")
             }
+            imageAvailability = VideoAvailability(rawValue: image) ?? .off
         case .cancelled(_, let atStep, let error):
             // Covers user-resumed-drawing cancels, server-side failures, AND
             // the backend's synthesized "can't animate" replies to the manual
