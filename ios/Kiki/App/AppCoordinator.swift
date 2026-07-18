@@ -2189,6 +2189,26 @@ final class AppCoordinator {
         return saved
     }
 
+    /// Everything the Brush Studio can change, captured on open so Cancel can revert.
+    struct BrushStudioSnapshot {
+        let config: BrushConfig
+        let curatedID: String?
+        let customID: UUID?
+    }
+
+    func takeBrushSnapshot() -> BrushStudioSnapshot {
+        BrushStudioSnapshot(config: currentBrushConfig(),
+                            curatedID: activeCuratedPresetID,
+                            customID: activeCustomBrushID)
+    }
+
+    func restoreBrushSnapshot(_ snapshot: BrushStudioSnapshot) {
+        writeToolKnobs(from: snapshot.config)
+        activeCuratedPresetID = snapshot.curatedID
+        activeCustomBrushID = snapshot.customID
+        applyTool()
+    }
+
     /// Write every secondary knob from a config back into the tool fields (batched so the
     /// brush rebuilds once). Deliberately does NOT touch color or size — presets and saved
     /// brushes carry character, not identity.

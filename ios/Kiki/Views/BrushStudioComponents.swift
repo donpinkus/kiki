@@ -133,15 +133,19 @@ struct ColorJitterSection: View {
     @Binding var jitter: ColorJitter?
     var defaults = ColorJitter(hue: 0.05, saturation: 0.15, brightness: 0.1)
     var body: some View {
-        Section(title) {
-            Toggle("Enabled", isOn: Binding(
+        // Header toggle + rows (plain stack — the Studio page is not a Form).
+        VStack(alignment: .leading, spacing: 12) {
+            Toggle(isOn: Binding(
                 get: { jitter != nil },
-                set: { jitter = $0 ? defaults : nil }))
+                set: { jitter = $0 ? defaults : nil })) {
+                Text(title).font(.headline)
+            }
             if jitter != nil {
                 let j = Binding(get: { jitter ?? ColorJitter() }, set: { jitter = $0 })
                 slider("Hue", j.hue); slider("Saturation", j.saturation); slider("Brightness", j.brightness)
             }
         }
+        .padding(.top, 8)
     }
     private func slider(_ label: String, _ value: Binding<Double>) -> some View {
         HStack {

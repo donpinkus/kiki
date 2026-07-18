@@ -1,39 +1,39 @@
 import SwiftUI
 import CanvasModule
 
-// MARK: - Brush Studio (full page)
+// MARK: - Brush Studio (full page, Procreate-style)
 //
-// THE brush-editing surface (2026-07-17): one full-screen page that absorbed both prior
-// layers — the sidebar gear popover (secondary knobs) and the docked dev panel (dynamics
-// curves + recorder). Procreate-style: section rail on the left, controls on the right,
-// live engine-rendered stroke preview on top. All controls bind the same AppCoordinator
-// tool state the canvas uses, so there is no tweak-vs-author split: you are always
-// editing the brush you're holding, and "Save as brush" snapshots it into the library.
+// THE brush-editing surface: dark three-pane layout matching Procreate's Brush Studio —
+// left rail (sections, blue pill selection), middle controls column, and a large
+// interactive DRAWING PAD on the right (a bare MetalCanvasView holding the live brush,
+// so you try every knob change immediately; scribbles persist across tweaks and are
+// never saved). Cancel reverts to the on-open snapshot; ✓ keeps the edits. All controls
+// bind the same AppCoordinator tool state the canvas uses — you are always editing the
+// brush you're holding, and "Save as brush" snapshots it into the library.
 
 struct BrushStudioPage: View {
     @Environment(AppCoordinator.self) private var coordinator
-    @State private var section: StudioSection = .brushes
+    @State private var section: StudioSection = .strokePath
     @State private var showSaveDialog = false
     @State private var saveName = ""
+    @State private var padClearToken = 0
+    @State private var snapshot: AppCoordinator.BrushStudioSnapshot?
     /// Local mirror of coordinator.toolDynamics (nil ⇄ inert), edited by the Dynamics +
     /// Color sections. Synced both ways below; Equatable guards break the write cycle.
     @State private var dyn = BrushDynamics()
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            Divider()
-            BrushPreviewStrip(config: coordinator.currentBrushConfig())
-            Divider()
-            HStack(spacing: 0) {
-                rail
-                Divider()
-                detail
-            }
-            .frame(maxHeight: .infinity)
+        HStack(spacing: 0) {
+            rail
+            controls
+            padPane
         }
-        .background(Color(uiColor: .systemGroupedBackground))
-        .onAppear { dyn = coordinator.toolDynamics ?? BrushDynamics() }
+        .background(StudioTheme.page.ignoresSafeArea())
+        .environment(\.colorScheme, .dark)
+        .onAppear {
+            snapshot = coordinator.takeBrushSnapshot()
+            dyn = coordinator.toolDynamics ?? BrushDynamics()
+        }
         .onChange(of: dyn) { _, new in
             coordinator.toolDynamics = new.isInert ? nil : new
         }
@@ -53,33 +53,141 @@ struct BrushStudioPage: View {
         }
     }
 
-    private var header: some View {
-        HStack(spacing: 16) {
-            Text("Brush Studio").font(.title2.weight(.semibold))
-            Text(activeBrushLabel)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-            Spacer()
-            Button {
-                saveName = activeBrushLabel == "Custom brush" ? "" : activeBrushLabel
-                showSaveDialog = true
-            } label: {
-                Label("Save as brush", systemImage: "square.and.arrow.down")
+    // MARK: Left rail
+
+    private var rail: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Brush Studio")
+                .font(.title.weight(.bold))
+                .padding(.horizontal, 26)
+                .padding(.top, 28)
+                .padding(.bottom, 18)
+            ScrollView {
+                VStack(spacing: 3) {
+                    ForEach(StudioSection.allCases) { s in
+                        Button {
+                            section = s
+                        } label: {
+                            HStack(spacing: 14) {
+                                Image(systemName: s.icon)
+                                    .font(.system(size: 17))
+                                    .frame(width: 26)
+                                Text(s.rawValue)
+                                    .font(.body.weight(section == s ? .semibold : .regular))
+                                Spacer(minLength: 0)
+                            }
+                            .padding(.vertical, 11)
+                            .padding(.horizontal, 16)
+                            .background(section == s ? StudioTheme.accent : .clear)
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                            .foregroundStyle(section == s ? .white : StudioTheme.railIdle)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.bottom, 16)
             }
-            .buttonStyle(.bordered)
-            Button {
-                coordinator.showBrushStudio = false
-            } label: {
-                Text("Done").font(.body.weight(.semibold))
-            }
-            .buttonStyle(.borderedProminent)
         }
-        .padding(.horizontal, 20)
+        .frame(width: 272)
+        .background(StudioTheme.card)
+        .clipShape(RoundedRectangle(cornerRadius: 22))
+        .padding(12)
+    }
+
+    // MARK: Middle controls column
+
+    private var controls: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 26) {
+                Text(section.heading)
+                    .font(.title2.weight(.bold))
+                    .foregroundStyle(.white.opacity(0.85))
+                switch section {
+                case .brushes: BrushesSection()
+                case .strokePath: StrokePathSection()
+                case .stabilization: StabilizationSection()
+                case .taper: TaperSection()
+                case .shape: ShapeSection()
+                case .grain: GrainSection()
+                case .rendering: RenderingSection()
+                case .wet: WetSection()
+                case .color: ColorSection(dyn: $dyn)
+                case .dynamics: DynamicsSection(dyn: $dyn)
+                case .developer: DeveloperSection(dyn: $dyn)
+                }
+            }
+            .padding(.horizontal, 30)
+            .padding(.top, 34)
+            .padding(.bottom, 40)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(width: 440)
+        .id(section)   // reset scroll position when switching sections
+    }
+
+    // MARK: Right drawing pad
+
+    private var padPane: some View {
+        ZStack(alignment: .top) {
+            BrushTryPadView(
+                brush: coordinator.currentBrushConfig(),
+                clearToken: padClearToken,
+                onBrushInputSample: { coordinator.liveBrushInput = $0 },
+                devMaxSpeed: coordinator.devMaxSpeed,
+                devDistancePeriod: coordinator.devDistancePeriod,
+                devFadePeriod: coordinator.devFadePeriod
+            )
+            .background(Color.white)
+            .clipShape(UnevenRoundedRectangle(cornerRadii: .init(topLeading: 22, bottomLeading: 22)))
+            .ignoresSafeArea(edges: [.trailing, .bottom])
+
+            HStack(spacing: 10) {
+                padChip {
+                    HStack(spacing: 8) {
+                        Image(systemName: "scribble.variable")
+                        Text("Drawing Pad").font(.subheadline.weight(.semibold))
+                    }
+                }
+                Button { padClearToken += 1 } label: {
+                    padChipLabel { Text("Clear").font(.subheadline.weight(.medium)) }
+                }
+                .buttonStyle(.plain)
+                Spacer()
+                Button {
+                    saveName = defaultSaveName
+                    showSaveDialog = true
+                } label: {
+                    padChipLabel { Text("Save as brush").font(.subheadline.weight(.medium)) }
+                }
+                .buttonStyle(.plain)
+                Button {
+                    if let snapshot { coordinator.restoreBrushSnapshot(snapshot) }
+                    coordinator.showBrushStudio = false
+                } label: {
+                    padChipLabel { Text("Cancel").font(.subheadline.weight(.medium)) }
+                }
+                .buttonStyle(.plain)
+                Button {
+                    coordinator.showBrushStudio = false
+                } label: {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 17, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 44, height: 44)
+                        .background(StudioTheme.accent)
+                        .clipShape(Circle())
+                        .shadow(color: .black.opacity(0.25), radius: 5, y: 2)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 18)
+            .padding(.top, 16)
+        }
         .padding(.vertical, 12)
     }
 
-    private var activeBrushLabel: String {
+    private var defaultSaveName: String {
         if let id = coordinator.activeCustomBrushID,
            let saved = coordinator.customBrushLibrary.brush(for: id) {
             return saved.name
@@ -88,122 +196,81 @@ struct BrushStudioPage: View {
            let preset = CuratedPresetCatalog.preset(for: id) {
             return preset.displayName
         }
-        return "Custom brush"
+        return ""
     }
 
-    private var rail: some View {
-        ScrollView {
-            VStack(spacing: 2) {
-                ForEach(StudioSection.allCases) { s in
-                    Button {
-                        section = s
-                    } label: {
-                        HStack(spacing: 10) {
-                            Image(systemName: s.icon)
-                                .frame(width: 24)
-                            Text(s.rawValue)
-                            Spacer()
-                        }
-                        .padding(.vertical, 10)
-                        .padding(.horizontal, 12)
-                        .background(section == s ? Color.accentColor.opacity(0.15) : .clear)
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
-                        .foregroundStyle(section == s ? Color.accentColor : .primary)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(10)
-        }
-        .frame(width: 210)
-        .background(Color(uiColor: .secondarySystemGroupedBackground))
+    /// A non-interactive dark floating chip (label style shared with the buttons).
+    private func padChip(@ViewBuilder _ content: () -> some View) -> some View {
+        padChipLabel(content)
     }
 
-    private var detail: some View {
-        Form {
-            switch section {
-            case .brushes: BrushesSection()
-            case .stroke: StrokeSection()
-            case .shape: ShapeSection()
-            case .grain: GrainSection()
-            case .rendering: RenderingSection()
-            case .color: ColorSection(dyn: $dyn)
-            case .dynamics: DynamicsSection(dyn: $dyn)
-            case .wet: WetSection()
-            case .developer: DeveloperSection(dyn: $dyn)
-            }
-        }
-        .id(section)   // reset scroll position when switching sections
+    private func padChipLabel(@ViewBuilder _ content: () -> some View) -> some View {
+        content()
+            .foregroundStyle(.white.opacity(0.92))
+            .padding(.horizontal, 16)
+            .frame(height: 44)
+            .background(StudioTheme.padChip)
+            .clipShape(Capsule())
+            .shadow(color: .black.opacity(0.25), radius: 5, y: 2)
     }
+}
+
+// MARK: - Theme + sections
+
+enum StudioTheme {
+    static let page = Color(red: 0.082, green: 0.082, blue: 0.090)
+    static let card = Color(red: 0.129, green: 0.129, blue: 0.141)
+    static let chip = Color.white.opacity(0.08)
+    static let padChip = Color(red: 0.16, green: 0.16, blue: 0.175)
+    static let accent = Color(red: 0.23, green: 0.51, blue: 0.96)
+    static let railIdle = Color.white.opacity(0.62)
 }
 
 enum StudioSection: String, CaseIterable, Identifiable {
     case brushes = "Brushes"
-    case stroke = "Stroke"
+    case strokePath = "Stroke path"
+    case stabilization = "Stabilization"
+    case taper = "Taper"
     case shape = "Shape"
     case grain = "Grain"
     case rendering = "Rendering"
-    case color = "Color"
-    case dynamics = "Dynamics"
     case wet = "Wet paint"
+    case color = "Color dynamics"
+    case dynamics = "Dynamics"
     case developer = "Developer"
 
     var id: String { rawValue }
 
+    /// Column heading (Procreate uses e.g. "Stroke properties" for Stroke path).
+    var heading: String {
+        switch self {
+        case .brushes: return "Brushes"
+        case .strokePath: return "Stroke properties"
+        case .stabilization: return "Stabilization"
+        case .taper: return "Taper"
+        case .shape: return "Shape"
+        case .grain: return "Grain"
+        case .rendering: return "Rendering"
+        case .wet: return "Wet paint"
+        case .color: return "Color dynamics"
+        case .dynamics: return "Pencil dynamics"
+        case .developer: return "Developer"
+        }
+    }
+
     var icon: String {
         switch self {
         case .brushes: return "paintbrush.pointed"
-        case .stroke: return "scribble.variable"
-        case .shape: return "circle.dashed"
+        case .strokePath: return "scribble"
+        case .stabilization: return "scribble.variable"
+        case .taper: return "pencil.tip"
+        case .shape: return "seal"
         case .grain: return "circle.grid.3x3"
         case .rendering: return "drop.halffull"
-        case .color: return "paintpalette"
-        case .dynamics: return "point.topleft.down.to.point.bottomright.curvepath"
         case .wet: return "drop"
+        case .color: return "paintpalette"
+        case .dynamics: return "gauge.with.needle"
         case .developer: return "wrench.and.screwdriver"
-        }
-    }
-}
-
-// MARK: - Live preview strip
-
-/// Engine-rendered stroke preview: the identical pipeline the canvas uses (via
-/// BrushPreviewRenderer), re-rendered when a knob changes. `.task(id:)` gives natural
-/// debouncing — a new config cancels the pending render.
-private struct BrushPreviewStrip: View {
-    let config: BrushConfig
-    @State private var renderer: BrushPreviewRenderer?
-    @State private var image: CGImage?
-    @State private var unavailable = false
-
-    var body: some View {
-        ZStack {
-            Color.white   // the preview is paint on paper — white in both color schemes
-            if let image {
-                Image(decorative: image, scale: 1)
-                    .resizable()
-                    .aspectRatio(CGFloat(BrushPreviewRenderer.bandWidth) / CGFloat(BrushPreviewRenderer.bandHeight),
-                                 contentMode: .fit)
-                    .frame(maxWidth: .infinity)
-            }
-            if unavailable {
-                Text("Preview unavailable for this brush on this device")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .frame(height: 150)
-        .clipped()
-        .task(id: config) {
-            if renderer == nil { renderer = BrushPreviewRenderer() }
-            try? await Task.sleep(nanoseconds: 90_000_000)
-            guard !Task.isCancelled else { return }
-            if let img = renderer?.render(config) {
-                image = img
-                unavailable = false
-            } else {
-                unavailable = true
-            }
         }
     }
 }
@@ -215,11 +282,11 @@ private struct BrushesSection: View {
     @State private var renamingBrush: SavedBrush?
     @State private var renameText = ""
 
-    private let columns = [GridItem(.adaptive(minimum: 130), spacing: 8)]
+    private let columns = [GridItem(.adaptive(minimum: 118), spacing: 8)]
 
     var body: some View {
         if !coordinator.customBrushLibrary.brushes.isEmpty {
-            Section("My brushes") {
+            StudioGroup("My brushes") {
                 LazyVGrid(columns: columns, spacing: 8) {
                     ForEach(coordinator.customBrushLibrary.brushes) { saved in
                         StudioChip(label: saved.name,
@@ -244,11 +311,10 @@ private struct BrushesSection: View {
                         }
                     }
                 }
-                Text("Tap to apply. Touch and hold to rename, overwrite, or delete.")
-                    .font(.caption2).foregroundStyle(.secondary)
+                StudioFootnote("Tap to apply. Touch and hold to rename, overwrite, or delete.")
             }
         }
-        Section("Presets") {
+        StudioGroup("Presets") {
             LazyVGrid(columns: columns, spacing: 8) {
                 StudioChip(label: "None",
                            selected: coordinator.activeCuratedPresetID == nil
@@ -262,8 +328,7 @@ private struct BrushesSection: View {
                     }
                 }
             }
-            Text("Presets keep your color and size. \u{201C}None\u{201D} resets every knob to the plain pen.")
-                .font(.caption2).foregroundStyle(.secondary)
+            StudioFootnote("Presets keep your color and size. \u{201C}None\u{201D} resets every knob to the plain pen.")
         }
         .alert("Rename brush", isPresented: Binding(
             get: { renamingBrush != nil },
@@ -280,48 +345,60 @@ private struct BrushesSection: View {
     }
 }
 
-// MARK: - Stroke
+// MARK: - Stroke path
 
-private struct StrokeSection: View {
+private struct StrokePathSection: View {
     @Environment(AppCoordinator.self) private var coordinator
 
     var body: some View {
         @Bindable var coordinator = coordinator
         let wet = coordinator.toolWetEnabled
 
-        Section("Path") {
-            BrushSliderRow("Spacing", value: $coordinator.toolSpacing, range: 0.02...1.0, help: BrushHelpCatalog.help["Spacing"]!)
-            Group {
-                BrushSliderRow("Spacing jitter", value: $coordinator.toolSpacingJitter, range: 0.0...1.0, help: BrushHelpCatalog.help["Spacing jitter"]!)
+        BrushSliderRow("Spacing", value: $coordinator.toolSpacing, range: 0.02...1.0, help: BrushHelpCatalog.help["Spacing"]!)
+        Group {
+            BrushSliderRow("Spacing jitter", value: $coordinator.toolSpacingJitter, range: 0.0...1.0, help: BrushHelpCatalog.help["Spacing jitter"]!)
+            BrushSliderRow("Fall off", value: $coordinator.toolFallOff, range: 0.0...1.0, help: BrushHelpCatalog.help["Fall off"]!)
+            BrushSliderRow("Count", value: $coordinator.toolStampCount, range: 1...8, help: BrushHelpCatalog.help["Count"]!,
+                           format: { "\(Int($0.rounded()))" })
+            if coordinator.toolStampCount.rounded() > 1 {
+                BrushSliderRow("Count jitter", value: $coordinator.toolStampCountJitter, range: 0.0...1.0, help: BrushHelpCatalog.help["Count jitter"]!)
             }
-            .disabled(wet).opacity(wet ? 0.35 : 1)
-            BrushSliderRow("Stabilize", value: $coordinator.toolStreamline, range: 0.0...1.0, help: BrushHelpCatalog.help["Stabilize"]!)
-            BrushSliderRow("Smoothing", value: $coordinator.toolStabilization, range: 0.0...1.0, help: BrushHelpCatalog.help["Smoothing"]!)
-            BrushSliderRow("Pressure smoothing", value: $coordinator.toolPressureSmoothing, range: 0.0...1.0, help: BrushHelpCatalog.help["Pressure smoothing"]!)
         }
-        Section("Taper") {
-            Group {
-                BrushSliderRow("Taper", value: $coordinator.toolTaper, range: 0.0...1.0, help: BrushHelpCatalog.help["Taper"]!)
-                if coordinator.toolTaper > 0.005 {
-                    BrushSliderRow("Taper opacity", value: $coordinator.toolTaperOpacity, range: 0.0...1.0, help: BrushHelpCatalog.help["Taper opacity"]!)
-                }
-                BrushSliderRow("Fall off", value: $coordinator.toolFallOff, range: 0.0...1.0, help: BrushHelpCatalog.help["Fall off"]!)
+        .disabled(wet).opacity(wet ? 0.35 : 1)
+        if wet { WetGateFootnote() }
+    }
+}
+
+// MARK: - Stabilization
+
+private struct StabilizationSection: View {
+    @Environment(AppCoordinator.self) private var coordinator
+
+    var body: some View {
+        @Bindable var coordinator = coordinator
+        BrushSliderRow("Stabilize", value: $coordinator.toolStreamline, range: 0.0...1.0, help: BrushHelpCatalog.help["Stabilize"]!)
+        BrushSliderRow("Smoothing", value: $coordinator.toolStabilization, range: 0.0...1.0, help: BrushHelpCatalog.help["Smoothing"]!)
+        BrushSliderRow("Pressure smoothing", value: $coordinator.toolPressureSmoothing, range: 0.0...1.0, help: BrushHelpCatalog.help["Pressure smoothing"]!)
+    }
+}
+
+// MARK: - Taper
+
+private struct TaperSection: View {
+    @Environment(AppCoordinator.self) private var coordinator
+
+    var body: some View {
+        @Bindable var coordinator = coordinator
+        let wet = coordinator.toolWetEnabled
+
+        Group {
+            BrushSliderRow("Taper", value: $coordinator.toolTaper, range: 0.0...1.0, help: BrushHelpCatalog.help["Taper"]!)
+            if coordinator.toolTaper > 0.005 {
+                BrushSliderRow("Taper opacity", value: $coordinator.toolTaperOpacity, range: 0.0...1.0, help: BrushHelpCatalog.help["Taper opacity"]!)
             }
-            .disabled(wet).opacity(wet ? 0.35 : 1)
         }
-        Section("Stamps per point") {
-            Group {
-                BrushSliderRow("Count", value: $coordinator.toolStampCount, range: 1...8, help: BrushHelpCatalog.help["Count"]!,
-                               format: { "\(Int($0.rounded()))" })
-                if coordinator.toolStampCount.rounded() > 1 {
-                    BrushSliderRow("Count jitter", value: $coordinator.toolStampCountJitter, range: 0.0...1.0, help: BrushHelpCatalog.help["Count jitter"]!)
-                }
-            }
-            .disabled(wet).opacity(wet ? 0.35 : 1)
-        }
-        if wet {
-            WetGateFootnote()
-        }
+        .disabled(wet).opacity(wet ? 0.35 : 1)
+        if wet { WetGateFootnote() }
     }
 }
 
@@ -334,7 +411,7 @@ private struct ShapeSection: View {
         @Bindable var coordinator = coordinator
         let wet = coordinator.toolWetEnabled
 
-        Section("Tip shape") {
+        StudioGroup("Tip") {
             Group {
                 BrushShapePicker(selection: $coordinator.toolShapeID)
                 if coordinator.toolShapeID != nil {
@@ -343,7 +420,7 @@ private struct ShapeSection: View {
             }
             .disabled(wet).opacity(wet ? 0.35 : 1)
         }
-        Section("Geometry") {
+        StudioGroup("Geometry") {
             BrushSliderRow("Hardness", value: $coordinator.toolHardness, range: 0.0...1.0, help: BrushHelpCatalog.help["Hardness"]!)
             BrushSliderRow("Aspect", value: $coordinator.toolAspect, range: 0.1...1.0, help: BrushHelpCatalog.help["Aspect"]!)
             BrushSliderRow("Angle", value: $coordinator.toolTipAngle, range: 0...(.pi), help: BrushHelpCatalog.help["Angle"]!,
@@ -352,7 +429,7 @@ private struct ShapeSection: View {
                 Group {
                     BrushSliderRow("Rotation", value: $coordinator.toolRotationFollow, range: -1.0...1.0, help: BrushHelpCatalog.help["Rotation"]!,
                                    format: { String(format: "%+.0f%%", $0 * 100) })
-                    HStack(spacing: 20) {
+                    HStack(spacing: 24) {
                         Toggle("Flip X", isOn: $coordinator.toolFlipX)
                         Toggle("Flip Y", isOn: $coordinator.toolFlipY)
                     }
@@ -361,9 +438,7 @@ private struct ShapeSection: View {
                 .disabled(wet).opacity(wet ? 0.35 : 1)
             }
         }
-        if wet {
-            WetGateFootnote()
-        }
+        if wet { WetGateFootnote() }
     }
 }
 
@@ -376,27 +451,22 @@ private struct GrainSection: View {
         @Bindable var coordinator = coordinator
         let wet = coordinator.toolWetEnabled
 
-        Section("Grain") {
-            Group {
-                GrainPicker(selection: $coordinator.toolGrainID)
-                if coordinator.toolGrainID != nil {
-                    BrushSliderRow("Grain depth", value: $coordinator.toolGrainDepth, range: 0.0...1.0, help: BrushHelpCatalog.help["Grain depth"]!)
-                    BrushSliderRow("Grain scale", value: $coordinator.toolGrainScale, range: 0.5...3.0, help: BrushHelpCatalog.help["Grain scale"]!,
-                                   format: { String(format: "%.1f\u{00D7}", $0) })
-                    Toggle(isOn: $coordinator.toolGrainMoving) {
-                        Text("Moving grain").font(.subheadline.weight(.medium))
-                    }
-                    Text(coordinator.toolGrainMoving
-                         ? "Tooth rides with the stroke — streaky crayon/lead."
-                         : "Tooth stays on the paper — overlapping strokes share it.")
-                        .font(.caption2).foregroundStyle(.secondary)
+        Group {
+            GrainPicker(selection: $coordinator.toolGrainID)
+            if coordinator.toolGrainID != nil {
+                BrushSliderRow("Grain depth", value: $coordinator.toolGrainDepth, range: 0.0...1.0, help: BrushHelpCatalog.help["Grain depth"]!)
+                BrushSliderRow("Grain scale", value: $coordinator.toolGrainScale, range: 0.5...3.0, help: BrushHelpCatalog.help["Grain scale"]!,
+                               format: { String(format: "%.1f\u{00D7}", $0) })
+                Toggle(isOn: $coordinator.toolGrainMoving) {
+                    Text("Moving grain").font(.subheadline.weight(.medium))
                 }
+                StudioFootnote(coordinator.toolGrainMoving
+                     ? "Tooth rides with the stroke — streaky crayon/lead."
+                     : "Tooth stays on the paper — overlapping strokes share it.")
             }
-            .disabled(wet).opacity(wet ? 0.35 : 1)
         }
-        if wet {
-            WetGateFootnote()
-        }
+        .disabled(wet).opacity(wet ? 0.35 : 1)
+        if wet { WetGateFootnote() }
     }
 }
 
@@ -409,35 +479,69 @@ private struct RenderingSection: View {
         @Bindable var coordinator = coordinator
         let wet = coordinator.toolWetEnabled
 
-        Section("Rendering") {
-            BrushSliderRow("Opacity", value: $coordinator.toolOpacity, range: 0.05...1.0, help: BrushHelpCatalog.help["Opacity"]!)
-            Group {
-                BrushSliderRow("Flow", value: $coordinator.toolFlow, range: 0.05...1.0, help: BrushHelpCatalog.help["Flow"]!)
-            }
-            .disabled(wet).opacity(wet ? 0.35 : 1)
+        BrushSliderRow("Opacity", value: $coordinator.toolOpacity, range: 0.05...1.0, help: BrushHelpCatalog.help["Opacity"]!)
+        Group {
+            BrushSliderRow("Flow", value: $coordinator.toolFlow, range: 0.05...1.0, help: BrushHelpCatalog.help["Flow"]!)
         }
-        if wet {
-            WetGateFootnote()
+        .disabled(wet).opacity(wet ? 0.35 : 1)
+        if wet { WetGateFootnote() }
+    }
+}
+
+// MARK: - Wet paint
+
+private struct WetSection: View {
+    @Environment(AppCoordinator.self) private var coordinator
+
+    var body: some View {
+        @Bindable var coordinator = coordinator
+
+        Toggle(isOn: $coordinator.toolWetEnabled) {
+            Text("Wet paint").font(.subheadline.weight(.medium))
+            + Text("  (experimental)").font(.caption).foregroundColor(.secondary)
+        }
+        if coordinator.toolWetEnabled {
+            StudioFootnote("Wet paint uses a round tip — Shape, Flow, Taper and Dynamics don't apply. Opacity scales the deposit.")
+            BrushSliderRow("Mix", value: $coordinator.toolWetStrength, range: 0.05...1.0, help: BrushHelpCatalog.help["Mix"]!)
+            BrushSliderRow("Smear", value: $coordinator.toolWetPickup, range: 0.0...1.0, help: BrushHelpCatalog.help["Smear"]!)
+            BrushSliderRow("Charge", value: $coordinator.toolWetCharge, range: 0.05...1.0, help: BrushHelpCatalog.help["Charge"]!)
+            BrushSliderRow("Refill", value: $coordinator.toolWetRefill, range: 0.0...1.0, help: BrushHelpCatalog.help["Refill"]!)
+            BrushSliderRow("Wet jitter", value: $coordinator.toolWetJitter, range: 0.0...1.0, help: BrushHelpCatalog.help["Wet jitter"]!)
+            BrushSliderRow("Blur", value: $coordinator.toolWetBlur, range: 0.0...1.0, help: BrushHelpCatalog.help["Blur"]!)
+        }
+        StudioGroup("Smudge") {
+            Toggle("Smudge mode (push canvas color, no new ink)",
+                   isOn: $coordinator.toolWetSmudge)
+                .font(.subheadline.weight(.medium))
+            StudioFootnote("Smudge uses the wet engine: Mix and Smear above set its strength and pickup.")
         }
     }
 }
 
-// MARK: - Color
+/// One-line explanation shown at the bottom of sections whose controls are wet-gated.
+private struct WetGateFootnote: View {
+    var body: some View {
+        StudioFootnote("Dimmed controls don't apply while Wet paint is on (it uses a round procedural tip with its own deposit model).")
+    }
+}
+
+// MARK: - Color dynamics
 
 private struct ColorSection: View {
     @Environment(AppCoordinator.self) private var coordinator
     @Binding var dyn: BrushDynamics
 
     var body: some View {
-        Section("Secondary color") {
+        StudioGroup("Secondary color") {
             ColorPicker("Ink 2", selection: Binding(
                 get: { coordinator.toolSecondaryColor ?? .yellow },
                 set: { coordinator.toolSecondaryColor = $0 }), supportsOpacity: false)
+                .font(.subheadline.weight(.medium))
             Toggle("Enabled", isOn: Binding(
                 get: { coordinator.toolSecondaryColor != nil },
                 set: { coordinator.toolSecondaryColor = $0 ? .yellow : nil }))
-            Text("Blend is driven by the Secondary blend curve — pressure for a two-tone nib, Distance for a gradient, Fuzzy for speckle.")
-                .font(.caption2).foregroundStyle(.secondary)
+                .font(.subheadline.weight(.medium))
+            StudioFootnote("Blend is driven by the Secondary blend curve — pressure for a two-tone nib, Distance for a gradient, Fuzzy for speckle.")
         }
         CurveToggleSection(title: "Secondary blend", option: $dyn.secondary, fold: .sizeLike, defaultSensor: .pressure)
         ColorJitterSection(title: "Color jitter (per stroke)", jitter: $dyn.colorJitter)
@@ -452,10 +556,7 @@ private struct DynamicsSection: View {
     @Binding var dyn: BrushDynamics
 
     var body: some View {
-        Section {
-            Text("Each parameter maps live pencil sensors (pressure, tilt, speed…) through a response curve. Watch the red marker ride the curve as you draw.")
-                .font(.caption).foregroundStyle(.secondary)
-        }
+        StudioFootnote("Each parameter maps live pencil sensors (pressure, tilt, speed…) through a response curve. Draw in the pad — the red marker rides the curve.")
         CurveToggleSection(title: "Size", option: $dyn.size, fold: .sizeLike, defaultSensor: .pressure)
         CurveToggleSection(title: "Flow", option: $dyn.flow, fold: .sizeLike, defaultSensor: .pressure)
         CurveToggleSection(title: "Rotation", option: $dyn.rotation, fold: .rotationLike, defaultSensor: .drawingAngle)
@@ -466,50 +567,6 @@ private struct DynamicsSection: View {
         CurveToggleSection(title: "Spacing", option: $dyn.spacing, fold: .sizeLike, defaultSensor: .speed)
         CurveToggleSection(title: "Darkness", option: $dyn.darkness, fold: .sizeLike, defaultSensor: .pressure)
         CurveToggleSection(title: "Grain (moving)", option: $dyn.grain, fold: .sizeLike, defaultSensor: .pressure)
-    }
-}
-
-// MARK: - Wet paint
-
-private struct WetSection: View {
-    @Environment(AppCoordinator.self) private var coordinator
-
-    var body: some View {
-        @Bindable var coordinator = coordinator
-
-        Section("Wet paint") {
-            Toggle(isOn: $coordinator.toolWetEnabled) {
-                Text("Wet paint").font(.subheadline.weight(.medium))
-                + Text("  (experimental)").font(.caption).foregroundColor(.secondary)
-            }
-            if coordinator.toolWetEnabled {
-                Text("Wet paint uses a round tip — Shape, Flow, Taper and Dynamics don't apply. Opacity scales the deposit.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                BrushSliderRow("Mix", value: $coordinator.toolWetStrength, range: 0.05...1.0, help: BrushHelpCatalog.help["Mix"]!)
-                BrushSliderRow("Smear", value: $coordinator.toolWetPickup, range: 0.0...1.0, help: BrushHelpCatalog.help["Smear"]!)
-                BrushSliderRow("Charge", value: $coordinator.toolWetCharge, range: 0.05...1.0, help: BrushHelpCatalog.help["Charge"]!)
-                BrushSliderRow("Refill", value: $coordinator.toolWetRefill, range: 0.0...1.0, help: BrushHelpCatalog.help["Refill"]!)
-                BrushSliderRow("Wet jitter", value: $coordinator.toolWetJitter, range: 0.0...1.0, help: BrushHelpCatalog.help["Wet jitter"]!)
-                BrushSliderRow("Blur", value: $coordinator.toolWetBlur, range: 0.0...1.0, help: BrushHelpCatalog.help["Blur"]!)
-            }
-        }
-        Section("Smudge") {
-            Toggle("Smudge mode (push canvas color, no new ink)",
-                   isOn: $coordinator.toolWetSmudge)
-            Text("Smudge uses the wet engine: Mix and Smear above set its strength and pickup.")
-                .font(.caption).foregroundStyle(.secondary)
-        }
-    }
-}
-
-/// One-line explanation shown at the bottom of sections whose controls are wet-gated.
-private struct WetGateFootnote: View {
-    var body: some View {
-        Section {
-            Text("Dimmed controls don't apply while Wet paint is on (it uses a round procedural tip with its own deposit model).")
-                .font(.caption2).foregroundStyle(.secondary)
-        }
     }
 }
 
@@ -526,7 +583,7 @@ private struct DeveloperSection: View {
     var body: some View {
         @Bindable var coordinator = coordinator
 
-        Section("Control-isolation test brushes") {
+        StudioGroup("Control-isolation test brushes") {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
                     Button("Default Pen") {
@@ -544,21 +601,22 @@ private struct DeveloperSection: View {
                 }
             }
             if let note = coordinator.activeTestNote {
-                Text(note).font(.caption).foregroundStyle(.blue)
+                Text(note).font(.caption).foregroundStyle(StudioTheme.accent)
             }
         }
 
-        Section("Engine") {
+        StudioGroup("Engine") {
             Toggle("Live input HUD", isOn: $coordinator.showInputHUD)
+                .font(.subheadline.weight(.medium))
             devSlider("Max speed", value: $coordinator.devMaxSpeed, range: 500...30000, fmt: "%.0f")
             devSlider("Distance period", value: $coordinator.devDistancePeriod, range: 100...4000, fmt: "%.0f")
             devSlider("Fade period", value: $coordinator.devFadePeriod, range: 8...512, fmt: "%.0f")
         }
 
-        Section("Stroke recorder (BrushHarness fixtures)") {
+        StudioGroup("Stroke recorder (BrushHarness fixtures)") {
             Toggle("Record strokes", isOn: $coordinator.isRecordingStrokes)
-            Text("Recording stays on after you close the Studio — draw on the canvas, then come back here to upload.")
-                .font(.caption2).foregroundStyle(.secondary)
+                .font(.subheadline.weight(.medium))
+            StudioFootnote("Recording captures strokes drawn on the CANVAS (not this pad) — close the Studio, draw, then come back to upload.")
             TextField("Note (what's wrong / what to look at)", text: $uploadNote)
                 .font(.caption)
                 .textFieldStyle(.roundedBorder)
@@ -566,10 +624,8 @@ private struct DeveloperSection: View {
                 Text("\(coordinator.recordedStrokes.count) stroke\(coordinator.recordedStrokes.count == 1 ? "" : "s") recorded")
                     .font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                // .borderless is LOAD-BEARING: with the default style, a Form row
-                // forwards one tap to EVERY Button in the row — tapping Upload also
-                // fired Clear, wiping the recording before the upload read it (the
-                // "recording gone + upload failed" device reports, 2026-07-15/16).
+                // .borderless is LOAD-BEARING inside Forms; kept here for the same
+                // one-tap-fires-every-button hazard (2026-07-15/16 device reports).
                 Button("Clear") {
                     coordinator.recordedStrokes.removeAll()
                     uploadState = .idle
@@ -615,8 +671,7 @@ private struct DeveloperSection: View {
                 .buttonStyle(.borderless)
                 .font(.caption)
             }
-            Text("Upload sends the stroke data (for exact replay) + a PNG of the canvas to Kiki Insights — a one-tap brush bug report. Share… is the offline AirDrop fallback.")
-                .font(.caption2).foregroundStyle(.secondary)
+            StudioFootnote("Upload sends the stroke data (for exact replay) + a PNG of the canvas to Kiki Insights — a one-tap brush bug report. Share… is the offline AirDrop fallback.")
         }
         .sheet(item: $recordingShareItem) { item in
             ShareSheet(activityItems: [item.url])
@@ -640,9 +695,40 @@ private struct RecordingShareItem: Identifiable {
 
 private enum FixtureUploadState { case idle, uploading, done, failed }
 
-// MARK: - Shared controls
+// MARK: - Shared building blocks
 
-/// A titled Section wrapping one dynamics parameter: enable toggle + full curve editor.
+/// A titled sub-group inside a section column (replaces Form's Section on the dark page).
+struct StudioGroup<Content: View>: View {
+    let title: String
+    @ViewBuilder let content: Content
+
+    init(_ title: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(title.uppercased())
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.45))
+                .kerning(0.6)
+            content
+        }
+        .padding(.top, 8)
+    }
+}
+
+/// Small secondary explanatory text.
+struct StudioFootnote: View {
+    let text: String
+    init(_ text: String) { self.text = text }
+    var body: some View {
+        Text(text).font(.caption2).foregroundStyle(.white.opacity(0.45))
+    }
+}
+
+/// A titled dynamics parameter group: header row with enable toggle + full curve editor.
 struct CurveToggleSection: View {
     let title: String
     @Binding var option: CurveOption?
@@ -650,24 +736,27 @@ struct CurveToggleSection: View {
     let defaultSensor: BrushSensor
 
     var body: some View {
-        Section(title) {
-            Toggle("Enabled", isOn: Binding(
+        VStack(alignment: .leading, spacing: 12) {
+            Toggle(isOn: Binding(
                 get: { option != nil },
                 set: { on in
                     option = on
                         ? CurveOption(sensors: [SensorChannel(sensor: defaultSensor)], fold: fold)
                         : nil
-                }))
+                })) {
+                Text(title).font(.headline)
+            }
             if option != nil {
                 CurveOptionEditor(option: Binding(
                     get: { option ?? CurveOption(sensors: [], fold: fold) },
                     set: { option = $0 }))
             }
         }
+        .padding(.top, 8)
     }
 }
 
-/// Selectable labeled chip (presets, saved brushes).
+/// Selectable labeled chip (presets, saved brushes, shapes, grains).
 struct StudioChip: View {
     let label: String
     let selected: Bool
@@ -681,13 +770,9 @@ struct StudioChip: View {
                 .minimumScaleFactor(0.7)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 10)
-                .background(selected ? Color.accentColor.opacity(0.18) : Color.gray.opacity(0.12))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .strokeBorder(selected ? Color.accentColor : .clear, lineWidth: 1.5)
-                )
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-                .foregroundStyle(selected ? Color.accentColor : .primary)
+                .background(selected ? StudioTheme.accent : StudioTheme.chip)
+                .clipShape(RoundedRectangle(cornerRadius: 9))
+                .foregroundStyle(selected ? .white : .white.opacity(0.85))
         }
         .buttonStyle(.plain)
     }
@@ -739,7 +824,8 @@ struct BrushHelp {
     let high: String    // what 100% means
 }
 
-/// A labeled slider with a value readout and a "?" button that opens a help popover.
+/// Procreate-style slider row: label + "?" help left, value chip right, slider below.
+/// The chip reads "None" at a zero percent value (matches Procreate's off state).
 struct BrushSliderRow: View {
     let title: String
     @Binding var value: CGFloat
@@ -759,25 +845,35 @@ struct BrushSliderRow: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 5) {
-                Text(title).font(.subheadline.weight(.medium))
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Text(title).font(.body.weight(.medium))
                 Button { showHelp = true } label: {
                     Image(systemName: "questionmark.circle")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.white.opacity(0.35))
                 }
                 .buttonStyle(.plain)
                 .popover(isPresented: $showHelp) {
                     helpContent.presentationCompactAdaptation(.popover)
                 }
                 Spacer()
-                Text(format(value))
-                    .font(.subheadline.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                Text(chipText)
+                    .font(.subheadline.weight(.medium).monospacedDigit())
+                    .foregroundStyle(.white.opacity(0.85))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 6)
+                    .background(StudioTheme.chip)
+                    .clipShape(Capsule())
             }
             Slider(value: $value, in: range)
+                .tint(.white.opacity(0.85))
         }
+    }
+
+    private var chipText: String {
+        let text = format(value)
+        return text == "0%" ? "None" : text
     }
 
     private var helpContent: some View {
