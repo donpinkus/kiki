@@ -77,7 +77,7 @@ The drawing canvas uses a custom Metal-based rendering engine (`MetalCanvasView`
 ### Performance invariants
 - `applyEraserStamps` creates a temporary `MTLBuffer` per batch (no shared-buffer races) and commits **without** `waitUntilCompleted`.
 - `flattenScratchIntoCanvas` is the only `waitUntilCompleted` on the drawing hot path — runs once per stroke end, not per frame.
-- `clearTexture` uses `waitUntilCompleted` but only runs at initial document allocation (`configureDocument`) — not interactive, and not on resize (the document is fixed-size and never resized; see Document resolution above).
+- `clearTexture` uses `waitUntilCompleted` but only runs on cold paths (document allocation, layer add/reset/restore, overlay-texture creation, opaque-snapshot background prep) — never per-frame, and never on resize (the document is fixed-size and never resized; see Document resolution above).
 
 ## Module Dependencies
 

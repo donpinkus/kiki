@@ -830,10 +830,11 @@ public final class CanvasRenderer {
     }
 
     /// Block until every command buffer submitted so far on the renderer's queue has
-    /// completed (empty buffer + same-queue ordering). **BrushHarness-only**: on device,
-    /// touch batches arrive ~8 ms apart so the GPU keeps up with the wet brush's CPU
-    /// pickup reads; a headless loop submits batches back-to-back and would sample a much
-    /// staler canvas without draining. NEVER call this on the app's interactive path
+    /// completed (empty buffer + same-queue ordering). Callers: BrushHarness's headless
+    /// replay AND the Brush Studio pad's stroke re-render (`paintRetained`) — both
+    /// submit batches back-to-back and would sample a much staler canvas without
+    /// draining. On device, live touch batches arrive ~8 ms apart so the GPU keeps up
+    /// without this. NEVER call this on the interactive per-touch/per-frame path
     /// (see Performance invariants in CLAUDE.md).
     func waitUntilQueueDrained() {
         guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
@@ -1612,8 +1613,10 @@ public final class CanvasRenderer {
         guard let enc = cmdBuf.makeRenderCommandEncoder(descriptor: rpd) else { return }
         enc.endEncoding()
         cmdBuf.commit()
-        // waitUntilCompleted is acceptable here — clearTexture runs once during
-        // canvas resize, not on the per-frame hot path.
+        // waitUntilCompleted is acceptable here — clearTexture runs on cold
+        // paths only (document allocation, layer add/reset/restore, overlay
+        // texture creation, opaque-snapshot background prep), never on the
+        // per-frame hot path.
         cmdBuf.waitUntilCompleted()
     }
 

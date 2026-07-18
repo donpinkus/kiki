@@ -13,6 +13,17 @@ import os
 ///   - Touch events → stamp instances (CPU, fast) → instanced GPU draw (per frame).
 ///   - `CADisplayLink` drives rendering; only encodes a pass when dirty.
 ///   - Active stroke lives in a scratch texture; flattened into the canvas on touchesEnded.
+/// Weak-target shim for CADisplayLink. The link (and the runloop it's
+/// scheduled on) strongly retains its target — pointing it at the view
+/// directly would keep the view alive forever (see the comment at the
+/// CADisplayLink creation site). The link retains only this proxy; the
+/// proxy holds the view weakly.
+private final class DisplayLinkProxy {
+    weak var target: MetalCanvasView?
+    init(target: MetalCanvasView) { self.target = target }
+    @objc func fire() { target?.displayLinkFired() }
+}
+
 public final class MetalCanvasView: UIView {
 
     // MARK: - Public State
@@ -313,12 +324,18 @@ public final class MetalCanvasView: UIView {
         let metalLayer = self.layer as! CAMetalLayer
         metalLayer.device = renderer.device
         metalLayer.pixelFormat = .bgra8Unorm_srgb
-        metalLayer.framebufferOnly = false  // allow drawHierarchy reads for stream capture
+        metalLayer.framebufferOnly = false  // allow getBytes/CIImage drawable reads for stream capture
         metalLayer.maximumDrawableCount = 2  // double-buffer for lowest latency
         metalLayer.isOpaque = false          // transparent so background UIImageView shows
 
         // Display link at ProMotion rate. Only fires when dirty.
-        let link = CADisplayLink(target: self, selector: #selector(displayLinkFired))
+        // Target the weak proxy, NOT self: CADisplayLink retains its target
+        // and the main runloop retains the scheduled link, so a direct-self
+        // target makes the runloop → link → view chain immortal — deinit
+        // never runs and every navigation away leaks the whole canvas
+        // (renderer + ≥16 MB of layer textures). With the proxy, the view
+        // deallocates normally and deinit invalidates the link.
+        let link = CADisplayLink(target: DisplayLinkProxy(target: self), selector: #selector(DisplayLinkProxy.fire))
         link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
         link.add(to: .main, forMode: .common)
         self.displayLink = link
@@ -431,7 +448,7 @@ public final class MetalCanvasView: UIView {
 
     // MARK: - Display Link
 
-    @objc private func displayLinkFired() {
+    @objc fileprivate func displayLinkFired() {
         guard isDirty else { return }
         isDirty = false
         // Brush Studio pad: a knob changed since the last frame — re-render every
