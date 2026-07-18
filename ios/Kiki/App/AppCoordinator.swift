@@ -115,8 +115,22 @@ final class AppCoordinator {
             applyTool()
         }
     }
-    /// Stroke-end taper ("Taper"). 0 = none; higher tapers the ends. See Phase 2.
-    var toolTaper: CGFloat = 0.0 {
+    /// Per-end stroke taper ("Taper" start/end, Procreate Pressure Taper). 0 = none.
+    /// The legacy symmetric BrushConfig.taper folds into these on apply (max per end).
+    var toolTaperStart: CGFloat = 0.0 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    var toolTaperEnd: CGFloat = 0.0 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    /// Random per-dab tip spin ("Scatter", Procreate Shape). 0 = none, 1 = fully random.
+    var toolRotationJitter: CGFloat = 0.0 {
         didSet {
             guard !isSwappingToolValues else { return }
             applyTool()
@@ -437,11 +451,6 @@ final class AppCoordinator {
         .eraser: 0.3,
         .lasso: 0.3
     ]
-    private var storedToolTapers: [DrawingTool: CGFloat] = [
-        .brush: 0.0,
-        .eraser: 0.0,
-        .lasso: 0.0
-    ]
     /// Per-tool brush shape. Absent = procedural round; only the brush meaningfully uses it.
     private var storedToolShapes: [DrawingTool: String] = [:]
 
@@ -453,7 +462,6 @@ final class AppCoordinator {
         storedToolStreamlines[oldTool] = toolStreamline
         storedToolHardnesses[oldTool] = toolHardness
         storedToolSpacings[oldTool] = toolSpacing
-        storedToolTapers[oldTool] = toolTaper
         storedToolShapes[oldTool] = toolShapeID  // nil clears the entry
         isSwappingToolValues = true
         toolSize = storedToolSizes[newTool] ?? toolSize
@@ -462,7 +470,6 @@ final class AppCoordinator {
         toolStreamline = storedToolStreamlines[newTool] ?? toolStreamline
         toolHardness = storedToolHardnesses[newTool] ?? toolHardness
         toolSpacing = storedToolSpacings[newTool] ?? toolSpacing
-        toolTaper = storedToolTapers[newTool] ?? toolTaper
         toolShapeID = storedToolShapes[newTool]
         isSwappingToolValues = false
     }
@@ -2253,7 +2260,9 @@ final class AppCoordinator {
         toolHardness = c.hardness
         toolSpacing = c.spacing
         toolSpacingJitter = c.spacingJitter
-        toolTaper = c.taper
+        toolTaperStart = max(c.taper, c.taperStart)
+        toolTaperEnd = max(c.taper, c.taperEnd)
+        toolRotationJitter = c.rotationJitter
         toolShapeID = c.shapeID
         toolAspect = c.aspectRatio
         toolGrainID = c.grainID
@@ -2298,7 +2307,9 @@ final class AppCoordinator {
         toolHardness = d.hardness
         toolSpacing = d.spacing
         toolSpacingJitter = d.spacingJitter
-        toolTaper = d.taper
+        toolTaperStart = 0
+        toolTaperEnd = 0
+        toolRotationJitter = 0
         toolShapeID = nil
         toolAspect = d.aspectRatio
         toolGrainID = nil
@@ -2358,7 +2369,9 @@ final class AppCoordinator {
                 hardness: toolHardness,
                 spacing: toolSpacing,
                 spacingJitter: toolSpacingJitter,
-                taper: toolTaper,
+                taper: 0,
+                taperStart: toolTaperStart,
+                taperEnd: toolTaperEnd,
                 taperOpacity: toolTaperOpacity,
                 wetEnabled: toolWetEnabled || toolWetSmudge,
                 wetStrength: toolWetStrength,
@@ -2380,6 +2393,7 @@ final class AppCoordinator {
                 stampCount: Int(toolStampCount.rounded()),
                 stampCountJitter: toolStampCountJitter,
                 rotationFollow: toolRotationFollow,
+                rotationJitter: toolRotationJitter,
                 flipX: toolFlipX,
                 flipY: toolFlipY,
                 secondaryColor: toolSecondaryColor.map { $0.codable },

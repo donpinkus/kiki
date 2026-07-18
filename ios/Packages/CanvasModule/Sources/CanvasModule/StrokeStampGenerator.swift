@@ -131,11 +131,15 @@ enum StrokeStampGenerator {
         // travel direction → rotation = atan2(-dx, dy). Round (procedural) brushes are
         // radially symmetric, so they stay at 0.
         let orientsToStroke = BrushShapeCatalog.orientsToStroke(brush.shapeID)
-        // Blobby dry-media tips: random per-dab spin (catalog `rotationJitter`) unless
-        // the brush drives rotation explicitly — same-orientation art repetition reads
-        // as discernible stamps (device report, 2026-07-16).
-        let shapeRotationJitter = BrushShapeCatalog.descriptor(for: brush.shapeID).rotationJitter
-            && brush.dynamics?.rotation == nil && brush.rotationFollow == nil
+        // Random per-dab spin (Procreate Shape "Scatter"). Two sources, take the max:
+        // the user knob `brush.rotationJitter` (explicit intent — applies even with
+        // follow/dynamics rotation, adding spin on top), and the dry-media shapes'
+        // catalog flag (full spin, but only when the brush doesn't drive rotation
+        // explicitly — same-orientation art repetition reads as discernible stamps,
+        // device report 2026-07-16).
+        let catalogSpin: CGFloat = (BrushShapeCatalog.descriptor(for: brush.shapeID).rotationJitter
+            && brush.dynamics?.rotation == nil && brush.rotationFollow == nil) ? 1 : 0
+        let rotationJitterAmount = Double(max(catalogSpin, max(0, min(1, brush.rotationJitter))))
         // Signed follow-stroke rotation (Procreate Shape "Rotation" −1…1). nil = legacy:
         // catalog-orienting shapes follow fully, others stay upright.
         let rotationFollow: CGFloat = {
@@ -364,8 +368,12 @@ enum StrokeStampGenerator {
                        interior: Bool = false) {
             dabSerial &+= 1
             var attr = attr
-            if shapeRotationJitter {
-                attr.rotation += Float(brushHash01(spacingSeed, dabSerial, 0x5B1A) * 2 * Double.pi)
+            if rotationJitterAmount > 0 {
+                // Centered: ±(amount·π) — at 1 that's the full circle (uniform, same
+                // distribution as the legacy 0…2π spin); partial amounts wobble around
+                // the tip's driven orientation instead of spinning one way.
+                let spin = (brushHash01(spacingSeed, dabSerial, 0x5B1A) - 0.5) * 2 * Double.pi * rotationJitterAmount
+                attr.rotation += Float(spin)
             }
             if flowCompRatio < 1 {
                 // a' = 1−(1−a)^ratio; premultiplied color scales by a'/a exactly.

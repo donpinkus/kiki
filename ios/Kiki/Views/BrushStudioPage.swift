@@ -5,11 +5,14 @@ import CanvasModule
 //
 // THE brush-editing surface: dark three-pane layout matching Procreate's Brush Studio —
 // left rail (sections, blue pill selection), middle controls column, and a large
-// interactive DRAWING PAD on the right (a bare MetalCanvasView holding the live brush,
-// so you try every knob change immediately; scribbles persist across tweaks and are
-// never saved). Cancel reverts to the on-open snapshot; ✓ keeps the edits. All controls
-// bind the same AppCoordinator tool state the canvas uses — you are always editing the
-// brush you're holding, and "Save as brush" snapshots it into the library.
+// interactive DRAWING PAD on the right (live brush; strokes re-render as knobs change).
+//
+// TAXONOMY (2026-07-17): tabs, group headings, and attribute names mirror Procreate's
+// Brush Studio verbatim (documents/research/krita-brush/14-procreate-brush-studio-
+// inventory.md) so gaps in our engine are VISIBLE, not hidden: every Procreate
+// attribute appears either as a bound control, a "via curves" pointer (capability
+// exists in the sensor-curve engine), or a grayed N/A gap row. Kiki-only knobs live
+// in "Kiki extensions" groups at the bottom of each tab.
 
 struct BrushStudioPage: View {
     @Environment(AppCoordinator.self) private var coordinator
@@ -18,8 +21,8 @@ struct BrushStudioPage: View {
     @State private var saveName = ""
     @State private var padClearToken = 0
     @State private var snapshot: AppCoordinator.BrushStudioSnapshot?
-    /// Local mirror of coordinator.toolDynamics (nil ⇄ inert), edited by the Dynamics +
-    /// Color sections. Synced both ways below; Equatable guards break the write cycle.
+    /// Local mirror of coordinator.toolDynamics (nil ⇄ inert), edited by several
+    /// sections. Synced both ways below; Equatable guards break the write cycle.
     @State private var dyn = BrushDynamics()
 
     var body: some View {
@@ -76,7 +79,7 @@ struct BrushStudioPage: View {
                                     .font(.body.weight(section == s ? .semibold : .regular))
                                 Spacer(minLength: 0)
                             }
-                            .padding(.vertical, 11)
+                            .padding(.vertical, 10)
                             .padding(.horizontal, 16)
                             .background(section == s ? StudioTheme.accent : .clear)
                             .clipShape(RoundedRectangle(cornerRadius: 12))
@@ -105,15 +108,20 @@ struct BrushStudioPage: View {
                     .foregroundStyle(.white.opacity(0.85))
                 switch section {
                 case .brushes: BrushesSection()
-                case .strokePath: StrokePathSection()
+                case .strokePath: StrokePathSection(dyn: $dyn)
                 case .stabilization: StabilizationSection()
                 case .taper: TaperSection()
-                case .shape: ShapeSection()
+                case .shape: ShapeSection(dyn: $dyn)
                 case .grain: GrainSection()
                 case .rendering: RenderingSection()
-                case .wet: WetSection()
-                case .color: ColorSection(dyn: $dyn)
+                case .wetMix: WetMixSection()
+                case .colorDynamics: ColorDynamicsSection(dyn: $dyn)
                 case .dynamics: DynamicsSection(dyn: $dyn)
+                case .applePencil: ApplePencilSection()
+                case .properties: PropertiesSection()
+                case .about: AboutSection(onReset: {
+                    if let snapshot { coordinator.restoreBrushSnapshot(snapshot) }
+                })
                 case .developer: DeveloperSection(dyn: $dyn)
                 }
             }
@@ -154,7 +162,7 @@ struct BrushStudioPage: View {
             .clipShape(RoundedRectangle(cornerRadius: 22))
 
             HStack(spacing: 10) {
-                padChip {
+                padChipLabel {
                     HStack(spacing: 8) {
                         Image(systemName: "scribble.variable")
                         Text("Drawing Pad").font(.subheadline.weight(.semibold))
@@ -211,11 +219,6 @@ struct BrushStudioPage: View {
         return ""
     }
 
-    /// A non-interactive dark floating chip (label style shared with the buttons).
-    private func padChip(@ViewBuilder _ content: () -> some View) -> some View {
-        padChipLabel(content)
-    }
-
     private func padChipLabel(@ViewBuilder _ content: () -> some View) -> some View {
         content()
             .foregroundStyle(.white.opacity(0.92))
@@ -238,35 +241,31 @@ enum StudioTheme {
     static let railIdle = Color.white.opacity(0.62)
 }
 
+/// Procreate's Brush Studio attribute list (their order), plus Kiki's Brushes (library)
+/// on top and Developer at the bottom. Materials (3D-only) and Preview (replaced by the
+/// live drawing pad) are intentionally absent.
 enum StudioSection: String, CaseIterable, Identifiable {
     case brushes = "Brushes"
-    case strokePath = "Stroke path"
+    case strokePath = "Stroke Path"
     case stabilization = "Stabilization"
     case taper = "Taper"
     case shape = "Shape"
     case grain = "Grain"
     case rendering = "Rendering"
-    case wet = "Wet paint"
-    case color = "Color dynamics"
+    case wetMix = "Wet Mix"
+    case colorDynamics = "Color Dynamics"
     case dynamics = "Dynamics"
+    case applePencil = "Apple Pencil"
+    case properties = "Properties"
+    case about = "About this brush"
     case developer = "Developer"
 
     var id: String { rawValue }
 
-    /// Column heading (Procreate uses e.g. "Stroke properties" for Stroke path).
     var heading: String {
         switch self {
-        case .brushes: return "Brushes"
         case .strokePath: return "Stroke properties"
-        case .stabilization: return "Stabilization"
-        case .taper: return "Taper"
-        case .shape: return "Shape"
-        case .grain: return "Grain"
-        case .rendering: return "Rendering"
-        case .wet: return "Wet paint"
-        case .color: return "Color dynamics"
-        case .dynamics: return "Pencil dynamics"
-        case .developer: return "Developer"
+        default: return rawValue
         }
     }
 
@@ -279,9 +278,12 @@ enum StudioSection: String, CaseIterable, Identifiable {
         case .shape: return "seal"
         case .grain: return "circle.grid.3x3"
         case .rendering: return "drop.halffull"
-        case .wet: return "drop"
-        case .color: return "paintpalette"
+        case .wetMix: return "drop"
+        case .colorDynamics: return "paintpalette"
         case .dynamics: return "gauge.with.needle"
+        case .applePencil: return "pencil"
+        case .properties: return "list.bullet"
+        case .about: return "info.circle"
         case .developer: return "wrench.and.screwdriver"
         }
     }
@@ -357,10 +359,11 @@ private struct BrushesSection: View {
     }
 }
 
-// MARK: - Stroke path
+// MARK: - Stroke Path
 
 private struct StrokePathSection: View {
     @Environment(AppCoordinator.self) private var coordinator
+    @Binding var dyn: BrushDynamics
 
     var body: some View {
         @Bindable var coordinator = coordinator
@@ -368,15 +371,15 @@ private struct StrokePathSection: View {
 
         BrushSliderRow("Spacing", value: $coordinator.toolSpacing, range: 0.02...1.0, help: BrushHelpCatalog.help["Spacing"]!)
         Group {
-            BrushSliderRow("Spacing jitter", value: $coordinator.toolSpacingJitter, range: 0.0...1.0, help: BrushHelpCatalog.help["Spacing jitter"]!)
-            BrushSliderRow("Fall off", value: $coordinator.toolFallOff, range: 0.0...1.0, help: BrushHelpCatalog.help["Fall off"]!)
-            BrushSliderRow("Count", value: $coordinator.toolStampCount, range: 1...8, help: BrushHelpCatalog.help["Count"]!,
-                           format: { "\(Int($0.rounded()))" })
-            if coordinator.toolStampCount.rounded() > 1 {
-                BrushSliderRow("Count jitter", value: $coordinator.toolStampCountJitter, range: 0.0...1.0, help: BrushHelpCatalog.help["Count jitter"]!)
-            }
+            BrushSliderRow("Spacing Jitter", value: $coordinator.toolSpacingJitter, range: 0.0...1.0, help: BrushHelpCatalog.help["Spacing Jitter"]!)
+            CurveAmountSlider(title: "Jitter Lateral", option: $dyn.scatterLateral,
+                              defaultSensors: [], help: BrushHelpCatalog.help["Jitter Lateral"]!)
+            CurveAmountSlider(title: "Jitter Linear", option: $dyn.scatterLinear,
+                              defaultSensors: [], help: BrushHelpCatalog.help["Jitter Linear"]!)
+            BrushSliderRow("Fall Off", value: $coordinator.toolFallOff, range: 0.0...1.0, help: BrushHelpCatalog.help["Fall Off"]!)
         }
         .disabled(wet).opacity(wet ? 0.35 : 1)
+        StudioFootnote("Jitter amounts can also be pressure-driven: Dynamics tab → Scatter ⊥ / Scatter ∥ curves.")
         if wet { WetGateFootnote() }
     }
 }
@@ -388,9 +391,17 @@ private struct StabilizationSection: View {
 
     var body: some View {
         @Bindable var coordinator = coordinator
-        BrushSliderRow("Stabilize", value: $coordinator.toolStreamline, range: 0.0...1.0, help: BrushHelpCatalog.help["Stabilize"]!)
-        BrushSliderRow("Smoothing", value: $coordinator.toolStabilization, range: 0.0...1.0, help: BrushHelpCatalog.help["Smoothing"]!)
-        BrushSliderRow("Pressure smoothing", value: $coordinator.toolPressureSmoothing, range: 0.0...1.0, help: BrushHelpCatalog.help["Pressure smoothing"]!)
+        StudioGroup("StreamLine") {
+            BrushSliderRow("Amount", value: $coordinator.toolStreamline, range: 0.0...1.0, help: BrushHelpCatalog.help["StreamLine Amount"]!)
+            BrushSliderRow("Pressure", value: $coordinator.toolPressureSmoothing, range: 0.0...1.0, help: BrushHelpCatalog.help["StreamLine Pressure"]!)
+        }
+        StudioGroup("Stabilization") {
+            BrushSliderRow("Amount", value: $coordinator.toolStabilization, range: 0.0...1.0, help: BrushHelpCatalog.help["Stabilization Amount"]!)
+        }
+        StudioGroup("Motion Filtering") {
+            GapRow("Amount", note: "Wobble-extremity filtering without averaging — not in Kiki's engine (our Stabilization is a distance-Gaussian).")
+            GapRow("Expression", note: "Counteracts over-smoothing — depends on Motion Filtering.")
+        }
     }
 }
 
@@ -403,13 +414,25 @@ private struct TaperSection: View {
         @Bindable var coordinator = coordinator
         let wet = coordinator.toolWetEnabled
 
-        Group {
-            BrushSliderRow("Taper", value: $coordinator.toolTaper, range: 0.0...1.0, help: BrushHelpCatalog.help["Taper"]!)
-            if coordinator.toolTaper > 0.005 {
-                BrushSliderRow("Taper opacity", value: $coordinator.toolTaperOpacity, range: 0.0...1.0, help: BrushHelpCatalog.help["Taper opacity"]!)
+        StudioGroup("Pressure Taper") {
+            Group {
+                BrushSliderRow("Start", value: $coordinator.toolTaperStart, range: 0.0...1.0, help: BrushHelpCatalog.help["Taper Start"]!)
+                BrushSliderRow("End", value: $coordinator.toolTaperEnd, range: 0.0...1.0, help: BrushHelpCatalog.help["Taper End"]!)
+                BrushSliderRow("Opacity", value: $coordinator.toolTaperOpacity, range: 0.0...1.0, help: BrushHelpCatalog.help["Taper Opacity"]!)
             }
+            .disabled(wet).opacity(wet ? 0.35 : 1)
+            GapRow("Link Tip Sizes", note: "Both taper ends share one tip size.")
+            GapRow("Size", note: "Severity of the thick→thin transition — Kiki's taper profile is fixed.")
+            GapRow("Pressure", note: "Toggle taper responding to pencil pressure.")
+            GapRow("Tip", note: "Fine vs chunky taper tip.")
+            GapRow("Tip Animation", note: "Animates the tip while drawing.")
         }
-        .disabled(wet).opacity(wet ? 0.35 : 1)
+        StudioGroup("Touch Taper") {
+            GapRow("Touch Taper", note: "Separate taper for finger strokes — Kiki applies one taper to all input.")
+        }
+        StudioGroup("Properties") {
+            GapRow("Classic Taper", note: "Legacy Procreate taper behavior.")
+        }
         if wet { WetGateFootnote() }
     }
 }
@@ -418,34 +441,77 @@ private struct TaperSection: View {
 
 private struct ShapeSection: View {
     @Environment(AppCoordinator.self) private var coordinator
+    @Binding var dyn: BrushDynamics
 
     var body: some View {
         @Bindable var coordinator = coordinator
         let wet = coordinator.toolWetEnabled
 
-        StudioGroup("Tip") {
+        StudioGroup("Shape Source") {
             Group {
                 BrushShapePicker(selection: $coordinator.toolShapeID)
-                if coordinator.toolShapeID != nil {
-                    BrushSliderRow("Tip lightness", value: $coordinator.toolTipLightness, range: 0.0...1.0, help: BrushHelpCatalog.help["Tip lightness"]!)
-                }
             }
             .disabled(wet).opacity(wet ? 0.35 : 1)
+            GapRow("Import (Photo / File / Paste)", note: "Kiki ships a fixed tip catalog — importing your own tip PNG isn't wired yet (engine supports any grayscale PNG).")
         }
-        StudioGroup("Geometry") {
-            BrushSliderRow("Hardness", value: $coordinator.toolHardness, range: 0.0...1.0, help: BrushHelpCatalog.help["Hardness"]!)
-            BrushSliderRow("Aspect", value: $coordinator.toolAspect, range: 0.1...1.0, help: BrushHelpCatalog.help["Aspect"]!)
-            BrushSliderRow("Angle", value: $coordinator.toolTipAngle, range: 0...(.pi), help: BrushHelpCatalog.help["Angle"]!,
-                           format: { "\(Int(($0 * 180 / .pi).rounded()))\u{00B0}" })
-            if coordinator.toolShapeID != nil {
-                Group {
+        StudioGroup("Behavior") {
+            Group {
+                if coordinator.toolShapeID != nil {
                     BrushSliderRow("Rotation", value: $coordinator.toolRotationFollow, range: -1.0...1.0, help: BrushHelpCatalog.help["Rotation"]!,
                                    format: { String(format: "%+.0f%%", $0 * 100) })
+                }
+                Toggle(isOn: Binding(
+                    get: { dyn.rotation?.sensors.contains { $0.sensor == .tiltDirection } ?? false },
+                    set: { on in
+                        dyn.rotation = on
+                            ? CurveOption(sensors: [SensorChannel(sensor: .tiltDirection)], fold: .rotationLike)
+                            : nil
+                    })) {
+                    Text("Azimuth").font(.subheadline.weight(.medium))
+                }
+                StudioFootnote("Azimuth: the pencil's tilt direction orients the tip (overrides stroke-direction rotation).")
+            }
+            .disabled(wet).opacity(wet ? 0.35 : 1)
+            GapRow("Azimuth and barrel roll", note: "Pencil Pro barrel-roll input isn't read yet.")
+        }
+        StudioGroup("Properties") {
+            Group {
+                BrushSliderRow("Scatter", value: $coordinator.toolRotationJitter, range: 0.0...1.0, help: BrushHelpCatalog.help["Scatter"]!)
+                BrushSliderRow("Count", value: $coordinator.toolStampCount, range: 1...8, help: BrushHelpCatalog.help["Count"]!,
+                               format: { "\(Int($0.rounded()))" })
+                if coordinator.toolStampCount.rounded() > 1 {
+                    BrushSliderRow("Count Jitter", value: $coordinator.toolStampCountJitter, range: 0.0...1.0, help: BrushHelpCatalog.help["Count Jitter"]!)
+                }
+                if coordinator.toolShapeID != nil {
                     HStack(spacing: 24) {
                         Toggle("Flip X", isOn: $coordinator.toolFlipX)
                         Toggle("Flip Y", isOn: $coordinator.toolFlipY)
                     }
                     .font(.subheadline.weight(.medium))
+                }
+                BrushSliderRow("Roundness", value: $coordinator.toolAspect, range: 0.1...1.0, help: BrushHelpCatalog.help["Roundness"]!)
+                BrushSliderRow("Pressure Roundness", value: Binding(
+                    get: { 1 - CGFloat(dyn.ratio?.minValue ?? 1) },
+                    set: { v in
+                        dyn.ratio = v <= 0.005 ? nil
+                            : CurveOption(sensors: [SensorChannel(sensor: .pressure)], minValue: Double(1 - v))
+                    }), range: 0.0...1.0, help: BrushHelpCatalog.help["Pressure Roundness"]!)
+            }
+            .disabled(wet).opacity(wet ? 0.35 : 1)
+            GapRow("Randomized", note: "One random tip rotation per stroke (Scatter above is per stamp).")
+            GapRow("Tilt Roundness", note: "Tilt-driven squash — configurable via Dynamics → Roundness curve + TiltElevation sensor.")
+            GapRow("Roundness Jitter (vert/horiz)", note: "Random per-stamp squash.")
+        }
+        StudioGroup("Filtering") {
+            GapRow("No / Classic / Improved Filtering", note: "Tip-texture resampling modes — Kiki uses mipmapped sampling only.")
+        }
+        StudioGroup("Kiki extensions") {
+            BrushSliderRow("Hardness", value: $coordinator.toolHardness, range: 0.0...1.0, help: BrushHelpCatalog.help["Hardness"]!)
+            BrushSliderRow("Angle", value: $coordinator.toolTipAngle, range: 0...(.pi), help: BrushHelpCatalog.help["Angle"]!,
+                           format: { "\(Int(($0 * 180 / .pi).rounded()))\u{00B0}" })
+            if coordinator.toolShapeID != nil {
+                Group {
+                    BrushSliderRow("Tip lightness", value: $coordinator.toolTipLightness, range: 0.0...1.0, help: BrushHelpCatalog.help["Tip lightness"]!)
                 }
                 .disabled(wet).opacity(wet ? 0.35 : 1)
             }
@@ -463,21 +529,47 @@ private struct GrainSection: View {
         @Bindable var coordinator = coordinator
         let wet = coordinator.toolWetEnabled
 
-        Group {
-            GrainPicker(selection: $coordinator.toolGrainID)
-            if coordinator.toolGrainID != nil {
-                BrushSliderRow("Grain depth", value: $coordinator.toolGrainDepth, range: 0.0...1.0, help: BrushHelpCatalog.help["Grain depth"]!)
-                BrushSliderRow("Grain scale", value: $coordinator.toolGrainScale, range: 0.5...3.0, help: BrushHelpCatalog.help["Grain scale"]!,
-                               format: { String(format: "%.1f\u{00D7}", $0) })
-                Toggle(isOn: $coordinator.toolGrainMoving) {
-                    Text("Moving grain").font(.subheadline.weight(.medium))
+        StudioGroup("Grain Source") {
+            Group {
+                GrainPicker(selection: $coordinator.toolGrainID)
+            }
+            .disabled(wet).opacity(wet ? 0.35 : 1)
+            GapRow("Import (Photo / File / Paste)", note: "Kiki's grains are procedural — grain-from-image isn't wired yet (needed for brush cloning).")
+        }
+        if coordinator.toolGrainID != nil {
+            StudioGroup("Behavior") {
+                Group {
+                    HStack(spacing: 8) {
+                        StudioChip(label: "Moving", selected: coordinator.toolGrainMoving) {
+                            coordinator.toolGrainMoving = true
+                        }
+                        StudioChip(label: "Texturized", selected: !coordinator.toolGrainMoving) {
+                            coordinator.toolGrainMoving = false
+                        }
+                    }
+                    StudioFootnote(coordinator.toolGrainMoving
+                         ? "Moving: tooth rides with the stroke — streaky crayon/lead."
+                         : "Texturized: tooth stays on the paper, stencil-like — overlapping strokes share it.")
                 }
-                StudioFootnote(coordinator.toolGrainMoving
-                     ? "Tooth rides with the stroke — streaky crayon/lead."
-                     : "Tooth stays on the paper — overlapping strokes share it.")
+                .disabled(wet).opacity(wet ? 0.35 : 1)
+                GapRow("Movement", note: "Drag/smear vs paint-roller grain travel.")
+            }
+            StudioGroup("Settings") {
+                Group {
+                    BrushSliderRow("Scale", value: $coordinator.toolGrainScale, range: 0.5...3.0, help: BrushHelpCatalog.help["Grain Scale"]!,
+                                   format: { String(format: "%.1f\u{00D7}", $0) })
+                    BrushSliderRow("Depth", value: $coordinator.toolGrainDepth, range: 0.0...1.0, help: BrushHelpCatalog.help["Grain Depth"]!)
+                }
+                .disabled(wet).opacity(wet ? 0.35 : 1)
+                GapRow("Zoom", note: "Cropped vs Follow Size grain scaling.")
+                GapRow("Rotation", note: "Grain rotation vs stroke direction.")
+                GapRow("Depth Minimum", note: "Floor for pressure-driven depth (curve Min in Dynamics → Grain).")
+                GapRow("Depth Jitter", note: "Random per-stamp grain strength.")
+                GapRow("Offset Jitter", note: "Random grain offset per stamp.")
+                GapRow("Blend Mode", note: "Grain blend mode — Kiki grain is multiplicative carve only.")
+                GapRow("Brightness / Contrast", note: "Grain texture pre-adjustment.")
             }
         }
-        .disabled(wet).opacity(wet ? 0.35 : 1)
         if wet { WetGateFootnote() }
     }
 }
@@ -487,22 +579,62 @@ private struct GrainSection: View {
 private struct RenderingSection: View {
     @Environment(AppCoordinator.self) private var coordinator
 
+    private static let modes: [(String, Bool)] = [
+        ("Light Glaze", true),          // ≈ Kiki's flow/opacity split ("Glaze")
+        ("Uniformed Glaze", false),
+        ("Intense Glaze", false),
+        ("Heavy Glaze", false),
+        ("Uniform Blending", false),
+        ("Intense Blending", false),
+    ]
+
     var body: some View {
         @Bindable var coordinator = coordinator
         let wet = coordinator.toolWetEnabled
 
-        BrushSliderRow("Opacity", value: $coordinator.toolOpacity, range: 0.05...1.0, help: BrushHelpCatalog.help["Opacity"]!)
-        Group {
-            BrushSliderRow("Flow", value: $coordinator.toolFlow, range: 0.05...1.0, help: BrushHelpCatalog.help["Flow"]!)
+        StudioGroup("Rendering Mode") {
+            VStack(spacing: 6) {
+                ForEach(Self.modes, id: \.0) { mode in
+                    HStack {
+                        Text(mode.0).font(.body.weight(.medium))
+                            .foregroundStyle(mode.1 ? .white : .white.opacity(0.3))
+                        Spacer()
+                        if mode.1 {
+                            Image(systemName: "checkmark").font(.subheadline.weight(.bold))
+                                .foregroundStyle(StudioTheme.accent)
+                        } else {
+                            Text("N/A").font(.caption2.weight(.semibold))
+                                .foregroundStyle(.white.opacity(0.3))
+                        }
+                    }
+                    .padding(.vertical, 8).padding(.horizontal, 14)
+                    .background(mode.1 ? StudioTheme.chip : .clear)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                }
+            }
+            StudioFootnote("Kiki has one rendering mode ≈ Light Glaze (per-dab Flow builds up inside the stroke; Opacity caps the whole stroke). The heavier glazes and the two wet Blending modes are engine gaps — Kiki's wet engine is toggled in Wet Mix instead.")
         }
-        .disabled(wet).opacity(wet ? 0.35 : 1)
+        StudioGroup("Blending") {
+            Group {
+                BrushSliderRow("Flow", value: $coordinator.toolFlow, range: 0.05...1.0, help: BrushHelpCatalog.help["Flow"]!)
+            }
+            .disabled(wet).opacity(wet ? 0.35 : 1)
+            GapRow("Wet Edges", note: "Pigment bleeding into the paper at stroke edges (roadmap spike exists).")
+            GapRow("Burnt Edges", note: "Color-burn where strokes overlap (+ blend-mode choice).")
+            GapRow("Blend Mode", note: "Whole-stroke blend mode (multiply, screen, …) — Kiki strokes are source-over only.")
+            GapRow("Luminance Blending", note: "Luminance-weighted stroke blending.")
+            GapRow("Alpha Threshold", note: "Hard-clips low-alpha stroke fringes.")
+        }
+        StudioGroup("Kiki extensions") {
+            BrushSliderRow("Opacity", value: $coordinator.toolOpacity, range: 0.05...1.0, help: BrushHelpCatalog.help["Opacity"]!)
+        }
         if wet { WetGateFootnote() }
     }
 }
 
-// MARK: - Wet paint
+// MARK: - Wet Mix
 
-private struct WetSection: View {
+private struct WetMixSection: View {
     @Environment(AppCoordinator.self) private var coordinator
 
     var body: some View {
@@ -512,39 +644,37 @@ private struct WetSection: View {
             Text("Wet paint").font(.subheadline.weight(.medium))
             + Text("  (experimental)").font(.caption).foregroundColor(.secondary)
         }
+        StudioFootnote("Procreate enables wet paint via the Blending rendering modes; Kiki uses this toggle. Wet paint uses a round tip — Shape, Flow, Taper and Dynamics don't apply; Opacity scales the deposit.")
         if coordinator.toolWetEnabled {
-            StudioFootnote("Wet paint uses a round tip — Shape, Flow, Taper and Dynamics don't apply. Opacity scales the deposit.")
-            BrushSliderRow("Mix", value: $coordinator.toolWetStrength, range: 0.05...1.0, help: BrushHelpCatalog.help["Mix"]!)
-            BrushSliderRow("Smear", value: $coordinator.toolWetPickup, range: 0.0...1.0, help: BrushHelpCatalog.help["Smear"]!)
+            GapRow("Dilution", note: "Water-transparency — deliberately folded into Attack + Opacity in Kiki's KM engine (decision 2026-07-16).")
             BrushSliderRow("Charge", value: $coordinator.toolWetCharge, range: 0.05...1.0, help: BrushHelpCatalog.help["Charge"]!)
-            BrushSliderRow("Refill", value: $coordinator.toolWetRefill, range: 0.0...1.0, help: BrushHelpCatalog.help["Refill"]!)
-            BrushSliderRow("Wet jitter", value: $coordinator.toolWetJitter, range: 0.0...1.0, help: BrushHelpCatalog.help["Wet jitter"]!)
+            BrushSliderRow("Attack", value: $coordinator.toolWetStrength, range: 0.05...1.0, help: BrushHelpCatalog.help["Attack"]!)
+            BrushSliderRow("Pull", value: $coordinator.toolWetPickup, range: 0.0...1.0, help: BrushHelpCatalog.help["Pull"]!)
+            GapRow("Grade", note: "Chunkiness/contrast of the wet brush texture.")
             BrushSliderRow("Blur", value: $coordinator.toolWetBlur, range: 0.0...1.0, help: BrushHelpCatalog.help["Blur"]!)
+            GapRow("Blur Jitter", note: "Random per-stamp blur.")
+            BrushSliderRow("Wetness Jitter", value: $coordinator.toolWetJitter, range: 0.0...1.0, help: BrushHelpCatalog.help["Wetness Jitter"]!)
+            StudioGroup("Kiki extensions") {
+                BrushSliderRow("Refill", value: $coordinator.toolWetRefill, range: 0.0...1.0, help: BrushHelpCatalog.help["Refill"]!)
+            }
         }
         StudioGroup("Smudge") {
             Toggle("Smudge mode (push canvas color, no new ink)",
                    isOn: $coordinator.toolWetSmudge)
                 .font(.subheadline.weight(.medium))
-            StudioFootnote("Smudge uses the wet engine: Mix and Smear above set its strength and pickup.")
+            StudioFootnote("Smudge uses the wet engine: Attack and Pull above set its strength and pickup.")
         }
     }
 }
 
-/// One-line explanation shown at the bottom of sections whose controls are wet-gated.
-private struct WetGateFootnote: View {
-    var body: some View {
-        StudioFootnote("Dimmed controls don't apply while Wet paint is on (it uses a round procedural tip with its own deposit model).")
-    }
-}
+// MARK: - Color Dynamics
 
-// MARK: - Color dynamics
-
-private struct ColorSection: View {
+private struct ColorDynamicsSection: View {
     @Environment(AppCoordinator.self) private var coordinator
     @Binding var dyn: BrushDynamics
 
     var body: some View {
-        StudioGroup("Secondary color") {
+        StudioGroup("Secondary color (Kiki)") {
             ColorPicker("Ink 2", selection: Binding(
                 get: { coordinator.toolSecondaryColor ?? .yellow },
                 set: { coordinator.toolSecondaryColor = $0 }), supportsOpacity: false)
@@ -553,32 +683,146 @@ private struct ColorSection: View {
                 get: { coordinator.toolSecondaryColor != nil },
                 set: { coordinator.toolSecondaryColor = $0 ? .yellow : nil }))
                 .font(.subheadline.weight(.medium))
-            StudioFootnote("Blend is driven by the Secondary blend curve — pressure for a two-tone nib, Distance for a gradient, Fuzzy for speckle.")
+            StudioFootnote("Procreate picks the secondary color in the color companion; Kiki sets it here. The blends below drive how much of it shows.")
         }
-        CurveToggleSection(title: "Secondary blend", option: $dyn.secondary, fold: .sizeLike, defaultSensor: .pressure)
-        ColorJitterSection(title: "Color jitter (per stroke)", jitter: $dyn.colorJitter)
-        ColorJitterSection(title: "Color jitter (per dab)", jitter: $dyn.dabColorJitter,
+        ColorJitterSection(title: "Stamp Color Jitter", jitter: $dyn.dabColorJitter,
                            defaults: ColorJitter(hue: 0.01, saturation: 0.08, brightness: 0.08))
+        GapRow("Stamp Color Jitter → Darkness", note: "Random per-stamp darkening (separate from Lightness).")
+        GapRow("Stamp Color Jitter → Secondary Color", note: "Random per-stamp secondary blend — approximate via Dynamics → Secondary blend + Fuzzy (dab) sensor.")
+        ColorJitterSection(title: "Stroke Color Jitter", jitter: $dyn.colorJitter)
+        GapRow("Stroke Color Jitter → Darkness / Secondary Color", note: "Per-stroke variants of the above.")
+        StudioGroup("Color Pressure") {
+            CurveAmountSlider(title: "Secondary Color", option: $dyn.secondary,
+                              defaultSensors: [.pressure], help: BrushHelpCatalog.help["Color Pressure Secondary"]!)
+            GapRow("Hue", note: "Pressure shifts hue.")
+            GapRow("Saturation", note: "Pressure shifts saturation.")
+            GapRow("Brightness", note: "Pressure shifts brightness — approximate via Dynamics → Darkness curve.")
+        }
+        StudioGroup("Color Tilt") {
+            GapRow("Hue / Saturation / Lightness / Secondary", note: "Tilt-driven color — no tilt→color mapping in Kiki yet (tilt sensors exist; color targets don't).")
+        }
+        StudioFootnote("Our jitter sliders use Brightness where Procreate splits Lightness/Darkness.")
     }
 }
 
-// MARK: - Dynamics (sensor → curve machine)
+// MARK: - Dynamics (Procreate: speed + jitter; Kiki: the full sensor-curve engine)
 
 private struct DynamicsSection: View {
     @Binding var dyn: BrushDynamics
 
     var body: some View {
-        StudioFootnote("Each parameter maps live pencil sensors (pressure, tilt, speed…) through a response curve. Draw in the pad — the red marker rides the curve.")
-        CurveToggleSection(title: "Size", option: $dyn.size, fold: .sizeLike, defaultSensor: .pressure)
-        CurveToggleSection(title: "Flow", option: $dyn.flow, fold: .sizeLike, defaultSensor: .pressure)
-        CurveToggleSection(title: "Rotation", option: $dyn.rotation, fold: .rotationLike, defaultSensor: .drawingAngle)
-        CurveToggleSection(title: "Scatter", option: $dyn.scatter, fold: .sizeLike, defaultSensor: .pressure)
-        CurveToggleSection(title: "Scatter \u{22A5} (across)", option: $dyn.scatterLateral, fold: .sizeLike, defaultSensor: .pressure)
-        CurveToggleSection(title: "Scatter \u{2225} (along)", option: $dyn.scatterLinear, fold: .sizeLike, defaultSensor: .pressure)
-        CurveToggleSection(title: "Roundness", option: $dyn.ratio, fold: .sizeLike, defaultSensor: .pressure)
-        CurveToggleSection(title: "Spacing", option: $dyn.spacing, fold: .sizeLike, defaultSensor: .speed)
-        CurveToggleSection(title: "Darkness", option: $dyn.darkness, fold: .sizeLike, defaultSensor: .pressure)
-        CurveToggleSection(title: "Grain (moving)", option: $dyn.grain, fold: .sizeLike, defaultSensor: .pressure)
+        StudioGroup("Speed") {
+            CurvePointerRow("Size", note: "Dynamics engine below: enable the Size curve and add the Speed sensor (fast = thin by inverting the curve).")
+            CurvePointerRow("Opacity", note: "Flow curve + Speed sensor.")
+            CurvePointerRow("Spacing", note: "Spacing curve + Speed sensor.")
+        }
+        StudioGroup("Jitter") {
+            CurvePointerRow("Size", note: "Size curve + Fuzzy (dab) sensor.")
+            CurvePointerRow("Opacity", note: "Flow curve + Fuzzy (dab) sensor.")
+        }
+        StudioGroup("Kiki sensor-curve engine") {
+            StudioFootnote("Superset of Procreate's Dynamics: any sensor (pressure, tilt, speed, distance, fade, fuzzy…) drives any parameter through an editable response curve. Draw in the pad — the red marker rides the live curve.")
+            CurveToggleSection(title: "Size", option: $dyn.size, fold: .sizeLike, defaultSensor: .pressure)
+            CurveToggleSection(title: "Flow", option: $dyn.flow, fold: .sizeLike, defaultSensor: .pressure)
+            CurveToggleSection(title: "Rotation", option: $dyn.rotation, fold: .rotationLike, defaultSensor: .drawingAngle)
+            CurveToggleSection(title: "Scatter", option: $dyn.scatter, fold: .sizeLike, defaultSensor: .pressure)
+            CurveToggleSection(title: "Scatter \u{22A5} (across)", option: $dyn.scatterLateral, fold: .sizeLike, defaultSensor: .pressure)
+            CurveToggleSection(title: "Scatter \u{2225} (along)", option: $dyn.scatterLinear, fold: .sizeLike, defaultSensor: .pressure)
+            CurveToggleSection(title: "Roundness", option: $dyn.ratio, fold: .sizeLike, defaultSensor: .pressure)
+            CurveToggleSection(title: "Spacing", option: $dyn.spacing, fold: .sizeLike, defaultSensor: .speed)
+            CurveToggleSection(title: "Darkness", option: $dyn.darkness, fold: .sizeLike, defaultSensor: .pressure)
+            CurveToggleSection(title: "Grain (moving)", option: $dyn.grain, fold: .sizeLike, defaultSensor: .pressure)
+        }
+    }
+}
+
+// MARK: - Apple Pencil
+
+private struct ApplePencilSection: View {
+    var body: some View {
+        StudioGroup("Pressure") {
+            GapRow("Pressure graph", note: "Dedicated pressure response graph — Kiki's equivalent is the per-parameter curve editors (Dynamics tab).")
+            CurvePointerRow("Size", note: "Size curve + Pressure sensor.")
+            CurvePointerRow("Opacity", note: "Flow curve + Pressure sensor.")
+            CurvePointerRow("Flow", note: "Flow curve + Pressure sensor.")
+            GapRow("Bleed", note: "Pressure-driven edge bleed.")
+        }
+        StudioGroup("Tilt") {
+            GapRow("Tilt graph / trigger angle", note: "Angle threshold where tilt kicks in.")
+            CurvePointerRow("Size", note: "Size curve + TiltElevation sensor.")
+            CurvePointerRow("Opacity", note: "Flow curve + TiltElevation sensor.")
+            GapRow("Gradation", note: "Shading softness on an angle.")
+            GapRow("Bleed", note: "Tilt-driven edge bleed.")
+            GapRow("Size Compression", note: "Compresses tilt size range.")
+        }
+        StudioGroup("Barrel Roll (Pencil Pro)") {
+            GapRow("Size / Opacity / Bleed / Relative to stroke", note: "Barrel-roll input isn't read yet (UIKit rollAngle, iOS 17.5+).")
+        }
+        StudioGroup("Cursor & Hover") {
+            GapRow("Cursor Outline / Hover preview", note: "Pencil hover UI — not applicable to Kiki yet.")
+        }
+    }
+}
+
+// MARK: - Properties
+
+private struct PropertiesSection: View {
+    var body: some View {
+        StudioGroup("Brush Behavior") {
+            GapRow("Use Stamp Preview", note: "Library thumbnail as a stamp — Kiki's library shows names (thumbnails planned).")
+            GapRow("Orient to Screen", note: "Rotates the brush with the canvas.")
+            GapRow("Preview Size", note: "Library preview scale.")
+            CurvePointerRow("Smudge Pull", note: "Wet Mix tab: Smudge mode + Pull set the smudge strength.")
+        }
+        StudioGroup("Brush Limits") {
+            GapRow("Maximum / Minimum Size", note: "Per-brush bounds for the sidebar size slider — Kiki's slider range is global.")
+            GapRow("Maximum / Minimum Opacity", note: "Per-brush bounds for the opacity slider.")
+        }
+    }
+}
+
+// MARK: - About this brush
+
+private struct AboutSection: View {
+    @Environment(AppCoordinator.self) private var coordinator
+    let onReset: () -> Void
+
+    var body: some View {
+        StudioGroup("This brush") {
+            HStack {
+                Text(label).font(.title3.weight(.semibold))
+                Spacer()
+            }
+            if let id = coordinator.activeCustomBrushID,
+               let saved = coordinator.customBrushLibrary.brush(for: id) {
+                Text("Saved \(saved.savedAt.formatted(date: .abbreviated, time: .shortened))")
+                    .font(.caption).foregroundStyle(.white.opacity(0.5))
+            }
+        }
+        StudioGroup("Reset") {
+            Button("Reset to opened state") { onReset() }
+                .buttonStyle(.bordered)
+            StudioFootnote("Restores every knob to how it was when you opened the Studio (same as Cancel, without closing). Procreate's reset points aren't implemented — Save as brush is the Kiki equivalent.")
+        }
+    }
+
+    private var label: String {
+        if let id = coordinator.activeCustomBrushID,
+           let saved = coordinator.customBrushLibrary.brush(for: id) {
+            return saved.name
+        }
+        if let id = coordinator.activeCuratedPresetID,
+           let preset = CuratedPresetCatalog.preset(for: id) {
+            return preset.displayName
+        }
+        return "Custom brush"
+    }
+}
+
+/// One-line explanation shown at the bottom of sections whose controls are wet-gated.
+private struct WetGateFootnote: View {
+    var body: some View {
+        StudioFootnote("Dimmed controls don't apply while Wet paint is on (it uses a round procedural tip with its own deposit model).")
     }
 }
 
@@ -636,8 +880,7 @@ private struct DeveloperSection: View {
                 Text("\(coordinator.recordedStrokes.count) stroke\(coordinator.recordedStrokes.count == 1 ? "" : "s") recorded")
                     .font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                // .borderless is LOAD-BEARING inside Forms; kept here for the same
-                // one-tap-fires-every-button hazard (2026-07-15/16 device reports).
+                // .borderless kept: one-tap-fires-every-button hazard (2026-07-15/16).
                 Button("Clear") {
                     coordinator.recordedStrokes.removeAll()
                     uploadState = .idle
@@ -737,6 +980,91 @@ struct StudioFootnote: View {
     init(_ text: String) { self.text = text }
     var body: some View {
         Text(text).font(.caption2).foregroundStyle(.white.opacity(0.45))
+    }
+}
+
+/// A Procreate attribute Kiki doesn't support yet — a VISIBLE gap (the point of the
+/// Procreate-taxonomy exercise). Grayed, with an "N/A" chip and a why/where note.
+struct GapRow: View {
+    let title: String
+    var note: String?
+
+    init(_ title: String, note: String? = nil) {
+        self.title = title
+        self.note = note
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                Text(title).font(.body.weight(.medium)).foregroundStyle(.white.opacity(0.35))
+                Spacer()
+                Text("N/A")
+                    .font(.caption2.weight(.semibold))
+                    .padding(.horizontal, 10).padding(.vertical, 4)
+                    .background(Color.white.opacity(0.05))
+                    .clipShape(Capsule())
+                    .foregroundStyle(.white.opacity(0.3))
+            }
+            if let note {
+                Text(note).font(.caption2).foregroundStyle(.white.opacity(0.3))
+            }
+        }
+    }
+}
+
+/// A Procreate attribute whose CAPABILITY exists in Kiki, but through the sensor-curve
+/// engine rather than a dedicated slider.
+struct CurvePointerRow: View {
+    let title: String
+    let note: String
+
+    init(_ title: String, note: String) {
+        self.title = title
+        self.note = note
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                Text(title).font(.body.weight(.medium)).foregroundStyle(.white.opacity(0.6))
+                Spacer()
+                Text("via curves")
+                    .font(.caption2.weight(.semibold))
+                    .padding(.horizontal, 10).padding(.vertical, 4)
+                    .background(StudioTheme.accent.opacity(0.18))
+                    .clipShape(Capsule())
+                    .foregroundStyle(StudioTheme.accent)
+            }
+            Text(note).font(.caption2).foregroundStyle(.white.opacity(0.4))
+        }
+    }
+}
+
+/// Procreate-style plain amount slider over a dynamics CurveOption: the slider IS the
+/// option's strength — created (with the given default sensors) on first move, cleared
+/// at zero. The full curve editor (Dynamics tab) remains the power surface; this keeps
+/// the two views consistent because both edit the same option.
+struct CurveAmountSlider: View {
+    let title: String
+    @Binding var option: CurveOption?
+    let defaultSensors: [BrushSensor]
+    let help: BrushHelp
+
+    var body: some View {
+        BrushSliderRow(title, value: Binding(
+            get: { CGFloat(option?.strength ?? 0) },
+            set: { v in
+                if v <= 0.005 {
+                    option = nil
+                } else if var existing = option {
+                    existing.strength = Double(v)
+                    option = existing
+                } else {
+                    option = CurveOption(sensors: defaultSensors.map { SensorChannel(sensor: $0) },
+                                         fold: .sizeLike, strength: Double(v))
+                }
+            }), range: 0...1, help: help)
     }
 }
 
@@ -923,61 +1251,76 @@ enum BrushHelpCatalog {
         "Flow": BrushHelp(summary: "How much paint each dab lays down as you draw.",
             low: "Almost nothing per dab — builds up very gradually.",
             high: "Full paint per dab."),
-        "Stabilize": BrushHelp(summary: "Smooths shaky lines by letting the drawn line lag behind the pencil.",
+        "StreamLine Amount": BrushHelp(summary: "Smooths shaky lines by letting the drawn line lag behind the pencil.",
             low: "Follows your hand exactly — every wobble shows.",
             high: "Very smooth and confident, but the line trails behind the pencil."),
-        "Smoothing": BrushHelp(summary: "Averages the path over the distance drawn for clean, steady curves.",
-            low: "No averaging — the path is exactly what Stabilize produces.",
-            high: "Very clean curvature; tremors vanish. The stroke still ends where the pencil lifts."),
-        "Pressure smoothing": BrushHelp(summary: "Low-pass on pencil pressure only — evens out width pulsing without touching the path.",
+        "StreamLine Pressure": BrushHelp(summary: "Low-pass on pencil pressure only — evens out width pulsing without touching the path.",
             low: "Raw pressure — every micro-variation shows in the width.",
             high: "Very even width; deliberate pressure changes respond gradually."),
+        "Stabilization Amount": BrushHelp(summary: "Averages the path over the distance drawn for clean, steady curves.",
+            low: "No averaging — the path is exactly what StreamLine produces.",
+            high: "Very clean curvature; tremors vanish. The stroke still ends where the pencil lifts."),
         "Hardness": BrushHelp(summary: "How crisp or soft the brush edge is.",
             low: "Soft, feathered airbrush edge.",
             high: "Crisp, sharp edge."),
         "Tip lightness": BrushHelp(summary: "Lets the tip's texture lighten and darken the ink (embossed, dimensional strokes).",
             low: "Flat ink — the tip texture only shapes coverage.",
             high: "Full value mapping — dark tip areas darken, light areas lighten; mid-gray = your color."),
-        "Grain depth": BrushHelp(summary: "How strongly the paper tooth shows through the stroke.",
+        "Grain Depth": BrushHelp(summary: "How strongly the paper tooth shows through the stroke.",
             low: "No texture — solid paint.",
             high: "Heavy dry-media break-up; press harder (more flow) to fill the tooth."),
-        "Angle": BrushHelp(summary: "The tip's fixed base angle — a calligraphy nib when Aspect is low.",
+        "Angle": BrushHelp(summary: "The tip's fixed base angle — a calligraphy nib when Roundness is low.",
             low: "0°: the flat axis lies horizontal.",
             high: "180°: rotated through a half turn (90° = vertical)."),
-        "Aspect": BrushHelp(summary: "How flat the brush tip is — a calligraphy/chisel nib at low values.",
-            low: "A thin flat blade (pair with Rotation dynamics to steer the nib).",
+        "Roundness": BrushHelp(summary: "Squashes the tip — a calligraphy/chisel nib at low values.",
+            low: "A thin flat blade (pair with Rotation or Azimuth to steer the nib).",
             high: "Fully round tip."),
+        "Pressure Roundness": BrushHelp(summary: "Pressure squashes the tip: light touch = flattened, full pressure = the Roundness above.",
+            low: "No pressure response.",
+            high: "Light strokes flatten to a blade."),
         "Spacing": BrushHelp(summary: "How far apart the stamped dabs are along the stroke.",
             low: "Dense — a smooth, continuous line.",
             high: "Far apart — you see individual dabs."),
-        "Spacing jitter": BrushHelp(summary: "Randomly varies the gap between dabs, so the stroke's rhythm breathes.",
+        "Spacing Jitter": BrushHelp(summary: "Randomly varies the gap between dabs, so the stroke's rhythm breathes.",
             low: "Even gaps.",
             high: "Gaps vary widely — spray-like, irregular deposits."),
-        "Fall off": BrushHelp(summary: "The stroke's paint gradually runs out as you draw.",
+        "Jitter Lateral": BrushHelp(summary: "Shifts stamps randomly PERPENDICULAR to the stroke — width-wise spray.",
+            low: "Stamps stay on the path.",
+            high: "Stamps scatter far to the sides of the path."),
+        "Jitter Linear": BrushHelp(summary: "Shifts stamps randomly ALONG the stroke direction.",
+            low: "Stamps stay evenly spaced.",
+            high: "Stamps bunch and gap along the path."),
+        "Fall Off": BrushHelp(summary: "The stroke's paint gradually runs out as you draw.",
             low: "Never runs out.",
             high: "Fades to nothing within a short distance — like a drying marker."),
-        "Grain scale": BrushHelp(summary: "How coarse the paper-grain features are.",
+        "Grain Scale": BrushHelp(summary: "How coarse the paper-grain features are.",
             low: "Fine tooth.",
             high: "Coarse, chunky tooth."),
-        "Count": BrushHelp(summary: "How many stamps land at each spacing point (pairs with Scatter dynamics for spray/cluster texture).",
+        "Count": BrushHelp(summary: "How many stamps land at each spacing point (pairs with the Jitter sliders for spray/cluster texture).",
             low: "One stamp per point — the normal stroke.",
             high: "Eight stamps per point, each with its own scatter."),
-        "Count jitter": BrushHelp(summary: "Randomly varies the per-point stamp count, so density breathes along the stroke.",
+        "Count Jitter": BrushHelp(summary: "Randomly varies the per-point stamp count, so density breathes along the stroke.",
             low: "Always the full Count.",
             high: "Anywhere from one stamp up to the full Count, at random."),
         "Rotation": BrushHelp(summary: "How the tip turns with your stroke direction.",
             low: "−100%: turns opposite to the stroke (mirrored calligraphy).",
             high: "+100%: follows the stroke; 0% holds the tip upright."),
-        "Taper": BrushHelp(summary: "Thins the stroke toward its start and end.",
-            low: "Uniform width from end to end.",
-            high: "Tapers to a point at both ends."),
-        "Taper opacity": BrushHelp(summary: "Also fades the ink toward the tapered tips, not just the width.",
+        "Scatter": BrushHelp(summary: "Random spin per stamp (rotation randomization — Procreate's Shape Scatter).",
+            low: "Every stamp keeps the tip's orientation.",
+            high: "Every stamp lands at a fully random angle — no repeating art."),
+        "Taper Start": BrushHelp(summary: "Thins the stroke toward its START.",
+            low: "Full width from the first touch.",
+            high: "Long thin lead-in."),
+        "Taper End": BrushHelp(summary: "Thins the stroke toward its END.",
+            low: "Full width to the lift.",
+            high: "Long thin tail-out."),
+        "Taper Opacity": BrushHelp(summary: "Also fades the ink toward the tapered tips, not just the width.",
             low: "Tips thin but stay full-strength (classic hard taper).",
             high: "Tips fade out to nothing (soft, airy entries and exits)."),
-        "Mix": BrushHelp(summary: "How strongly each dab deposits its color onto the canvas.",
+        "Attack": BrushHelp(summary: "How strongly each wet dab deposits its color onto the canvas (Procreate: how much paint sticks).",
             low: "Barely tints — color builds up slowly.",
             high: "Covers in a single pass."),
-        "Smear": BrushHelp(summary: "How much the brush picks up and carries the colors it crosses.",
+        "Pull": BrushHelp(summary: "How much the brush picks up and drags the colors it crosses (mixing).",
             low: "No pickup — always lays your color, no blending trail.",
             high: "Soaks up and drags color along the stroke (smudgy, blends)."),
         "Charge": BrushHelp(summary: "How much paint is loaded on the brush — it runs out as you stroke.",
@@ -986,11 +1329,14 @@ enum BrushHelpCatalog {
         "Refill": BrushHelp(summary: "How fast the brush re-loads its own color after picking up paint it crossed.",
             low: "Never — picked-up color rides along until you cross something else.",
             high: "Instantly — the brush always lays pure ink, no matter what it crosses."),
-        "Wet jitter": BrushHelp(summary: "Randomly varies how much paint each dab deposits — organic patchiness.",
+        "Wetness Jitter": BrushHelp(summary: "Randomly varies how much paint each dab deposits — organic patchiness.",
             low: "Even deposit along the stroke.",
             high: "Some dabs land soaked, others nearly dry."),
         "Blur": BrushHelp(summary: "Softens the smudge — dragged edges melt instead of staying crisp (Smudge mode only).",
             low: "Crisp smudge — edges keep their definition as they drag.",
-            high: "Soft melt — the smudge averages what it crosses and feathers its rim.")
+            high: "Soft melt — the smudge averages what it crosses and feathers its rim."),
+        "Color Pressure Secondary": BrushHelp(summary: "Pressure blends toward the secondary color (Ink 2).",
+            low: "Always the primary color.",
+            high: "Full pressure = fully Ink 2 (two-tone nib).")
     ]
 }
