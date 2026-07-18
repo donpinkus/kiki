@@ -238,9 +238,14 @@ enum SideBySideVideoComposer {
         export.outputURL = outputURL
         export.outputFileType = .mp4
 
-        await withCheckedContinuation { continuation in
-            export.exportAsynchronously { continuation.resume() }
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                export.exportAsynchronously { continuation.resume() }
+            }
+        } onCancel: {
+            export.cancelExport()
         }
+        if export.status == .cancelled { throw CancellationError() }
         guard export.status == .completed else {
             throw ComposeError.exportFailed(export.error)
         }

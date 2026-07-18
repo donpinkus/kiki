@@ -1242,6 +1242,9 @@ final class AppCoordinator {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             try await SideBySideVideoComposer.export(built, outputURL: output, watermark: watermark)
             return output
+        } catch is CancellationError {
+            // Superseded eager export (settings changed mid-encode) — expected.
+            return nil
         } catch {
             streamLog.error("Replay export failed: \(error.localizedDescription)")
             SentrySDK.capture(error: error) { scope in

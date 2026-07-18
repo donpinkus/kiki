@@ -48,6 +48,10 @@ struct SpeedPaintReplayView: View {
     @State private var isExporting = false
     @State private var exportedURL: URL?
     @State private var exportedKey: String?
+    /// In-flight eager export (started as soon as settings settle, so a share
+    /// tap usually finds the MP4 finished or mostly finished).
+    @State private var exportTask: Task<URL?, Never>?
+    @State private var exportTaskKey: String?
     @State private var shareItem: ReplayShareItem?
     @State private var statusMessage: String?
 
@@ -129,10 +133,20 @@ struct SpeedPaintReplayView: View {
             }
         }
         .task(id: previewKey) { await rebuildPreview() }
+        .task(id: exportKey) {
+            // Eagerly encode for the current settings so the share tap is
+            // instant (or nearly). The 600ms settle absorbs rapid control
+            // flips; .task(id:) cancels the debounce on each change, and
+            // startEagerExport cancels any stale in-flight encode.
+            try? await Task.sleep(for: .milliseconds(600))
+            guard !Task.isCancelled else { return }
+            startEagerExport()
+        }
         .onAppear { startLooping() }
         .onDisappear {
             player.pause()
             if let loopObserver { NotificationCenter.default.removeObserver(loopObserver) }
+            exportTask?.cancel()
         }
     }
 
@@ -220,24 +234,56 @@ struct SpeedPaintReplayView: View {
 
     private var exportKey: String { "\(layout.rawValue)-\(speed.rawValue)-\(watermark)" }
 
-    /// Run `action` with an exported MP4 for the current settings, encoding one
-    /// if the cached export is stale. The encode is the slow part (seconds for
-    /// long recordings), so it happens only here — never for the preview.
+    /// Kick off (or keep) a background encode for the current settings.
+    /// Cancels a stale in-flight encode first — `export` supports real
+    /// cancellation, so abandoned settings don't burn the encoder.
+    private func startEagerExport() {
+        let key = exportKey
+        if exportedKey == key, exportedURL != nil { return }   // already cached
+        if exportTaskKey == key, exportTask != nil { return }  // already encoding
+        exportTask?.cancel()
+        exportTaskKey = key
+        exportTask = Task { @MainActor in
+            let url = await coordinator.composeReplay(layout: layout, speed: speed.composerSpeed, watermark: watermark)
+            if let url, !Task.isCancelled {
+                exportedURL = url
+                exportedKey = key
+            } else if !Task.isCancelled, exportTaskKey == key {
+                // Failed (not superseded) — clear so a share tap retries fresh.
+                exportTaskKey = nil
+                exportTask = nil
+            }
+            return url
+        }
+    }
+
+    /// Run `action` with an exported MP4 for the current settings: cached →
+    /// instant; eager encode in flight → await it; otherwise encode now. The
+    /// encode is the slow part (seconds for long recordings), so it never
+    /// happens for the preview.
     private func withExportedReplay(target: String, _ action: @escaping @MainActor (URL) -> Void) {
         track(target: target)
         Task { @MainActor in
-            if let exportedURL, exportedKey == exportKey {
+            let key = exportKey
+            if let exportedURL, exportedKey == key {
                 action(exportedURL)
                 return
             }
             isExporting = true
             defer { isExporting = false }
-            guard let url = await coordinator.composeReplay(layout: layout, speed: speed.composerSpeed, watermark: watermark) else {
+            let url: URL?
+            if exportTaskKey == key, let task = exportTask {
+                url = await task.value
+            } else {
+                exportTask?.cancel()
+                url = await coordinator.composeReplay(layout: layout, speed: speed.composerSpeed, watermark: watermark)
+            }
+            guard let url else {
                 statusMessage = "Couldn't export the replay — try again."
                 return
             }
             exportedURL = url
-            exportedKey = exportKey
+            exportedKey = key
             action(url)
         }
     }
