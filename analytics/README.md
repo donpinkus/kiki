@@ -40,11 +40,17 @@ joins cast `users.user_id::text`):
   `drawing.closed` (session_duration_ms). `source` = `app` | `drawing`.
 - `drawings` — metadata + blob keys (`thumbnail_key`, `generated_key`,
   `video_key` reserved).
+- `fixtures` — brush-dev stroke fixtures (see BrushHarness).
+- `capture_frames` / `capture_prompts` — throttled server-side session capture
+  (sketch + generated JPEGs, prompts) for Gallery replay; pruned daily after
+  `CAPTURE_RETENTION_DAYS` (default 14).
+- `test_runs` / `test_run_images` — automated brush-test runs (Tests tab).
+- `brush_targets` / `brush_target_images` — Brushes tab target references.
 
 The dashboard JOINs them: per user it shows identity + `is_test_account` +
 `subscription_status` + this-month fal spend (from the backend tables) alongside
 sessions/events/drawings (Insights tables). Insights' `migrate()` only creates its
-three tables — it never touches the backend's.
+own tables — it never touches the backend's.
 
 ## API
 
@@ -53,13 +59,26 @@ three tables — it never touches the backend's.
 | POST | `/ingest` | Bearer (iOS) **or** `x-insights-key` (backend) | Batch events `{ events: [...] }` |
 | POST | `/ingest/drawing` | same | multipart: drawing metadata + `thumbnail`/`generated` files |
 | POST | `/ingest/fixture` | same | multipart: brush-dev stroke fixture (`fixture` JSON + optional `snapshot` PNG) — see `ios/Packages/CanvasModule/BrushHarness/README.md` |
+| POST | `/ingest/capture` | same | multipart: throttled session-capture frame (sketch/generated JPEG) |
+| POST | `/ingest/capture-prompt` | same | session-capture prompt snapshot |
+| POST | `/ingest/test-run` | same | automated brush-test run + images |
+| POST | `/ingest/brush-target-attempt` | same | brush-target attempt image (Brushes tab) |
 | POST | `/admin/login` | password body | Set admin cookie |
 | POST | `/admin/logout` | — | Clear cookie |
+| GET | `/admin/api/me` | cookie | Auth check for the SPA |
 | GET | `/admin/api/users?q=` | cookie | User list + counts |
 | GET | `/admin/api/users/:id` | cookie | Full per-user view |
+| GET | `/admin/api/launch` | cookie | Launch tab: provider/pool lifecycle views |
+| GET | `/admin/api/captures[/:streamId]` | cookie | Gallery replay: captured sessions + frames |
+| GET/PUT | `/admin/api/ops/warmer` | cookie | Ops tab: live fal-warmer config (`admin_config.fal_warmer`) + ping history |
+| GET | `/admin/api/ops/connections` | cookie | Ops tab: `fal_connections` history |
+| GET | `/admin/api/test-runs` | cookie | Tests tab: brush-test runs |
+| CRUD | `/admin/api/brush-targets[...]` | cookie | Brushes tab: targets + reference images |
 | GET | `/admin/api/fixtures?limit=` | cookie | Brush-dev fixture list (newest first; `fetch-fixtures.sh`) |
 | GET | `/blobs/*` | cookie | Serve a blob |
 | GET | `/health` | — | DB health |
+
+SPA nav (`web/src/App.tsx`): Users, Launch, Gallery (replay), Tests, Brushes, Ops.
 
 ### Event ingest contract
 
