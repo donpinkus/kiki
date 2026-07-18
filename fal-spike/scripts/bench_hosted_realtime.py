@@ -1,7 +1,8 @@
 """Protocol + perf probe for fal's HOSTED realtime model `fal-ai/flux-2/klein/realtime`.
 
-This is DIFFERENT from bench_stream.py: that one speaks our serverless app's custom
-protocol (config text + frame_meta + binary). The hosted marketplace model speaks
+This drives fal's HOSTED marketplace protocol (an earlier bench_stream.py spoke
+our serverless app's custom protocol — config text + frame_meta + binary — and
+was removed with that spike). The hosted marketplace model speaks
 fal's realtime protocol — msgpack messages over `wss://fal.run/<model>/realtime`,
 JWT minted server-side from FAL_KEY by the official fal_client. We drive it through
 fal_client.realtime_async so the URL/auth/msgpack framing are handled canonically.
