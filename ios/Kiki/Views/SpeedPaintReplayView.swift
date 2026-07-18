@@ -155,7 +155,7 @@ struct SpeedPaintReplayView: View {
         ZStack {
             RoundedRectangle(cornerRadius: 12)
                 .fill(Color(.secondarySystemBackground))
-            VideoPlayer(player: player)
+            PlayerLayerView(player: player)
                 .clipShape(RoundedRectangle(cornerRadius: 12))
                 .opacity(isComposing ? 0.4 : 1)
             if isComposing {
@@ -368,4 +368,29 @@ struct SpeedPaintReplayView: View {
 private struct ReplayShareItem: Identifiable {
     let id = UUID()
     let url: URL
+}
+
+/// Bare `AVPlayerLayer` preview. SwiftUI's `VideoPlayer` rendered black in
+/// this modal even with the item at `.readyToPlay` (telemetry: item status
+/// "ready" + black screen, while the export of the same composition played
+/// fine elsewhere). The plain layer displays the same player correctly, and
+/// the autoplay loop needs no playback controls anyway.
+private struct PlayerLayerView: UIViewRepresentable {
+    let player: AVPlayer
+
+    final class LayerView: UIView {
+        override static var layerClass: AnyClass { AVPlayerLayer.self }
+        var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
+    }
+
+    func makeUIView(context: Context) -> LayerView {
+        let view = LayerView()
+        view.playerLayer.videoGravity = .resizeAspect
+        view.playerLayer.player = player
+        return view
+    }
+
+    func updateUIView(_ view: LayerView, context: Context) {
+        view.playerLayer.player = player
+    }
 }
