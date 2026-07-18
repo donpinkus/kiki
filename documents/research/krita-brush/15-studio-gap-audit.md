@@ -34,9 +34,9 @@ is the engineering-facing ledger of those gaps, ranked by likely impact on brush
 7. Motion Filtering (Amount/Expression) — different algorithm from our Gaussian stabilization.
 8. Taper Size/Tip/Tip Animation/Link Tip Sizes/Pressure toggle/Classic; Touch (finger) taper split.
 9. Tilt: trigger angle graph, Gradation, Bleed, Size Compression; Pressure graph + Bleed.
-10. Color: Darkness jitters, per-stamp/stroke Secondary jitter, Color Pressure H/S/B, Color Tilt group.
-11. Randomized (per-stroke tip rotation), Roundness vert/horiz jitter, tip Filtering modes.
-12. Grain Movement (drag vs paint-roller), Brightness/Contrast.
+10. Color: ~~Darkness jitters~~ **DONE 2026-07-17** (ColorJitter.darkness, one-sided v×=1−r·d, offline-asserted); still open: per-stamp/stroke Secondary jitter, Color Pressure H/S/B, Color Tilt group.
+11. ~~Randomized~~ **DONE 2026-07-17** (BrushConfig.randomizedRotation — one stroke-seeded spin baked into tipAngle); still open: Roundness vert/horiz jitter, tip Filtering modes.
+12. Grain: ~~Depth Jitter~~ **DONE 2026-07-17** (BrushConfig.grainDepthJitter — per-dab one-sided grainMul reduction, harness-validated); still open: Movement (drag vs paint-roller), Offset Jitter, Brightness/Contrast.
 13. Wet Mix: Dilution (deliberately folded into Attack+Opacity — decision 2026-07-16), Grade, Blur Jitter.
 14. Per-brush Max/Min Size + Opacity slider bounds; Use Stamp Preview / Orient to Screen.
 

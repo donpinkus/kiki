@@ -479,6 +479,9 @@ private struct ShapeSection: View {
         StudioGroup("Properties") {
             Group {
                 BrushSliderRow("Scatter", value: $coordinator.toolRotationJitter, range: 0.0...1.0, help: BrushHelpCatalog.help["Scatter"]!)
+                Toggle("Randomized", isOn: $coordinator.toolRandomizedRotation)
+                    .font(.subheadline.weight(.medium))
+                StudioFootnote("Randomized: one random tip rotation per stroke (Scatter above is per stamp).")
                 BrushSliderRow("Count", value: $coordinator.toolStampCount, range: 1...8, help: BrushHelpCatalog.help["Count"]!,
                                format: { "\(Int($0.rounded()))" })
                 if coordinator.toolStampCount.rounded() > 1 {
@@ -500,7 +503,6 @@ private struct ShapeSection: View {
                     }), range: 0.0...1.0, help: BrushHelpCatalog.help["Pressure Roundness"]!)
             }
             .disabled(wet).opacity(wet ? 0.35 : 1)
-            GapRow("Randomized", note: "One random tip rotation per stroke (Scatter above is per stamp).")
             GapRow("Tilt Roundness", note: "Tilt-driven squash — configurable via Dynamics → Roundness curve + TiltElevation sensor.")
             GapRow("Roundness Jitter (vert/horiz)", note: "Random per-stamp squash.")
         }
@@ -567,7 +569,7 @@ private struct GrainSection: View {
                 GapRow("Zoom", note: "Cropped vs Follow Size grain scaling.")
                 GapRow("Rotation", note: "Grain rotation vs stroke direction.")
                 GapRow("Depth Minimum", note: "Floor for pressure-driven depth (curve Min in Dynamics → Grain).")
-                GapRow("Depth Jitter", note: "Random per-stamp grain strength.")
+                BrushSliderRow("Depth Jitter", value: $coordinator.toolGrainDepthJitter, range: 0.0...1.0, help: BrushHelpCatalog.help["Grain Depth Jitter"]!)
                 GapRow("Offset Jitter", note: "Random grain offset per stamp.")
                 GapRow("Blend Mode", note: "Grain blend mode — Kiki grain is multiplicative carve only.")
                 GapRow("Brightness / Contrast", note: "Grain texture pre-adjustment.")
@@ -690,10 +692,9 @@ private struct ColorDynamicsSection: View {
         }
         ColorJitterSection(title: "Stamp Color Jitter", jitter: $dyn.dabColorJitter,
                            defaults: ColorJitter(hue: 0.01, saturation: 0.08, brightness: 0.08))
-        GapRow("Stamp Color Jitter → Darkness", note: "Random per-stamp darkening (separate from Lightness).")
         GapRow("Stamp Color Jitter → Secondary Color", note: "Random per-stamp secondary blend — approximate via Dynamics → Secondary blend + Fuzzy (dab) sensor.")
         ColorJitterSection(title: "Stroke Color Jitter", jitter: $dyn.colorJitter)
-        GapRow("Stroke Color Jitter → Darkness / Secondary Color", note: "Per-stroke variants of the above.")
+        GapRow("Stroke Color Jitter → Secondary Color", note: "Per-stroke random secondary blend.")
         StudioGroup("Color Pressure") {
             CurveAmountSlider(title: "Secondary Color", option: $dyn.secondary,
                               defaultSensors: [.pressure], help: BrushHelpCatalog.help["Color Pressure Secondary"]!)
@@ -704,7 +705,7 @@ private struct ColorDynamicsSection: View {
         StudioGroup("Color Tilt") {
             GapRow("Hue / Saturation / Lightness / Secondary", note: "Tilt-driven color — no tilt→color mapping in Kiki yet (tilt sensors exist; color targets don't).")
         }
-        StudioFootnote("Our jitter sliders use Brightness where Procreate splits Lightness/Darkness.")
+        StudioFootnote("Brightness ≈ Procreate's Lightness (symmetric); Darkness is the one-sided darken jitter.")
     }
 }
 
@@ -1375,6 +1376,9 @@ enum BrushHelpCatalog {
         "Tip lightness": BrushHelp(summary: "Lets the tip's texture lighten and darken the ink (embossed, dimensional strokes).",
             low: "Flat ink — the tip texture only shapes coverage.",
             high: "Full value mapping — dark tip areas darken, light areas lighten; mid-gray = your color."),
+        "Grain Depth Jitter": BrushHelp(summary: "Randomly varies the grain strength per stamp — patchy, organic tooth.",
+            low: "Even grain along the stroke.",
+            high: "Some stamps carve the full Depth, others barely any."),
         "Grain Depth": BrushHelp(summary: "How strongly the paper tooth shows through the stroke.",
             low: "No texture — solid paint.",
             high: "Heavy dry-media break-up; press harder (more flow) to fill the tooth."),

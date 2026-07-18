@@ -156,8 +156,13 @@ enum StrokeStampGenerator {
             return rotationAgnostic ? 1 : 0
         }()
         // Static tip angle (calligraphy nib): added to every dab's rotation, before any
-        // follow-stroke or dynamic component.
+        // follow-stroke or dynamic component. Randomized (Procreate Shape "Randomized")
+        // adds ONE random spin per stroke on top — every stroke lands the tip at a new
+        // angle, but the stroke itself is coherent (unlike per-dab Scatter).
         let tipAngle = Float(brush.tipAngle)
+            + (brush.randomizedRotation
+               ? Float(brushHash01(strokeSeed(stroke.id), 0, 0x9A0D) * 2 * Double.pi)
+               : 0)
         func strokeRotation(dx: CGFloat, dy: CGFloat) -> Float {
             guard rotationFollow != 0, dx != 0 || dy != 0 else { return tipAngle }
             return tipAngle + Float(CGFloat(atan2(-dx, dy)) * rotationFollow)
@@ -191,7 +196,8 @@ enum StrokeStampGenerator {
                 srgb = cj.applied(toSRGB: srgb,
                                   rH: brushHash01(s, 0, 0x4011),
                                   rS: brushHash01(s, 0, 0x4012),
-                                  rB: brushHash01(s, 0, 0x4013))
+                                  rB: brushHash01(s, 0, 0x4013),
+                                  rD: brushHash01(s, 0, 0x4014))
             }
             return SIMD3<Float>(s2lLocal(CGFloat(srgb.r)), s2lLocal(CGFloat(srgb.g)), s2lLocal(CGFloat(srgb.b)))
         }()
@@ -216,7 +222,8 @@ enum StrokeStampGenerator {
                 srgb = cj.applied(toSRGB: srgb,
                                   rH: brushHash01(sd, 0, 0x4011),
                                   rS: brushHash01(sd, 0, 0x4012),
-                                  rB: brushHash01(sd, 0, 0x4013))
+                                  rB: brushHash01(sd, 0, 0x4013),
+                                  rD: brushHash01(sd, 0, 0x4014))
             }
             return srgb
         }()
@@ -261,7 +268,8 @@ enum StrokeStampGenerator {
                     srgb = cj.applied(toSRGB: srgb,
                                       rH: brushHash01(spacingSeed, dab, 0x4021),
                                       rS: brushHash01(spacingSeed, dab, 0x4022),
-                                      rB: brushHash01(spacingSeed, dab, 0x4023))
+                                      rB: brushHash01(spacingSeed, dab, 0x4023),
+                                      rD: brushHash01(spacingSeed, dab, 0x4024))
                 }
                 linRGB = SIMD3<Float>(s2lLocal(CGFloat(srgb.r)), s2lLocal(CGFloat(srgb.g)), s2lLocal(CGFloat(srgb.b)))
             }
@@ -368,6 +376,12 @@ enum StrokeStampGenerator {
                        interior: Bool = false) {
             dabSerial &+= 1
             var attr = attr
+            if brush.grainDepthJitter > 0.001 {
+                // Procreate Grain "Depth Jitter": random per-stamp texture strength,
+                // one-sided down from the configured Depth.
+                attr.grainMul *= Float(1 - brushHash01(spacingSeed, dabSerial, 0x6A1B)
+                                         * Double(min(max(brush.grainDepthJitter, 0), 1)))
+            }
             if rotationJitterAmount > 0 {
                 // Centered: ±(amount·π) — at 1 that's the full circle (uniform, same
                 // distribution as the legacy 0…2π spin); partial amounts wobble around

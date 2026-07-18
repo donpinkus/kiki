@@ -143,6 +143,7 @@ struct ColorJitterSection: View {
             if jitter != nil {
                 let j = Binding(get: { jitter ?? ColorJitter() }, set: { jitter = $0 })
                 slider("Hue", j.hue); slider("Saturation", j.saturation); slider("Brightness", j.brightness)
+                slider("Darkness", j.darkness)
             }
         }
         .padding(.top, 8)

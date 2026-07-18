@@ -404,5 +404,35 @@ do {
     print("   whole point list in generateStampsForStroke — see IMPLEMENTATION-LOG H3 follow-up.)")
 }
 
+// --- ColorJitter Darkness (Procreate Stamp/Stroke Color Jitter → Darkness, 2026-07-17) ---
+do {
+    let dk = ColorJitter(darkness: 1.0)
+    let full = dk.applied(toSRGB: (r: 0.8, g: 0.5, b: 0.2), rH: 0.5, rS: 0.5, rB: 0.5, rD: 1.0)
+    check("darkness=1 rD=1 → black (r)", full.r, 0)
+    check("darkness=1 rD=1 → black (g)", full.g, 0)
+    let none = dk.applied(toSRGB: (r: 0.8, g: 0.5, b: 0.2), rH: 0.5, rS: 0.5, rB: 0.5, rD: 0.0)
+    check("darkness rD=0 → unchanged (r)", none.r, 0.8, tol: 1e-6)
+    let half = ColorJitter(darkness: 0.5).applied(toSRGB: (r: 0.8, g: 0.0, b: 0.0), rH: 0.5, rS: 0.5, rB: 0.5, rD: 1.0)
+    checkBool("darkness=0.5 rD=1 darkens toward half V", abs(half.r - 0.4) < 1e-6)
+    checkBool("darkness one-sided: never lightens",
+              ColorJitter(darkness: 0.7).applied(toSRGB: (r: 0.3, g: 0.3, b: 0.3), rH: 0.5, rS: 0.5, rB: 0.5, rD: 0.2).r <= 0.3 + 1e-9)
+    // Back-compat: payload without `darkness` decodes to 0.
+    let legacy = try! JSONDecoder().decode(ColorJitter.self,
+        from: Data(#"{"hue":0.1,"saturation":0.2,"brightness":0.3}"#.utf8))
+    check("legacy ColorJitter decode: darkness=0", legacy.darkness, 0)
+    check("legacy ColorJitter decode: hue kept", legacy.hue, 0.1, tol: 1e-9)
+}
+
+// --- BrushConfig new-knob Codable round-trip (rotationJitter / randomizedRotation / grainDepthJitter) ---
+do {
+    var cfg = BrushConfig(color: .black, baseWidth: 20)
+    cfg.rotationJitter = 0.4; cfg.randomizedRotation = true; cfg.grainDepthJitter = 0.6
+    let data = try! JSONEncoder().encode(cfg)
+    let back = try! JSONDecoder().decode(BrushConfig.self, from: data)
+    check("rotationJitter round-trip", Double(back.rotationJitter), 0.4, tol: 1e-9)
+    checkBool("randomizedRotation round-trip", back.randomizedRotation)
+    check("grainDepthJitter round-trip", Double(back.grainDepthJitter), 0.6, tol: 1e-9)
+}
+
 print("")
 if failures == 0 { print("ALL PASSED") } else { print("\(failures) FAILED"); exit(1) }

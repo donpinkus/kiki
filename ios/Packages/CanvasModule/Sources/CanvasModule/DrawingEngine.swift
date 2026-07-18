@@ -245,6 +245,12 @@ public struct BrushConfig: Codable, Sendable {
     /// Deterministic per dab (stroke-seeded). Adds on top of follow/tip rotation.
     /// The dry-media shapes' catalog `rotationJitter` flag forces 1 (legacy behavior).
     public var rotationJitter: CGFloat
+    /// One random tip rotation PER STROKE (Procreate Shape "Randomized"): each stroke
+    /// lands the tip at a new angle, but the stroke itself stays coherent.
+    public var randomizedRotation: Bool
+    /// Random per-stamp grain-strength reduction [0,1] (Procreate Grain "Depth Jitter"):
+    /// grainMul ×= 1 − r·jitter, one-sided down from the configured Depth.
+    public var grainDepthJitter: CGFloat
     /// Mirror the tip art horizontally / vertically (Procreate Shape "Flip X/Y").
     /// Vertex-stage UV flip; no effect on the symmetric procedural round tip.
     public var flipX: Bool
@@ -300,6 +306,8 @@ public struct BrushConfig: Codable, Sendable {
         stampCountJitter: CGFloat = 0.0,
         rotationFollow: CGFloat? = nil,
         rotationJitter: CGFloat = 0.0,
+        randomizedRotation: Bool = false,
+        grainDepthJitter: CGFloat = 0.0,
         flipX: Bool = false,
         flipY: Bool = false,
         secondaryColor: CodableColor? = nil,
@@ -342,6 +350,8 @@ public struct BrushConfig: Codable, Sendable {
         self.stampCountJitter = stampCountJitter
         self.rotationFollow = rotationFollow
         self.rotationJitter = rotationJitter
+        self.randomizedRotation = randomizedRotation
+        self.grainDepthJitter = grainDepthJitter
         self.flipX = flipX
         self.flipY = flipY
         self.secondaryColor = secondaryColor
@@ -390,6 +400,7 @@ public struct BrushConfig: Codable, Sendable {
         case stampCount, stampCountJitter, rotationFollow, flipX, flipY, fallOff, tipAngle
         case wetCharge, wetRefill, wetJitter, wetBlur, secondaryColor
         case taperStart, taperEnd, taperOpacity, grainMoving, rotationJitter
+        case randomizedRotation, grainDepthJitter
     }
 
     public init(from decoder: Decoder) throws {
@@ -442,6 +453,8 @@ public struct BrushConfig: Codable, Sendable {
         stampCountJitter = try container.decodeIfPresent(CGFloat.self, forKey: .stampCountJitter) ?? 0.0
         rotationFollow = try container.decodeIfPresent(CGFloat.self, forKey: .rotationFollow)
         rotationJitter = try container.decodeIfPresent(CGFloat.self, forKey: .rotationJitter) ?? 0.0
+        randomizedRotation = try container.decodeIfPresent(Bool.self, forKey: .randomizedRotation) ?? false
+        grainDepthJitter = try container.decodeIfPresent(CGFloat.self, forKey: .grainDepthJitter) ?? 0.0
         flipX = try container.decodeIfPresent(Bool.self, forKey: .flipX) ?? false
         flipY = try container.decodeIfPresent(Bool.self, forKey: .flipY) ?? false
         secondaryColor = try container.decodeIfPresent(CodableColor.self, forKey: .secondaryColor)
@@ -496,6 +509,8 @@ public struct BrushConfig: Codable, Sendable {
         try container.encode(stampCountJitter, forKey: .stampCountJitter)
         try container.encodeIfPresent(rotationFollow, forKey: .rotationFollow)
         try container.encode(rotationJitter, forKey: .rotationJitter)
+        try container.encode(randomizedRotation, forKey: .randomizedRotation)
+        try container.encode(grainDepthJitter, forKey: .grainDepthJitter)
         try container.encode(flipX, forKey: .flipX)
         try container.encode(flipY, forKey: .flipY)
         try container.encodeIfPresent(dynamics, forKey: .dynamics)

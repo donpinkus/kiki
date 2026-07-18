@@ -136,6 +136,20 @@ final class AppCoordinator {
             applyTool()
         }
     }
+    /// One random tip rotation per stroke ("Randomized", Procreate Shape).
+    var toolRandomizedRotation: Bool = false {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    /// Random per-stamp grain strength ("Depth Jitter", Procreate Grain).
+    var toolGrainDepthJitter: CGFloat = 0.0 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
     /// Gaussian arc-length smoothing ("Smoothing", P3). 0 = off; higher = steadier
     /// curvature with more trailing lag (catch-up-on-lift covers the tail).
     var toolStabilization: CGFloat = 0.0 {
@@ -2276,6 +2290,8 @@ final class AppCoordinator {
         toolTaperStart = max(c.taper, c.taperStart)
         toolTaperEnd = max(c.taper, c.taperEnd)
         toolRotationJitter = c.rotationJitter
+        toolRandomizedRotation = c.randomizedRotation
+        toolGrainDepthJitter = c.grainDepthJitter
         toolShapeID = c.shapeID
         toolAspect = c.aspectRatio
         toolGrainID = c.grainID
@@ -2323,6 +2339,8 @@ final class AppCoordinator {
         toolTaperStart = 0
         toolTaperEnd = 0
         toolRotationJitter = 0
+        toolRandomizedRotation = false
+        toolGrainDepthJitter = 0
         toolShapeID = nil
         toolAspect = d.aspectRatio
         toolGrainID = nil
@@ -2407,6 +2425,8 @@ final class AppCoordinator {
                 stampCountJitter: toolStampCountJitter,
                 rotationFollow: toolRotationFollow,
                 rotationJitter: toolRotationJitter,
+                randomizedRotation: toolRandomizedRotation,
+                grainDepthJitter: toolGrainDepthJitter,
                 flipX: toolFlipX,
                 flipY: toolFlipY,
                 secondaryColor: toolSecondaryColor.map { $0.codable },

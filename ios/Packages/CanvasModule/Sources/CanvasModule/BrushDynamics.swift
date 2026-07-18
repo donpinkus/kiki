@@ -752,20 +752,35 @@ public struct ColorJitter: Codable, Equatable, Sendable {
     public var hue: Double
     public var saturation: Double
     public var brightness: Double
-    public init(hue: Double = 0, saturation: Double = 0, brightness: Double = 0) {
-        self.hue = hue; self.saturation = saturation; self.brightness = brightness
+    /// One-sided random DARKENING [0,1] (Procreate's "Darkness" jitter — distinct from
+    /// the symmetric `brightness`): v ×= 1 − r·darkness, never lightens.
+    public var darkness: Double
+    public init(hue: Double = 0, saturation: Double = 0, brightness: Double = 0, darkness: Double = 0) {
+        self.hue = hue; self.saturation = saturation; self.brightness = brightness; self.darkness = darkness
     }
-    public var isInert: Bool { hue == 0 && saturation == 0 && brightness == 0 }
+    public var isInert: Bool { hue == 0 && saturation == 0 && brightness == 0 && darkness == 0 }
 
-    /// Apply the jitter to an sRGB color given three independent [0,1) random draws (one per
-    /// channel). Returns sRGB. Each draw maps to a symmetric ±shift via `2r−1`.
+    // Backward-compatible decode: payloads saved before `darkness` decode unchanged.
+    enum CodingKeys: String, CodingKey { case hue, saturation, brightness, darkness }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        hue = try c.decodeIfPresent(Double.self, forKey: .hue) ?? 0
+        saturation = try c.decodeIfPresent(Double.self, forKey: .saturation) ?? 0
+        brightness = try c.decodeIfPresent(Double.self, forKey: .brightness) ?? 0
+        darkness = try c.decodeIfPresent(Double.self, forKey: .darkness) ?? 0
+    }
+
+    /// Apply the jitter to an sRGB color given independent [0,1) random draws (one per
+    /// channel). Returns sRGB. H/S/B draws map to symmetric ±shifts via `2r−1`; the
+    /// darkness draw is one-sided (0 = untouched, 1 = full configured darkening).
     public func applied(toSRGB rgb: (r: Double, g: Double, b: Double),
-                        rH: Double, rS: Double, rB: Double) -> (r: Double, g: Double, b: Double) {
+                        rH: Double, rS: Double, rB: Double, rD: Double = 0) -> (r: Double, g: Double, b: Double) {
         var hsv = rgbToHSV(rgb)
         hsv.h = (hsv.h + (2 * rH - 1) * hue).truncatingRemainder(dividingBy: 1.0)
         if hsv.h < 0 { hsv.h += 1.0 }
         hsv.s = clamp01(hsv.s * (1 + (2 * rS - 1) * saturation))
         hsv.v = clamp01(hsv.v * (1 + (2 * rB - 1) * brightness))
+        if darkness > 0 { hsv.v = clamp01(hsv.v * (1 - rD * darkness)) }
         return hsvToRGB(hsv)
     }
 }
