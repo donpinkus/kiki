@@ -51,9 +51,10 @@ const pool = createInstancePool({
   poolMin: () => config.LAMBDA_VIDEO_POOL_MIN,
   poolMax: () => config.LAMBDA_VIDEO_POOL_MAX,
   targetStreams: () => config.LAMBDA_VIDEO_POOL_TARGET_STREAMS,
-  /** LTX-2.3 model load is ~5-10 min on a cold NFS page cache (no compile
-   * cache to persist yet — LTX runs eager). */
-  bootEstimateMs: 10 * 60_000,
+  /** Measured 2026-07-18: launch → healthy in 321s with NFS-warm weights
+   * (LTX runs eager — no compile cache to pay). 6 min adds margin for cold
+   * NFS page cache. */
+  bootEstimateMs: 6 * 60_000,
 });
 
 // The factory returns plain closures, so destructuring is safe.

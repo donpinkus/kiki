@@ -600,24 +600,36 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       // Pushed on change only (checked every 15s + once at wiring), so a
       // mid-session Insights flag flip reaches open sessions within ~75s
       // (flag poll 60s + push check 15s).
-      const availabilityOf = (
-        status: string,
-      ): 'off' | 'warming' | 'ready' =>
-        status === 'ready' ? 'ready' : status === 'booting' || status === 'launching' ? 'warming' : 'off';
+      const systemPayload = (
+        state: ReturnType<typeof poolGetState>,
+        systemEnabled: boolean,
+      ): Record<string, unknown> => {
+        // 'off' = the SYSTEM is disabled (env / Insights flag) — hide its UX.
+        // Everything else while not ready reads 'warming': an asleep pool
+        // wakes on the interest this very session registers, so from the
+        // user's seat it IS warming. The popover's stage field distinguishes
+        // waking/searching/booting, and only booting gets a determinate
+        // progress surface (search time is capacity-bound and unpredictable —
+        // clients show elapsed for it, never an ETA).
+        if (!systemEnabled) return { availability: 'off' };
+        if (state.status === 'ready') return { availability: 'ready' };
+        const stage =
+          state.status === 'launching' ? 'searching' : state.status === 'booting' ? 'booting' : 'waking';
+        return {
+          availability: 'warming',
+          stage,
+          stageStartedAtMs:
+            stage === 'searching' ? state.searchStartedAtMs : stage === 'booting' ? state.launchedAtMs : undefined,
+          bootEstimateSeconds: state.bootEstimateSeconds,
+        };
+      };
       const computeSystemAvailability = (): Record<string, unknown> => {
-        const image = poolGetState();
-        let video: { availability: string; etaSeconds: number | null };
-        if (config.LAMBDA_VIDEO_URL) {
-          video = { availability: 'ready', etaSeconds: null }; // static dev override
-        } else if (!videoPoolEnabled()) {
-          video = { availability: 'off', etaSeconds: null };
-        } else {
-          const vp = videoPoolGetState();
-          video = { availability: availabilityOf(vp.status), etaSeconds: vp.etaSeconds };
-        }
+        const video = config.LAMBDA_VIDEO_URL
+          ? { availability: 'ready' } // static dev override
+          : systemPayload(videoPoolGetState(), videoPoolEnabled());
         return {
           type: 'system_availability',
-          image: { availability: availabilityOf(image.status), etaSeconds: image.etaSeconds },
+          image: systemPayload(poolGetState(), config.LAMBDA_DEV_POOL_ENABLED || Boolean(config.LAMBDA_IMAGE_URL)),
           video,
         };
       };

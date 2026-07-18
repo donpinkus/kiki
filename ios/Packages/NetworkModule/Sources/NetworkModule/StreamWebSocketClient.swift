@@ -72,10 +72,26 @@ public actor StreamWebSocketClient {
         case complete(requestId: String?, mp4: Data, fps: Int?, frames: Int?)
         case cancelled(requestId: String?, atStep: Int?, error: String?)
         /// Backend's system-availability push — BOTH H100 systems in one
-        /// message. image: off|warming|ready (off = pool asleep/disabled; fal
-        /// still serves images). video: off = feature flag disabled (hide all
-        /// animation UX) | warming | ready. etaSeconds present while warming.
-        case availability(image: String, imageEtaSeconds: Int?, video: String, videoEtaSeconds: Int?)
+        /// message. availability: off (system disabled — hide its UX) |
+        /// warming | ready. While warming, `stage` distinguishes
+        /// waking/searching/booting; only booting carries timing for a
+        /// determinate progress bar (capacity search is unpredictable).
+        case availability(image: SystemStatus, video: SystemStatus)
+    }
+
+    /// One H100 system's pushed status (see VideoEvent.availability).
+    public struct SystemStatus: Sendable, Equatable {
+        public let availability: String // off | warming | ready
+        public let stage: String? // waking | searching | booting (warming only)
+        public let stageStartedAtMs: Double?
+        public let bootEstimateSeconds: Int?
+
+        public init(json: [String: Any]) {
+            self.availability = json["availability"] as? String ?? "off"
+            self.stage = json["stage"] as? String
+            self.stageStartedAtMs = json["stageStartedAtMs"] as? Double
+            self.bootEstimateSeconds = json["bootEstimateSeconds"] as? Int
+        }
     }
 
     /// Sendable payload for `ConnectionEvent`. Holds a human-readable message
@@ -386,20 +402,13 @@ public actor StreamWebSocketClient {
                                 ])
                                 await self.videoContinuation.yield(event)
                             } else if type == "system_availability" {
-                                let image = json["image"] as? [String: Any] ?? [:]
-                                let video = json["video"] as? [String: Any] ?? [:]
-                                let imageAvail = image["availability"] as? String ?? "off"
-                                let videoAvail = video["availability"] as? String ?? "off"
+                                let image = SystemStatus(json: json["image"] as? [String: Any] ?? [:])
+                                let video = SystemStatus(json: json["video"] as? [String: Any] ?? [:])
                                 Self.breadcrumb(category: "ws.video", message: "system_availability", data: [
-                                    "image": imageAvail,
-                                    "video": videoAvail,
+                                    "image": image.availability,
+                                    "video": video.availability,
                                 ])
-                                await self.videoContinuation.yield(.availability(
-                                    image: imageAvail,
-                                    imageEtaSeconds: image["etaSeconds"] as? Int,
-                                    video: videoAvail,
-                                    videoEtaSeconds: video["etaSeconds"] as? Int
-                                ))
+                                await self.videoContinuation.yield(.availability(image: image, video: video))
                             } else if type == "video_cancelled" {
                                 let event = StreamWebSocketClient.VideoEvent.cancelled(
                                     requestId: json["requestId"] as? String,

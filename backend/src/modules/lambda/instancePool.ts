@@ -60,6 +60,14 @@ export interface PoolState {
   launchedAtMs?: number;
   readyAtMs?: number;
   etaSeconds: number | null;
+  /** Epoch ms when the CURRENT capacity search started (status 'launching');
+   * undefined otherwise. Search duration is capacity-bound and unpredictable
+   * (minutes to hours) — clients show elapsed, never an ETA. */
+  searchStartedAtMs?: number;
+  /** The pool's boot estimate (capacity granted → healthy), for client-side
+   * determinate progress bars. Boot durations ARE consistent (image p50
+   * ~4 min, video ~5.5 min measured 2026-07-18). */
+  bootEstimateSeconds: number;
   /** Per-instance summary for ops visibility. */
   instances: PoolInstanceSummary[];
 }
@@ -206,6 +214,8 @@ export function createInstancePool(spec: InstancePoolSpec): InstancePool {
   const instances = new Map<string, PoolInstance>();
   let lastError: string | undefined;
   let launchesInFlight = 0;
+  /** Start of the oldest in-flight capacity search (0 = none). */
+  let searchStartedAtMs = 0;
   let tickTimer: NodeJS.Timeout | null = null;
   let log: FastifyBaseLogger | Console = console;
   /** Last time anyone expressed interest (ensure/acquire) — keeps the floor-0
@@ -383,6 +393,8 @@ runcmd:
       launchedAtMs,
       readyAtMs,
       etaSeconds,
+      searchStartedAtMs: status === 'launching' && searchStartedAtMs > 0 ? searchStartedAtMs : undefined,
+      bootEstimateSeconds: Math.round(spec.bootEstimateMs / 1000),
       instances: list.map((i) => ({
         name: i.name,
         status: i.status,
@@ -399,6 +411,7 @@ runcmd:
     if (!enabled()) return;
     if (upOrComing() >= spec.poolMax()) return;
     launchesInFlight += 1;
+    if (launchesInFlight === 1) searchStartedAtMs = Date.now();
     const name = `${spec.namePrefix}${Date.now()}`;
     const region = spec.region();
     const searchStartMs = Date.now();
@@ -445,6 +458,7 @@ runcmd:
       recordPoolEvent('launch_failed', name, region, Date.now() - searchStartMs, (err as Error).message);
     } finally {
       launchesInFlight -= 1;
+      if (launchesInFlight === 0) searchStartedAtMs = 0;
     }
   }
 

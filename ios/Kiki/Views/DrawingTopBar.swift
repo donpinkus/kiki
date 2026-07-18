@@ -1,4 +1,5 @@
 import SwiftUI
+import NetworkModule
 import CanvasModule
 import ExportModule
 
@@ -312,33 +313,21 @@ private struct KikiAIStatusDetails: View {
     @Environment(AppCoordinator.self) private var coordinator
 
     var body: some View {
-        // 1s tick so "elapsed" counts up live while the popover is open.
+        // 1s tick so elapsed counts and progress bars advance live while
+        // the popover is open.
         TimelineView(.periodic(from: .now, by: 1)) { _ in
             VStack(alignment: .leading, spacing: 10) {
+                // ── IMAGE system ─────────────────────────────────────────
                 Text("Kiki's AI")
                     .font(.headline)
-
-                switch coordinator.lambdaPoolState?.status {
-                case "ready":
-                    Label("Ready — sketch magic is available.", systemImage: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                case "launching":
-                    Label("Finding a GPU…", systemImage: "hourglass")
-                        .foregroundStyle(KikiAIStatusBadge.warmPink)
-                    warmingDetail
-                case "booting":
-                    Label("Warming up…", systemImage: "flame")
-                        .foregroundStyle(KikiAIStatusBadge.warmPink)
-                    warmingDetail
-                case "none":
-                    Label("Asleep — powered down after 30 quiet minutes.", systemImage: "moon.zzz")
-                        .foregroundStyle(KikiAIStatusBadge.warmPink)
-                    Button("Wake up") { coordinator.ensureLambdaPool() }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
-                case "error":
-                    Label("Error fetching Kiki's AI", systemImage: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.red)
+                SystemStageView(
+                    status: coordinator.imageSystemStatus,
+                    readyText: "Ready — sketch magic is available.",
+                    offText: "Asleep — powered down after 30 quiet minutes."
+                )
+                // Test-account extras from the detailed REST poll (the push
+                // is intentionally minimal for everyone else).
+                if coordinator.lambdaPoolState?.status == "error" {
                     if let err = coordinator.lambdaPoolState?.lastError {
                         Text(err)
                             .font(.caption.monospaced())
@@ -348,32 +337,26 @@ private struct KikiAIStatusDetails: View {
                     Button("Try again") { coordinator.ensureLambdaPool() }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
-                default:
-                    Text("Status unknown — Kiki's AI may be asleep.")
-                        .foregroundStyle(.secondary)
+                } else if coordinator.imageSystemStatus?.availability == "off",
+                          coordinator.lambdaPoolState != nil {
                     Button("Wake up") { coordinator.ensureLambdaPool() }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
                 }
-
                 Text("Powers the Edit button — turning generated images back into editable sketches.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
+                // ── VIDEO system (hidden entirely when the feature is off) ─
                 if coordinator.videoAvailability != .off {
                     Divider()
                     Text("Kiki's video AI")
                         .font(.headline)
-                    switch coordinator.videoAvailability {
-                    case .ready:
-                        Label("Ready — animations are available.", systemImage: "checkmark.circle.fill")
-                            .foregroundStyle(.green)
-                    case .warming:
-                        Label("Warming up — animations will be available in a couple of minutes.", systemImage: "flame")
-                            .foregroundStyle(KikiAIStatusBadge.warmPink)
-                    case .off:
-                        EmptyView()
-                    }
+                    SystemStageView(
+                        status: coordinator.videoSystemStatus,
+                        readyText: "Ready — animations are available.",
+                        offText: "Asleep."
+                    )
                     Text("Powers the Animate button and the automatic animation when you pause drawing.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -382,23 +365,79 @@ private struct KikiAIStatusDetails: View {
             .font(.subheadline)
         }
     }
+}
+
+/// One H100 system's stage line: green check when ready; while warming, the
+/// stage decides the surface — capacity search is UNPREDICTABLE (minutes to
+/// hours, so: indeterminate spinner + elapsed, never an ETA), while booting
+/// is consistent (measured p50 ~4-5.5 min, so: a determinate progress bar,
+/// capped at 95% until the backend actually reports ready).
+private struct SystemStageView: View {
+    let status: StreamWebSocketClient.SystemStatus?
+    let readyText: String
+    let offText: String
+
+    var body: some View {
+        switch status?.availability {
+        case "ready":
+            Label(readyText, systemImage: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+        case "warming":
+            warmingBody
+        case "off":
+            Label(offText, systemImage: "moon.zzz")
+                .foregroundStyle(KikiAIStatusBadge.warmPink)
+        default:
+            Text("Status unknown — start drawing to wake Kiki's AI.")
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var elapsedSeconds: Int? {
+        status?.stageStartedAtMs.map { max(0, Int(Date().timeIntervalSince1970 - $0 / 1000)) }
+    }
 
     @ViewBuilder
-    private var warmingDetail: some View {
-        let elapsed: Int? = coordinator.lambdaPoolState?.launchedAtMs.map {
-            max(0, Int(Date().timeIntervalSince1970 - $0 / 1000))
-        }
-        HStack(spacing: 12) {
-            if let elapsed {
-                Text("\(elapsed)s elapsed")
+    private var warmingBody: some View {
+        switch status?.stage {
+        case "searching":
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Finding a GPU…\(elapsedSeconds.map { " \($0)s" } ?? "")")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
-            if let eta = coordinator.lambdaPoolState?.etaSeconds {
-                Text("~\(eta)s remaining")
-                    .font(.caption.monospacedDigit())
+        case "booting":
+            VStack(alignment: .leading, spacing: 4) {
+                let estimate = max(status?.bootEstimateSeconds ?? 300, 1)
+                let elapsed = elapsedSeconds ?? 0
+                ProgressView(value: min(0.95, Double(elapsed) / Double(estimate)))
+                    .tint(KikiAIStatusBadge.warmPink)
+                HStack {
+                    Label("Warming up", systemImage: "flame")
+                        .foregroundStyle(KikiAIStatusBadge.warmPink)
+                    Spacer()
+                    if elapsed < estimate {
+                        Text("~\(estimate - elapsed)s left")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("almost there…")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        default: // waking (interest registered, launch imminent) or unknown
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Waking up…")
+                    .font(.caption)
                     .foregroundStyle(.secondary)
             }
         }
     }
 }
+

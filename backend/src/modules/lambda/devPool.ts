@@ -29,10 +29,12 @@ const pool = createInstancePool({
   poolMin: () => config.LAMBDA_POOL_MIN,
   poolMax: () => config.LAMBDA_POOL_MAX,
   targetStreams: () => config.LAMBDA_POOL_TARGET_STREAMS,
-  /** First-ever boot pays full compile (~10 min); with the persisted
-   * inductor cache subsequent boots are shorter — refreshed empirically,
-   * see the lambda-image-provider plan doc. */
-  bootEstimateMs: 10 * 60_000,
+  /** Measured (lambda_pool_events, 2026-07-18): capacity-granted → healthy
+   * runs 136-282s, p50 236s, with the NFS inductor cache warm. 5 min covers
+   * the observed spread; only a first-ever-boot-per-region compile (~10 min)
+   * blows through it, and the client caps its progress bar rather than
+   * lying. */
+  bootEstimateMs: 5 * 60_000,
 });
 
 // The factory returns plain closures, so destructuring is safe — these are
