@@ -34,6 +34,7 @@ import json
 import logging
 import os
 import random
+import secrets
 import time
 from contextlib import asynccontextmanager
 
@@ -125,7 +126,11 @@ async def websocket_stream(ws: WebSocket):
     # proxy with an unguessable hostname. No-op when KIKI_WS_TOKEN is unset
     # (local dev unchanged).
     expected_token = os.environ.get("KIKI_WS_TOKEN", "")
-    if expected_token and ws.query_params.get("token") != expected_token:
+    # compare_digest: constant-time compare — a plain != short-circuits per
+    # character and leaks a timing oracle on a public-IP port.
+    if expected_token and not secrets.compare_digest(
+        ws.query_params.get("token", ""), expected_token
+    ):
         logger.warning(
             f"WS rejected: bad token from {client_ip or '?'}",
             extra={"event": "pod.ws.bad_token", "client_ip": client_ip},
@@ -330,6 +335,10 @@ async def websocket_stream(ws: WebSocket):
                             await ws.send_text(json.dumps({
                                 "type": "status",
                                 "status": "error",
+                                # requestId lets a client awaiting a specific
+                                # request (style-preview picker) fail THAT
+                                # request instead of stalling uncorrelated.
+                                "requestId": cfg.get("requestId"),
                                 "message": str(e),
                             }))
                         except Exception:
