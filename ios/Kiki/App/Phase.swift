@@ -15,11 +15,13 @@ import Sentry
 /// user-perceived state has changed (stream.startup_begin → preparing,
 /// first frame → drawing, video preview begins → animating, etc.).
 ///
-/// Imperative state rather than `@TaskLocal` because iOS's stream
-/// lifecycle is delegate-driven (URLSession WS callbacks fire on
-/// URLSession's queue, NOT a user Task — TaskLocal propagation breaks
-/// across that boundary). Single-active-stream lets us get away with
-/// a static. Thread-safe via `OSAllocatedUnfairLock`.
+/// Imperative state rather than `@TaskLocal` because the phase is read at
+/// log-emit time from arbitrary contexts (`Log.emit` can run off-Task /
+/// off-MainActor), where TaskLocal propagation wouldn't reach. In the
+/// current code all `Phase.set` call sites are MainActor-isolated (the WS
+/// client uses async `receive()` in an actor, not delegate callbacks) —
+/// the lock exists for the off-thread `Phase.current` reads.
+/// Single-active-stream lets us get away with a static.
 ///
 /// Logs emitted while no phase is set carry no `phase` attribute,
 /// filterable as `!has:phase` in Sentry's Logs UI (catches lifecycle

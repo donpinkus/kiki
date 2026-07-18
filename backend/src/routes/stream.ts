@@ -150,6 +150,12 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
           .finally(() => { lambdaBillInFlight = false; });
       };
       let lastBilledMs = 0;
+      // Single-flight guard for fal spend writes: onUsage can fire twice in
+      // quick succession (throttled per-frame fire + a close-triggered fire)
+      // and meterFalUsage only advances lastBilledMs AFTER its await — two
+      // overlapping invocations would read the same lastBilledMs and bill
+      // the same open-span twice (the ledger write is an additive upsert).
+      let meterInFlight = false;
       // Admin session replay: throttled sketch/generated frame mirror to
       // Insights (see modules/insights/frameCapture.ts). Created lazily once
       // identity + streamId exist; null when capture is disabled/unconfigured.
@@ -298,9 +304,14 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         // Final fal spend flush: persist the last partial open span BEFORE
         // closing the relay (close() would finalize it out of reach). Read the
         // delta synchronously; fire-and-forget the DB write (low-stakes ~cents).
-        if (falMeteringEnabled && userId && relay?.cumulativeOpenMs) {
+        // Skip when a meterFalUsage write is still in flight: it hasn't
+        // advanced lastBilledMs yet, so flushing here would re-bill its span.
+        // Forfeits at most the ≤10s throttle tail (undercount) instead of
+        // risking a double charge.
+        if (falMeteringEnabled && userId && relay?.cumulativeOpenMs && !meterInFlight) {
           const deltaMs = relay.cumulativeOpenMs() - lastBilledMs;
           if (deltaMs > 0) {
+            lastBilledMs += deltaMs; // relay is being torn down — no retry path needs the old value
             void addMonthlySpendUsd(userId, (deltaMs / 1000) * RATE_USD_PER_SEC).catch(() => {});
           }
         }
@@ -525,6 +536,13 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         );
         relay?.close();
         relay = null;
+        // A fresh FalImageRelay restarts cumulativeOpenMs at 0; lastBilledMs
+        // tracks the CURRENT relay's cumulative total, so it must reset with
+        // it — carrying an old relay's total across a rewire would make every
+        // delta negative and silently stop billing. (Latent today: the only
+        // mid-session fal-relay creation is the lambda→fal downgrade, where
+        // lastBilledMs is still 0 — this guards the invariant structurally.)
+        if (imageProvider === 'fal') lastBilledMs = 0;
         const newRelay: ImageRelay =
           imageProvider === 'fal'
             ? new FalImageRelay(config.FAL_KEY, {
@@ -655,10 +673,12 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
           sendLimitReachedAndClose();
         };
         const meterFalUsage = async (): Promise<void> => {
+          if (meterInFlight) return; // overlap would double-bill; next fire covers the delta
           if (!relay?.cumulativeOpenMs) return;
           const ms = relay.cumulativeOpenMs();
           const deltaMs = ms - lastBilledMs;
           if (deltaMs <= 0) return;
+          meterInFlight = true;
           try {
             const total = await addMonthlySpendUsd(uid, (deltaMs / 1000) * RATE_USD_PER_SEC);
             lastBilledMs = ms; // advance only on success → a failed write retries next fire
@@ -677,6 +697,8 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
               { userId, connId, streamId, err: (err as Error).message, event: 'fal_spend_record_failed' },
               'fal_spend_record_failed',
             );
+          } finally {
+            meterInFlight = false;
           }
         };
         relay?.onUsage?.(() => void meterFalUsage());
