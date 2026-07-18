@@ -249,12 +249,22 @@ export interface FleetDailyRow {
   wait_p50_ms: number | null; frames: number; sketches: number; videos: number;
 }
 
+export interface FleetGpuSpendRow {
+  pool: string; itype: string; instances: number; still_open: number;
+  gpu_hours: number; price_hr: number; cost_usd: number;
+}
+export interface FleetFalSpendRow { source: string; conns: number; billed_hours: number; cost_usd: number; }
+export interface FleetSpendDailyRow { day: string; gpu_usd: number; fal_usd: number; }
+
 export interface FleetData {
   image: FleetImage | null;
   video: FleetVideo | null;
   pools: FleetPoolRow[];
   recent_events: FleetEventRow[];
   daily: FleetDailyRow[];
+  gpu_spend: FleetGpuSpendRow[];
+  fal_spend: FleetFalSpendRow[];
+  spend_daily: FleetSpendDailyRow[];
 }
 
 export interface CapacityCell {

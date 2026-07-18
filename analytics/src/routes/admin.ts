@@ -711,7 +711,17 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
       const EXCL = `($1::bool = false OR user_id NOT IN
         (SELECT user_id::text FROM users WHERE is_test_account))`;
       const wired = `COALESCE((properties->>'lambda_wired')::bool, false)`;
-      const [image, video, pools, recentEvents, daily] = await Promise.all([
+      // Lambda per-hour price by instance type (parsed from the launched
+      // event's `type@region` detail). $/hr from Lambda's list, 2026-07.
+      const priceCase = `CASE split_part(COALESCE(l.detail,''), '@', 1)
+                    WHEN 'gpu_1x_h100_sxm5' THEN 4.29
+                    WHEN 'gpu_1x_h100_pcie' THEN 3.29
+                    WHEN 'gpu_1x_a100_sxm4' THEN 1.99
+                    WHEN 'gpu_1x_a100'      THEN 1.99
+                    WHEN 'gpu_1x_gh200'     THEN 2.29
+                    WHEN 'gpu_1x_a6000'     THEN 1.09
+                    ELSE 4.29 END`;
+      const [image, video, pools, recentEvents, daily, gpuSpend, falSpend, spendDaily] = await Promise.all([
         // Image system: acquisition + waits + generation + render ratio.
         query(
           `SELECT count(*)::int AS sessions,
@@ -824,6 +834,92 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
            GROUP BY 1 ORDER BY 1 DESC`,
           [excl],
         ),
+        // ─── GPU SPEND (7d): reconstruct instance lifetimes. Each
+        // launched instance (name = kiki-(serve|video)-<epochMs>) is paired
+        // with its earliest terminate-family event; still-open instances
+        // count to now(). Price from the launched event's `type@region`
+        // detail. Per (pool, type). Lambda bills per-minute from ready →
+        // terminate; using launched→terminate slightly overcounts the boot
+        // window (a few min) — acceptable for a spend "sense". ─────────────
+        query(
+          `WITH lifetimes AS (
+             SELECT l.pool,
+                    split_part(COALESCE(l.detail,''), '@', 1) AS itype,
+                    ${priceCase} AS price_hr,
+                    l.ts AS launched_at,
+                    (SELECT min(t.ts) FROM lambda_pool_events t
+                     WHERE t.instance_name = l.instance_name
+                       AND t.event IN ('idle_terminate','instance_dead','boot_stalled','disabled_terminate')
+                       AND t.ts >= l.ts) AS terminated_at
+             FROM lambda_pool_events l
+             WHERE l.event = 'launched' AND l.instance_name IS NOT NULL
+               AND l.ts > now() - interval '7 days'
+           )
+           SELECT pool, itype,
+                  count(*)::int AS instances,
+                  count(*) FILTER (WHERE terminated_at IS NULL)::int AS still_open,
+                  round(sum(extract(epoch FROM (COALESCE(terminated_at, now()) - launched_at)) / 3600.0)::numeric, 2)::float AS gpu_hours,
+                  price_hr,
+                  round(sum(extract(epoch FROM (COALESCE(terminated_at, now()) - launched_at)) / 3600.0 * price_hr)::numeric, 2)::float AS cost_usd
+           FROM lifetimes
+           GROUP BY pool, itype, price_hr
+           ORDER BY pool, cost_usd DESC`,
+        ).catch((err: { code?: string }) => {
+          if (err.code === '42P01' || err.code === '42703') return { rows: [] as Record<string, unknown>[] };
+          throw err;
+        }),
+        // ─── fal SPEND (7d): fal bills warm-runner-ATTACHED time only — a
+        // cold ping's spin-up wait (≈ first_frame_ms) has no runner attached
+        // and isn't billed (verified vs dashboard 2026-07-14). Split
+        // user-drawing vs warmer overhead. ────────────────────────────────
+        query(
+          `SELECT source,
+                  count(*)::int AS conns,
+                  round(sum(greatest(0, open_ms - CASE WHEN found_warm IS DISTINCT FROM true
+                    THEN COALESCE(first_frame_ms, open_ms) ELSE 0 END)) / 3600000.0, 2)::float AS billed_hours,
+                  round(sum(greatest(0, open_ms - CASE WHEN found_warm IS DISTINCT FROM true
+                    THEN COALESCE(first_frame_ms, open_ms) ELSE 0 END)) / 1000.0 * 0.00194, 2)::float AS cost_usd
+           FROM fal_connections
+           WHERE opened_at > now() - interval '7 days'
+           GROUP BY source`,
+        ).catch((err: { code?: string }) => {
+          if (err.code === '42P01') return { rows: [] as Record<string, unknown>[] };
+          throw err;
+        }),
+        // ─── Daily spend trend (14d): GPU cost/day (by launch day) + fal
+        // cost/day. Two separate day-keyed series merged client-side. ──────
+        query(
+          `WITH lifetimes AS (
+             SELECT to_char(l.ts AT TIME ZONE 'America/Los_Angeles', 'YYYY-MM-DD') AS day,
+                    ${priceCase} AS price_hr,
+                    l.ts AS launched_at,
+                    (SELECT min(t.ts) FROM lambda_pool_events t
+                     WHERE t.instance_name = l.instance_name
+                       AND t.event IN ('idle_terminate','instance_dead','boot_stalled','disabled_terminate')
+                       AND t.ts >= l.ts) AS terminated_at
+             FROM lambda_pool_events l
+             WHERE l.event = 'launched' AND l.instance_name IS NOT NULL
+               AND l.ts > now() - interval '14 days'
+           ),
+           gpu AS (
+             SELECT day, round(sum(extract(epoch FROM (COALESCE(terminated_at, now()) - launched_at)) / 3600.0 * price_hr)::numeric, 2)::float AS gpu_usd
+             FROM lifetimes GROUP BY day
+           ),
+           fal AS (
+             SELECT to_char(opened_at AT TIME ZONE 'America/Los_Angeles', 'YYYY-MM-DD') AS day,
+                    round(sum(greatest(0, open_ms - CASE WHEN found_warm IS DISTINCT FROM true
+                      THEN COALESCE(first_frame_ms, open_ms) ELSE 0 END)) / 1000.0 * 0.00194, 2)::float AS fal_usd
+             FROM fal_connections WHERE opened_at > now() - interval '14 days' GROUP BY day
+           )
+           SELECT COALESCE(gpu.day, fal.day) AS day,
+                  COALESCE(gpu.gpu_usd, 0) AS gpu_usd,
+                  COALESCE(fal.fal_usd, 0) AS fal_usd
+           FROM gpu FULL OUTER JOIN fal ON gpu.day = fal.day
+           ORDER BY day DESC`,
+        ).catch((err: { code?: string }) => {
+          if (err.code === '42P01' || err.code === '42703') return { rows: [] as Record<string, unknown>[] };
+          throw err;
+        }),
       ]);
       return {
         image: image.rows[0] ?? null,
@@ -831,6 +927,9 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
         pools: pools.rows,
         recent_events: recentEvents.rows,
         daily: daily.rows,
+        gpu_spend: gpuSpend.rows,
+        fal_spend: falSpend.rows,
+        spend_daily: spendDaily.rows,
       };
     });
 

@@ -134,7 +134,101 @@ export function Fleet() {
         </div>
       </div>
 
-      {/* ── 4: fleet lifecycle ── */}
+      {/* ── 4: spend ── */}
+      {(() => {
+        const gpu = data.gpu_spend ?? [];
+        const fal = data.fal_spend ?? [];
+        const gpuTotal = gpu.reduce((a, r) => a + r.cost_usd, 0);
+        const falUser = fal.find((r) => r.source === 'user')?.cost_usd ?? 0;
+        const falWarmer = fal.find((r) => r.source === 'warmer')?.cost_usd ?? 0;
+        const total = gpuTotal + falUser + falWarmer;
+        const stillOpen = gpu.reduce((a, r) => a + r.still_open, 0);
+        const usd = (v: number): string => `$${v.toFixed(2)}`;
+        return (
+          <>
+            <div className="section-title">Spend (7d)</div>
+            <div className="stat-row">
+              <div className="stat">
+                <div className="label">Total infra spend</div>
+                <div className="value">{usd(total)}</div>
+                <div className="sub">GPU {usd(gpuTotal)} · fal {usd(falUser + falWarmer)}</div>
+              </div>
+              <div className="stat">
+                <div className="label">GPU (Lambda instances)</div>
+                <div className="value">{usd(gpuTotal)}</div>
+                <div className="sub">
+                  {gpu.reduce((a, r) => a + r.gpu_hours, 0).toFixed(1)} instance-hrs
+                  {stillOpen > 0 ? ` · ${stillOpen} still running (counting to now)` : ''}
+                </div>
+              </div>
+              <div className="stat">
+                <div className="label">fal — drawing</div>
+                <div className="value">{usd(falUser)}</div>
+                <div className="sub">the fallback path (attached time only)</div>
+              </div>
+              <div className="stat">
+                <div className="label">fal — keep-warm</div>
+                <div className="value">{usd(falWarmer)}</div>
+                <div className="sub">warmer overhead (tune in Ops)</div>
+              </div>
+            </div>
+
+            {gpu.length > 0 && (
+              <div className="card" style={{ padding: 0 }}>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Pool</th><th>GPU type</th><th>$/hr</th><th>Instances</th>
+                      <th>Instance-hrs</th><th>Cost</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {gpu.map((r, i) => (
+                      <tr key={i}>
+                        <td>{r.pool}</td>
+                        <td><strong>{r.itype.replace('gpu_1x_', '') || '(unknown)'}</strong></td>
+                        <td>${r.price_hr.toFixed(2)}</td>
+                        <td>{r.instances}{r.still_open > 0 ? ` (${r.still_open} open)` : ''}</td>
+                        <td>{r.gpu_hours.toFixed(1)}</td>
+                        <td><strong>{usd(r.cost_usd)}</strong></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+              GPU cost = reconstructed instance lifetime (launch → terminate, priced by type) — approximate:
+              open instances count to now, and the launch→ready boot window (a few min) is included.
+              fal bills warm-attached time only (cold spin-up is unbilled). Per-user metered spend (the
+              free-tier ledger) is separate — this is what WE pay.
+            </div>
+
+            {/* daily spend trend */}
+            {(data.spend_daily ?? []).length > 0 && (
+              <div className="card" style={{ padding: 0, marginTop: 8 }}>
+                <table>
+                  <thead>
+                    <tr><th>Day</th><th>GPU</th><th>fal</th><th>Total</th></tr>
+                  </thead>
+                  <tbody>
+                    {data.spend_daily.map((d) => (
+                      <tr key={d.day}>
+                        <td>{d.day}</td>
+                        <td>{usd(d.gpu_usd)}</td>
+                        <td>{usd(d.fal_usd)}</td>
+                        <td><strong>{usd(d.gpu_usd + d.fal_usd)}</strong></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </>
+        );
+      })()}
+
+      {/* ── 5: fleet lifecycle ── */}
       <div className="section-title">Fleet lifecycle (7d)</div>
       <div className="card" style={{ padding: 0 }}>
         <table>
