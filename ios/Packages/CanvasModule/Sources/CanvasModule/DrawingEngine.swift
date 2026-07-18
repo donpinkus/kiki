@@ -534,3 +534,9 @@ struct LayeredDrawing: Codable {
     }
 }
 
+
+// MARK: - BrushConfig equality
+
+/// Memberwise equality (synthesized). Lets SwiftUI diff configs — the Brush Studio's
+/// live preview re-renders via `.task(id: config)` only when a knob actually changed.
+extension BrushConfig: Equatable {}

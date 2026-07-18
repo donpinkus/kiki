@@ -332,11 +332,15 @@ final class AppCoordinator {
         didSet { canvasViewModel.setWetOrderingPerStamp(wetOrderingPerStamp) }
     }
 
-    /// Whether the brush-settings popover (secondary sliders) is shown.
-    var showBrushSettings = false
-    /// Whether the Brush Studio (dev) tuning panel is shown. Presented from the sidebar (a
-    /// stable parent) rather than from inside the popover, so it survives the popover dismissing.
+    /// Whether the full-page Brush Studio is shown (fullScreenCover from DrawingView).
+    /// The single brush-editing surface — the old settings popover + docked dev panel
+    /// were folded into it (2026-07-17).
     var showBrushStudio = false
+    /// The last-applied saved custom brush id (chip highlight in the Studio). Purely
+    /// informational, like activeCuratedPresetID.
+    var activeCustomBrushID: UUID?
+    /// On-device named custom brushes ("Save as brush" in the Brush Studio).
+    let customBrushLibrary = CustomBrushLibrary()
 
     // MARK: - DEV brush-tuning harness (input HUD + engine knobs + active test note)
 
@@ -2159,7 +2163,36 @@ final class AppCoordinator {
     /// brush rebuilds once.
     func applyCuratedPreset(_ preset: CuratedPreset) {
         let base = BrushConfig(color: currentColor.codable, baseWidth: toolSize, opacity: toolOpacity)
-        let c = preset.configure(base)
+        writeToolKnobs(from: preset.configure(base))
+        activeCuratedPresetID = preset.id
+        activeCustomBrushID = nil
+        activeTestNote = nil
+        applyTool()
+    }
+
+    /// Apply a saved custom brush: the config carries the brush's character; the user's
+    /// current color and size are kept (same contract as curated presets).
+    func applySavedBrush(_ saved: SavedBrush) {
+        writeToolKnobs(from: saved.config)
+        activeCuratedPresetID = nil
+        activeCustomBrushID = saved.id
+        activeTestNote = nil
+        applyTool()
+    }
+
+    /// Snapshot every knob into a config and save it as a named custom brush.
+    @discardableResult
+    func saveCurrentBrush(named name: String) -> SavedBrush {
+        let saved = customBrushLibrary.add(name: name, config: currentBrushConfig())
+        activeCuratedPresetID = nil
+        activeCustomBrushID = saved.id
+        return saved
+    }
+
+    /// Write every secondary knob from a config back into the tool fields (batched so the
+    /// brush rebuilds once). Deliberately does NOT touch color or size — presets and saved
+    /// brushes carry character, not identity.
+    private func writeToolKnobs(from c: BrushConfig) {
         isSwappingToolValues = true
         toolOpacity = c.opacity
         toolFlow = c.flow
@@ -2189,8 +2222,10 @@ final class AppCoordinator {
         toolTaperOpacity = c.taperOpacity
         toolPressureSmoothing = c.pressureSmoothing
         toolSecondaryColor = c.secondaryColor.map { Color(red: $0.red, green: $0.green, blue: $0.blue) }
-        toolWetEnabled = c.wetEnabled
-        toolWetSmudge = false
+        // currentBrushConfig folds wetEnabled = wet-ink || smudge — unfold here so the
+        // toggles round-trip: a saved smudge brush shows Smudge on, Wet paint off.
+        toolWetSmudge = c.wetSmudge
+        toolWetEnabled = c.wetEnabled && !c.wetSmudge
         toolWetStrength = c.wetStrength
         toolWetPickup = c.wetPickup
         toolWetCharge = c.wetCharge
@@ -2198,9 +2233,6 @@ final class AppCoordinator {
         toolWetJitter = c.wetJitter
         toolWetBlur = c.wetBlur
         isSwappingToolValues = false
-        activeCuratedPresetID = preset.id
-        activeTestNote = nil
-        applyTool()
     }
 
     /// Reset every secondary knob to the engine default (the "None" preset chip),
@@ -2244,6 +2276,7 @@ final class AppCoordinator {
         toolWetBlur = d.wetBlur
         isSwappingToolValues = false
         activeCuratedPresetID = nil
+        activeCustomBrushID = nil
         activeTestNote = nil
         applyTool()
     }
@@ -2258,10 +2291,10 @@ final class AppCoordinator {
         applyTool()
     }
 
-    private func applyTool() {
-        switch currentTool {
-        case .brush:
-            let config = BrushConfig(
+    /// The live brush as a full config — the single source both applyTool and the Brush
+    /// Studio (preview strip, "Save as brush") read. Keep in sync with writeToolKnobs.
+    func currentBrushConfig() -> BrushConfig {
+        BrushConfig(
                 color: currentColor.codable,
                 baseWidth: toolSize,
                 opacity: toolOpacity,
@@ -2301,7 +2334,12 @@ final class AppCoordinator {
                 secondaryColor: toolSecondaryColor.map { $0.codable },
                 dynamics: toolDynamics
             )
-            canvasViewModel.selectBrush(config)
+    }
+
+    private func applyTool() {
+        switch currentTool {
+        case .brush:
+            canvasViewModel.selectBrush(currentBrushConfig())
         case .eraser:
             canvasViewModel.selectEraser(width: toolSize)
         case .lasso:

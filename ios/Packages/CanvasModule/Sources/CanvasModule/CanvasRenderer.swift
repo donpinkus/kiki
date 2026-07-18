@@ -1591,6 +1591,12 @@ public final class CanvasRenderer {
 
     // MARK: - Texture Utilities
 
+    /// Clear every document layer back to transparent. Used by BrushPreviewRenderer,
+    /// which re-renders into one long-lived document — never on the drawing hot path.
+    func clearAllLayers() {
+        for layer in layers { clearTexture(layer.texture) }
+    }
+
     private func clearTexture(_ texture: MTLTexture) {
         guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
         let rpd = MTLRenderPassDescriptor()

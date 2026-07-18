@@ -41,10 +41,11 @@ struct CanvasSidebar: View {
 
             Divider().frame(width: 24)
 
-            // Brush settings (Opacity / Flow / Stabilize / Hardness / Spacing / Taper)
-            // live in a popover; the sidebar stays compact. Brush tool only.
+            // All brush settings live in the full-page Brush Studio (fullScreenCover owned
+            // by DrawingView); the sidebar keeps only Size for mid-drawing tweaks. Brush
+            // tool only.
             Button {
-                coordinator.showBrushSettings.toggle()
+                coordinator.showBrushStudio = true
             } label: {
                 Image(systemName: "slider.horizontal.3")
                     .font(.system(size: 18, weight: .medium))
@@ -53,13 +54,6 @@ struct CanvasSidebar: View {
             }
             .tint(Color.primary)
             .disabled(coordinator.currentTool != .brush)
-            .popover(isPresented: $coordinator.showBrushSettings) {
-                BrushSettingsPopover()
-                    .environment(coordinator)
-                    .presentationCompactAdaptation(.popover)
-            }
-            // Brush Studio is now a docked left panel owned by DrawingView (non-modal, so you can
-            // tune while drawing). The popover button just sets `coordinator.showBrushStudio`.
 
             Divider().frame(width: 24)
 
