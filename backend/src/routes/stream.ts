@@ -102,6 +102,42 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       // already been persisted to the monthly_usage ledger (advanced only on
       // a successful DB write, so a failed write is retried, not lost).
       let falMeteringEnabled = false;
+      // Lambda metering: per-frame billing into the SAME monthly_usage ledger
+      // (one unified $10 free tier across providers). ~$0.0007 raw GPU cost
+      // per 4-step frame (590ms @ $4.29/hr H100), charged at $0.001 to absorb
+      // pool idle overhead. Batched writes every 25 frames; fail-open like fal.
+      let lambdaMeteringEnabled = false;
+      let lambdaUnbilledFrames = 0;
+      let lambdaBillInFlight = false;
+      const LAMBDA_USD_PER_FRAME = 0.001;
+      const billLambdaFrames = (): void => {
+        if (!lambdaMeteringEnabled || lambdaBillInFlight || lambdaUnbilledFrames === 0) return;
+        const uidNow = userId;
+        if (!uidNow) return;
+        const count = lambdaUnbilledFrames;
+        lambdaUnbilledFrames = 0;
+        lambdaBillInFlight = true;
+        void addMonthlySpendUsd(uidNow, count * LAMBDA_USD_PER_FRAME)
+          .then((total) => {
+            if (clientDisconnected || socket.readyState !== socket.OPEN) return;
+            // Live meter push (same shape as the fal path's usage events).
+            socket.send(JSON.stringify({ type: 'usage', spendUsd: total, capUsd: config.FREE_TIER_FAL_USD }));
+            if (total >= config.FREE_TIER_FAL_USD) {
+              request.log.info(
+                { userId: uidNow, connId, streamId, spendUsd: total, event: 'free_limit_reached' },
+                'AI spend cap reached mid-session (lambda) — cutting stream',
+              );
+              socket.send(JSON.stringify({
+                type: 'error',
+                code: 'free_limit_reached',
+                message: "You're out of free drawing time this month — subscribe to keep drawing.",
+              }));
+              socket.close(1008, 'free_limit_reached');
+            }
+          })
+          .catch(() => { lambdaUnbilledFrames += count; })  // retry on next flush
+          .finally(() => { lambdaBillInFlight = false; });
+      };
       let lastBilledMs = 0;
       // Admin session replay: throttled sketch/generated frame mirror to
       // Insights (see modules/insights/frameCapture.ts). Created lazily once
@@ -234,6 +270,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
           },
           'session_close',
         );
+        billLambdaFrames();
         if (userId) {
           trackSessionClosed({ userId, durationMs });
           trackProviderSession({
@@ -354,13 +391,13 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       // device) so the monthly free budget can't be bypassed by reconnecting.
       // Exempt users (test accounts, active subscribers) pass and skip
       // mid-session metering. Only applies when the image path is fal.
-      if (imageProvider === 'fal' && source === 'jwt') {
+      if ((imageProvider === 'fal' || imageProvider === 'lambda') && source === 'jwt') {
         try {
           const budget = await checkFalBudget(userId);
           if (!budget.allowed) {
             request.log.info(
               { userId, connId, streamId, spendUsd: budget.spendUsd, capUsd: budget.capUsd, event: 'free_limit_reached' },
-              'fal spend cap reached at session start — denying',
+              'AI spend cap reached at session start — denying',
             );
             socket.send(
               JSON.stringify({
@@ -372,7 +409,8 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             socket.close(1008, 'free_limit_reached');
             return;
           }
-          falMeteringEnabled = !budget.exempt;
+          falMeteringEnabled = imageProvider === 'fal' && !budget.exempt;
+          lambdaMeteringEnabled = imageProvider === 'lambda' && !budget.exempt;
         } catch (err) {
           // Fail-open: if the budget DB is unreachable, let the user draw rather
           // than hang or hard-deny. Enable metering so spend resumes capping
@@ -381,7 +419,8 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             { userId, connId, streamId, err: (err as Error).message, event: 'fal_budget_check_failed' },
             'fal_budget_check_failed — failing open (allowing session)',
           );
-          falMeteringEnabled = true;
+          falMeteringEnabled = imageProvider === 'fal';
+          lambdaMeteringEnabled = imageProvider === 'lambda';
         }
       }
 
@@ -423,6 +462,10 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             const base64 = buf.toString('base64');
             socket.send(JSON.stringify({ type: 'frame', data: base64 }));
             framesDelivered += 1;
+            if (imageProvider === 'lambda') {
+              lambdaUnbilledFrames += 1;
+              if (lambdaUnbilledFrames >= 25) billLambdaFrames();
+            }
             captureFrame('generated', buf);
           } else {
             // Forward text frames (frame_meta, status, error) to the iPad

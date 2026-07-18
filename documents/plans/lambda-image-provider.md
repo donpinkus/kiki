@@ -401,3 +401,18 @@ holds: $7,500 credits ≈ 1,750 H100-SXM-hours.)
    3-step) — and whether A100 40 GB ($1.99) is adequate.
 4. Does `preempted` ever fire on on-demand instances?
 5. Adherence: reference-mode VAE-concat vs fal feedback loop, same sketches (the point).
+
+## Launch decisions (Donald, 2026-07-17)
+
+- **Video stays disabled for launch.** (RunPod removal already killed it; this
+  makes it a decision, not an accident. Revisit as an LTX-on-Lambda port later.)
+- **Lambda metering: per-frame, unified ledger.** Every lambda-delivered frame
+  charges $0.001 into the same `monthly_usage` ledger as fal (one $10 free
+  tier across providers; ~$0.0007 measured raw GPU cost per 4-step frame,
+  rounded up for pool overhead). Batched every 25 frames + flush at close,
+  fail-open, same exemptions (test accounts/subscribers), same mid-session
+  free_limit_reached cut, live usage pushes to the iPad meter. Session-start
+  budget gate now applies to lambda sessions too. Approximate by design —
+  the goal is bounding worst-case demo cost near $10/user, not accounting.
+- **Lambda quota: assume self-serve headroom for small N.** Formalize with
+  Lambda (support ticket / sales) only when approaching ~20 instances.
