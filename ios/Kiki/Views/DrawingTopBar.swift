@@ -113,14 +113,6 @@ struct DrawingTopBar: View {
                 }
             }
 
-            if !coordinator.canvasViewModel.isDefaultTransform {
-                actionButton(
-                    icon: "arrow.counterclockwise",
-                    action: coordinator.canvasViewModel.resetViewTransform,
-                    disabled: false
-                )
-            }
-
             Button {
                 coordinator.showLayerPanel.toggle()
             } label: {
@@ -204,14 +196,6 @@ struct DrawingTopBar: View {
         }
     }
 
-    private func actionButton(icon: String, action: @escaping () -> Void, disabled: Bool) -> some View {
-        Button {
-            action()
-        } label: {
-            chromeIcon(icon, color: disabled ? KikiTheme.iconDim : KikiTheme.icon)
-        }
-        .disabled(disabled)
-    }
 }
 
 /// Identifiable wrapper so `.sheet(item:)` re-presents when the exported file
