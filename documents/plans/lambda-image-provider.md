@@ -399,6 +399,44 @@ Per H100 SXM ($4.29/hr), 768², users capped at 1 frame / 3 s (Donald-approved f
 - Overload is graceful (fair split, cadence stretches), so pool sizing is a UX knob,
   not a stability knob.
 
+## Multi-region + GPU-type fallback (2026-07-18)
+
+Motivated by a 6-hour us-south-2 H100 drought (searches: 4s off-peak; 15-min
+windows exhausted all day; at one point zero H100-SXM capacity Lambda-wide).
+
+- **Pool capacity sweep**: `launchOne` walks a (type × region) grid
+  TYPE-MAJOR — every region is asked for the better GPU before a worse GPU
+  is accepted anywhere. Config: `LAMBDA_REGIONS` /
+  `LAMBDA_INSTANCE_TYPES` (ordered csv; video variants exist). Live:
+  regions = us-south-2, us-southeast-1, us-east-1 (all three filesystems
+  populated with 9b-kv + TLS + the genMs server); validated in prod — under
+  pressure the sweep skipped dry us-south-2 and won an SXM in
+  us-southeast-1 in 108s.
+- **GPU-type benchmark** (30-frame serial through the real WS path,
+  client-side round-trip):
+
+  | type | $/hr | fits? | gen p50 | gen p95 | $/frame | notes |
+  |---|---|---|---|---|---|---|
+  | gpu_1x_h100_sxm5 | 4.29 | ✓ (43 GB free) | **686 ms** | 907 ms | $0.00082 | production baseline (kv+compile, warm) |
+  | gpu_1x_a100_sxm4 | 1.99 | ✓ tight (4.4 GB free of 40) | **1574 ms** | 1711 ms | $0.00087 | first-boot compile 637s (Ampere autotune); cached after |
+  | gpu_1x_h100_pcie | 3.29 | (untested — no capacity) | ~est 0.85× SXM | | | same Hopper arch; in fallback list on equivalence |
+  | gpu_1x_a100 (PCIe) | 1.99 | (untested — no capacity) | ≈ sxm4 | | | same arch+VRAM as sxm4; in list |
+  | gpu_1x_a6000 | 1.09 | (untested — no capacity) | est ~3s | | | excluded until benchmarked |
+  | gpu_1x_gh200 | 2.29 | **excluded permanently** | | | | Grace = ARM CPU; our NFS venvs are x86 |
+
+  A100 verdict: ~2.3× slower than SXM but ≈ fal's latency **with our
+  reference-mode adherence** — a real quality win over falling all the way
+  to fal. $/frame is a wash with H100. VRAM headroom is tight (4.4 GB);
+  `expandable_segments` is on, watch for fragmentation OOMs in long
+  sessions.
+- **Fallback order live**: `gpu_1x_h100_sxm5, gpu_1x_h100_pcie,
+  gpu_1x_a100_sxm4, gpu_1x_a100`. Full sweep circuit = 12 cells ≈ 2.6 min
+  at the 13s account-wide launch spacing.
+- **Inductor cache is per-arch**: a region serving both Hopper and Ampere
+  accumulates both kernel sets on its filesystem — first boot per (region,
+  arch) pays that arch's compile (H100 ~5 min; A100 ~10.5 min, within the
+  25-min boot timeout).
+
 ## Phase 2 (revised with data) — shared pool design
 
 - **Pod**: unchanged for v1 (sharing verified). Optional: 3-step default on Lambda.

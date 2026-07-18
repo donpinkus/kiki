@@ -196,6 +196,14 @@ echo "=== venv (self-contained; NOT system-site-packages — Lambda Stack's syst
 # is unusable on 24.04 instances — detect and rebuild.
 if [ -x $FS/kiki/venv/bin/python3 ]; then
   VENV_PY=$($FS/kiki/venv/bin/python3 -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")' 2>/dev/null || echo broken)
+  # The venv's bin/python3 is a symlink resolved against the HOST python, so
+  # the version check can PASS on a stale venv whose site-packages are from an
+  # older python (seen on the early-era us-east-1 fs: 3.12 host, 3.10 venv,
+  # 'No module named pip'). Verify pip actually imports inside the venv too.
+  if ! $FS/kiki/venv/bin/python3 -m pip --version >/dev/null 2>&1; then
+    echo "existing venv has no working pip — rebuilding"
+    VENV_PY=broken
+  fi
   if [ "$VENV_PY" != "${EXPECTED_PY}" ]; then
     echo "existing venv is python $VENV_PY, expected ${EXPECTED_PY} — rebuilding"
     rm -rf $FS/kiki/venv
