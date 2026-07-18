@@ -49,6 +49,26 @@ interior) — biggest engine gap this session surfaced; Height grain blend.
    Intense/Uniformed Glaze density correctly.
 3. Wet Edges 0/50/100 sweep — to spec the edge effect before building it.
 
+## Original-shape generation (2026-07-18) — DO NOT ship extracted Procreate tips
+
+Owner decision: the shipped tips must not be direct pixel copies of Procreate's
+proprietary shapes (IP). Two approaches tried:
+
+- **Procedural synthesis** (`scratchpad/gen-shapes.py`, numpy): rounds/halftone/
+  spatter/charcoal render fine, but organic tips (ink blot, palette knife, smear)
+  look artificial. **Rejected** by owner — quality bar not met.
+- **fal.ai `fal-ai/flux-2` img2img** (NOT our H100 — klein is reference-mode-only,
+  can't do strength-based partial-denoise). Endpoint: `POST https://fal.run/fal-ai/
+  flux-2` with `image_url` (data URI) + `strength`, sync, ~4-6 s/image, `FAL_KEY`
+  from `backend/.env.local`. Produces genuinely original, high-quality ink/paint
+  textures. Findings: (1) flux reads "black shape on white" as a PHOTO of paint on
+  paper — must prompt out paper texture / torn edges / border / shadow or the mask
+  gets a solid-rectangle rim; (2) it reinterprets the silhouette rather than closely
+  copying — good for originality, weaker for matching a specific target shape;
+  strength ~0.3 keeps shape, ~0.6+ reimagines it. Scripts: `scratchpad/fal-sweep.py`,
+  `fal-refine.py`. **This is the promising path** — tune strength + prompt, then
+  clean+threshold outputs to masks.
+
 ## Unused tip library (ready to mine)
 30 more extracted-ready Shape Editor captures on Desktop: ink blots (0234–0240),
 splashes (0258/0259), dry-brush streaks (0241–0243), hardness ramp (0244–0250),

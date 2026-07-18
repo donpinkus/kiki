@@ -43,11 +43,46 @@ public enum BrushShapeCatalog {
         BrushShapeDescriptor(id: "drybrush", displayName: "Dry Brush", resourceName: "drybrush"),
         BrushShapeDescriptor(id: "pastel", displayName: "Pastel", resourceName: "pastel", rotationJitter: true),
         BrushShapeDescriptor(id: "ink", displayName: "Spray", resourceName: "ink"),
-        // Cloned Procreate tips (2026-07-18, brush-target sessions): extracted from
-        // Shape Editor screenshots. See documents/research/krita-brush/16-brush-clones.md.
+        // Clone-brush tips (2026-07-18): ORIGINALS generated from Procreate Shape Editor
+        // captures via fal Flux Kontext (structure-preserving variation — NOT pixel copies).
+        // See documents/research/krita-brush/16-brush-clones.md.
         BrushShapeDescriptor(id: "stucco", displayName: "Stucco", resourceName: "stucco"),
         BrushShapeDescriptor(id: "nightjar", displayName: "Blob", resourceName: "nightjar"),
         BrushShapeDescriptor(id: "oldbeach", displayName: "Knife", resourceName: "oldbeach"),
+        // Stock shape library: originals generated the same way from Donald's Procreate
+        // Shape Library captures (Kontext variation of each). "import all as stock shapes."
+        BrushShapeDescriptor(id: "lib_chinese_ink", displayName: "Chinese Ink", resourceName: "lib_chinese_ink"),
+        BrushShapeDescriptor(id: "lib_ink_sponge", displayName: "Ink Sponge", resourceName: "lib_ink_sponge"),
+        BrushShapeDescriptor(id: "lib_ink_dry", displayName: "Ink Dry", resourceName: "lib_ink_dry"),
+        BrushShapeDescriptor(id: "lib_ink2", displayName: "Ink 2", resourceName: "lib_ink2"),
+        BrushShapeDescriptor(id: "lib_ink_grain", displayName: "Ink Grain", resourceName: "lib_ink_grain"),
+        BrushShapeDescriptor(id: "lib_ink_pounce", displayName: "Ink Pounce", resourceName: "lib_ink_pounce"),
+        BrushShapeDescriptor(id: "lib_char_disc", displayName: "Charcoal Disc", resourceName: "lib_char_disc"),
+        BrushShapeDescriptor(id: "lib_flat_brush", displayName: "Flat Brush", resourceName: "lib_flat_brush"),
+        BrushShapeDescriptor(id: "lib_flat_marker", displayName: "Flat Marker", resourceName: "lib_flat_marker"),
+        BrushShapeDescriptor(id: "lib_flat_brush2", displayName: "Flat Brush 2", resourceName: "lib_flat_brush2"),
+        BrushShapeDescriptor(id: "lib_small_point", displayName: "Small Point", resourceName: "lib_small_point"),
+        BrushShapeDescriptor(id: "lib_ultra_soft", displayName: "Ultra Soft", resourceName: "lib_ultra_soft"),
+        BrushShapeDescriptor(id: "lib_soft", displayName: "Soft", resourceName: "lib_soft"),
+        BrushShapeDescriptor(id: "lib_medium", displayName: "Medium", resourceName: "lib_medium"),
+        BrushShapeDescriptor(id: "lib_medium_hard", displayName: "Medium Hard", resourceName: "lib_medium_hard"),
+        BrushShapeDescriptor(id: "lib_hard", displayName: "Hard", resourceName: "lib_hard"),
+        BrushShapeDescriptor(id: "lib_halftone", displayName: "Halftone", resourceName: "lib_halftone"),
+        BrushShapeDescriptor(id: "lib_char_block", displayName: "Charcoal Block", resourceName: "lib_char_block"),
+        BrushShapeDescriptor(id: "lib_char_macro", displayName: "Charcoal Macro", resourceName: "lib_char_macro"),
+        BrushShapeDescriptor(id: "lib_char_shards", displayName: "Charcoal Shards", resourceName: "lib_char_shards"),
+        BrushShapeDescriptor(id: "lib_char_soft", displayName: "Charcoal Soft", resourceName: "lib_char_soft"),
+        BrushShapeDescriptor(id: "lib_char_wisp", displayName: "Charcoal Wisp", resourceName: "lib_char_wisp"),
+        BrushShapeDescriptor(id: "lib_cloud", displayName: "Cloud", resourceName: "lib_cloud"),
+        BrushShapeDescriptor(id: "lib_splash", displayName: "Splash", resourceName: "lib_splash"),
+        BrushShapeDescriptor(id: "lib_splatter", displayName: "Splatter", resourceName: "lib_splatter"),
+        BrushShapeDescriptor(id: "lib_oil_smear", displayName: "Oil Smear", resourceName: "lib_oil_smear"),
+        BrushShapeDescriptor(id: "lib_palette", displayName: "Palette Knife", resourceName: "lib_palette"),
+        BrushShapeDescriptor(id: "lib_paint_flakes", displayName: "Paint Flakes", resourceName: "lib_paint_flakes"),
+        BrushShapeDescriptor(id: "lib_ridge", displayName: "Ridge Print", resourceName: "lib_ridge"),
+        BrushShapeDescriptor(id: "lib_acrylic_square", displayName: "Acrylic Square", resourceName: "lib_acrylic_square"),
+        BrushShapeDescriptor(id: "lib_leaves", displayName: "Leaves", resourceName: "lib_leaves"),
+        BrushShapeDescriptor(id: "lib_rocks", displayName: "Rocks", resourceName: "lib_rocks"),
     ]
 
     public static func descriptor(for id: String?) -> BrushShapeDescriptor {
