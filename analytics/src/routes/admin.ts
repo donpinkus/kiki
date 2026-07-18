@@ -859,7 +859,7 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
                   count(*)::int AS instances,
                   count(*) FILTER (WHERE terminated_at IS NULL)::int AS still_open,
                   round(sum(extract(epoch FROM (COALESCE(terminated_at, now()) - launched_at)) / 3600.0)::numeric, 2)::float AS gpu_hours,
-                  price_hr,
+                  price_hr::float AS price_hr,
                   round(sum(extract(epoch FROM (COALESCE(terminated_at, now()) - launched_at)) / 3600.0 * price_hr)::numeric, 2)::float AS cost_usd
            FROM lifetimes
            GROUP BY pool, itype, price_hr

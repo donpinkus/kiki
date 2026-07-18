@@ -138,9 +138,9 @@ export function Fleet() {
       {(() => {
         const gpu = data.gpu_spend ?? [];
         const fal = data.fal_spend ?? [];
-        const gpuTotal = gpu.reduce((a, r) => a + r.cost_usd, 0);
-        const falUser = fal.find((r) => r.source === 'user')?.cost_usd ?? 0;
-        const falWarmer = fal.find((r) => r.source === 'warmer')?.cost_usd ?? 0;
+        const gpuTotal = gpu.reduce((a, r) => a + Number(r.cost_usd), 0);
+        const falUser = Number(fal.find((r) => r.source === 'user')?.cost_usd ?? 0);
+        const falWarmer = Number(fal.find((r) => r.source === 'warmer')?.cost_usd ?? 0);
         const total = gpuTotal + falUser + falWarmer;
         const stillOpen = gpu.reduce((a, r) => a + r.still_open, 0);
         const usd = (v: number): string => `$${v.toFixed(2)}`;
@@ -157,7 +157,7 @@ export function Fleet() {
                 <div className="label">GPU (Lambda instances)</div>
                 <div className="value">{usd(gpuTotal)}</div>
                 <div className="sub">
-                  {gpu.reduce((a, r) => a + r.gpu_hours, 0).toFixed(1)} instance-hrs
+                  {gpu.reduce((a, r) => a + Number(r.gpu_hours), 0).toFixed(1)} instance-hrs
                   {stillOpen > 0 ? ` · ${stillOpen} still running (counting to now)` : ''}
                 </div>
               </div>
@@ -187,10 +187,10 @@ export function Fleet() {
                       <tr key={i}>
                         <td>{r.pool}</td>
                         <td><strong>{r.itype.replace('gpu_1x_', '') || '(unknown)'}</strong></td>
-                        <td>${r.price_hr.toFixed(2)}</td>
+                        <td>${Number(r.price_hr).toFixed(2)}</td>
                         <td>{r.instances}{r.still_open > 0 ? ` (${r.still_open} open)` : ''}</td>
-                        <td>{r.gpu_hours.toFixed(1)}</td>
-                        <td><strong>{usd(r.cost_usd)}</strong></td>
+                        <td>{Number(r.gpu_hours).toFixed(1)}</td>
+                        <td><strong>{usd(Number(r.cost_usd))}</strong></td>
                       </tr>
                     ))}
                   </tbody>
@@ -215,9 +215,9 @@ export function Fleet() {
                     {data.spend_daily.map((d) => (
                       <tr key={d.day}>
                         <td>{d.day}</td>
-                        <td>{usd(d.gpu_usd)}</td>
-                        <td>{usd(d.fal_usd)}</td>
-                        <td><strong>{usd(d.gpu_usd + d.fal_usd)}</strong></td>
+                        <td>{usd(Number(d.gpu_usd))}</td>
+                        <td>{usd(Number(d.fal_usd))}</td>
+                        <td><strong>{usd(Number(d.gpu_usd) + Number(d.fal_usd))}</strong></td>
                       </tr>
                     ))}
                   </tbody>
