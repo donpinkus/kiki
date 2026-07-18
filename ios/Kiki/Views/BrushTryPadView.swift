@@ -24,6 +24,13 @@ struct BrushTryPadView: UIViewRepresentable {
     func makeUIView(context: Context) -> MetalCanvasView {
         let view = MetalCanvasView()
         view.backgroundColor = .white
+        // Pad mode: keep raw stroke geometry so knob changes live re-render the paint
+        // already down (Procreate behavior); no undo snapshots (Clear + re-render
+        // replace them); no QuickShape (snapped geometry wouldn't survive re-render,
+        // and shape-snapping isn't what a brush try pad is for).
+        view.retainStrokeGeometry = true
+        view.isUndoEnabled = false
+        view.isQuickShapeEnabled = false
         context.coordinator.lastClearToken = clearToken
         apply(to: view, context.coordinator)
         return view
@@ -43,6 +50,8 @@ struct BrushTryPadView: UIViewRepresentable {
         if coordinator.lastBrush != brush {
             coordinator.lastBrush = brush
             view.currentTool = .brush(brush)
+            // Procreate behavior: knob changes re-paint the strokes already on the pad.
+            view.setRetainedStrokesBrush(brush)
         }
         view.onBrushInputSample = onBrushInputSample
         view.devMaxSpeed = devMaxSpeed

@@ -434,6 +434,14 @@ public final class MetalCanvasView: UIView {
     @objc private func displayLinkFired() {
         guard isDirty else { return }
         isDirty = false
+        // Brush Studio pad: a knob changed since the last frame — re-render every
+        // retained stroke with the new brush before compositing. Coalesced here so a
+        // slider drag costs at most one full re-render per display frame.
+        if pendingRerenderBrush != nil, activeStroke == nil {
+            let brush = pendingRerenderBrush!
+            pendingRerenderBrush = nil
+            rerenderRetainedStrokes(with: brush)
+        }
         renderFrame()
     }
 
@@ -584,6 +592,7 @@ public final class MetalCanvasView: UIView {
                                           stabilization: config.stabilization,
                                           pressureSmoothing: config.pressureSmoothing)
             let firstRaw = makeStrokePoint(from: touch)
+            activeRawPoints = [firstRaw]   // pre-stabilizer, for pad live re-render
             let firstPoint = stabilizer?.feed(firstRaw) ?? firstRaw
             activeStroke = Stroke(points: [firstPoint], brush: config)
             activeStrokeStamps = []
@@ -721,6 +730,7 @@ public final class MetalCanvasView: UIView {
             let coalesced = event?.coalescedTouches(for: touch) ?? [touch]
             for ct in coalesced {
                 let raw = makeStrokePoint(from: ct)
+                if retainStrokeGeometry { activeRawPoints.append(raw) }
                 activeStroke?.points.append(stabilizer?.feed(raw) ?? raw)
             }
             emitBrushInputSample(brush: config)
@@ -1129,6 +1139,7 @@ public final class MetalCanvasView: UIView {
                 // (Simulator) nothing was painted, so no stroke count / autosave either.
                 if renderer.isWetRenderingAvailable {
                     applyNewWetStamps()
+                    retainCompletedStroke(stroke)
                     strokeCount += 1
                     onDrawingChanged?()
                     onStrokeCompleted?(canvasSpaceStroke(stroke))
@@ -1143,6 +1154,8 @@ public final class MetalCanvasView: UIView {
             guard renderer.isWetInkAvailable else { return }
             appendNewWetInkStamps()
         }
+
+        retainCompletedStroke(stroke)
 
         // Brush: push undo snapshot, flatten scratch into canvas.
         pushUndoSnapshot()
@@ -1180,6 +1193,118 @@ public final class MetalCanvasView: UIView {
             return q
         }
         return Stroke(id: stroke.id, points: points, brush: brush)
+    }
+
+    // MARK: - Brush Studio pad: retained-geometry live re-render
+    //
+    // Procreate-style: strokes in the try pad keep their RAW input geometry (pre-
+    // stabilizer, view-space), and when a brush knob changes the whole pad is cleared
+    // and every stroke re-painted with the new brush — so sliders live-update paint
+    // that's already down. Retaining raw points means even Stabilize/Smoothing dial
+    // retroactively (re-applied per re-render from the new brush). Off for the main
+    // canvas: its persistence is pixel-based and strokes there keep the brush that
+    // painted them.
+
+    /// Opt-in (the Studio pad sets it). When true, committed brush strokes are retained
+    /// as raw geometry and `setRetainedStrokesBrush` re-renders them live.
+    public var retainStrokeGeometry = false
+    /// The pad turns undo snapshots off — each one is a full-document CPU copy
+    /// (~16 MB), and the pad has Clear + live re-render instead of undo.
+    public var isUndoEnabled = true
+
+    /// Raw view-space input points per committed stroke. Ids are kept so per-stroke
+    /// seeded randomness (spacing jitter, scatter) is stable across re-renders —
+    /// otherwise every slider tick would reshuffle the stroke.
+    private var retainedStrokes: [(id: UUID, points: [StrokePoint])] = []
+    private var activeRawPoints: [StrokePoint] = []
+    private var pendingRerenderBrush: BrushConfig?
+
+    /// Re-render every retained stroke with `brush` (geometry kept, brush swapped).
+    /// Coalesced to the next display-link frame; no-op unless retention is on.
+    public func setRetainedStrokesBrush(_ brush: BrushConfig) {
+        guard retainStrokeGeometry, !retainedStrokes.isEmpty else { return }
+        pendingRerenderBrush = brush
+        isDirty = true
+    }
+
+    private func retainCompletedStroke(_ stroke: Stroke) {
+        guard retainStrokeGeometry else { return }
+        retainedStrokes.append((id: stroke.id,
+                                points: activeRawPoints.isEmpty ? stroke.points : activeRawPoints))
+        activeRawPoints = []
+    }
+
+    private func rerenderRetainedStrokes(with brush: BrushConfig) {
+        renderer.clearAllLayers()
+        for retained in retainedStrokes {
+            // Re-apply stabilization from the NEW brush (the retained points are raw),
+            // exactly like the live input path + catch-up tail.
+            var points = retained.points
+            if brush.streamline > 0 || brush.stabilization > 0 || brush.pressureSmoothing > 0 {
+                var st = StrokeStabilizer(streamline: brush.streamline,
+                                          stabilization: brush.stabilization,
+                                          pressureSmoothing: brush.pressureSmoothing)
+                var fed = retained.points.map { st.feed($0) }
+                fed.append(contentsOf: st.finish())
+                points = fed
+            }
+            paintRetained(Stroke(id: retained.id, points: points, brush: brush))
+        }
+        isDirty = true
+    }
+
+    /// Paint one committed stroke from scratch — the same routing the live path and the
+    /// BrushHarness use: dry via StrokeStampGenerator → commitStampsToCanvas, wet ink
+    /// via a whole-stroke walker (canvas pristine per stroke), smudge via batched
+    /// walker advances with queue drains so the pickup sees its own deposits.
+    private func paintRetained(_ stroke: Stroke) {
+        let brush = stroke.brush
+        guard let start = stroke.points.first?.position else { return }
+
+        if brush.wetEnabled, brush.wetSmudge {
+            guard renderer.isWetRenderingAvailable else { return }
+            renderer.waitUntilQueueDrained()
+            var walker = WetStrokeWalker(startPosition: start, brush: brush)
+            var upTo = 1
+            while upTo <= stroke.points.count {
+                let prefix = Stroke(id: stroke.id,
+                                    points: Array(stroke.points.prefix(upTo)),
+                                    brush: brush)
+                let stamps = walker.advance(
+                    stroke: prefix, scale: canvasScale, clipPath: nil,
+                    sample: { [renderer] x, y in renderer.sampleLayerColor(x: x, y: y) },
+                    sampleAveraged: { [renderer] x, y, r in renderer.sampleLayerColorAveraged(x: x, y: y, radius: r) },
+                    mix: { [renderer] a, b, t in renderer.kmMixCPU(a, b, t) })
+                if !stamps.isEmpty {
+                    renderer.applyWetStamps(stamps)
+                    renderer.waitUntilQueueDrained()
+                }
+                if upTo == stroke.points.count { break }
+                upTo = min(upTo + 8, stroke.points.count)
+            }
+            return
+        }
+        if brush.wetEnabled {
+            guard renderer.isWetInkAvailable else { return }
+            // The KM under-color is a canvas sample — drain so this stroke sees the
+            // strokes re-painted before it.
+            renderer.waitUntilQueueDrained()
+            var walker = WetStrokeWalker(startPosition: start, brush: brush)
+            let stamps = walker.advance(
+                stroke: stroke, scale: canvasScale, clipPath: nil,
+                sample: { [renderer] x, y in renderer.sampleLayerColor(x: x, y: y) },
+                sampleAveraged: { [renderer] x, y, r in renderer.sampleLayerColorAveraged(x: x, y: y, radius: r) },
+                mix: { [renderer] a, b, t in renderer.kmMixCPU(a, b, t) })
+            renderer.commitStampsToCanvas(stamps, strokeOpacity: Float(brush.opacity), wetInk: true)
+            return
+        }
+        let stamps = generateStampsForStroke(stroke, scale: canvasScale)
+        renderer.commitStampsToCanvas(stamps,
+                                      strokeOpacity: Float(brush.opacity),
+                                      shapeTexture: renderer.shapeTexture(for: brush.shapeID),
+                                      grain: renderer.grainSettings(for: brush),
+                                      lightness: renderer.lightnessSettings(for: brush),
+                                      flip: renderer.flipSettings(for: brush))
     }
 
     // MARK: - Snap Edit Mode (handle dragging post-commit)
@@ -2215,6 +2340,7 @@ public final class MetalCanvasView: UIView {
     // MARK: - Undo / Redo
 
     private func pushUndoSnapshot() {
+        guard isUndoEnabled else { return }   // Studio pad: no 16 MB snapshots
         guard let id = renderer.layerID(at: activeLayerIndex),
               let data = renderer.snapshotLayer(at: activeLayerIndex) else { return }
         undoSnapshots.append(.layer(id: id, snapshotData: data))
@@ -2376,11 +2502,14 @@ public final class MetalCanvasView: UIView {
     /// the pre-clear layer STACK (all layers + structure) is captured, not
     /// just the active layer, so undo restores multi-layer documents fully.
     public func clearAll() {
-        if let current = renderer.snapshotLayerStack() {
+        if isUndoEnabled, let current = renderer.snapshotLayerStack() {
             undoSnapshots.append(.canvas(layers: current.layers, activeIndex: current.activeIndex, strokeCount: strokeCount))
             trimUndoAndClearRedo()
         }
         renderer.resetToSingleLayer()
+        retainedStrokes.removeAll()
+        activeRawPoints.removeAll()
+        pendingRerenderBrush = nil
         strokeCount = 0
         isDirty = true
         onStateChanged?()
