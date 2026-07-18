@@ -39,9 +39,28 @@ to manage pod lifecycles — with no pods there was nothing to orchestrate.
 `archive/video-ltx/` for the planned Lambda video port, and the iOS video
 render path (`VideoEvent`, `ResultState.videoStreaming/.videoLooping`,
 `LoopingVideoView`) is intact — it's inert until a backend sends `video_*`
-messages again. The RunPod network volumes + any Railway env vars
-(RUNPOD_API_KEY, NETWORK_VOLUMES_*, REDIS_URL, COST_*, OPS_API_KEY) are now
-unused — delete the volumes/addon to stop the ~$49/mo storage spend.
+messages again.
+
+**Pending manual cleanup (Donald-only; from the 2026-07-17 cleanup handoff —
+delete each line here once done):**
+
+1. Railway — delete unused backend env vars: `RUNPOD_API_KEY`,
+   `RUNPOD_REGISTRY_AUTH_ID`, `NETWORK_VOLUMES_BY_DC`,
+   `NETWORK_VOLUMES_BY_DC_VIDEO`, `REDIS_URL`, `VIDEO_POD_ENABLED`,
+   `ONDEMAND_FALLBACK_ENABLED`, `ONDEMAND_ONLY_MODE`,
+   `PREEMPTION_REPLACEMENT_ENABLED`, `MAX_SESSION_REPLACEMENTS`,
+   `RECONCILE_INTERVAL_MS`, `RECONCILE_MIN_AGE_SEC`, `POD_BOOT_*`,
+   `COST_MONITOR_INTERVAL_MS`, `COST_ALERT_*`, `COST_POD_LOG_WEBHOOK_URL`,
+   `OPS_API_KEY`, `MAX_CONCURRENT_PROVISIONS`, `PUBLIC_KEY`, `FLUX_IMAGE`,
+   `RUNPOD_GHCR_AUTH_ID`, `SENTRY_DSN_POD` (backend no longer forwards it).
+2. Railway — remove the Redis addon (nothing reads it).
+3. RunPod — destroy the 11 network volumes (5 image + 6 video ≈ **$49/mo**)
+   and revoke the API key when done.
+4. GitHub — delete the `RUNPOD_API_KEY` Actions secret (stop-pods workflow
+   is gone).
+5. PostHog — close the account whenever the historical events (project
+   389365) stop being useful; drop `POSTHOG_PERSONAL_API_KEY` /
+   `POSTHOG_PROJECT_ID` from root `.env.local`.
 
 ---
 
