@@ -545,7 +545,11 @@ export function start(logger: FastifyBaseLogger): void {
         });
         log.info({ instanceId: remote.id, name, event: 'lambda_pool_adopted' }, 'adopted existing kiki-serve instance');
         recordPoolEvent('adopted', name, remote.region.name);
-        void inBackgroundScope('lambda_pool', () => watchBoot(name));
+        void inBackgroundScope('lambda_pool', () =>
+          watchBoot(name).catch((err: Error) => {
+            log.warn({ name, err: err.message, event: 'lambda_pool_adopted_boot_failed' }, 'adopted instance never became healthy');
+          }),
+        );
       }
     } catch (err) {
       logger.warn({ err, event: 'lambda_pool_reconcile_failed' }, 'lambda pool startup reconcile failed');
