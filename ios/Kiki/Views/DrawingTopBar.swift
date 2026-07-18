@@ -254,7 +254,8 @@ struct KikiAIStatusBadge: View {
     private var label: String {
         switch coordinator.lambdaPoolState?.status {
         case "ready": return "Kiki's AI"
-        case "launching", "booting", "none": return "Kiki's AI · warming up"
+        case "launching", "booting": return "Kiki's AI · warming up"
+        case "none": return "Kiki's AI · asleep"
         case "error": return "Kiki's AI · error"
         default: return "Kiki's AI"
         }
@@ -302,10 +303,16 @@ private struct KikiAIStatusDetails: View {
                     Label("Finding a GPU…", systemImage: "hourglass")
                         .foregroundStyle(.pink)
                     warmingDetail
-                case "booting", "none":
+                case "booting":
                     Label("Warming up…", systemImage: "flame")
                         .foregroundStyle(.pink)
                     warmingDetail
+                case "none":
+                    Label("Asleep — powered down after 30 quiet minutes.", systemImage: "moon.zzz")
+                        .foregroundStyle(.pink)
+                    Button("Wake up") { coordinator.ensureLambdaPool() }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
                 case "error":
                     Label("Error fetching Kiki's AI", systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.red)
