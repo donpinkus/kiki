@@ -558,7 +558,13 @@ private struct AnimateModalView: View {
                 } header: {
                     Text("Animation prompt")
                 } footer: {
-                    Text("Describe the **motion**, not the scene — the video already knows what's in your drawing. Short, physical phrases work best; camera moves like \"slow zoom in\" work too. Leave empty for a gentle default.")
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Describe the **motion**, not the scene — the video already knows what's in your drawing. Short, physical phrases work best; camera moves like \"slow zoom in\" work too. Leave empty for a gentle default.")
+                        if coordinator.videoAvailability == .warming {
+                            Text("Kiki's video AI is still warming up — your prompt is saved, and Animate unlocks in a couple of minutes.")
+                                .foregroundStyle(KikiAIStatusBadge.warmPink)
+                        }
+                    }
                 }
 
                 Section("Examples — tap to use") {
@@ -573,30 +579,25 @@ private struct AnimateModalView: View {
                     }
                 }
 
-                Section {
-                    Button {
-                        coordinator.requestAnimate()
-                        dismiss()
-                    } label: {
-                        HStack {
-                            Spacer()
-                            Text(animateCTA)
-                                .font(.headline)
-                            Spacer()
-                        }
-                    }
-                    .disabled(!canFire)
-                } footer: {
-                    if coordinator.videoAvailability == .warming {
-                        Text("Kiki's video AI is still warming up — you can save your prompt now and animate in a couple of minutes.")
-                    }
-                }
             }
             .navigationTitle("Animate")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Done") { dismiss() }
+                    Button("Cancel") { dismiss() }
+                }
+                // The primary action lives in the toolbar so it's ALWAYS
+                // visible — at the medium detent an in-form CTA sat below
+                // the fold (caught in simulator testing 2026-07-18).
+                ToolbarItem(placement: .confirmationAction) {
+                    Button {
+                        coordinator.requestAnimate()
+                        dismiss()
+                    } label: {
+                        Text(animateCTA)
+                            .font(.headline)
+                    }
+                    .disabled(!canFire)
                 }
             }
         }

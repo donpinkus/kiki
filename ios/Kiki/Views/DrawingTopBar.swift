@@ -306,6 +306,14 @@ struct KikiAIStatusBadge: View {
                 .frame(width: 300)
                 .padding()
         }
+        // Simulator dev automation: the DevAutomation UI bridge can't tap the
+        // badge, so it raises this coordinator flag instead.
+        .onChange(of: coordinator.devShowStatusDetails) { _, requested in
+            if requested {
+                showDetails = true
+                coordinator.devShowStatusDetails = false
+            }
+        }
     }
 }
 

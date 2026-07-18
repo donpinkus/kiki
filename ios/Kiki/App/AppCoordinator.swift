@@ -994,6 +994,9 @@ final class AppCoordinator {
         DevAutomation.onReplayRequested = { [weak self] fixture in
             self?.devReplayFixture(fixture)
         }
+        DevAutomation.onUIActionRequested = { [weak self] action in
+            self?.devPerformUIAction(action)
+        }
 
         // Gate on auth: if no Keychain token, show sign-in. Otherwise the
         // normal gallery/drawing flow resumes.
@@ -1530,6 +1533,29 @@ final class AppCoordinator {
     /// canvas (triggered via DevAutomation's Darwin notification). Routes into a
     /// drawing first when needed and waits for the canvas view to attach — the
     /// canvas is created lazily when DrawingView appears.
+    /// Simulator dev automation: perform a named UI action (DevAutomation
+    /// bridge). Deliberately tiny — just the surfaces host-level tooling
+    /// can't tap (popovers/modals) plus navigation.
+    func devPerformUIAction(_ action: String) {
+        switch action {
+        case "openDrawing":
+            if currentScreen == .gallery { openMostRecentDrawing() }
+        case "statusDetails":
+            devShowStatusDetails = true
+        case "animateModal":
+            showAnimateModal = true
+        case "dismiss":
+            devShowStatusDetails = false
+            showAnimateModal = false
+        default:
+            streamLog.warning("[dev] unknown UI action: \(action)")
+        }
+    }
+
+    /// Dev-automation binding for the status badge popover (normally
+    /// @State-local to the badge; the sim bridge needs to open it).
+    var devShowStatusDetails = false
+
     func devReplayFixture(_ fixture: BrushFixture) {
         Task { @MainActor in
             if currentScreen != .drawing {
@@ -1547,6 +1573,15 @@ final class AppCoordinator {
                 "event": "dev.replay.done",
                 "strokes": fixture.strokes.count,
             ])
+        }
+    }
+
+    /// Dev automation: open the newest drawing from the gallery.
+    func openMostRecentDrawing() {
+        var descriptor = FetchDescriptor<Drawing>(sortBy: [SortDescriptor(\.updatedAt, order: .reverse)])
+        descriptor.fetchLimit = 1
+        if let drawing = try? modelContext.fetch(descriptor).first {
+            openDrawing(drawing)
         }
     }
 

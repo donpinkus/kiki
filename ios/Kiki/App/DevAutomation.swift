@@ -27,9 +27,19 @@ enum DevAutomation {
 
     static let replayNotificationName = "com.don.kiki.dev.replay"
     static let defaultReplayPath = "/tmp/kiki-replay.json"
+    /// UI-action bridge: write the action name to /tmp/kiki-ui-action.txt and
+    /// post this notification. Drives taps the harness can't perform
+    /// (popovers, modals) deterministically:
+    ///   xcrun simctl spawn <sim> notifyutil -p com.don.kiki.dev.ui
+    /// Actions: openDrawing | statusDetails | animateModal | dismiss
+    static let uiNotificationName = "com.don.kiki.dev.ui"
+    static let uiActionPath = "/tmp/kiki-ui-action.txt"
 
     /// Set by AppCoordinator. Called on the main actor with the decoded fixture.
     @MainActor static var onReplayRequested: ((BrushFixture) -> Void)?
+
+    /// Set by AppCoordinator. Called on the main actor with the action name.
+    @MainActor static var onUIActionRequested: ((String) -> Void)?
 
     /// Seed Keychain from launch arguments (UserDefaults argument domain) if
     /// dev tokens were passed. Must run before AppCoordinator's auth gate reads
@@ -66,6 +76,23 @@ enum DevAutomation {
             nil,
             .deliverImmediately
         )
+        CFNotificationCenterAddObserver(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            nil,
+            { _, _, _, _, _ in DevAutomation.handleUINotification() },
+            uiNotificationName as CFString,
+            nil,
+            .deliverImmediately
+        )
+    }
+
+    private static func handleUINotification() {
+        let action = (try? String(contentsOfFile: uiActionPath, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !action.isEmpty else { return }
+        Task { @MainActor in
+            onUIActionRequested?(action)
+        }
     }
 
     private static func handleReplayNotification() {
