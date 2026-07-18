@@ -355,6 +355,9 @@ final class AppCoordinator {
     var activeCustomBrushID: UUID?
     /// On-device named custom brushes ("Save as brush" in the Brush Studio).
     let customBrushLibrary = CustomBrushLibrary()
+    /// User-imported brush tips + grains (Studio → Shape/Grain Source → Import). Its
+    /// init points the engine (`BrushAssetStore.directory`) at the on-disk store.
+    let brushAssets = BrushAssetLibrary()
 
     // MARK: - DEV brush-tuning harness (input HUD + engine knobs + active test note)
 

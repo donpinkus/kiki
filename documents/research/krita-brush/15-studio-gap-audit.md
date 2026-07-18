@@ -23,8 +23,8 @@ is the engineering-facing ledger of those gaps, ranked by likely impact on brush
 ## Gaps (N/A rows), ranked
 
 **Likely to block cloning specific popular brushes:**
-1. **Grain import from image** (+ jitters: Depth Min/Jitter, Offset Jitter, Rotation, Zoom, Blend Mode) — grains are procedural-only. Known pre-requisite for the cloning loop.
-2. **Shape import from image** — engine supports arbitrary grayscale PNGs (catalog is folder-drop), only the UI/import path is missing.
+1. ~~**Grain import from image**~~ **DONE 2026-07-17** — Studio → Grain Source → Import/Paste; engine resolves user ids lazily from `BrushAssetStore.directory` (`BRUSH_USER_ASSETS_DIR` for the harness). Remaining grain sub-gaps: Depth Min/Jitter, Offset Jitter, Rotation, Zoom, Blend Mode, Movement.
+2. ~~**Shape import from image**~~ **DONE 2026-07-17** — same path (`shapes/<id>.png`, luma = coverage, mipmapped mask). Imported tips stamp upright by default; steer via Rotation/Azimuth/Scatter.
 3. **Rendering modes beyond Light Glaze** (Uniformed/Intense/Heavy Glaze, Uniform/Intense Blending) — many Procreate brushes lean on Heavy Glaze / Blending.
 4. **Wet Edges** — pigment-bleed edges (roadmap spike exists in pro-brush-roadmap).
 5. **Stroke Blend Mode** (multiply/screen per brush) + Burnt Edges + Luminance Blending + Alpha Threshold.

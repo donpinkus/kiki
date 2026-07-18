@@ -1,4 +1,5 @@
 import SwiftUI
+import PhotosUI
 import CanvasModule
 
 // MARK: - Brush Studio (full page, Procreate-style)
@@ -450,9 +451,10 @@ private struct ShapeSection: View {
         StudioGroup("Shape Source") {
             Group {
                 BrushShapePicker(selection: $coordinator.toolShapeID)
+                UserAssetPicker(kind: .shape, selection: $coordinator.toolShapeID)
+                StudioFootnote("Imported tips read luminance as coverage (white = paint). They stamp upright by default — steer with Rotation, Azimuth, or Scatter.")
             }
             .disabled(wet).opacity(wet ? 0.35 : 1)
-            GapRow("Import (Photo / File / Paste)", note: "Kiki ships a fixed tip catalog — importing your own tip PNG isn't wired yet (engine supports any grayscale PNG).")
         }
         StudioGroup("Behavior") {
             Group {
@@ -532,9 +534,10 @@ private struct GrainSection: View {
         StudioGroup("Grain Source") {
             Group {
                 GrainPicker(selection: $coordinator.toolGrainID)
+                UserAssetPicker(kind: .grain, selection: $coordinator.toolGrainID)
+                StudioFootnote("Imported grains tile at their native pixel size (Scale multiplies). Screenshots of Procreate grains work — the engine reads them grayscale.")
             }
             .disabled(wet).opacity(wet ? 0.35 : 1)
-            GapRow("Import (Photo / File / Paste)", note: "Kiki's grains are procedural — grain-from-image isn't wired yet (needed for brush cloning).")
         }
         if coordinator.toolGrainID != nil {
             StudioGroup("Behavior") {
@@ -1154,6 +1157,112 @@ struct GrainPicker: View {
                 }
             }
         }
+    }
+}
+
+/// User-imported tips/grains: thumbnail chips + Photos/Paste import + rename/delete.
+/// Selection binds straight to toolShapeID / toolGrainID — the engine resolves the
+/// asset id lazily from disk, so import is just "write PNG, set id".
+struct UserAssetPicker: View {
+    let kind: BrushAsset.Kind
+    @Binding var selection: String?
+    @Environment(AppCoordinator.self) private var coordinator
+    @State private var photoItem: PhotosPickerItem?
+    @State private var renamingAsset: BrushAsset?
+    @State private var renameText = ""
+
+    private let columns = [GridItem(.adaptive(minimum: 110), spacing: 8)]
+
+    var body: some View {
+        let items = kind == .shape ? coordinator.brushAssets.shapes : coordinator.brushAssets.grains
+        if !items.isEmpty {
+            LazyVGrid(columns: columns, spacing: 8) {
+                ForEach(items) { asset in
+                    assetChip(asset)
+                        .contextMenu {
+                            Button("Rename…") {
+                                renameText = asset.name
+                                renamingAsset = asset
+                            }
+                            Button("Delete", role: .destructive) {
+                                if selection == asset.id { selection = nil }
+                                coordinator.brushAssets.delete(asset.id)
+                            }
+                        }
+                }
+            }
+        }
+        HStack(spacing: 8) {
+            PhotosPicker(selection: $photoItem, matching: .images) {
+                Label("Import", systemImage: "photo")
+                    .font(.caption.weight(.medium))
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            Button {
+                if let image = UIPasteboard.general.image {
+                    if let asset = coordinator.brushAssets.importImage(image, kind: kind) {
+                        selection = asset.id
+                    }
+                }
+            } label: {
+                Label("Paste", systemImage: "doc.on.clipboard")
+                    .font(.caption.weight(.medium))
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
+        .onChange(of: photoItem) { _, item in
+            guard let item else { return }
+            Task {
+                if let data = try? await item.loadTransferable(type: Data.self),
+                   let image = UIImage(data: data),
+                   let asset = coordinator.brushAssets.importImage(image, kind: kind) {
+                    selection = asset.id
+                }
+                photoItem = nil
+            }
+        }
+        .alert("Rename", isPresented: Binding(
+            get: { renamingAsset != nil },
+            set: { if !$0 { renamingAsset = nil } })) {
+            TextField("Name", text: $renameText)
+            Button("Rename") {
+                if let asset = renamingAsset {
+                    coordinator.brushAssets.rename(asset.id, to: renameText)
+                }
+                renamingAsset = nil
+            }
+            Button("Cancel", role: .cancel) { renamingAsset = nil }
+        }
+    }
+
+    private func assetChip(_ asset: BrushAsset) -> some View {
+        let selected = selection == asset.id
+        return Button {
+            selection = asset.id
+        } label: {
+            HStack(spacing: 8) {
+                if let image = coordinator.brushAssets.image(for: asset) {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: 26, height: 26)
+                        .clipShape(RoundedRectangle(cornerRadius: 5))
+                }
+                Text(asset.name)
+                    .font(.caption)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 6)
+            .padding(.horizontal, 6)
+            .background(selected ? StudioTheme.accent : StudioTheme.chip)
+            .clipShape(RoundedRectangle(cornerRadius: 9))
+            .foregroundStyle(selected ? .white : .white.opacity(0.85))
+        }
+        .buttonStyle(.plain)
     }
 }
 

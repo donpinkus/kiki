@@ -146,6 +146,11 @@ public final class CanvasRenderer {
     /// Phase 3). Built once at init from `Resources/BrushShapes`. The procedural round
     /// brush has no entry here.
     private let shapeTextures: [String: MTLTexture]
+    /// Runtime caches for user-imported assets (loaded lazily from
+    /// `BrushAssetStore.directory` when an id isn't in the built-in catalogs).
+    private var userShapeTextures: [String: MTLTexture] = [:]
+    private var userShapeLumaMeans: [String: Float] = [:]
+    private var userGrainTextures: [String: (texture: MTLTexture, tilePx: Double)] = [:]
     /// 1×1 black — bound to the stamp fragments' moving-grain slot when moving grain is
     /// off (Metal requires referenced textures to be bound; the enabled flag gates use).
     private let blackDummyTexture: MTLTexture
@@ -1903,7 +1908,7 @@ public final class CanvasRenderer {
     func lightnessSettings(for brush: BrushConfig) -> (params: SIMD4<Float>, recenter: SIMD4<Float>)? {
         guard brush.tipLightness > 0.005, let shapeID = brush.shapeID else { return nil }
         let hsl = LightnessMap.hsl(r: Double(brush.color.red), g: Double(brush.color.green), b: Double(brush.color.blue))
-        let mean = shapeLumaMeans[shapeID] ?? 0.75
+        let mean = shapeLumaMeans[shapeID] ?? userShapeLumaMeans[shapeID] ?? 0.75
         return (SIMD4<Float>(Float(hsl.h), Float(hsl.s), Float(hsl.l),
                              Float(min(max(brush.tipLightness, 0), 1))),
                 SIMD4<Float>(mean, 1.6, 0, 0))
@@ -1912,11 +1917,16 @@ public final class CanvasRenderer {
     /// Resolve a brush's grain settings (P8): texture + depth + document-space UV scale.
     /// nil when the brush has no grain, depth ≈ 0, or the id is unknown.
     func grainSettings(for brush: BrushConfig) -> (texture: MTLTexture, depth: Float, invScale: Float, moving: Bool)? {
-        guard brush.grainDepth > 0.005,
-              let desc = GrainCatalog.descriptor(for: brush.grainID),
-              let tex = grainTextures[desc.id] else { return nil }
-        let tilePx = 256.0 * Double(desc.nativeScale) * Double(max(brush.grainScale, 0.05))
-        return (tex, Float(min(max(brush.grainDepth, 0), 1)), Float(1.0 / tilePx), brush.grainMoving)
+        guard brush.grainDepth > 0.005, let grainID = brush.grainID else { return nil }
+        let depth = Float(min(max(brush.grainDepth, 0), 1))
+        if let desc = GrainCatalog.descriptor(for: grainID), let tex = grainTextures[desc.id] {
+            let tilePx = 256.0 * Double(desc.nativeScale) * Double(max(brush.grainScale, 0.05))
+            return (tex, depth, Float(1.0 / tilePx), brush.grainMoving)
+        }
+        // User-imported grain: tile at the image's native pixel size × grainScale.
+        guard let user = userGrain(for: grainID) else { return nil }
+        let tilePx = user.tilePx * Double(max(brush.grainScale, 0.05))
+        return (user.texture, depth, Float(1.0 / tilePx), brush.grainMoving)
     }
 
     /// Bind the moving-grain slot (texture(1) + fragment buffer(3)) for a dry stamp
@@ -1938,7 +1948,44 @@ public final class CanvasRenderer {
     /// `MetalCanvasView` resolves this when a stroke starts and assigns `activeShapeTexture`.
     func shapeTexture(for id: String?) -> MTLTexture? {
         guard let id, id != BrushShapeCatalog.roundID else { return nil }
-        return shapeTextures[id]
+        if let builtIn = shapeTextures[id] { return builtIn }
+        return userShapeTexture(for: id)
+    }
+
+    /// Lazily load a user-imported tip (BrushAssetStore.directory/shapes/<id>.png) into
+    /// the runtime cache. Same mask pipeline as the catalog tips (mipmapped R8, luma =
+    /// coverage). nil (→ procedural round fallback) when the file is missing.
+    private func userShapeTexture(for id: String) -> MTLTexture? {
+        if let cached = userShapeTextures[id] { return cached }
+        guard let dir = BrushAssetStore.directory else { return nil }
+        let url = dir.appendingPathComponent("shapes/\(id).png")
+        guard let data = try? Data(contentsOf: url),
+              let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil),
+              let texture = Self.makeGrayscaleMaskTexture(device: device, queue: commandQueue, cgImage: cgImage) else {
+            return nil
+        }
+        userShapeTextures[id] = texture
+        userShapeLumaMeans[id] = Self.shapeMeanLuma(cgImage)
+        return texture
+    }
+
+    /// Lazily load a user-imported grain (grains/<id>.png). Grayscale, tile = the
+    /// image's own pixel size (Procreate-style: the source repeats at native scale,
+    /// then `BrushConfig.grainScale` multiplies).
+    private func userGrain(for id: String) -> (texture: MTLTexture, tilePx: Double)? {
+        if let cached = userGrainTextures[id] { return cached }
+        guard let dir = BrushAssetStore.directory else { return nil }
+        let url = dir.appendingPathComponent("grains/\(id).png")
+        guard let data = try? Data(contentsOf: url),
+              let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil),
+              let texture = Self.makeGrayscaleMaskTexture(device: device, queue: commandQueue, cgImage: cgImage) else {
+            return nil
+        }
+        let entry = (texture: texture, tilePx: Double(cgImage.width))
+        userGrainTextures[id] = entry
+        return entry
     }
 
     /// Load every catalog shape that has a PNG resource into a mipmapped R8Unorm mask

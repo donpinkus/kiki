@@ -58,6 +58,18 @@ public enum BrushShapeCatalog {
     }
 }
 
+// MARK: - User-imported assets
+
+/// Location of user-imported brush assets: `shapes/<id>.png` (grayscale tips, luma =
+/// coverage) and `grains/<id>.png` (grayscale grain tiles). The renderer resolves any
+/// shape/grain id that isn't in the built-in catalogs against this directory, lazily.
+/// The app points it at Application Support/BrushAssets; the BrushHarness inherits the
+/// `BRUSH_USER_ASSETS_DIR` env default so fixtures with imported assets can replay.
+public enum BrushAssetStore {
+    public static var directory: URL? =
+        ProcessInfo.processInfo.environment["BRUSH_USER_ASSETS_DIR"].map { URL(fileURLWithPath: $0) }
+}
+
 // MARK: - Grain catalog (P8)
 
 /// One selectable grain texture. All grains are PROCEDURAL (generated at renderer init
