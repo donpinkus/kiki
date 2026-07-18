@@ -52,7 +52,7 @@ struct DrawingTopBar: View {
                     Section("Share video") {
                         Button("Speed paint replay") {
                             Task { @MainActor in
-                                await coordinator.flushRecording()
+                                await coordinator.flushRecording(consolidate: true)
                                 showReplay = true
                             }
                         }

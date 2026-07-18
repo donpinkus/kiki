@@ -130,34 +130,44 @@ enum SideBySideVideoComposer {
             useAnimationTail = false
         }
 
-        // Speed: scale both tracks' timelines to 1/multiplier of their duration.
-        var finalDuration: CMTime
-        if effectiveMultiplier != 1 {
-            let scaled = CMTimeMultiplyByFloat64(baseDuration, multiplier: 1.0 / effectiveMultiplier)
-            canvasComp.scaleTimeRange(baseRange, toDuration: scaled)
-            generatedComp.scaleTimeRange(baseRange, toDuration: scaled)
-            finalDuration = scaled
-        } else {
-            finalDuration = baseDuration
-        }
-
         let renderSize = layout.renderSize
 
-        // Tail: append the generated animation (canvas frozen on the final drawing
-        // | animation playing in the generated pane), or — if there's no animation
-        // (or the mode wants an exact total) — hold the final frame. Real-time,
-        // not sped up.
+        // Tail FIRST, at the unscaled content end: the generated animation
+        // (canvas frozen on the final drawing | animation in the generated
+        // pane), or — with no animation (or when the mode wants an exact
+        // total) — a freeze-frame hold. The hold is rendered as a REAL
+        // multi-second H.264 clip on disk and inserted as one ordinary
+        // segment: every composition-trick variant (single stretched sample,
+        // repeated single-frame inserts, pre/post-scale ordering) was
+        // silently truncated by AVAssetExportSession in some parameter
+        // regions (mapped empirically in the Mac harness sweep) — only
+        // real file segments, like the content itself, export reliably.
         let oneFrame = CMTime(value: 1, timescale: 12)
-        let tailStart = finalDuration
+        var tailDuration = CMTime.zero
         var tailGeneratedTransform: CGAffineTransform?
-        // Best-effort: a tail failure must NEVER blank the whole replay. On any
-        // error we reset to the pre-tail duration; the instruction below is
-        // clamped to `finalDuration`, so partial inserts past it aren't rendered.
-        if lastSegmentDuration > oneFrame, let lastCanvasTrack {
+        // Best-effort: a tail failure must NEVER blank the whole replay. On
+        // any error we zero the tail; the instruction below is clamped to
+        // `finalDuration`, so partial inserts past it aren't rendered.
+        if lastSegmentDuration > oneFrame,
+           let lastCanvasURL = canvasSegments.last, let lastGeneratedURL = generatedSegments.last {
             do {
-                let lastFrameRange = CMTimeRange(start: lastSegmentDuration - oneFrame, duration: oneFrame)
-                var appendedAnimation = false
+                let holdDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+                try FileManager.default.createDirectory(at: holdDir, withIntermediateDirectories: true)
 
+                func insertHoldClip(on track: AVMutableCompositionTrack, lastFrameOf source: URL, seconds: Double, name: String) async throws -> CMTime {
+                    let image = try await lastFrameImage(of: source)
+                    let clipURL = holdDir.appendingPathComponent("hold-\(name).mp4")
+                    try await writeHoldClip(image: image, side: side, seconds: seconds, to: clipURL)
+                    let clipAsset = AVURLAsset(url: clipURL)
+                    guard let clipTrack = try await clipAsset.loadTracks(withMediaType: .video).first else {
+                        throw ComposeError.missingTrack
+                    }
+                    let clipRange = try await clipTrack.load(.timeRange)
+                    try track.insertTimeRange(clipRange, of: clipTrack, at: baseDuration)
+                    return clipRange.duration
+                }
+
+                var appendedAnimation = false
                 if useAnimationTail, let generatedVideoURL {
                     let animAsset = AVURLAsset(url: generatedVideoURL)
                     let animTrack = try? await animAsset.loadTracks(withMediaType: .video).first
@@ -165,32 +175,42 @@ enum SideBySideVideoComposer {
                     // which would make insertTimeRange throw.
                     let animRange = try? await animTrack?.load(.timeRange)
                     if let animTrack, let animRange, animRange.duration.isValid, animRange.duration > .zero {
-                        try generatedComp.insertTimeRange(animRange, of: animTrack, at: tailStart)
-                        try canvasComp.insertTimeRange(lastFrameRange, of: lastCanvasTrack, at: tailStart)
-                        canvasComp.scaleTimeRange(CMTimeRange(start: tailStart, duration: oneFrame), toDuration: animRange.duration)
+                        try generatedComp.insertTimeRange(animRange, of: animTrack, at: baseDuration)
+                        _ = try await insertHoldClip(on: canvasComp, lastFrameOf: lastCanvasURL, seconds: animRange.duration.seconds, name: "canvas")
                         // The animation isn't 768²; fit it into the generated pane.
                         let animSize = (try? await animTrack.load(.naturalSize)) ?? CGSize(width: side, height: side)
                         tailGeneratedTransform = fitTransform(sourceSize: animSize, into: generatedPaneRect(for: layout, render: renderSize))
-                        finalDuration = tailStart + animRange.duration
+                        tailDuration = animRange.duration
                         appendedAnimation = true
                     }
                 }
 
-                if !appendedAnimation, let lastGeneratedTrack {
-                    let hold = CMTime(seconds: holdSeconds, preferredTimescale: 600)
-                    try canvasComp.insertTimeRange(lastFrameRange, of: lastCanvasTrack, at: tailStart)
-                    try generatedComp.insertTimeRange(lastFrameRange, of: lastGeneratedTrack, at: tailStart)
-                    let frozen = CMTimeRange(start: tailStart, duration: oneFrame)
-                    canvasComp.scaleTimeRange(frozen, toDuration: hold)
-                    generatedComp.scaleTimeRange(frozen, toDuration: hold)
-                    finalDuration = tailStart + hold
+                if !appendedAnimation {
+                    tailDuration = try await insertHoldClip(on: canvasComp, lastFrameOf: lastCanvasURL, seconds: holdSeconds, name: "canvas")
+                    _ = try await insertHoldClip(on: generatedComp, lastFrameOf: lastGeneratedURL, seconds: holdSeconds, name: "generated")
                 }
             } catch {
                 // Drop the tail, keep the main replay.
-                finalDuration = tailStart
+                tailDuration = .zero
                 tailGeneratedTransform = nil
             }
         }
+
+        // Speed: scale only the content range to 1/multiplier of its
+        // duration; the tail segments after it shift left and stay real-time.
+        // The scaled duration is SNAPPED to the output 30 fps frame grid —
+        // AVAssetExportSession silently truncates everything from the first
+        // tail boundary that falls off the output grid (empirical, verified
+        // in the Mac harness across 8 scenarios), so the content must end
+        // exactly on an output frame. The snap stretches content ≤ 17 ms.
+        let targetSeconds = baseDuration.seconds / effectiveMultiplier
+        let contentDuration = CMTime(value: CMTimeValue(max(Int((targetSeconds * 30).rounded()), 1)), timescale: 30)
+        if contentDuration != baseDuration {
+            canvasComp.scaleTimeRange(baseRange, toDuration: contentDuration)
+            generatedComp.scaleTimeRange(baseRange, toDuration: contentDuration)
+        }
+        let tailStart = contentDuration
+        let finalDuration = tailStart + tailDuration
 
         // Layout: position each pane within the render canvas. Uncovered areas
         // (the vertical layout's side margins) render black — intentional letterbox.
@@ -249,6 +269,74 @@ enum SideBySideVideoComposer {
         guard export.status == .completed else {
             throw ComposeError.exportFailed(export.error)
         }
+    }
+
+    /// The last decodable frame of a video file.
+    private static func lastFrameImage(of url: URL) async throws -> CGImage {
+        let asset = AVURLAsset(url: url)
+        let duration = try await asset.load(.duration)
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        let target = CMTime(seconds: max(duration.seconds - 0.05, 0), preferredTimescale: 600)
+        return try await generator.image(at: target).image
+    }
+
+    /// Write a `seconds`-long H.264 clip of `image` repeated at 12 fps —
+    /// the freeze-frame hold as a real file (see the tail comment in
+    /// `build` for why the hold cannot be a composition trick).
+    private static func writeHoldClip(image: CGImage, side: Int, seconds: Double, to url: URL) async throws {
+        let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
+        let settings: [String: Any] = [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: side,
+            AVVideoHeightKey: side,
+        ]
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
+        input.expectsMediaDataInRealTime = false
+        let attrs: [String: Any] = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey as String: side,
+            kCVPixelBufferHeightKey as String: side,
+        ]
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: attrs)
+        guard writer.canAdd(input) else { throw ComposeError.exportSetupFailed }
+        writer.add(input)
+        guard writer.startWriting() else { throw ComposeError.exportFailed(writer.error) }
+        writer.startSession(atSourceTime: .zero)
+
+        var pb: CVPixelBuffer?
+        CVPixelBufferCreate(kCFAllocatorDefault, side, side, kCVPixelFormatType_32BGRA, attrs as CFDictionary, &pb)
+        guard let buffer = pb else { throw ComposeError.exportSetupFailed }
+        CVPixelBufferLockBaseAddress(buffer, [])
+        if let ctx = CGContext(
+            data: CVPixelBufferGetBaseAddress(buffer),
+            width: side, height: side, bitsPerComponent: 8,
+            bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
+            space: CGColorSpace(name: CGColorSpace.sRGB)!,
+            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+        ) {
+            ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+            ctx.fill(CGRect(x: 0, y: 0, width: side, height: side))
+            // Aspect-fill, matching the recorder's framing.
+            let imageW = CGFloat(image.width), imageH = CGFloat(image.height)
+            let scale = max(CGFloat(side) / imageW, CGFloat(side) / imageH)
+            let drawW = imageW * scale, drawH = imageH * scale
+            ctx.draw(image, in: CGRect(x: (CGFloat(side) - drawW) / 2, y: (CGFloat(side) - drawH) / 2, width: drawW, height: drawH))
+        }
+        CVPixelBufferUnlockBaseAddress(buffer, [])
+
+        let frames = max(Int((seconds * 12).rounded()), 2)
+        for f in 0..<frames {
+            while !input.isReadyForMoreMediaData {
+                try await Task.sleep(nanoseconds: 2_000_000)
+            }
+            adaptor.append(buffer, withPresentationTime: CMTime(value: CMTimeValue(f), timescale: 12))
+        }
+        input.markAsFinished()
+        await withCheckedContinuation { continuation in
+            writer.finishWriting { continuation.resume() }
+        }
+        guard writer.status == .completed else { throw ComposeError.exportFailed(writer.error) }
     }
 
     /// Affine transforms that scale each square source pane to fit and position

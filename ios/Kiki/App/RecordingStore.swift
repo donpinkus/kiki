@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 
 /// Stores a drawing's timelapse recording as an ordered list of MP4 *segments*
@@ -91,5 +92,68 @@ struct RecordingStore {
     /// Remove a drawing's recording (called when the drawing is deleted).
     func delete(_ drawingId: UUID) {
         try? FileManager.default.removeItem(at: directory(for: drawingId))
+    }
+
+    // MARK: - Consolidation
+
+    enum ConsolidateError: Error {
+        case trackSetupFailed
+        case nothingToMerge
+        case exportFailed(Error?)
+    }
+
+    /// Merge all finalized segments into a single pair via lossless
+    /// passthrough remux (no re-encode — fast). Keeps the number of distinct
+    /// files a replay composition references bounded: iOS's hardware H.264
+    /// decoder pool is small, and a composition referencing dozens of files
+    /// can fail to render (black player) where a handful is fine.
+    ///
+    /// Not safe to run while a replay preview/export is using the segment
+    /// files — call it only before the replay modal opens or after a session
+    /// ends.
+    func consolidate(for drawingId: UUID) async throws {
+        let segments = segmentURLs(for: drawingId)
+        guard segments.canvas.count > 1 else { return }
+        let dir = directory(for: drawingId)
+        let tmpCanvas = dir.appendingPathComponent("consolidating-canvas.mp4")
+        let tmpGenerated = dir.appendingPathComponent("consolidating-generated.mp4")
+        try await Self.concatenate(segments.canvas, to: tmpCanvas)
+        try await Self.concatenate(segments.generated, to: tmpGenerated)
+        let fm = FileManager.default
+        for url in segments.canvas + segments.generated {
+            try? fm.removeItem(at: url)
+        }
+        try fm.moveItem(at: tmpCanvas, to: canvasURL(drawingId, 0))
+        try fm.moveItem(at: tmpGenerated, to: generatedURL(drawingId, 0))
+    }
+
+    /// Concatenate same-codec MP4s into one file without re-encoding.
+    private static func concatenate(_ sources: [URL], to output: URL) async throws {
+        let composition = AVMutableComposition()
+        guard let track = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else {
+            throw ConsolidateError.trackSetupFailed
+        }
+        var cursor = CMTime.zero
+        for url in sources {
+            let asset = AVURLAsset(url: url)
+            guard let source = try await asset.loadTracks(withMediaType: .video).first else { continue }
+            let duration = try await asset.load(.duration)
+            guard duration.isValid, duration > .zero else { continue }
+            try track.insertTimeRange(CMTimeRange(start: .zero, duration: duration), of: source, at: cursor)
+            cursor = cursor + duration
+        }
+        guard cursor > .zero else { throw ConsolidateError.nothingToMerge }
+        try? FileManager.default.removeItem(at: output)
+        guard let export = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetPassthrough) else {
+            throw ConsolidateError.trackSetupFailed
+        }
+        export.outputURL = output
+        export.outputFileType = .mp4
+        await withCheckedContinuation { continuation in
+            export.exportAsynchronously { continuation.resume() }
+        }
+        guard export.status == .completed else {
+            throw ConsolidateError.exportFailed(export.error)
+        }
     }
 }

@@ -1172,15 +1172,38 @@ final class AppCoordinator {
     /// Flush the in-progress recording to a stored segment so the replay includes
     /// the latest strokes. Recording continues afterward. Call before opening the
     /// replay modal.
-    func flushRecording() async {
-        guard let drawingId = currentDrawingId, let recorder else {
-            streamLog.info("flushRecording: nothing to flush (drawing=\(self.currentDrawingId?.uuidString ?? "nil") recorder=\(self.recorder != nil)")
+    /// `consolidate: true` additionally merges all stored segments into one
+    /// pair (lossless remux) — pass it on the pre-replay-modal flush so the
+    /// preview composition references a single file per track (a composition
+    /// referencing dozens of files can render black on iOS; see
+    /// `RecordingStore.consolidate`). Never consolidate while a replay
+    /// preview/export may be reading the segment files.
+    func flushRecording(consolidate: Bool = false) async {
+        guard let drawingId = currentDrawingId else {
+            streamLog.info("flushRecording: no current drawing")
             return
         }
-        if let urls = await recorder.checkpoint() {
+        if let recorder, let urls = await recorder.checkpoint() {
             Self.appendSegmentReporting(canvasTemp: urls.canvas, generatedTemp: urls.generated, for: drawingId)
         } else {
-            streamLog.info("flushRecording: checkpoint had <2 new frames — relying on stored segments")
+            streamLog.info("flushRecording: no new footage since last checkpoint — relying on stored segments")
+        }
+        if consolidate {
+            await Self.consolidateReporting(for: drawingId)
+        }
+    }
+
+    /// `RecordingStore.consolidate` with failure reporting. A failure leaves
+    /// the original segments in place — the replay still works, just with
+    /// more files.
+    private nonisolated static func consolidateReporting(for drawingId: UUID) async {
+        do {
+            try await RecordingStore.shared.consolidate(for: drawingId)
+        } catch {
+            streamLog.error("Recording consolidation failed: \(error.localizedDescription)")
+            SentrySDK.capture(error: error) { scope in
+                scope.setTag(value: "replay.consolidate", key: "op")
+            }
         }
     }
 
@@ -1261,6 +1284,11 @@ final class AppCoordinator {
         Task.detached {
             if let urls = await recorder.finish() {
                 Self.appendSegmentReporting(canvasTemp: urls.canvas, generatedTemp: urls.generated, for: drawingId)
+                // Session over, no replay UI can be reading the files — keep
+                // the per-drawing segment count bounded across sessions.
+                if RecordingStore.shared.segmentURLs(for: drawingId).canvas.count >= 4 {
+                    await Self.consolidateReporting(for: drawingId)
+                }
             }
             await MainActor.run { UIApplication.shared.endBackgroundTask(bgTask) }
         }
