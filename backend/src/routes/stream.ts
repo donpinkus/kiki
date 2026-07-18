@@ -17,6 +17,7 @@ import {
   releaseStream as poolReleaseStream,
   touchInstance as poolTouchInstance,
   hasReady as poolHasReady,
+  reportFailure as poolReportFailure,
 } from '../modules/lambda/devPool.js';
 import { trackSessionClosed, trackProviderSession } from '../modules/analytics/index.js';
 
@@ -167,6 +168,16 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       let upstreamReconnects = 0;
       let wiredAtMs: number | null = null;
       let lambdaBounced = false;
+      // What the pool was doing when we bounced ('launching' = still searching
+      // for H100 capacity, 'booting' = warming, 'none'/'error' = not even
+      // trying) — the waterfall's "how far did this session get" resolution.
+      let poolStatusAtBounce: string | null = null;
+      // True when `imageProvider` was resolved from 'auto' (the launch mode).
+      // Auto sessions degrade to fal MID-SESSION when the lambda upstream dies
+      // with no replacement instance — the drawing keeps flowing. Explicit
+      // `?imageProvider=lambda` overrides keep the hard bounce instead (a
+      // silent fal handoff would corrupt the A/B adherence comparison).
+      let providerResolvedFromAuto = false;
       // Pool instance this session's stream slot is held on (lambda only);
       // released on close / re-assignment.
       let poolInstanceName: string | null = null;
@@ -293,6 +304,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             upstreamDisconnects,
             upstreamReconnects,
             lambdaBounced,
+            poolStatusAtBounce,
             everReachedReady,
           });
         }
@@ -392,6 +404,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       // recorded either way so the pool warms while fal serves.
       if (imageProvider === 'auto') {
         touchDevPool();
+        providerResolvedFromAuto = true;
         imageProvider = poolHasReady() || config.LAMBDA_IMAGE_URL ? 'lambda' : 'fal';
         request.log.info(
           { userId, connId, streamId, imageProvider, event: 'image_provider_auto' },
@@ -574,6 +587,59 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         if (lastConfig) newRelay.sendConfig(lastConfig);
       };
 
+      // Mid-session fal spend metering (non-exempt users only). The relay
+      // fires onUsage when open-time may have advanced (on each connection
+      // close + a ~10s throttle); we persist the delta and hard-stop if over
+      // cap. Called after every fal wireRelay — initial connect AND the
+      // mid-session lambda→fal downgrade — because onUsage registration
+      // lives on the relay instance. No-op unless fal metering is on.
+      const setupFalMetering = (): void => {
+        if (!falMeteringEnabled) return;
+        const enforceCut = (spendUsd: number): void => {
+          if (clientDisconnected || socket.readyState !== socket.OPEN) return;
+          request.log.info(
+            { userId, connId, streamId, spendUsd, capUsd: config.FREE_TIER_FAL_USD, event: 'free_limit_reached' },
+            'fal spend cap reached mid-session — cutting stream',
+          );
+          socket.send(
+            JSON.stringify({
+              type: 'error',
+              code: 'free_limit_reached',
+              message: "You're out of free drawing time this month — subscribe to keep drawing.",
+            }),
+          );
+          // Any reconnect re-hits the start-of-session budget gate and is
+          // denied cleanly (no cut→reconnect loop).
+          socket.close(1008, 'free_limit_reached');
+        };
+        const meterFalUsage = async (): Promise<void> => {
+          if (!relay?.cumulativeOpenMs) return;
+          const ms = relay.cumulativeOpenMs();
+          const deltaMs = ms - lastBilledMs;
+          if (deltaMs <= 0) return;
+          try {
+            const total = await addMonthlySpendUsd(uid, (deltaMs / 1000) * RATE_USD_PER_SEC);
+            lastBilledMs = ms; // advance only on success → a failed write retries next fire
+            // Live usage push so the client's free-tier meter ticks up in
+            // near-real-time (every onUsage fire, ~10s). Best-effort.
+            if (!clientDisconnected && socket.readyState === socket.OPEN) {
+              socket.send(
+                JSON.stringify({ type: 'usage', spendUsd: total, capUsd: config.FREE_TIER_FAL_USD }),
+              );
+            }
+            if (total >= config.FREE_TIER_FAL_USD) enforceCut(total);
+          } catch (err) {
+            // Fail-open: don't advance lastBilledMs; the delta is retried on
+            // the next onUsage fire. Never throw out of the relay callback.
+            request.log.warn(
+              { userId, connId, streamId, err: (err as Error).message, event: 'fal_spend_record_failed' },
+              'fal_spend_record_failed',
+            );
+          }
+        };
+        relay?.onUsage?.(() => void meterFalUsage());
+      };
+
       // Recover from an upstream close. If the iPad WS is still open, attempt
       // a same-URL reconnect (transient transport drop — network blip, fal
       // pool churn). There is no "voluntary upstream close while client is
@@ -636,24 +702,68 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
               }
             }
 
-            // Lambda failover: the instance is gone — hand the session to a
-            // DIFFERENT pool instance if one is ready. (The dead instance's
-            // health checks will get it terminated + replaced by the scaler.)
+            // Lambda failover: the instance is gone — mark it suspect (so the
+            // pool stops assigning it immediately; tick probes decide whether
+            // it recovers or gets the 3-strike terminate) and hand the session
+            // to a DIFFERENT pool instance if one is assignable.
             if (imageProvider === 'lambda' && poolInstanceName) {
-              poolReleaseStream(poolInstanceName);
+              const failedInstance = poolInstanceName;
+              poolReportFailure(failedInstance);
+              poolReleaseStream(failedInstance);
               poolInstanceName = null;
               const slot = poolAcquireStream();
-              if (slot && !clientDisconnected && socket.readyState === socket.OPEN) {
+              if (slot && slot.name !== failedInstance && !clientDisconnected && socket.readyState === socket.OPEN) {
                 poolInstanceName = slot.name;
                 request.log.info(
                   { userId, connId, streamId, newInstance: slot.name, event: 'lambda_pool_failover' },
                   'reassigning session to another pool instance',
                 );
-                await wireRelay(slot.url);
-                if (clientDisconnected || socket.readyState !== socket.OPEN) return;
-                sendState('ready');
-                return;
+                try {
+                  await wireRelay(slot.url);
+                  if (clientDisconnected || socket.readyState !== socket.OPEN) return;
+                  sendState('ready');
+                  return;
+                } catch (failoverErr) {
+                  // The replacement is bad too — mark and fall through to the
+                  // fal downgrade / bounce below.
+                  poolReportFailure(slot.name);
+                  poolReleaseStream(slot.name);
+                  poolInstanceName = null;
+                  request.log.warn(
+                    { userId, connId, streamId, instance: slot.name, err: (failoverErr as Error).message, event: 'lambda_pool_failover_failed' },
+                    'failover instance also unreachable',
+                  );
+                }
+              } else if (slot) {
+                // Only the just-failed instance came back — don't reuse it.
+                poolReleaseStream(slot.name);
               }
+            }
+
+            // No pool instance to fail over to. Auto-resolved sessions degrade
+            // to fal in place — the drawing keeps flowing, the pool heals in
+            // the background, and the next fresh session lands back on the
+            // H100 path. (Explicit ?imageProvider=lambda keeps the hard bounce
+            // below so A/B comparisons never silently mix providers.)
+            if (
+              imageProvider === 'lambda' &&
+              providerResolvedFromAuto &&
+              !clientDisconnected &&
+              socket.readyState === socket.OPEN
+            ) {
+              request.log.warn(
+                { userId, connId, streamId, event: 'lambda_auto_downgrade_fal' },
+                'auto-resolved lambda session downgraded to fal mid-session',
+              );
+              billLambdaFrames(); // flush frames already served on lambda
+              imageProvider = 'fal';
+              falMeteringEnabled = lambdaMeteringEnabled;
+              lambdaMeteringEnabled = false;
+              await wireRelay('fal://flux-2-klein-realtime');
+              setupFalMetering();
+              if (clientDisconnected || socket.readyState !== socket.OPEN) return;
+              sendState('ready');
+              return;
             }
 
             // Nothing to fail over to: fal reconnects hit the same hosted
@@ -685,11 +795,25 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       // wiring lifecycle, in one filter.
       await withPhase('preparing', async () => {
       try {
+        // Downgrade an auto-resolved lambda session to fal — used at initial
+        // connect (pool advertised ready but the connect failed / no slot) and
+        // NEVER for explicit `?imageProvider=lambda` overrides (those bounce so
+        // the A/B comparison stays honest). Metering exemption carries over.
+        const downgradeAutoToFal = (why: string): void => {
+          request.log.warn(
+            { userId, connId, streamId, why, event: 'lambda_auto_downgrade_fal' },
+            'auto-resolved lambda session downgraded to fal',
+          );
+          billLambdaFrames(); // flush any frames already served on lambda
+          imageProvider = 'fal';
+          falMeteringEnabled = lambdaMeteringEnabled;
+          lambdaMeteringEnabled = false;
+        };
+
         if (imageProvider === 'lambda') {
-          // Lambda Cloud dev path: relay to our own image server on a Lambda
-          // H100 — either the static LAMBDA_IMAGE_URL instance or the dev
-          // pool's kiki-serve instance (modules/lambda/devPool.ts). No
-          // metering: test-account-only A/B path.
+          // Lambda Cloud path: relay to our own image server on a Lambda
+          // H100 — either the static LAMBDA_IMAGE_URL instance or a pool
+          // kiki-serve instance (modules/lambda/devPool.ts).
           let lambdaUrl = config.LAMBDA_IMAGE_URL || null;
           if (!lambdaUrl) {
             const slot = poolAcquireStream();
@@ -699,32 +823,55 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             }
           }
           if (!lambdaUrl) {
-            // Not up yet — kick the pool and tell the iPad explicitly. Serving
-            // fal silently here would corrupt the A/B comparison; an explicit
-            // bounce lets Donald retry once the pool reports ready.
-            const poolState = ensureDevPool();
-            request.log.info(
-              { userId, connId, streamId, poolStatus: poolState.status, event: 'lambda_not_ready' },
-              'imageProvider=lambda but no instance ready — bouncing client',
-            );
-            socket.send(
-              JSON.stringify({
-                type: 'error',
-                code: 'lambda_not_ready',
-                message: `Lambda H100 not ready: ${poolState.message}. Toggle back to fal or retry in ~3 min.`,
-              }),
-            );
-            lambdaBounced = true;
-            socket.close(1013, 'lambda_not_ready');
-            return;
+            if (providerResolvedFromAuto) {
+              // hasReady() flipped between resolution and acquire (suspect
+              // mark, health kill) — serve fal instead of dying.
+              downgradeAutoToFal('no_assignable_instance');
+            } else {
+              // Explicit lambda override — kick the pool and tell the iPad
+              // explicitly. Serving fal silently here would corrupt the A/B
+              // comparison; an explicit bounce lets Donald retry once the
+              // pool reports ready.
+              const poolState = ensureDevPool();
+              request.log.info(
+                { userId, connId, streamId, poolStatus: poolState.status, event: 'lambda_not_ready' },
+                'imageProvider=lambda but no instance ready — bouncing client',
+              );
+              socket.send(
+                JSON.stringify({
+                  type: 'error',
+                  code: 'lambda_not_ready',
+                  message: `Lambda H100 not ready: ${poolState.message}. Toggle back to fal or retry in ~3 min.`,
+                }),
+              );
+              lambdaBounced = true;
+              poolStatusAtBounce = poolState.status;
+              socket.close(1013, 'lambda_not_ready');
+              return;
+            }
           }
-          request.log.info(
-            { userId, connId, streamId, event: 'image_provider_lambda' },
-            'imageProvider=lambda — relaying to Lambda Cloud image instance',
-          );
-          sendState('connecting');
-          await wireRelay(lambdaUrl);
-        } else {
+          if (lambdaUrl) {
+            request.log.info(
+              { userId, connId, streamId, event: 'image_provider_lambda' },
+              'imageProvider=lambda — relaying to Lambda Cloud image instance',
+            );
+            sendState('connecting');
+            try {
+              await wireRelay(lambdaUrl);
+            } catch (err) {
+              // Mark the instance suspect so the pool stops assigning it
+              // before the next probe cycle; free the slot either way.
+              if (poolInstanceName) {
+                poolReportFailure(poolInstanceName);
+                poolReleaseStream(poolInstanceName);
+                poolInstanceName = null;
+              }
+              if (!providerResolvedFromAuto) throw err;
+              downgradeAutoToFal(`initial_connect_failed: ${(err as Error).message}`);
+            }
+          }
+        }
+        if (imageProvider === 'fal') {
           // fal hosted image path. The relay connects in ~0.5s when the pool
           // is warm (see modules/fal/falWarmer.ts).
           request.log.info(
@@ -734,54 +881,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
           sendState('connecting');
           await wireRelay('fal://flux-2-klein-realtime');
 
-          // Mid-session spend metering (non-exempt users only). The relay fires
-          // onUsage when open-time may have advanced (on each connection close +
-          // a ~10s throttle); we persist the delta and hard-stop if over cap.
-          if (falMeteringEnabled) {
-            const enforceCut = (spendUsd: number): void => {
-              if (clientDisconnected || socket.readyState !== socket.OPEN) return;
-              request.log.info(
-                { userId, connId, streamId, spendUsd, capUsd: config.FREE_TIER_FAL_USD, event: 'free_limit_reached' },
-                'fal spend cap reached mid-session — cutting stream',
-              );
-              socket.send(
-                JSON.stringify({
-                  type: 'error',
-                  code: 'free_limit_reached',
-                  message: "You're out of free drawing time this month — subscribe to keep drawing.",
-                }),
-              );
-              // Any reconnect re-hits the start-of-session budget gate and is
-              // denied cleanly (no cut→reconnect loop).
-              socket.close(1008, 'free_limit_reached');
-            };
-            const meterFalUsage = async (): Promise<void> => {
-              if (!relay?.cumulativeOpenMs) return;
-              const ms = relay.cumulativeOpenMs();
-              const deltaMs = ms - lastBilledMs;
-              if (deltaMs <= 0) return;
-              try {
-                const total = await addMonthlySpendUsd(uid, (deltaMs / 1000) * RATE_USD_PER_SEC);
-                lastBilledMs = ms; // advance only on success → a failed write retries next fire
-                // Live usage push so the client's free-tier meter ticks up in
-                // near-real-time (every onUsage fire, ~10s). Best-effort.
-                if (!clientDisconnected && socket.readyState === socket.OPEN) {
-                  socket.send(
-                    JSON.stringify({ type: 'usage', spendUsd: total, capUsd: config.FREE_TIER_FAL_USD }),
-                  );
-                }
-                if (total >= config.FREE_TIER_FAL_USD) enforceCut(total);
-              } catch (err) {
-                // Fail-open: don't advance lastBilledMs; the delta is retried on
-                // the next onUsage fire. Never throw out of the relay callback.
-                request.log.warn(
-                  { userId, connId, streamId, err: (err as Error).message, event: 'fal_spend_record_failed' },
-                  'fal_spend_record_failed',
-                );
-              }
-            };
-            relay?.onUsage?.(() => void meterFalUsage());
-          }
+          setupFalMetering();
         }
         request.log.info({ userId, connId, streamId, event: 'relay_connected' }, 'Upstream connected, relaying');
 

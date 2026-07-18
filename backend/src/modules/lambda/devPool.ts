@@ -26,8 +26,25 @@ import { createHmac } from 'node:crypto';
 import { request as httpsRequest } from 'node:https';
 import type { FastifyBaseLogger } from 'fastify';
 import { config } from '../../config/index.js';
+import { query } from '../../postgres/client.js';
 import { inBackgroundScope } from '../observability/scope.js';
 import { LambdaClient, launchWithRetry, lambdaSleep } from './client.js';
+
+/** Fire-and-forget lifecycle row → lambda_pool_events (H100 waterfall on the
+ * Insights Launch tab). Recording must never affect pool operation. */
+function recordPoolEvent(
+  event: string,
+  instanceName?: string,
+  region?: string,
+  durationMs?: number,
+  detail?: string,
+): void {
+  void query(
+    `INSERT INTO lambda_pool_events (event, instance_name, region, duration_ms, detail)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [event, instanceName ?? null, region ?? null, durationMs ?? null, detail?.slice(0, 500) ?? null],
+  ).catch(() => {});
+}
 
 const PORT = 8766;
 const OS_IMAGE_FAMILY = 'lambda-stack-24-04';
@@ -179,15 +196,38 @@ export function touch(): void {
   lastInterestMs = Date.now();
 }
 
-/** True when at least one instance is serving. */
+/** True when at least one instance is serving (and not marked suspect) —
+ * i.e. a new stream asked for right now would actually get a slot. */
 export function hasReady(): boolean {
-  return readyInstances().length > 0;
+  return assignableInstances().length > 0;
+}
+
+/** Instances eligible for NEW stream assignment: ready and not suspect.
+ * (healthFails > 0 = a relay just failed to connect, or a tick probe failed —
+ * skip it until a probe succeeds and resets the counter. If everything is
+ * suspect, callers fall back to fal; nothing is ever assigned blind.) */
+function assignableInstances(): PoolInstance[] {
+  return readyInstances().filter((i) => i.healthFails === 0);
+}
+
+/** A relay failed to reach this instance (connect refused/timeout mid-
+ * session). Mark it suspect so assignment skips it NOW instead of waiting
+ * out the probe cycle; the tick's probes then either clear it (transient
+ * blip — healthFails resets to 0 on the next success) or escalate to the
+ * 3-strike terminate. Deliberately only ONE strike per call site: N
+ * concurrent sessions failing over must not gang-terminate an instance
+ * that's mid-restart. */
+export function reportFailure(name: string): void {
+  const inst = instances.get(name);
+  if (!inst || inst.status !== 'ready') return;
+  inst.healthFails = Math.max(inst.healthFails, 1);
+  log.warn({ name, event: 'lambda_pool_instance_suspect' }, 'relay connect failed — instance marked suspect');
 }
 
 /** Assign a stream to the least-loaded ready instance. Null when none. */
 export function acquireStream(): { name: string; url: string } | null {
   lastInterestMs = Date.now();
-  const ready = readyInstances().sort((a, b) => a.activeStreams - b.activeStreams);
+  const ready = assignableInstances().sort((a, b) => a.activeStreams - b.activeStreams);
   const inst = ready[0];
   if (!inst) return null;
   inst.activeStreams += 1;
@@ -210,7 +250,7 @@ export function touchInstance(name: string): void {
 
 /** One-shot URL (sketchify): least-loaded ready instance, no slot held. */
 export function wsUrl(): string | null {
-  const ready = readyInstances().sort((a, b) => a.activeStreams - b.activeStreams);
+  const ready = assignableInstances().sort((a, b) => a.activeStreams - b.activeStreams);
   const inst = ready[0];
   if (!inst?.ip) return null;
   touchInstance(inst.name);
@@ -292,6 +332,8 @@ async function launchOne(): Promise<void> {
   launchesInFlight += 1;
   const name = `${NAME_PREFIX}${Date.now()}`;
   const region = config.LAMBDA_REGION;
+  const searchStartMs = Date.now();
+  recordPoolEvent('launch_requested', name, region);
   try {
     const c = client();
     const keys = await c.listSshKeys();
@@ -324,10 +366,13 @@ async function launchOne(): Promise<void> {
       healthFails: 0,
     });
     log.info({ instanceId: id, name, event: 'lambda_pool_launched' }, 'launched kiki-serve instance');
+    // duration = how long the capacity search took (launch API retries).
+    recordPoolEvent('launched', name, region, Date.now() - searchStartMs);
     await watchBoot(name);
   } catch (err) {
     lastError = (err as Error).message;
     log.error({ err, event: 'lambda_pool_launch_failed' }, 'lambda pool launch failed');
+    recordPoolEvent('launch_failed', name, region, Date.now() - searchStartMs, (err as Error).message);
   } finally {
     launchesInFlight -= 1;
   }
@@ -377,6 +422,8 @@ async function watchBoot(name: string): Promise<void> {
     { instanceId: inst.id, name, ip: inst.ip, bootMs: inst.readyAtMs - inst.launchedAtMs, event: 'lambda_pool_ready' },
     'lambda pool instance ready',
   );
+  // duration = boot/warm time (capacity granted → OUR /health ok).
+  recordPoolEvent('ready', name, inst.region, inst.readyAtMs - inst.launchedAtMs);
 }
 
 // ── periodic tick: autoscale + idle scale-down + health ─────────────────────
@@ -397,6 +444,12 @@ async function tick(): Promise<void> {
           log.warn(
             { name: inst.name, instanceId: inst.id, event: 'lambda_pool_instance_dead' },
             'instance failed health checks — terminating (scaler will replace if needed)',
+          );
+          recordPoolEvent(
+            'instance_dead',
+            inst.name,
+            inst.region,
+            inst.readyAtMs !== undefined ? Date.now() - inst.readyAtMs : undefined,
           );
           instances.delete(inst.name);
           void client().terminate([inst.id]).catch(() => {});
@@ -429,10 +482,14 @@ async function tick(): Promise<void> {
         { name: idle.name, instanceId: idle.id, idleMs: Date.now() - idle.lastActivityMs, event: 'lambda_pool_idle_terminate' },
         'terminating idle pool instance',
       );
+      recordPoolEvent('idle_terminate', idle.name, idle.region, Date.now() - idle.lastActivityMs);
       instances.delete(idle.name);
       void client().terminate([idle.id]).catch(() => {});
     }
   }
+
+  // Retention for the waterfall's raw rows (tiny table; cheap on the ts index).
+  void query(`DELETE FROM lambda_pool_events WHERE ts < now() - interval '30 days'`).catch(() => {});
 }
 
 // ── lifecycle ───────────────────────────────────────────────────────────────
@@ -466,6 +523,7 @@ export function start(logger: FastifyBaseLogger): void {
           healthFails: 0,
         });
         log.info({ instanceId: remote.id, name, event: 'lambda_pool_adopted' }, 'adopted existing kiki-serve instance');
+        recordPoolEvent('adopted', name, remote.region.name);
         void inBackgroundScope('lambda_pool', () => watchBoot(name));
       }
     } catch (err) {
