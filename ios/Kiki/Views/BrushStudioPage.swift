@@ -130,17 +130,28 @@ struct BrushStudioPage: View {
 
     private var padPane: some View {
         ZStack(alignment: .top) {
-            BrushTryPadView(
-                brush: coordinator.currentBrushConfig(),
-                clearToken: padClearToken,
-                onBrushInputSample: { coordinator.liveBrushInput = $0 },
-                devMaxSpeed: coordinator.devMaxSpeed,
-                devDistancePeriod: coordinator.devDistancePeriod,
-                devFadePeriod: coordinator.devFadePeriod
-            )
+            // The engine's display + touch mapping assume a SQUARE view (canvasScale is a
+            // single documentSide/width scalar; the compositor fills the drawable with the
+            // square document). A pane-shaped view stretches the display and skews touch→
+            // texture mapping vertically (strokes landed below the pencil, 2026-07-17
+            // device report). So: size the canvas as a square covering the pane's larger
+            // edge, pin it top-leading, and clip — the pad is a window onto a square canvas.
+            GeometryReader { geo in
+                let side = max(geo.size.width, geo.size.height)
+                BrushTryPadView(
+                    brush: coordinator.currentBrushConfig(),
+                    clearToken: padClearToken,
+                    onBrushInputSample: { coordinator.liveBrushInput = $0 },
+                    devMaxSpeed: coordinator.devMaxSpeed,
+                    devDistancePeriod: coordinator.devDistancePeriod,
+                    devFadePeriod: coordinator.devFadePeriod
+                )
+                .frame(width: side, height: side)
+                .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
+                .clipped()
+            }
             .background(Color.white)
-            .clipShape(UnevenRoundedRectangle(cornerRadii: .init(topLeading: 22, bottomLeading: 22)))
-            .ignoresSafeArea(edges: [.trailing, .bottom])
+            .clipShape(RoundedRectangle(cornerRadius: 22))
 
             HStack(spacing: 10) {
                 padChip {
@@ -185,6 +196,7 @@ struct BrushStudioPage: View {
             .padding(.top, 16)
         }
         .padding(.vertical, 12)
+        .padding(.trailing, 12)
     }
 
     private var defaultSaveName: String {
