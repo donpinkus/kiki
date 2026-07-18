@@ -21,7 +21,6 @@ const appleJwks = createRemoteJWKSet(APPLE_JWKS_URL);
 export interface AppleIdentityPayload {
   appleSub: string;
   email?: string;
-  emailVerified?: boolean;
 }
 
 export async function verifyAppleIdentityToken(
@@ -40,9 +39,5 @@ export async function verifyAppleIdentityToken(
   return {
     appleSub: payload.sub,
     email: typeof payload.email === 'string' ? payload.email : undefined,
-    emailVerified:
-      typeof payload.email_verified === 'boolean'
-        ? payload.email_verified
-        : payload.email_verified === 'true',
   };
 }

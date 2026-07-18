@@ -6,8 +6,9 @@
 -- Registered user accounts. The durable system-of-record for identity +
 -- subscription state, replacing the former Redis user hash. `apple_sub` UNIQUE
 -- gives cross-deploy dedup natively (was the Redis `apple-sub:{sub}` key).
--- The subscription_* columns are unused until StoreKit lands; is_test_account
--- and the usage ledger are consumed by the Stage 2 fal-spend cap.
+-- The subscription_* columns are maintained by the StoreKit flow
+-- (modules/appstore/subscriptions.ts) and read by the free-tier cap exemption;
+-- is_test_account and the usage ledger are consumed by the drawing-spend cap.
 CREATE TABLE IF NOT EXISTS users (
   user_id                 UUID PRIMARY KEY,
   apple_sub               TEXT NOT NULL UNIQUE,
@@ -31,10 +32,12 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS subscription_last_signed_ms BIGINT;
 CREATE UNIQUE INDEX IF NOT EXISTS users_original_transaction_id_key
   ON users (original_transaction_id) WHERE original_transaction_id IS NOT NULL;
 
--- Per-user, per-month fal image-generation spend (USD), for the free-tier cap.
+-- Per-user, per-month image-generation spend (USD), for the free-tier cap.
+-- Despite the column name, fal_spend_usd is the UNIFIED ledger: fal
+-- connection-open time (~$0.00194/sec) AND Lambda H100 frames ($0.001/frame)
+-- both accumulate here (renaming the column would need a migration; not worth it).
 -- One row per (user, calendar month UTC); a new month is a fresh row reading 0,
--- so the monthly reset is implicit. Incremented atomically as the relay reports
--- connection-open time (~$0.00194/sec). Test accounts + subscribers are exempt
+-- so the monthly reset is implicit. Test accounts + subscribers are exempt
 -- from the cap but spend is still recorded for them only if a session runs the
 -- metering (exempt sessions skip it).
 CREATE TABLE IF NOT EXISTS monthly_usage (

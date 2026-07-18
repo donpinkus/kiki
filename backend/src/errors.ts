@@ -8,12 +8,3 @@ export class AppError extends Error {
   }
 }
 
-export class ProviderError extends AppError {
-  readonly provider: string;
-
-  constructor(provider: string, message: string) {
-    super(502, message);
-    this.name = 'ProviderError';
-    this.provider = provider;
-  }
-}
