@@ -21,6 +21,8 @@ huggingface-hub>=0.25.0
 # ─── Server ────────────────────────────────────────────────────────
 fastapi>=0.108.0
 uvicorn[standard]>=0.25.0
+# Direct dep of dev/image_client.py only (the server uses Starlette WebSockets;
+# uvicorn[standard] already pulls websockets in transitively for the runtime).
 websockets>=12.0
 Pillow>=10.0.0
 

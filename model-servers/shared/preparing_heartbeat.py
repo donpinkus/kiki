@@ -1,4 +1,5 @@
-"""Background heartbeat for the `preparing` phase on both image and video pods.
+"""Background heartbeat for the image server's `preparing` phase (also used by
+the archived video server — see archive/video-ltx/).
 
 Emits a structured `preparing heartbeat:` log line every 15s for the duration
 of the `preparing` phase block in `lifespan()`. Carries `host_rss_gib`,
@@ -11,10 +12,10 @@ breath — but the trajectory is the most diagnostic-positive signal we get
 when the pod goes silent mid-Step-2 transformer load.
 
 Implemented with `threading.Thread` (daemon=True) rather than
-`asyncio.create_task` because the load functions on both image/server.py
-(FluxKleinPipeline.load) and video/server.py (video/pipeline.py) are
-synchronous and block the asyncio event loop for 60-90s. An asyncio task
-wouldn't get a chance to run until load completed — defeating the purpose.
+`asyncio.create_task` because the pipeline load in image/server.py
+(FluxKleinPipeline.load) is synchronous and blocks the asyncio event loop
+for 60-90s. An asyncio task wouldn't get a chance to run until load
+completed — defeating the purpose.
 
 Stops when its `Event` is set, typically via `stop_heartbeat()` in the
 `finally` of the `with sentry_init.phase("preparing"):` block.
