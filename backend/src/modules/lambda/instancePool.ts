@@ -95,6 +95,8 @@ export interface InstancePoolSpec {
   /** Boot-watch poll cadence (IP + /health). */
   pollMs?: number;
   launchRetryMins?: number;
+  /** Account-wide launch API spacing override (tests: 0). */
+  launchSpacingMs?: number;
   /** How recently touch()/acquire must have happened to count as "user
    * interest" (keeps one instance warm on a floor-0 pool). */
   interestWindowMs?: number;
@@ -420,6 +422,7 @@ runcmd:
         LAUNCH_RETRY_MINS,
         undefined,
         (msg) => log.info({ pool: spec.kind, event: 'lambda_pool_launch_retry' }, msg),
+        spec.launchSpacingMs,
       );
       if (!id) throw new Error('Lambda launch returned no instance id');
       instances.set(name, {

@@ -217,26 +217,56 @@ export function isTransientNetworkError(e: unknown): boolean {
  * every 15s until the deadline. 15s respects the 1-per-12s launch rate limit.
  * `onAttempt` fires right before each try (e.g. to reset a timing baseline).
  */
+// ── account-wide launch spacing ──────────────────────────────────────────
+// Lambda's launch endpoint is rate-limited (~1 call/12s per ACCOUNT). One
+// retry loop at 15s cadence never trips it — but the image and video pools
+// retry CONCURRENTLY, and two interleaved 15s loops average ~7.5s between
+// launch calls → 429 storms that killed both pools' capacity searches
+// (observed in prod 2026-07-18). All launch attempts in this process gate
+// through one timestamp so calls stay ≥13s apart regardless of pool count.
+const MIN_LAUNCH_SPACING_MS = 13_000;
+let launchGate: Promise<void> = Promise.resolve();
+let lastLaunchCallMs = 0;
+function spacedLaunchSlot(spacingMs: number): Promise<void> {
+  const slot = launchGate.then(async () => {
+    const wait = lastLaunchCallMs + spacingMs - Date.now();
+    if (wait > 0) await lambdaSleep(wait);
+    lastLaunchCallMs = Date.now();
+  });
+  // Chain regardless of outcome so one failure never wedges the gate.
+  launchGate = slot.catch(() => {});
+  return slot;
+}
+
 export async function launchWithRetry(
   client: LambdaClient,
   req: LaunchRequest,
   retryMins: number,
   onAttempt?: () => void,
   log: (msg: string) => void = console.log,
+  /** Override the account-wide launch spacing (tests use 0 — a fake cloud
+   * has no rate limit). */
+  spacingMs: number = MIN_LAUNCH_SPACING_MS,
 ): Promise<string[]> {
   const deadline = Date.now() + retryMins * 60_000;
   for (;;) {
     onAttempt?.();
     try {
+      await spacedLaunchSlot(spacingMs);
       return await client.launch(req);
     } catch (e) {
       const capacityMiss = e instanceof LambdaApiError && /insufficient-capacity/.test(e.code);
+      // 429 = we (or a concurrent retry loop) outpaced the account-wide
+      // launch rate limit — transient by definition, retry like capacity.
+      const rateLimited = e instanceof LambdaApiError && e.status === 429;
       const transient = isTransientNetworkError(e);
-      if ((capacityMiss || transient) && Date.now() < deadline) {
+      if ((capacityMiss || rateLimited || transient) && Date.now() < deadline) {
         log(
           capacityMiss
             ? `[launch] insufficient capacity for ${req.instance_type_name} in ${req.region_name} — retrying in 15s`
-            : `[launch] transient network error (${(e as Error).message}) — retrying in 15s`,
+            : rateLimited
+              ? `[launch] launch API rate-limited (429) — retrying in 15s`
+              : `[launch] transient network error (${(e as Error).message}) — retrying in 15s`,
         );
         await lambdaSleep(15_000);
         continue;

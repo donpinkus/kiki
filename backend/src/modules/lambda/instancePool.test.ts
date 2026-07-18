@@ -115,6 +115,7 @@ function makePool(
     bootTimeoutMs: 5000,
     pollMs: 20,
     launchRetryMins: 0,
+    launchSpacingMs: 0,
     interestWindowMs: 250,
     ...overrides,
   });
