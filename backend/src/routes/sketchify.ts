@@ -7,7 +7,7 @@
  * 503 → { error: 'lambda_not_ready', status, etaSeconds } — H100 still booting
  *
  * Methodology (validated on 6 real drawings, see
- * documents/plans/generation-to-canvas-roundtrip.md): the sketch is ONE extra
+ * documents/plans/completed/generation-to-canvas-roundtrip.md): the sketch is ONE extra
  * klein generation on the same Lambda instance — the generated image goes in
  * as the reference and a fixed style prompt + fixed seed produce a clean
  * coloring-book sketch. `lines` re-derives colors from the drawing prompt on

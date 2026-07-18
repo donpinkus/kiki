@@ -1,8 +1,10 @@
 # Generation → editable sketch → regeneration ("pull the image onto the canvas")
 
-**Status (2026-07-17):** methodology evaluated end-to-end on H100 (9B-KV pipeline,
-Donald's real angel drawing, ~$1.50 of the $20 budget). **Feature is viable; a clear
-winning method exists.** No app changes made (per scope).
+**Status (2026-07-18): ✅ Shipped** as the "Edit" button (commit `54316c2` — backend
+`POST /v1/sketchify` + iOS Edit capsule), built on the winning method below.
+Earlier status (2026-07-17): methodology evaluated end-to-end on H100 (9B-KV pipeline,
+Donald's real angel drawing, ~$1.50 of the $20 budget) — feature viable, clear
+winning method, no app changes yet at that point.
 
 ## The feature
 

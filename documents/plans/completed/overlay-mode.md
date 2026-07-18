@@ -1,6 +1,6 @@
 # Overlay Drawing Mode — Implementation Spec
 
-**Status:** in development (5 parallel independent implementations, 2026-06-21)
+**Status:** ✅ **Shipped.** Overlay is now a live `DrawingLayout` case and the app's default layout (`AppCoordinator.drawingLayout = .overlay`). Doc kept as the behavior spec / locked product decisions record. (Moved to completed/ 2026-07-18.)
 **Owner:** Donald
 
 ## What we're building
