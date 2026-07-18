@@ -1,3 +1,4 @@
+import AVFoundation
 import SwiftUI
 import SwiftData
 import os
@@ -1216,7 +1217,67 @@ final class AppCoordinator {
             streamLog.info("flushRecording: no new footage since last checkpoint — relying on stored segments")
         }
         if consolidate {
+            let before = RecordingStore.shared.segmentURLs(for: drawingId).canvas.count
             await Self.consolidateReporting(for: drawingId)
+            await Self.logReplayDiagnostics(for: drawingId, pairsBeforeConsolidation: before)
+        }
+    }
+
+    /// Per-file forensics for the current drawing's recording store, shipped
+    /// to Sentry Logs (`event:replay.diag*`) and the Xcode console on every
+    /// replay-modal open. Runs on natural occurrences — cheap (a handful of
+    /// files post-consolidation) and exactly what's needed to debug "the
+    /// preview is black" without pulling files off the device.
+    private nonisolated static func logReplayDiagnostics(for drawingId: UUID, pairsBeforeConsolidation: Int) async {
+        let store = RecordingStore.shared
+        let segments = store.segmentURLs(for: drawingId)
+        let animation = store.generatedVideoURL(for: drawingId)
+        Log.info("replay.diag", attributes: [
+            "event": "replay.diag",
+            "drawing_id": drawingId.uuidString,
+            "pairs_before_consolidation": pairsBeforeConsolidation,
+            "pairs_after_consolidation": segments.canvas.count,
+            "has_animation_mp4": animation != nil,
+        ])
+        streamLog.info("REPLAY DIAG drawing=\(drawingId.uuidString, privacy: .public) pairs=\(pairsBeforeConsolidation)→\(segments.canvas.count, privacy: .public)")
+        for (kind, urls) in [("canvas", segments.canvas), ("generated", segments.generated)] {
+            for url in urls {
+                let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+                let bytes = (attrs?[.size] as? NSNumber)?.intValue ?? -1
+                let asset = AVURLAsset(url: url)
+                let duration = (try? await asset.load(.duration).seconds) ?? -1
+                let playable = (try? await asset.load(.isPlayable)) ?? false
+                let tracks = (try? await asset.loadTracks(withMediaType: .video)) ?? []
+                var width = 0, height = 0
+                var fps: Float = -1
+                var trackSeconds = -1.0
+                var codec: UInt32 = 0
+                if let track = tracks.first {
+                    let natural = (try? await track.load(.naturalSize)) ?? .zero
+                    width = Int(natural.width)
+                    height = Int(natural.height)
+                    fps = (try? await track.load(.nominalFrameRate)) ?? -1
+                    trackSeconds = (try? await track.load(.timeRange).duration.seconds) ?? -1
+                    if let format = (try? await track.load(.formatDescriptions))?.first {
+                        codec = CMFormatDescriptionGetMediaSubType(format)
+                    }
+                }
+                Log.info("replay.diag.file", attributes: [
+                    "event": "replay.diag.file",
+                    "kind": kind,
+                    "file": url.lastPathComponent,
+                    "bytes": bytes,
+                    "duration_s": duration,
+                    "playable": playable,
+                    "video_tracks": tracks.count,
+                    "width": width,
+                    "height": height,
+                    "fps": fps,
+                    "track_duration_s": trackSeconds,
+                    "codec_fourcc": codec,
+                ])
+                streamLog.info("REPLAY DIAG \(kind, privacy: .public)/\(url.lastPathComponent, privacy: .public): \(bytes)B dur=\(duration, privacy: .public)s playable=\(playable, privacy: .public) tracks=\(tracks.count) \(width)x\(height) @\(fps)fps trackDur=\(trackSeconds, privacy: .public)")
+            }
         }
     }
 
