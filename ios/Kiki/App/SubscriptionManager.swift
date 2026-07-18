@@ -135,7 +135,9 @@ final class SubscriptionManager {
             }
         }
         await refreshEntitlements()
-        if status != .subscribed {
+        if status == .subscribed {
+            Analytics.track(.subscriptionRestored, properties: ["product_id": Self.productID])
+        } else {
             lastError = "No active subscription to restore."
         }
     }
