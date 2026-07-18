@@ -64,6 +64,15 @@ enum AnalyticsEvent: String {
     case imageShared = "image.shared"
     case videoShared = "video.shared"
 
+    // Speed-paint replay diagnostics — the replay pipeline is device-only
+    // (AVFoundation), so its forensics ship as events: store contents on
+    // every modal open, composition stats per build, and player-item load
+    // failures (the "black preview" class of bug).
+    case replayDiag = "replay.diag"
+    case replayDiagFile = "replay.diag.file"
+    case replayBuilt = "replay.built"
+    case replayPreviewFailed = "replay.preview_failed"
+
     // Errors surfaced to the user. Fired whenever any error banner/message
     // becomes visible (drawing-view red banner, sign-in failure text).
     // Properties: `message` (the verbatim string shown), `surface`

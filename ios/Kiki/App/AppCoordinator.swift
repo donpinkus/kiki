@@ -1232,13 +1232,14 @@ final class AppCoordinator {
         let store = RecordingStore.shared
         let segments = store.segmentURLs(for: drawingId)
         let animation = store.generatedVideoURL(for: drawingId)
-        Log.info("replay.diag", attributes: [
-            "event": "replay.diag",
+        let summary: [String: Any] = [
             "drawing_id": drawingId.uuidString,
             "pairs_before_consolidation": pairsBeforeConsolidation,
             "pairs_after_consolidation": segments.canvas.count,
             "has_animation_mp4": animation != nil,
-        ])
+        ]
+        Analytics.track(.replayDiag, properties: summary)
+        Log.info("replay.diag", attributes: summary.merging(["event": "replay.diag"]) { a, _ in a })
         streamLog.info("REPLAY DIAG drawing=\(drawingId.uuidString, privacy: .public) pairs=\(pairsBeforeConsolidation)→\(segments.canvas.count, privacy: .public)")
         for (kind, urls) in [("canvas", segments.canvas), ("generated", segments.generated)] {
             for url in urls {
@@ -1262,8 +1263,7 @@ final class AppCoordinator {
                         codec = CMFormatDescriptionGetMediaSubType(format)
                     }
                 }
-                Log.info("replay.diag.file", attributes: [
-                    "event": "replay.diag.file",
+                let fileProps: [String: Any] = [
                     "kind": kind,
                     "file": url.lastPathComponent,
                     "bytes": bytes,
@@ -1274,8 +1274,10 @@ final class AppCoordinator {
                     "height": height,
                     "fps": fps,
                     "track_duration_s": trackSeconds,
-                    "codec_fourcc": codec,
-                ])
+                    "codec_fourcc": Int(codec),
+                ]
+                Analytics.track(.replayDiagFile, properties: fileProps)
+                Log.info("replay.diag.file", attributes: fileProps.merging(["event": "replay.diag.file"]) { a, _ in a })
                 streamLog.info("REPLAY DIAG \(kind, privacy: .public)/\(url.lastPathComponent, privacy: .public): \(bytes)B dur=\(duration, privacy: .public)s playable=\(playable, privacy: .public) tracks=\(tracks.count) \(width)x\(height) @\(fps)fps trackDur=\(trackSeconds, privacy: .public)")
             }
         }
@@ -1334,6 +1336,10 @@ final class AppCoordinator {
             )
             Log.info("replay.built", attributes: [
                 "event": "replay.built",
+                "segments": segments.canvas.count,
+                "duration_s": built.composition.duration.seconds,
+            ])
+            Analytics.track(.replayBuilt, properties: [
                 "segments": segments.canvas.count,
                 "duration_s": built.composition.duration.seconds,
             ])

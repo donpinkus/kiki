@@ -231,6 +231,7 @@ struct SpeedPaintReplayView: View {
             case .failed:
                 let detail = item.error.map(String.init(describing:)) ?? "unknown"
                 statusMessage = "Preview failed to load: \(item.error?.localizedDescription ?? "unknown error")"
+                Analytics.track(.replayPreviewFailed, properties: ["status": "failed", "error": detail])
                 Log.error("replay.preview_item_failed", attributes: [
                     "event": "replay.preview_item_failed",
                     "error": detail,
@@ -239,11 +240,13 @@ struct SpeedPaintReplayView: View {
                     scope.setExtra(value: detail, key: "error")
                 }
             case .unknown:
+                Analytics.track(.replayPreviewFailed, properties: ["status": "stuck"])
                 Log.error("replay.preview_item_stuck", attributes: [
                     "event": "replay.preview_item_stuck",
                 ])
                 SentrySDK.capture(message: "replay.preview_item_stuck")
             default:
+                Analytics.track(.replayPreviewFailed, properties: ["status": "ready"])
                 Log.info("replay.preview_item_ready", attributes: [
                     "event": "replay.preview_item_ready",
                 ])
