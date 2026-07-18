@@ -12,6 +12,8 @@
  * Replaces the old in-memory `entitlement` stub (which gated on GPU-seconds).
  */
 
+import type { FastifyReply, FastifyRequest } from 'fastify';
+
 import { config } from '../../config/index.js';
 import { query } from '../../postgres/client.js';
 
@@ -88,4 +90,15 @@ export async function isTestAccount(userId: string): Promise<boolean> {
     [userId],
   );
   return res.rows[0]?.is_test_account ?? false;
+}
+
+/**
+ * Fastify preHandler: 403 unless the authed user is a test account. Sending
+ * the reply here makes Fastify skip the route handler. Shared by the
+ * Lambda-backed dev surfaces (routes/lambdaDev.ts, routes/sketchify.ts).
+ */
+export async function testAccountsOnly(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+  if (!(await isTestAccount(request.userId))) {
+    await reply.code(403).send({ error: 'test accounts only' });
+  }
 }

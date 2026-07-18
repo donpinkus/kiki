@@ -13,13 +13,10 @@
 
 import type { FastifyPluginAsync } from 'fastify';
 import { ensure, getState } from '../modules/lambda/devPool.js';
-import { isTestAccount } from '../modules/falBudget/index.js';
+import { testAccountsOnly } from '../modules/falBudget/index.js';
 
 export const lambdaDevRoute: FastifyPluginAsync = async (fastify) => {
-  fastify.post('/v1/dev/lambda/ensure', async (request, reply) => {
-    if (!(await isTestAccount(request.userId))) {
-      return reply.code(403).send({ error: 'test accounts only' });
-    }
+  fastify.post('/v1/dev/lambda/ensure', { preHandler: testAccountsOnly }, async (request) => {
     const state = ensure();
     request.log.info(
       { userId: request.userId, poolStatus: state.status, instanceId: state.instanceId, event: 'lambda_pool_ensure' },
@@ -28,10 +25,5 @@ export const lambdaDevRoute: FastifyPluginAsync = async (fastify) => {
     return state;
   });
 
-  fastify.get('/v1/dev/lambda/status', async (request, reply) => {
-    if (!(await isTestAccount(request.userId))) {
-      return reply.code(403).send({ error: 'test accounts only' });
-    }
-    return getState();
-  });
+  fastify.get('/v1/dev/lambda/status', { preHandler: testAccountsOnly }, async () => getState());
 };

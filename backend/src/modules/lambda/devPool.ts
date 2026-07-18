@@ -60,7 +60,7 @@ const HEALTH_FAILS_TO_KILL = 3;
  * refreshed empirically, see plan doc. */
 const BOOT_ESTIMATE_MS = 10 * 60_000;
 
-export type DevPoolStatusKind = 'disabled' | 'none' | 'launching' | 'booting' | 'ready' | 'error';
+export type PoolStatusKind = 'disabled' | 'none' | 'launching' | 'booting' | 'ready' | 'error';
 
 interface PoolInstance {
   id: string;
@@ -78,8 +78,8 @@ interface PoolInstance {
   adopted?: boolean;
 }
 
-export interface DevPoolState {
-  status: DevPoolStatusKind;
+export interface PoolState {
+  status: PoolStatusKind;
   instanceId?: string;
   ip?: string;
   region: string;
@@ -227,15 +227,32 @@ export function reportFailure(name: string): void {
   log.warn({ name, event: 'lambda_pool_instance_suspect' }, 'relay connect failed — instance marked suspect');
 }
 
+/** Least-loaded assignable instance, or null. Pure — mutation stays at call sites. */
+function leastLoadedReady(): PoolInstance | null {
+  return assignableInstances().sort((a, b) => a.activeStreams - b.activeStreams)[0] ?? null;
+}
+
+function wsUrlFor(inst: PoolInstance): string {
+  return `${scheme()}://${inst.ip}:${PORT}/ws?token=${wsToken(inst.name)}`;
+}
+
+/** Remove an instance from the pool and terminate it (fire-and-forget),
+ * recording the lifecycle event. Callers emit their own log line — the
+ * messages differ meaningfully per reason. */
+function terminateInstance(inst: PoolInstance, event: string, durationMs?: number): void {
+  instances.delete(inst.name);
+  void client().terminate([inst.id]).catch(() => {});
+  recordPoolEvent(event, inst.name, inst.region, durationMs);
+}
+
 /** Assign a stream to the least-loaded ready instance. Null when none. */
 export function acquireStream(): { name: string; url: string } | null {
   lastInterestMs = Date.now();
-  const ready = assignableInstances().sort((a, b) => a.activeStreams - b.activeStreams);
-  const inst = ready[0];
+  const inst = leastLoadedReady();
   if (!inst) return null;
   inst.activeStreams += 1;
   inst.lastActivityMs = Date.now();
-  return { name: inst.name, url: `${scheme()}://${inst.ip}:${PORT}/ws?token=${wsToken(inst.name)}` };
+  return { name: inst.name, url: wsUrlFor(inst) };
 }
 
 /** Release a stream slot (on session close or re-assignment). */
@@ -253,15 +270,14 @@ export function touchInstance(name: string): void {
 
 /** One-shot URL (sketchify): least-loaded ready instance, no slot held. */
 export function wsUrl(): string | null {
-  const ready = assignableInstances().sort((a, b) => a.activeStreams - b.activeStreams);
-  const inst = ready[0];
+  const inst = leastLoadedReady();
   if (!inst?.ip) return null;
   touchInstance(inst.name);
-  return `${scheme()}://${inst.ip}:${PORT}/ws?token=${wsToken(inst.name)}`;
+  return wsUrlFor(inst);
 }
 
 /** User interest: make sure at least one instance exists/is coming. */
-export function ensure(): DevPoolState {
+export function ensure(): PoolState {
   lastInterestMs = Date.now();
   if (enabled() && instances.size === 0 && launchesInFlight === 0) {
     lastError = undefined;
@@ -270,13 +286,13 @@ export function ensure(): DevPoolState {
   return getState();
 }
 
-export function getState(): DevPoolState {
+export function getState(): PoolState {
   const list = [...instances.values()];
   const ready = list.filter((i) => i.status === 'ready');
   const booting = list.filter((i) => i.status === 'booting');
   const launching = launchesInFlight > 0 || list.some((i) => i.status === 'launching');
 
-  let status: DevPoolStatusKind;
+  let status: PoolStatusKind;
   if (!enabled()) status = 'disabled';
   else if (ready.length > 0) status = 'ready';
   else if (booting.length > 0) status = 'booting';
@@ -297,7 +313,7 @@ export function getState(): DevPoolState {
     readyAtMs = ready[0]?.readyAtMs;
   }
 
-  const messages: Record<DevPoolStatusKind, string> = {
+  const messages: Record<PoolStatusKind, string> = {
     disabled: 'Lambda pool disabled (LAMBDA_DEV_POOL_ENABLED / LAMBDA_API_KEY unset)',
     none: 'No instance',
     launching: 'Requesting H100 capacity…',
@@ -419,9 +435,7 @@ async function watchBoot(name: string): Promise<void> {
   // …then OUR /health.
   for (;;) {
     if (Date.now() > deadline) {
-      instances.delete(name);
-      void c.terminate([inst.id]).catch(() => {});
-      recordPoolEvent('boot_stalled', name, inst.region, Date.now() - trueLaunchMs(inst));
+      terminateInstance(inst, 'boot_stalled', Date.now() - trueLaunchMs(inst));
       throw new Error(`boot timed out waiting for /health (${name})`);
     }
     if (!instances.has(name)) return;
@@ -465,14 +479,11 @@ async function tick(): Promise<void> {
             { name: inst.name, instanceId: inst.id, event: 'lambda_pool_instance_dead' },
             'instance failed health checks — terminating (scaler will replace if needed)',
           );
-          recordPoolEvent(
+          terminateInstance(
+            inst,
             'instance_dead',
-            inst.name,
-            inst.region,
             inst.readyAtMs !== undefined ? Date.now() - inst.readyAtMs : undefined,
           );
-          instances.delete(inst.name);
-          void client().terminate([inst.id]).catch(() => {});
         }
       }
     }),
@@ -502,9 +513,7 @@ async function tick(): Promise<void> {
         { name: idle.name, instanceId: idle.id, idleMs: Date.now() - idle.lastActivityMs, event: 'lambda_pool_idle_terminate' },
         'terminating idle pool instance',
       );
-      recordPoolEvent('idle_terminate', idle.name, idle.region, Date.now() - idle.lastActivityMs);
-      instances.delete(idle.name);
-      void client().terminate([idle.id]).catch(() => {});
+      terminateInstance(idle, 'idle_terminate', Date.now() - idle.lastActivityMs);
     }
   }
 

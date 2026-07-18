@@ -21,7 +21,7 @@
 
 import type { FastifyPluginAsync } from 'fastify';
 import WebSocket from 'ws';
-import { isTestAccount } from '../modules/falBudget/index.js';
+import { testAccountsOnly } from '../modules/falBudget/index.js';
 import { touch as touchDevPool, wsUrl as devPoolWsUrl, ensure as ensureDevPool } from '../modules/lambda/devPool.js';
 import { config } from '../config/index.js';
 
@@ -86,12 +86,10 @@ function runSketchify(url: string, jpeg: Buffer, prompt: string): Promise<Buffer
 export const sketchifyRoute: FastifyPluginAsync = async (fastify) => {
   fastify.post<{ Body: { imageBase64?: string; mode?: string } }>(
     '/v1/sketchify',
+    // Same gate as the other Lambda-backed dev surfaces for now; drop the
+    // preHandler when the feature ships to everyone.
+    { preHandler: testAccountsOnly },
     async (request, reply) => {
-      // Same gate as the other Lambda-backed dev surfaces for now; widen when
-      // the feature ships to everyone.
-      if (!(await isTestAccount(request.userId))) {
-        return reply.code(403).send({ error: 'test accounts only' });
-      }
       const { imageBase64, mode } = request.body ?? {};
       const prompt = SKETCH_PROMPTS[mode ?? ''];
       if (!imageBase64 || !prompt) {
