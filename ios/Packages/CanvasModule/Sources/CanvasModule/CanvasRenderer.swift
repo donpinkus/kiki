@@ -1895,7 +1895,45 @@ public final class CanvasRenderer {
             let v = 0.65 * vnoise(x, y, cells: 24, seed: 55) + 0.35 * vnoise(x, y, cells: 48, seed: 66)
             return min(1, max(0, (v - 0.25) * 1.6))
         }
+        // Image-based grains (cloned Procreate textures): grayscale PNGs from
+        // Resources/BrushGrains, tiling at their own pixel size (grainSettings uses
+        // texture.width as the tile). Missing file → the id resolves to no grain.
+        for descriptor in GrainCatalog.all {
+            guard let resourceName = descriptor.resourceName,
+                  let data = grainPNGData(resourceName: resourceName),
+                  let source = CGImageSourceCreateWithData(data as CFData, nil),
+                  let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else { continue }
+            let w = cgImage.width, h = cgImage.height
+            var bytes = [UInt8](repeating: 0, count: w * h)
+            guard let ctx = CGContext(data: &bytes, width: w, height: h, bitsPerComponent: 8,
+                                      bytesPerRow: w, space: CGColorSpaceCreateDeviceGray(),
+                                      bitmapInfo: CGImageAlphaInfo.none.rawValue) else { continue }
+            ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: w, height: h))
+            let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r8Unorm,
+                                                                width: w, height: h, mipmapped: false)
+            desc.usage = [.shaderRead]
+            desc.storageMode = .shared
+            guard let tex = device.makeTexture(descriptor: desc) else { continue }
+            bytes.withUnsafeBytes { ptr in
+                tex.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0,
+                            withBytes: ptr.baseAddress!, bytesPerRow: w)
+            }
+            out[descriptor.id] = tex
+        }
         return out
+    }
+
+    /// Bundle (app) / `BRUSH_GRAINS_DIR` env (harness) lookup for image-grain PNGs —
+    /// mirrors `shapePNGData`.
+    private static func grainPNGData(resourceName: String) -> Data? {
+        #if BRUSH_HARNESS
+        guard let dir = ProcessInfo.processInfo.environment["BRUSH_GRAINS_DIR"] else { return nil }
+        return try? Data(contentsOf: URL(fileURLWithPath: dir).appendingPathComponent("\(resourceName).png"))
+        #else
+        guard let url = Bundle.module.url(forResource: resourceName, withExtension: "png",
+                                          subdirectory: "BrushGrains") else { return nil }
+        return try? Data(contentsOf: url)
+        #endif
     }
 
     /// Grain-variant PSO (same source-over blend as the compositor).
@@ -1940,7 +1978,9 @@ public final class CanvasRenderer {
         guard brush.grainDepth > 0.005, let grainID = brush.grainID else { return nil }
         let depth = Float(min(max(brush.grainDepth, 0), 1))
         if let desc = GrainCatalog.descriptor(for: grainID), let tex = grainTextures[desc.id] {
-            let tilePx = 256.0 * Double(desc.nativeScale) * Double(max(brush.grainScale, 0.05))
+            // Tile at the texture's own pixel size (256 for procedural; image grains
+            // bring their native resolution) × the descriptor + brush scales.
+            let tilePx = Double(tex.width) * Double(desc.nativeScale) * Double(max(brush.grainScale, 0.05))
             return (tex, depth, Float(1.0 / tilePx), brush.grainMoving)
         }
         // User-imported grain: tile at the image's native pixel size × grainScale.

@@ -359,6 +359,83 @@ public enum CuratedPresetCatalog {
             b.fallOff = 0.12  // gentle dry-out on very long strokes
             return b
         },
+
+        // --- Procreate clones (brush-target sessions, 2026-07-18) -------------------
+        // Recipes reverse-engineered from Brush Studio screenshots + tuned in the
+        // harness against the targets' drawing-pad strokes. Mapping notes + known
+        // approximation gaps: documents/research/krita-brush/16-brush-clones.md.
+
+        // "Stucco": dense plaster drag — spatter tip fully spin-decorrelated at tight
+        // spacing saturates to a chalky mass; contrasty speckle grain carves the pits.
+        // (Procreate uses a photographic plaster grain in Multiply — screenshot of the
+        // Grain Editor pending; procedural speckle approximates it.)
+        CuratedPreset(id: "stucco", displayName: "Stucco") { base in
+            var b = base
+            b.shapeID = "stucco"
+            b.rotationFollow = 0        // tip stamps upright (Touch only, Rotation 0)
+            b.rotationJitter = 1.0
+            b.spacing = 0.05
+            b.opacity = 0.95
+            b.flow = 1.0
+            b.taperStart = 0.15; b.taperEnd = 0.15; b.taperOpacity = 1.0
+            b.grainID = "speckle"
+            b.grainDepth = 0.5
+            b.grainScale = 0.6
+            b.grainMoving = true        // Procreate: Moving / Rolling
+            b.dynamics = BrushDynamics(
+                size: CurveOption(sensors: [], strength: 1),   // AP Size 0%: no pressure size
+                flow: CurveOption(sensors: [SensorChannel(sensor: .pressure)], minValue: 0.85))
+            return b
+        },
+
+        // "Nightjar": lumpy ink ribbon with splatter satellites — blob tip follows the
+        // stroke with heavy along-stroke jitter; an occasional scattered second stamp
+        // is the splatter. (Procreate also wet-mixes via Intense Blending — our wet
+        // path is round-tip-only, so this is the dry approximation.)
+        CuratedPreset(id: "nightjar", displayName: "Nightjar") { base in
+            var b = base
+            b.shapeID = "nightjar"
+            b.rotationFollow = 1.0      // Rotation: Follow stroke (max)
+            b.flipX = true; b.flipY = true
+            b.spacing = 0.18
+            b.spacingJitter = 0.10
+            b.taperEnd = 0.07
+            b.stampCount = 2
+            b.stampCountJitter = 0.7
+            b.dynamics = BrushDynamics(
+                size: CurveOption(sensors: [SensorChannel(sensor: .pressure)], minValue: 0.55),
+                scatter: CurveOption(sensors: [], strength: 0.5),
+                scatterLateral: CurveOption(sensors: [], strength: 0.07),
+                scatterLinear: CurveOption(sensors: [], strength: 0.40),
+                ratio: CurveOption(sensors: [SensorChannel(sensor: .pressure)], minValue: 0.75))
+            return b
+        },
+
+        // "Old Beach": chalky textured paint — palette-knife smear tip, low flow
+        // build-up, texturized grain, tip-lightness for the striation dimensionality.
+        // (Procreate's bright ragged edge comes from Wet Edges Max + Burnt Edges —
+        // both engine gaps; this is the closest dry read.)
+        CuratedPreset(id: "oldbeach", displayName: "Old Beach") { base in
+            var b = base
+            b.shapeID = "oldbeach"
+            b.rotationFollow = 0
+            b.rotationJitter = 0.3
+            b.spacing = 0.16
+            b.opacity = 0.75
+            b.flow = 0.55
+            b.grainID = "paper"
+            b.grainDepth = 0.7
+            b.grainScale = 0.7
+            b.grainMoving = false       // Texturized
+            b.tipLightness = 0.85
+            b.dynamics = BrushDynamics(
+                size: CurveOption(sensors: [SensorChannel(sensor: .pressure)], minValue: 0.74),
+                flow: CurveOption(sensors: [SensorChannel(sensor: .pressure)], minValue: 0.35),
+                // Azimuth input style: the pencil's tilt direction orients the tip.
+                rotation: CurveOption(sensors: [SensorChannel(sensor: .tiltDirection)], fold: .rotationLike),
+                dabColorJitter: ColorJitter(hue: 0.02, saturation: 0.02, brightness: 0.02, darkness: 0.02))
+            return b
+        },
     ]
 
     public static func preset(for id: String) -> CuratedPreset? {

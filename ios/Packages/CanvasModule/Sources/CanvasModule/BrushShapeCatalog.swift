@@ -43,6 +43,11 @@ public enum BrushShapeCatalog {
         BrushShapeDescriptor(id: "drybrush", displayName: "Dry Brush", resourceName: "drybrush"),
         BrushShapeDescriptor(id: "pastel", displayName: "Pastel", resourceName: "pastel", rotationJitter: true),
         BrushShapeDescriptor(id: "ink", displayName: "Spray", resourceName: "ink"),
+        // Cloned Procreate tips (2026-07-18, brush-target sessions): extracted from
+        // Shape Editor screenshots. See documents/research/krita-brush/16-brush-clones.md.
+        BrushShapeDescriptor(id: "stucco", displayName: "Stucco", resourceName: "stucco"),
+        BrushShapeDescriptor(id: "nightjar", displayName: "Blob", resourceName: "nightjar"),
+        BrushShapeDescriptor(id: "oldbeach", displayName: "Knife", resourceName: "oldbeach"),
     ]
 
     public static func descriptor(for id: String?) -> BrushShapeDescriptor {
@@ -72,15 +77,26 @@ public enum BrushAssetStore {
 
 // MARK: - Grain catalog (P8)
 
-/// One selectable grain texture. All grains are PROCEDURAL (generated at renderer init
-/// from deterministic hash noise, tileable 256²) — no bundle resources, so the
-/// BrushHarness gets them for free. `nativeScale` is the default UV multiplier applied
-/// on top of `BrushConfig.grainScale` (bigger = coarser features on canvas; the plan's
-/// guidance is to stay in the COARSE value-grain band that survives img2img).
+/// One selectable grain texture. Grains are either PROCEDURAL (generated at renderer
+/// init from deterministic hash noise, tileable 256²) or IMAGE-BASED (`resourceName`:
+/// a grayscale PNG in `Resources/BrushGrains`, tiling at its own pixel size — the ship
+/// vehicle for cloned Procreate grains; `BRUSH_GRAINS_DIR` env for the harness).
+/// `nativeScale` is the default UV multiplier applied on top of
+/// `BrushConfig.grainScale` (bigger = coarser features on canvas; the plan's guidance
+/// is to stay in the COARSE value-grain band that survives img2img).
 public struct GrainDescriptor: Identifiable, Equatable, Sendable {
     public let id: String
     public let displayName: String
     public let nativeScale: CGFloat
+    /// PNG resource name (no extension) in `Resources/BrushGrains`, or nil = procedural.
+    public let resourceName: String?
+
+    public init(id: String, displayName: String, nativeScale: CGFloat, resourceName: String? = nil) {
+        self.id = id
+        self.displayName = displayName
+        self.nativeScale = nativeScale
+        self.resourceName = resourceName
+    }
 }
 
 public enum GrainCatalog {
