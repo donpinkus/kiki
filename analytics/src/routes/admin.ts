@@ -8,7 +8,7 @@
  * aggregate tools (Sentry) don't give.
  */
 
-import type { FastifyPluginAsync } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import {
   ADMIN_COOKIE,
   requireAdmin,
@@ -16,8 +16,30 @@ import {
   verifyAdminPassword,
 } from '../auth.js';
 import { query } from '../db.js';
-import { blobStore } from '../blobStore.js';
+import { blobStore, randomStamp, safeFilename } from '../blobStore.js';
 import { config } from '../config.js';
+
+/** Parse the numeric `:id` route param; sends the 400 and returns null on junk. */
+function parseIdParam(request: FastifyRequest, reply: FastifyReply): number | null {
+  const id = Number((request.params as { id: string }).id);
+  if (!Number.isFinite(id)) {
+    void reply.code(400).send({ error: 'bad id' });
+    return null;
+  }
+  return id;
+}
+
+/** Group child rows by parent key, preserving input (SQL ORDER BY) order. */
+function groupBy<C>(children: C[], key: (c: C) => string): Map<string, C[]> {
+  const map = new Map<string, C[]>();
+  for (const c of children) {
+    const k = key(c);
+    const list = map.get(k) ?? [];
+    list.push(c);
+    map.set(k, list);
+  }
+  return map;
+}
 
 export const adminRoute: FastifyPluginAsync = async (app) => {
   // ─── Auth ──────────────────────────────────────────────────────────────────
@@ -63,13 +85,15 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
          FROM brush_target_images WHERE target_id = ANY($1::bigint[]) ORDER BY created_at`,
         [targets.map((t) => t.id)],
       );
-      const byTarget = new Map<string, unknown[]>();
-      for (const img of images) {
-        const list = byTarget.get(String(img.target_id)) ?? [];
-        list.push({ id: img.id, kind: img.kind, label: img.label, note: img.note, blob_key: img.blob_key, created_at: img.created_at });
-        byTarget.set(String(img.target_id), list);
-      }
-      return { targets: targets.map((t) => ({ ...t, images: byTarget.get(String(t.id)) ?? [] })) };
+      const byTarget = groupBy(images, (img) => String(img.target_id));
+      return {
+        targets: targets.map((t) => ({
+          ...t,
+          images: (byTarget.get(String(t.id)) ?? []).map((img) => ({
+            id: img.id, kind: img.kind, label: img.label, note: img.note, blob_key: img.blob_key, created_at: img.created_at,
+          })),
+        })),
+      };
     });
 
     gated.post('/admin/api/brush-targets', async (request, reply) => {
@@ -80,13 +104,13 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
         `INSERT INTO brush_targets (name, note) VALUES ($1, $2) RETURNING id`,
         [name, body?.note ?? null],
       );
-      return { ok: true, id: rows[0]!.id };
+      return { ok: true, id: rows[0]?.id };
     });
 
     gated.patch('/admin/api/brush-targets/:id', async (request, reply) => {
-      const id = Number((request.params as { id: string }).id);
+      const id = parseIdParam(request, reply);
+      if (id === null) return;
       const body = request.body as { name?: string; note?: string; status?: string };
-      if (!Number.isFinite(id)) return reply.code(400).send({ error: 'bad id' });
       await query(
         `UPDATE brush_targets SET
            name = COALESCE($2, name),
@@ -100,8 +124,8 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
     });
 
     gated.delete('/admin/api/brush-targets/:id', async (request, reply) => {
-      const id = Number((request.params as { id: string }).id);
-      if (!Number.isFinite(id)) return reply.code(400).send({ error: 'bad id' });
+      const id = parseIdParam(request, reply);
+      if (id === null) return;
       await query(`DELETE FROM brush_targets WHERE id = $1`, [id]);
       return { ok: true };
     });
@@ -110,8 +134,8 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
     // 'kind' field applies to all files in the request (reference | settings |
     // attempt; default reference). Filenames become the initial labels.
     gated.post('/admin/api/brush-targets/:id/images', async (request, reply) => {
-      const id = Number((request.params as { id: string }).id);
-      if (!Number.isFinite(id)) return reply.code(400).send({ error: 'bad id' });
+      const id = parseIdParam(request, reply);
+      if (id === null) return;
       const { rows: t } = await query(`SELECT id FROM brush_targets WHERE id = $1`, [id]);
       if (t.length === 0) return reply.code(404).send({ error: 'no such target' });
 
@@ -127,23 +151,23 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
         if (buf.length === 0) continue;
         if (buf.length > 24 * 1024 * 1024) return reply.code(400).send({ error: 'image too large' });
         const label = (part.filename ?? 'image').replace(/\.[a-zA-Z0-9]+$/, '');
-        const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        const key = `brush-targets/${id}/${stamp}-${(part.filename ?? 'image.png').replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+        const key = `brush-targets/${id}/${randomStamp()}-${safeFilename(part.filename ?? 'image.png')}`;
         await blobStore.put(key, buf);
         const { rows } = await query<{ id: string }>(
           `INSERT INTO brush_target_images (target_id, kind, label, blob_key) VALUES ($1, $2, $3, $4) RETURNING id`,
           [id, ['reference', 'settings', 'attempt'].includes(kind) ? kind : 'reference', label, key],
         );
-        saved.push({ id: rows[0]!.id, label });
+        const savedId = rows[0]?.id;
+        if (savedId) saved.push({ id: savedId, label });
       }
       await query(`UPDATE brush_targets SET updated_at = now() WHERE id = $1`, [id]);
       return { ok: true, images: saved };
     });
 
     gated.patch('/admin/api/brush-target-images/:id', async (request, reply) => {
-      const id = Number((request.params as { id: string }).id);
+      const id = parseIdParam(request, reply);
+      if (id === null) return;
       const body = request.body as { label?: string; note?: string; kind?: string };
-      if (!Number.isFinite(id)) return reply.code(400).send({ error: 'bad id' });
       await query(
         `UPDATE brush_target_images SET
            label = COALESCE($2, label),
@@ -156,8 +180,8 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
     });
 
     gated.delete('/admin/api/brush-target-images/:id', async (request, reply) => {
-      const id = Number((request.params as { id: string }).id);
-      if (!Number.isFinite(id)) return reply.code(400).send({ error: 'bad id' });
+      const id = parseIdParam(request, reply);
+      if (id === null) return;
       await query(`DELETE FROM brush_target_images WHERE id = $1`, [id]);
       return { ok: true };
     });
@@ -175,13 +199,15 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
         `SELECT run_id, scene, blob_key, description FROM test_run_images WHERE run_id = ANY($1::bigint[]) ORDER BY scene`,
         [runs.map((r) => r.id)],
       );
-      const byRun = new Map<string, { scene: string; blob_key: string; description: string | null }[]>();
-      for (const img of images) {
-        const list = byRun.get(String(img.run_id)) ?? [];
-        list.push({ scene: img.scene, blob_key: img.blob_key, description: img.description });
-        byRun.set(String(img.run_id), list);
-      }
-      return { runs: runs.map((r) => ({ ...r, images: byRun.get(String(r.id)) ?? [] })) };
+      const byRun = groupBy(images, (img) => String(img.run_id));
+      return {
+        runs: runs.map((r) => ({
+          ...r,
+          images: (byRun.get(String(r.id)) ?? []).map((img) => ({
+            scene: img.scene, blob_key: img.blob_key, description: img.description,
+          })),
+        })),
+      };
     });
 
     // Brush-dev stroke fixtures (newest first) — consumed by
@@ -353,6 +379,13 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
       // number on the page. Applied server-side: events rows don't carry the
       // flag, so each query filters via the users table.
       const excl = (request.query as { excludeTest?: string }).excludeTest === '1';
+      // Test-account exclusion predicates, interpolated into the queries below
+      // (every query binds [excl] as $1). Two forms because not every query
+      // joins users: EXCL_EVENTS filters bare events rows via a subquery;
+      // EXCL_JOINED expects a `u` alias from a LEFT JOIN users.
+      const EXCL_EVENTS = `($1::bool = false OR user_id NOT IN
+                  (SELECT user_id::text FROM users WHERE is_test_account))`;
+      const EXCL_JOINED = `($1::bool = false OR COALESCE(u.is_test_account, false) = false)`;
       const [daily, newUsers, funnelRows, errorUsers, recentErrors, summary, providers, h100Waterfall, h100Pool, drawingOpened, drawingStages] = await Promise.all([
         query(
           `SELECT to_char(occurred_at AT TIME ZONE 'America/Los_Angeles', 'YYYY-MM-DD') AS day,
@@ -372,8 +405,7 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
                     FILTER (WHERE name = 'stream.first_frame' AND (properties->>'wait_ms') ~ '^[0-9.]+$'))::int AS ttfi_p90
            FROM events
            WHERE occurred_at > now() - interval '30 days'
-             AND ($1::bool = false OR user_id NOT IN
-                  (SELECT user_id::text FROM users WHERE is_test_account))
+             AND ${EXCL_EVENTS}
            GROUP BY 1`,
           [excl],
         ),
@@ -414,7 +446,7 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
            FROM events e
            LEFT JOIN users u ON u.user_id::text = e.user_id
            WHERE e.name ~* 'error|fail' AND e.occurred_at > now() - interval '7 days'
-             AND ($1::bool = false OR COALESCE(u.is_test_account, false) = false)
+             AND ${EXCL_JOINED}
            GROUP BY 1, 2
            ORDER BY errors DESC
            LIMIT 20`,
@@ -425,7 +457,7 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
            FROM events e
            LEFT JOIN users u ON u.user_id::text = e.user_id
            WHERE e.name ~* 'error|fail'
-             AND ($1::bool = false OR COALESCE(u.is_test_account, false) = false)
+             AND ${EXCL_JOINED}
            ORDER BY e.occurred_at DESC
            LIMIT 25`,
           [excl],
@@ -436,8 +468,7 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
            FROM events
            WHERE name = 'stream.first_frame' AND (properties->>'wait_ms') ~ '^[0-9.]+$'
              AND occurred_at > now() - interval '7 days'
-             AND ($1::bool = false OR user_id NOT IN
-                  (SELECT user_id::text FROM users WHERE is_test_account))`,
+             AND ${EXCL_EVENTS}`,
           [excl],
         ),
       // ─── H100 / provider visibility (7d): per-provider session outcomes ──
@@ -458,8 +489,7 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
          FROM events
          WHERE name = 'stream.provider_session'
            AND occurred_at > now() - interval '7 days'
-           AND ($1::bool = false OR user_id NOT IN
-                (SELECT user_id::text FROM users WHERE is_test_account))
+           AND ${EXCL_EVENTS}
          GROUP BY 1
          ORDER BY sessions DESC`,
         [excl],
@@ -509,8 +539,7 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
            FROM events
            WHERE name = 'stream.provider_session'
              AND occurred_at > now() - interval '7 days'
-             AND ($1::bool = false OR user_id NOT IN
-                  (SELECT user_id::text FROM users WHERE is_test_account))`,
+             AND ${EXCL_EVENTS}`,
           [excl],
         );
       })(),
@@ -550,8 +579,7 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
         `SELECT count(*)::int AS opened
          FROM events
          WHERE name = 'drawing.opened' AND occurred_at > now() - interval '7 days'
-           AND ($1::bool = false OR user_id NOT IN
-                (SELECT user_id::text FROM users WHERE is_test_account))`,
+           AND ${EXCL_EVENTS}`,
         [excl],
       ),
       (() => {
@@ -585,8 +613,7 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
           `SELECT ${cols}
            FROM events
            WHERE name = 'drawing.closed' AND occurred_at > now() - interval '7 days'
-             AND ($1::bool = false OR user_id NOT IN
-                  (SELECT user_id::text FROM users WHERE is_test_account))`,
+             AND ${EXCL_EVENTS}`,
           [excl],
         );
       })()
@@ -771,7 +798,6 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
             pings: [],
             stats24h: null,
             sources24h: [],
-            userColdEvents: [],
           };
         }
         throw err;
