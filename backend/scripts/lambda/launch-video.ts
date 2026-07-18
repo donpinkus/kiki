@@ -138,8 +138,10 @@ const FS_NAME = getArg('--fs') ?? `kiki-video-${REGION}`;
 
 // Reuse any live instance first — a warm instance is also a capacity
 // reservation; don't burn it by double-launching.
+// Setup instances use the `kiki-vidsetup-` prefix precisely so they never
+// match the serving prefix here (or in the videoPool's redeploy adoption).
 const existing = (await client.listInstances()).filter(
-  (i) => i.name?.startsWith(NAME_PREFIX) && !i.name.startsWith('kiki-video-setup-') && ['booting', 'active'].includes(i.status),
+  (i) => i.name?.startsWith(NAME_PREFIX) && ['booting', 'active'].includes(i.status),
 );
 let name: string;
 let instanceId: string;

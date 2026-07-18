@@ -33,8 +33,20 @@ import type { FastifyBaseLogger } from 'fastify';
 import { StreamRelay } from '../relay/streamRelay.js';
 
 export interface VideoSessionOptions {
-  /** wss/ws URL of the video instance, including ?token=. */
-  url: string;
+  /** Get a video-instance slot to relay to. Static mode (LAMBDA_VIDEO_URL)
+   * returns the fixed URL every time; pool mode proxies
+   * videoPool.acquireStream() (least-loaded ready instance, slot held).
+   * Null = nothing assignable right now — the session stays image-only and
+   * RETRIES on the next fire attempt, so a session that started before the
+   * pool warmed picks up video mid-session. */
+  acquire: () => { name?: string; url: string } | null;
+  /** Release a held slot (close / upstream loss). No-op in static mode. */
+  release?: (name: string) => void;
+  /** Mark an instance suspect after a failed connect (pool skips it for
+   * assignment until a health probe clears it). No-op in static mode. */
+  reportFailure?: (name: string) => void;
+  /** Record instance activity (frames flowing) for the pool's idle reaper. */
+  touchInstance?: (name: string) => void;
   /** Pinned fleet cert (config.LAMBDA_TLS_CA) for wss URLs; null = default trust. */
   tlsCa: string | null;
   /** Idle window before triggering (config.VIDEO_IDLE_TRIGGER_MS). */
@@ -57,10 +69,12 @@ export interface VideoSessionStats {
 export class VideoSession {
   private readonly opts: VideoSessionOptions;
   private relay: StreamRelay | null = null;
-  /** Set on unrecoverable relay failure — session continues image-only. */
-  private disabled = false;
+  /** Pool instance name our slot is held on (undefined slot name = static). */
+  private slotName: string | null = null;
   private closed = false;
-  private reconnecting = false;
+  /** Guards concurrent ensureRelay() runs (timer + generated-frame events
+   * can race). */
+  private wiring = false;
 
   // ── idle-trigger state ────────────────────────────────────────────────
   private idleTimer: NodeJS.Timeout | null = null;
@@ -97,21 +111,49 @@ export class VideoSession {
     this.opts = opts;
   }
 
-  /** Best-effort connect. Never throws — failure logs once and disables
-   * video for this session (image path unaffected). */
+  /** Best-effort connect at session start. Never throws; when no instance
+   * is assignable yet (pool still booting) the session stays image-only and
+   * every later fire attempt lazily retries via ensureRelay(). */
   async start(): Promise<void> {
-    try {
-      await this.wireRelay();
+    await this.ensureRelay();
+  }
+
+  /** Acquire a slot + wire the relay if not already wired. Returns true when
+   * a relay is available. All failure modes leave the session retryable:
+   * no slot → try again next fire; connect failure → reportFailure (pool
+   * skips the instance) + release, try again next fire. */
+  private async ensureRelay(): Promise<boolean> {
+    if (this.relay) return true;
+    if (this.closed || this.wiring) return false;
+    const slot = this.opts.acquire();
+    if (!slot) {
       this.opts.log.info(
-        { ...this.opts.ctx, event: 'video_relay_wired' },
+        { ...this.opts.ctx, event: 'video_pool_no_instance' },
+        'no video instance assignable — session image-only for now',
+      );
+      return false;
+    }
+    this.wiring = true;
+    try {
+      await this.wireRelay(slot.url);
+      this.slotName = slot.name ?? null;
+      this.opts.log.info(
+        { ...this.opts.ctx, instance: slot.name, event: 'video_relay_wired' },
         'video relay wired',
       );
+      return true;
     } catch (err) {
-      this.disabled = true;
+      if (slot.name) {
+        this.opts.reportFailure?.(slot.name);
+        this.opts.release?.(slot.name);
+      }
       this.opts.log.warn(
-        { ...this.opts.ctx, err: (err as Error).message, event: 'video_relay_wire_failed' },
-        'video relay wire failed — session continues image-only',
+        { ...this.opts.ctx, instance: slot.name, err: (err as Error).message, event: 'video_relay_wire_failed' },
+        'video relay wire failed — will retry on next trigger',
       );
+      return false;
+    } finally {
+      this.wiring = false;
     }
   }
 
@@ -171,11 +213,21 @@ export class VideoSession {
       );
       this.opts.sendToClient(JSON.stringify({ type: 'video_cancelled', requestId: null, error }));
     };
-    if (this.disabled || !this.relay) return fail('video_unavailable');
     const prompt = this.lastConfig?.['prompt'];
     if (typeof prompt !== 'string') return fail('no_prompt');
     if (!this.lastGeneratedJpeg) return fail('no_image');
-    this.fire(prompt, 'manual');
+    if (this.relay) {
+      this.fire(prompt, 'manual');
+      return;
+    }
+    // No relay yet (pool booting / previous instance lost): acquire + wire,
+    // then fire — or reset the iPad button if nothing is assignable.
+    void this.ensureRelay().then((ok) => {
+      if (this.closed || this.inFlightRequestId) return;
+      if (!ok) return fail('video_unavailable');
+      const p = this.lastConfig?.['prompt'];
+      if (typeof p === 'string' && this.lastGeneratedJpeg) this.fire(p, 'manual');
+    });
   }
 
   getStats(): VideoSessionStats {
@@ -190,27 +242,44 @@ export class VideoSession {
     }
     this.relay?.close();
     this.relay = null;
+    if (this.slotName) {
+      this.opts.release?.(this.slotName);
+      this.slotName = null;
+    }
   }
 
   // ── internals ─────────────────────────────────────────────────────────
 
+  /** (Re-)arm the idle timer to the fixed deadline lastSketchAtMs + idleMs.
+   * Computed as a remainder (not a flat idleMs) so re-arms from maybeFire's
+   * not-idle-yet branch converge on the SAME deadline; +5ms slack because
+   * setTimeout can fire marginally early vs Date.now() (ms rounding) — the
+   * source of a nasty bug where an early fire hit the not-idle-yet guard
+   * and, with nothing re-arming the timer, the idle period never triggered. */
   private armIdleTimer(): void {
     if (this.idleTimer) clearTimeout(this.idleTimer);
+    const remaining = Math.max(0, this.opts.idleMs - (Date.now() - this.lastSketchAtMs));
     this.idleTimer = setTimeout(() => {
       this.idleTimer = null;
       this.maybeFire('idle_timer');
-    }, this.opts.idleMs);
+    }, remaining + 5);
   }
 
   /** Central trigger gate. Called from the idle timer, from generated-frame
    * arrival, and from in-flight-cleared (complete/cancelled) events; the
    * conditions make multiple calls per idle period safe. */
   private maybeFire(source: string): void {
-    if (this.closed || this.disabled || !this.relay) return;
+    if (this.closed) return;
     if (!this.opts.isClientOpen()) return;
     if (this.firedThisIdle || this.inFlightRequestId) return;
     if (this.lastSketchAtMs === 0) return; // never drew — nothing to animate
-    if (Date.now() - this.lastSketchAtMs < this.opts.idleMs) return; // not idle yet
+    if (Date.now() - this.lastSketchAtMs < this.opts.idleMs) {
+      // Not idle yet (early timer fire, or a non-timer caller). Re-arm to
+      // the true deadline — a bare return here would strand the idle period
+      // with no armed timer when the timer itself fired early.
+      this.armIdleTimer();
+      return;
+    }
     const prompt = this.lastConfig?.['prompt'];
     if (typeof prompt !== 'string') {
       this.opts.log.warn(
@@ -224,6 +293,15 @@ export class VideoSession {
     if (!this.lastGeneratedJpeg || this.lastGeneratedSeq < this.lastSketchSeq) {
       // The final image generation for the finished drawing hasn't landed
       // yet — noteGeneratedFrame() calls back into maybeFire when it does.
+      return;
+    }
+    if (!this.relay) {
+      // Lazy (re-)acquire: pool may have warmed since session start, or the
+      // previous instance died. On success, re-run the gate (conditions may
+      // have changed while wiring — e.g. the user resumed drawing).
+      void this.ensureRelay().then((ok) => {
+        if (ok) this.maybeFire(`${source}:relay_wired`);
+      });
       return;
     }
     this.fire(prompt, source);
@@ -275,9 +353,9 @@ export class VideoSession {
     );
   }
 
-  private async wireRelay(): Promise<void> {
-    const relay = new StreamRelay(this.opts.url, {
-      tlsCa: this.opts.url.startsWith('wss') ? this.opts.tlsCa : null,
+  private async wireRelay(url: string): Promise<void> {
+    const relay = new StreamRelay(url, {
+      tlsCa: url.startsWith('wss') ? this.opts.tlsCa : null,
     });
     relay.setLogContext({ ...this.opts.ctx, role: 'video' });
     relay.onMessage((data, isBinary) => this.handleUpstreamMessage(data, isBinary));
@@ -299,6 +377,8 @@ export class VideoSession {
    * it). video_cancelled and unknown text pass through verbatim. */
   private handleUpstreamMessage(data: Buffer | string, isBinary: boolean): void {
     if (this.closed || !this.opts.isClientOpen()) return;
+    // Keep the pool's idle reaper honest while video traffic flows.
+    if (this.slotName) this.opts.touchInstance?.(this.slotName);
     if (isBinary) {
       const buf = data as Buffer;
       const wrap = this.pendingBinaryWrapper;
@@ -355,38 +435,31 @@ export class VideoSession {
     this.opts.sendToClient(data);
   }
 
-  /** One same-URL reconnect attempt (transient transport drop); on failure
-   * the session drops to image-only. Best-effort by design — no iPad-visible
-   * error, no image-path impact. */
+  /** Upstream relay lost (instance died / restarted / network drop). Release
+   * the slot and clear state — the next fire attempt lazily re-acquires
+   * (possibly a DIFFERENT pool instance), so recovery needs no dedicated
+   * reconnect loop. If a generation was in flight, tell the iPad so the
+   * Animate button and video UI reset instead of hanging. Best-effort by
+   * design — no iPad-visible error, no image-path impact. */
   private handleUpstreamClose(code: number, reason: string): void {
     this.opts.log.warn(
-      { ...this.opts.ctx, code, reason, event: 'video_relay_closed' },
+      { ...this.opts.ctx, instance: this.slotName, code, reason, event: 'video_relay_closed' },
       'video_relay_closed',
     );
+    const lostRequest = this.inFlightRequestId;
     this.inFlightRequestId = null;
     this.pendingBinaryWrapper = null;
     this.relay?.close();
     this.relay = null;
-    if (this.closed || !this.opts.isClientOpen() || this.reconnecting) {
-      return;
+    if (this.slotName) {
+      this.opts.release?.(this.slotName);
+      this.slotName = null;
     }
-    this.reconnecting = true;
-    void (async () => {
-      try {
-        await this.wireRelay();
-        this.opts.log.info(
-          { ...this.opts.ctx, event: 'video_relay_reconnected' },
-          'video same-URL reconnect succeeded',
-        );
-      } catch (err) {
-        this.disabled = true;
-        this.opts.log.warn(
-          { ...this.opts.ctx, err: (err as Error).message, event: 'video_relay_reconnect_failed' },
-          'video reconnect failed — session continues image-only',
-        );
-      } finally {
-        this.reconnecting = false;
-      }
-    })();
+    if (this.closed || !this.opts.isClientOpen()) return;
+    if (lostRequest) {
+      this.opts.sendToClient(
+        JSON.stringify({ type: 'video_cancelled', requestId: lostRequest, error: 'video_instance_lost' }),
+      );
+    }
   }
 }

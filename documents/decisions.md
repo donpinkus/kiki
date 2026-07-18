@@ -14,6 +14,18 @@ Record implementation decisions here as they are made. Newest first. This preven
 
 ---
 
+### 2026-07-18 — Video fleet gets production scaling via a shared pool factory (launch-blocking)
+
+**Context:** The video POC ran one manually-launched static instance. Owner: production scaling is necessary for launch, and the image/video systems are near-identical in orchestration — "just the node being spun up is different."
+
+**Decision:** Factor `devPool.ts`'s orchestration wholesale into `modules/lambda/instancePool.ts` — `createInstancePool(spec)` parameterized by fleet identity (name prefix, per-region filesystem, label) and scaling dials, with injectable Lambda client + health probe + timing dials (making the machinery unit-testable for the first time; 6 tests cover interest-launch, pressure scale-up, idle reap, 3-strike health kill, suspect marking, redeploy adoption). `devPool.ts` re-exports the image instantiation with an unchanged API and unchanged behavior; `videoPool.ts` instantiates the video fleet. **Video's load model drives deliberately slower scaling**: a video "stream" is a connected drawing session that fires one ~15-30s one-shot job per idle pause, so one instance serves more sessions (`LAMBDA_VIDEO_POOL_TARGET_STREAMS=8` vs image's 4) and the ceiling starts at `LAMBDA_VIDEO_POOL_MAX=1` — over-subscription degrades to late/cancelled videos (best-effort by design), never a broken drawing loop. Floor 0; interest = app-open (`/v1/dev/lambda/ensure` side-effect) + stream open; 30-min idle reap. `VideoSession` acquires slots lazily and re-acquires on each fire attempt, so sessions upgrade to video mid-session when the pool warms and fail over to a different instance after an upstream loss (with a synthesized `video_cancelled` so the iPad's Animate button resets). `lambda_pool_events` gained a `pool` column ('image'/'video'); the Insights image waterfall filters on it. Static `LAMBDA_VIDEO_URL` remains as a dev override; `launch-video.ts` instances are pool-adopted on deploy (setup instances renamed `kiki-vidsetup-*` so adoption can't grab one).
+
+**Alternatives considered:** Copy-pasting devPool into a videoPool (rejected — two diverging copies of subtle, battle-tested orchestration); scaling on in-flight generation depth instead of connected sessions (rejected for now — same signal shape as the image pool is simpler, the session count bounds generation demand, and the dials compensate; revisit if trigger→complete latencies show queueing the session count doesn't predict); a fal-hosted video fallback (rejected — image-only IS the graceful fallback for a decorative feature).
+
+**Consequences:** New env vars `LAMBDA_VIDEO_POOL_ENABLED` / `LAMBDA_VIDEO_REGION` / `LAMBDA_VIDEO_POOL_MIN|MAX|TARGET_STREAMS`. Fixed en route: an idle-timer early-fire race in `videoSession.ts` that could silently eat an idle period's video (timer fired ~1ms before the window elapsed, nothing re-armed it — caught by the new tests flaking, real production bug).
+
+---
+
 ### 2026-07-18 — Video idle-state animation returns on a DEDICATED Lambda H100, triggered by a backend 3s-idle timer
 
 **Context:** Owner asked to rebuild the video generation feature (removed with RunPod 2026-07-17, archived in `archive/video-ltx/`) on the new Lambda H100 infrastructure, as a proof of concept: image generation always has priority; a video of the user's drawing generates after 3 s of drawing inactivity.

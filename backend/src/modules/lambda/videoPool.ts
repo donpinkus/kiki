@@ -1,0 +1,78 @@
+/**
+ * Lambda Cloud H100 VIDEO pool — dedicated LTX-2.3 instances for the
+ * idle-state animation. Same orchestration machinery as the image pool
+ * (modules/lambda/instancePool.ts); what differs is the node (fleet name,
+ * filesystem, boot) and the LOAD MODEL, which drives deliberately slower
+ * scaling:
+ *
+ *  - A video "stream" is a connected drawing session that only occasionally
+ *    generates (one ~15-30s one-shot job per idle pause / Animate tap), not
+ *    a continuous ⅓-fps image stream — so one instance serves many more
+ *    sessions than an image instance (LAMBDA_VIDEO_POOL_TARGET_STREAMS=8 vs
+ *    the image pool's 4).
+ *  - Over-subscription degrades gracefully by design: generations queue
+ *    behind the pipeline lock, videos arrive late, and cancel-on-resume
+ *    prunes requests whose user started drawing again. Nothing user-visible
+ *    breaks — video is best-effort everywhere — so the ceiling stays low
+ *    (LAMBDA_VIDEO_POOL_MAX=1 by default; raise when real queueing shows up
+ *    in video_trigger→video_complete latencies).
+ *  - Floor 0 + interest-based warm-up: a user opening the app / starting a
+ *    stream touches this pool, the next tick launches one instance, and
+ *    sessions lazily pick up video mid-session when it becomes ready
+ *    (VideoSession re-acquires on each fire attempt). Until then — and on
+ *    any failure — sessions are simply image-only; there is no fal-style
+ *    video fallback, "no video" IS the fallback.
+ *
+ * Fleet identity: `kiki-video-*` instances on the `kiki-video-<region>`
+ * filesystem (populated by scripts/lambda/setup-lambda-video.ts). Instances
+ * launched manually via scripts/lambda/launch-video.ts share the name prefix
+ * and HMAC token scheme, so the pool ADOPTS them on backend (re)deploy —
+ * setup instances use the non-colliding `kiki-vidsetup-` prefix precisely so
+ * adoption never grabs one.
+ */
+
+import type { FastifyBaseLogger } from 'fastify';
+import { config } from '../../config/index.js';
+import { createInstancePool } from './instancePool.js';
+
+export type { DevPoolState, DevPoolStatusKind } from './instancePool.js';
+
+const pool = createInstancePool({
+  kind: 'video',
+  namePrefix: 'kiki-video-',
+  fsName: (region) => `kiki-video-${region}`,
+  label: 'video H100',
+  enabled: () => config.LAMBDA_VIDEO_POOL_ENABLED && config.LAMBDA_API_KEY.length > 0,
+  region: () => config.LAMBDA_VIDEO_REGION,
+  instanceType: () => config.LAMBDA_INSTANCE_TYPE,
+  poolMin: () => config.LAMBDA_VIDEO_POOL_MIN,
+  poolMax: () => config.LAMBDA_VIDEO_POOL_MAX,
+  targetStreams: () => config.LAMBDA_VIDEO_POOL_TARGET_STREAMS,
+  /** LTX-2.3 model load is ~5-10 min on a cold NFS page cache (no compile
+   * cache to persist yet — LTX runs eager). */
+  bootEstimateMs: 10 * 60_000,
+});
+
+export const touch = pool.touch;
+export const hasReady = pool.hasReady;
+export const reportFailure = pool.reportFailure;
+export const acquireStream = pool.acquireStream;
+export const releaseStream = pool.releaseStream;
+export const touchInstance = pool.touchInstance;
+export const wsUrl = pool.wsUrl;
+export const ensure = pool.ensure;
+export const getState = pool.getState;
+
+/** True when the video pool is configured on (used by stream.ts to decide
+ * whether to create a pool-backed VideoSession at all). */
+export function poolEnabled(): boolean {
+  return config.LAMBDA_VIDEO_POOL_ENABLED && config.LAMBDA_API_KEY.length > 0;
+}
+
+export function start(logger: FastifyBaseLogger): void {
+  pool.start(logger);
+}
+
+export function stop(): void {
+  pool.stop();
+}

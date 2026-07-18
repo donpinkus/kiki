@@ -312,7 +312,9 @@ const [instanceId] = await launchWithRetry(
     instance_type_name: TYPE,
     ssh_key_names: [keyName],
     file_system_names: [FS_NAME],
-    name: `kiki-video-setup-${Date.now()}`,
+    // NOT `kiki-video-setup-…`: the video pool adopts by the `kiki-video-`
+    // name prefix on backend deploy, and must never grab a setup instance.
+    name: `kiki-vidsetup-${Date.now()}`,
     image: { family: OS_IMAGE_FAMILY },
   },
   RETRY_MINS,

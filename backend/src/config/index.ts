@@ -65,14 +65,36 @@ export interface AppConfig {
    * form exposed as LAMBDA_TLS_CA. */
   readonly LAMBDA_TLS_CA: string;
 
-  // ─── Video (LTX-2.3 idle-state animation on a dedicated Lambda H100) ──
-  /** Full WS URL of the dedicated Lambda VIDEO instance (LTX-2.3 server),
-   * including path and token — printed by scripts/lambda/launch-video.ts.
-   * Empty = video disabled (the POC gate). The video GPU is SEPARATE from
-   * the image pool: LTX 22B FP8 + Gemma hold ~46 GiB resident and cannot
-   * share an 80 GB H100 with the 9B-KV image server (~37 GB) — which also
-   * guarantees image-generation latency is never impacted by video work. */
+  // ─── Video (LTX-2.3 idle-state animation on dedicated Lambda H100s) ───
+  /** Static WS URL of a manually-launched Lambda VIDEO instance (LTX-2.3
+   * server), including path and token — printed by
+   * scripts/lambda/launch-video.ts. Dev override: takes precedence over the
+   * video pool (mirrors LAMBDA_IMAGE_URL vs the image pool). The video GPU
+   * is SEPARATE from the image pool: LTX 22B FP8 + Gemma hold ~46 GiB
+   * resident and cannot share an 80 GB H100 with the 9B-KV image server
+   * (~37 GB) — which also guarantees image-generation latency is never
+   * impacted by video work. Video is on when this OR the pool is set. */
   readonly LAMBDA_VIDEO_URL: string;
+  /** Production video path: the backend manages a pool of `kiki-video-*`
+   * instances (modules/lambda/videoPool.ts) — interest-launched when users
+   * open the app, idle-reaped, redeploy-adopted, same machinery as the image
+   * pool. Default false. */
+  readonly LAMBDA_VIDEO_POOL_ENABLED: boolean;
+  /** Region for video-pool instances (its `kiki-video-<region>` filesystem
+   * must be populated via scripts/lambda/setup-lambda-video.ts). Defaults to
+   * LAMBDA_REGION. */
+  readonly LAMBDA_VIDEO_REGION: string;
+  /** Video pool floor (default 0 — scale to zero when nobody is around). */
+  readonly LAMBDA_VIDEO_POOL_MIN: number;
+  /** Video pool ceiling (default 1 — video scales DELIBERATELY slowly: jobs
+   * are one-shot ~15-30s generations serialized per instance, overload just
+   * means late/cancelled videos, never a broken drawing loop. Raise when
+   * trigger→complete latency shows real queueing). */
+  readonly LAMBDA_VIDEO_POOL_MAX: number;
+  /** Connected drawing sessions per video instance before the pool grows
+   * (default 8 — a video "stream" generates only during idle pauses, so one
+   * GPU serves far more sessions than the image pool's target of 4). */
+  readonly LAMBDA_VIDEO_POOL_TARGET_STREAMS: number;
   /** Idle window: a video_request fires this many ms after the user's LAST
    * sketch frame (provided a generated image newer than that sketch exists).
    * Default 3000 (product decision 2026-07-18). */
@@ -235,6 +257,11 @@ function validateConfig(): AppConfig {
       ? Buffer.from(process.env['LAMBDA_TLS_CA_B64'], 'base64').toString('utf-8')
       : '',
     LAMBDA_VIDEO_URL: lambdaVideoUrl,
+    LAMBDA_VIDEO_POOL_ENABLED: process.env['LAMBDA_VIDEO_POOL_ENABLED'] === 'true',
+    LAMBDA_VIDEO_REGION: process.env['LAMBDA_VIDEO_REGION'] ?? process.env['LAMBDA_REGION'] ?? 'us-south-2',
+    LAMBDA_VIDEO_POOL_MIN: Number(process.env['LAMBDA_VIDEO_POOL_MIN'] ?? 0),
+    LAMBDA_VIDEO_POOL_MAX: Number(process.env['LAMBDA_VIDEO_POOL_MAX'] ?? 1),
+    LAMBDA_VIDEO_POOL_TARGET_STREAMS: Number(process.env['LAMBDA_VIDEO_POOL_TARGET_STREAMS'] ?? 8),
     VIDEO_IDLE_TRIGGER_MS: Number(process.env['VIDEO_IDLE_TRIGGER_MS'] ?? 3000),
     FAL_KEY: falKey,
     FAL_IDLE_CLOSE_MS: Number(process.env['FAL_IDLE_CLOSE_MS'] ?? 0),

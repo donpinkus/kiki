@@ -83,6 +83,7 @@ import { usageRoute } from './routes/usage.js';
 import { lambdaDevRoute } from './routes/lambdaDev.js';
 import { sketchifyRoute } from './routes/sketchify.js';
 import { start as startLambdaDevPool, stop as stopLambdaDevPool } from './modules/lambda/devPool.js';
+import { start as startLambdaVideoPool, stop as stopLambdaVideoPool } from './modules/lambda/videoPool.js';
 import { installAuth } from './modules/auth/index.js';
 import { start as startFalWarmer, stop as stopFalWarmer } from './modules/fal/falWarmer.js';
 import { shutdownAnalytics } from './modules/analytics/index.js';
@@ -187,6 +188,10 @@ const start = async () => {
     // LAMBDA_DEV_POOL_ENABLED). Instance launch happens on demand via
     // POST /v1/dev/lambda/ensure, not here.
     startLambdaDevPool(app.log);
+    // Video pool: same machinery, dedicated LTX fleet (no-op unless
+    // LAMBDA_VIDEO_POOL_ENABLED). Launch happens on user interest (stream
+    // open / lambda ensure route), not here.
+    startLambdaVideoPool(app.log);
 
     await app.listen({ port: config.PORT, host: config.HOST });
     app.log.info(`Server listening on ${config.HOST}:${config.PORT}`);
@@ -206,6 +211,7 @@ async function gracefulShutdown(signal: string): Promise<void> {
   // Timer only — the kiki-serve instance intentionally survives redeploys
   // (start() re-adopts it via the name prefix + deterministic token).
   stopLambdaDevPool();
+  stopLambdaVideoPool();
   try {
     await shutdownAnalytics();
   } catch (err) {

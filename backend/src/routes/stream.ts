@@ -22,6 +22,14 @@ import {
 } from '../modules/lambda/devPool.js';
 import { trackSessionClosed, trackProviderSession } from '../modules/analytics/index.js';
 import { VideoSession } from '../modules/video/videoSession.js';
+import {
+  poolEnabled as videoPoolEnabled,
+  touch as touchVideoPool,
+  acquireStream as videoPoolAcquire,
+  releaseStream as videoPoolRelease,
+  touchInstance as videoPoolTouchInstance,
+  reportFailure as videoPoolReportFailure,
+} from '../modules/lambda/videoPool.js';
 
 /**
  * WebSocket relay from the iPad to the image provider (fal hosted realtime,
@@ -510,14 +518,22 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         }
       }
 
-      // Video idle-state animation (POC): connect to the dedicated Lambda
-      // video instance in parallel with image wiring. Best-effort — start()
-      // never throws; a dead/absent instance leaves the session image-only.
-      // Gate is env presence (LAMBDA_VIDEO_URL set by ops after
-      // scripts/lambda/launch-video.ts prints it).
-      if (config.LAMBDA_VIDEO_URL) {
+      // Video idle-state animation: connect to a dedicated Lambda video
+      // instance in parallel with image wiring. Best-effort — start() never
+      // throws; with no instance assignable the session stays image-only and
+      // lazily upgrades when the pool warms. Sources, in precedence order:
+      //   1. LAMBDA_VIDEO_URL — static manually-launched instance (dev).
+      //   2. The video pool (LAMBDA_VIDEO_POOL_ENABLED) — production:
+      //      interest-launched on app open / stream start, idle-reaped,
+      //      redeploy-adopted (modules/lambda/videoPool.ts).
+      if (config.LAMBDA_VIDEO_URL || videoPoolEnabled()) {
+        const staticUrl = config.LAMBDA_VIDEO_URL;
+        if (!staticUrl) touchVideoPool(); // interest → next tick launches if none
         videoSession = new VideoSession({
-          url: config.LAMBDA_VIDEO_URL,
+          acquire: staticUrl ? () => ({ url: staticUrl }) : videoPoolAcquire,
+          release: staticUrl ? undefined : videoPoolRelease,
+          reportFailure: staticUrl ? undefined : videoPoolReportFailure,
+          touchInstance: staticUrl ? undefined : videoPoolTouchInstance,
           tlsCa: config.LAMBDA_TLS_CA || null,
           idleMs: config.VIDEO_IDLE_TRIGGER_MS,
           sendToClient: (text) => {

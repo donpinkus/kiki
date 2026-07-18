@@ -534,11 +534,13 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
                 min(duration_ms) FILTER (WHERE event = 'ready' AND duration_ms > 5000) AS boot_min_ms,
                 max(duration_ms) FILTER (WHERE event = 'ready' AND duration_ms > 5000) AS boot_max_ms
          FROM lambda_pool_events
-         WHERE ts > now() - interval '7 days'`,
+         WHERE ts > now() - interval '7 days' AND pool = 'image'`,
       ).catch((err: { code?: string }) => {
-        // Table is backend-owned; absent until the backend deploy that
-        // creates it. Don't let that 500 the whole Launch payload.
-        if (err.code === '42P01') return { rows: [] as Record<string, unknown>[] };
+        // Table (and, briefly, the 'pool' column added 2026-07-18 with the
+        // video fleet) is backend-owned; absent until the backend deploy
+        // that creates it. Don't let that 500 the whole Launch payload.
+        // 42P01 = undefined_table, 42703 = undefined_column.
+        if (err.code === '42P01' || err.code === '42703') return { rows: [] as Record<string, unknown>[] };
         throw err;
       }),
       // ─── Drawing-experience waterfall (7d): one funnel per canvas open ───

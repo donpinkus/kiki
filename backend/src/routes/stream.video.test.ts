@@ -89,7 +89,9 @@ function startMockVideoServer(): Promise<MockUpstream> {
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-async function until(cond: () => boolean, timeoutMs = 4000): Promise<void> {
+/** Generous timeout: container CPU contention can stall the event loop for
+ * seconds (source of flaky until() timeouts on otherwise-fast assertions). */
+async function until(cond: () => boolean, timeoutMs = 10_000): Promise<void> {
   const start = Date.now();
   while (!cond()) {
     if (Date.now() - start > timeoutMs) throw new Error('until() timed out');
@@ -97,7 +99,7 @@ async function until(cond: () => boolean, timeoutMs = 4000): Promise<void> {
   }
 }
 
-describe('stream route video wiring (e2e with mock lambda image + video servers)', () => {
+describe('stream route video wiring (e2e with mock lambda image + video servers)', { timeout: 30_000 }, () => {
   let mockImage: MockUpstream;
   let mockVideo: MockUpstream;
   // Fastify instance type comes from the dynamic import; kept loose here.

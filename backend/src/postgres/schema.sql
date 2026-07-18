@@ -132,7 +132,11 @@ CREATE TABLE IF NOT EXISTS lambda_pool_events (
   instance_name TEXT,
   region        TEXT,
   duration_ms   INTEGER,
-  detail        TEXT
+  detail        TEXT,
+  -- Which fleet: 'image' (kiki-serve-*) or 'video' (kiki-video-*). Added
+  -- 2026-07-18 with the video pool; pre-existing rows default to 'image'.
+  pool          TEXT NOT NULL DEFAULT 'image'
 );
+ALTER TABLE lambda_pool_events ADD COLUMN IF NOT EXISTS pool TEXT NOT NULL DEFAULT 'image';
 CREATE INDEX IF NOT EXISTS lambda_pool_events_ts ON lambda_pool_events (ts);
 CREATE INDEX IF NOT EXISTS lambda_pool_events_event ON lambda_pool_events (event, ts);

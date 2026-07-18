@@ -92,13 +92,23 @@ const testLog = {
   child: () => testLog,
 } as never;
 
-function makeSession(url: string, opts: { idleMs?: number } = {}): {
+function makeSession(
+  url: string,
+  opts: {
+    idleMs?: number;
+    acquire?: () => { name?: string; url: string } | null;
+    release?: (name: string) => void;
+    reportFailure?: (name: string) => void;
+  } = {},
+): {
   session: VideoSession;
   clientMessages: Array<Record<string, unknown>>;
 } {
   const clientMessages: Array<Record<string, unknown>> = [];
   const session = new VideoSession({
-    url,
+    acquire: opts.acquire ?? (() => ({ url })),
+    release: opts.release,
+    reportFailure: opts.reportFailure,
     tlsCa: null,
     idleMs: opts.idleMs ?? 60,
     sendToClient: (text) => clientMessages.push(JSON.parse(text) as Record<string, unknown>),
@@ -118,8 +128,10 @@ function must<T>(value: T | undefined, what: string): T {
   return value;
 }
 
-/** Poll until cond() or timeout. */
-async function until(cond: () => boolean, timeoutMs = 2000): Promise<void> {
+/** Poll until cond() or timeout. Generous default: under CI/container CPU
+ * contention the whole event loop can stall for seconds — observed causing
+ * flaky timeouts at 2s on assertions that pass in <150ms unloaded. */
+async function until(cond: () => boolean, timeoutMs = 10_000): Promise<void> {
   const start = Date.now();
   while (!cond()) {
     if (Date.now() - start > timeoutMs) throw new Error('until() timed out');
@@ -127,7 +139,7 @@ async function until(cond: () => boolean, timeoutMs = 2000): Promise<void> {
   }
 }
 
-describe('VideoSession idle trigger', () => {
+describe('VideoSession idle trigger', { timeout: 30_000 }, () => {
   const cleanups: Array<() => Promise<void> | void> = [];
   afterEach(async () => {
     while (cleanups.length) await cleanups.pop()?.();
@@ -321,6 +333,89 @@ describe('VideoSession idle trigger', () => {
     session.noteGeneratedFrame(JPEG);
     await sleep(120);
     expect(session.getStats().videoTriggered).toBe(0);
+  });
+
+  it('lazily acquires when the pool warms mid-session (image-only until then)', async () => {
+    const mock = await startMockVideoServer();
+    cleanups.push(mock.close);
+    let poolReady = false;
+    const { session } = makeSession(mock.url, {
+      acquire: () => (poolReady ? { name: 'kiki-video-1', url: mock.url } : null),
+    });
+    cleanups.push(() => session.close());
+    await session.start(); // pool empty — session stays image-only
+
+    session.noteConfig({ type: 'config', prompt: 'a heron' });
+    session.noteSketchFrame();
+    session.noteGeneratedFrame(JPEG);
+    await sleep(150); // idle window elapsed, no instance → nothing fires
+    expect(mock.received).toHaveLength(0);
+
+    // Pool instance becomes ready; the next trigger event re-acquires.
+    poolReady = true;
+    session.noteSketchFrame();
+    session.noteGeneratedFrame(JPEG);
+    await until(() => mock.received.some((m) => m['type'] === 'video_request'));
+  });
+
+  it('releases the pool slot on close and reports failures on dead instances', async () => {
+    const released: string[] = [];
+    const failed: string[] = [];
+    // Dead instance: acquire succeeds, connect fails → reportFailure+release.
+    const dead = makeSession('ws://127.0.0.1:1/ws', {
+      acquire: () => ({ name: 'kiki-video-dead', url: 'ws://127.0.0.1:1/ws' }),
+      release: (n) => released.push(n),
+      reportFailure: (n) => failed.push(n),
+    });
+    cleanups.push(() => dead.session.close());
+    await dead.session.start();
+    expect(failed).toEqual(['kiki-video-dead']);
+    expect(released).toEqual(['kiki-video-dead']);
+
+    // Live instance: slot held while wired, released exactly once on close.
+    const mock = await startMockVideoServer();
+    cleanups.push(mock.close);
+    const released2: string[] = [];
+    const live = makeSession(mock.url, {
+      acquire: () => ({ name: 'kiki-video-live', url: mock.url }),
+      release: (n) => released2.push(n),
+    });
+    await live.session.start();
+    expect(released2).toEqual([]);
+    live.session.close();
+    expect(released2).toEqual(['kiki-video-live']);
+  });
+
+  it('resets the iPad on upstream loss mid-generation and re-acquires on the next idle', async () => {
+    const mock = await startMockVideoServer({ holdCompletion: true });
+    cleanups.push(mock.close);
+    const released: string[] = [];
+    const { session, clientMessages } = makeSession(mock.url, {
+      acquire: () => ({ name: 'kiki-video-1', url: mock.url }),
+      release: (n) => released.push(n),
+    });
+    cleanups.push(() => session.close());
+    await session.start();
+
+    session.noteConfig({ type: 'config', prompt: 'an owl' });
+    session.noteSketchFrame();
+    session.noteGeneratedFrame(JPEG);
+    await until(() => mock.pending.length === 1);
+
+    // Instance dies mid-generation: slot released, iPad told (button resets).
+    mock.pending[0]?.ws.terminate();
+    await until(() => released.length === 1);
+    await until(() =>
+      clientMessages.some(
+        (m) => m['type'] === 'video_cancelled' && m['error'] === 'video_instance_lost',
+      ),
+    );
+
+    // New idle period lazily re-acquires (same mock plays a healthy new
+    // instance) and fires again.
+    session.noteSketchFrame();
+    session.noteGeneratedFrame(JPEG);
+    await until(() => mock.received.filter((m) => m['type'] === 'video_request').length === 2);
   });
 
   it('stops sending to the client after close()', async () => {

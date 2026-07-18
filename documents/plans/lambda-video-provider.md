@@ -56,11 +56,27 @@ iOS state: `AppCoordinator.isAnimating` / `requestAnimate()`,
 - **Best-effort everywhere.** Video session wiring failure, instance death,
   reconnect failure — all degrade to image-only with a log line, never an
   iPad-visible error. Mirrors the RunPod-era policy.
-- **POC topology: ONE static instance via `LAMBDA_VIDEO_URL`.** No pool, no
-  autoscaler, no idle reaper yet. The env var is the feature gate: unset =
-  video off (production today). Path to prod is a `videoPool.ts` clone of
-  `devPool.ts` (name prefix `kiki-video-`, HMAC tokens already compatible) —
-  deliberately not built until the POC validates quality/latency.
+- **Production topology (2026-07-18, launch-blocking): a managed video pool
+  sharing the image pool's orchestration.** `devPool.ts`'s machinery was
+  factored into `modules/lambda/instancePool.ts` (launch-with-retry,
+  boot-watch on OUR /health, redeploy adoption by name prefix + HMAC token,
+  suspect marking, 3-strike health kills, pressure autoscale, idle reap,
+  `lambda_pool_events` telemetry — now with a `pool` column separating
+  fleets) and instantiated twice: the image pool (`devPool.ts`, behavior
+  unchanged) and the video pool (`videoPool.ts`, `kiki-video-*` on
+  `kiki-video-<region>`). **Video scales deliberately slowly**: a video
+  "stream" is a connected drawing session that only occasionally generates a
+  one-shot ~15-30s job, so `LAMBDA_VIDEO_POOL_TARGET_STREAMS=8` (vs the
+  image pool's 4) and `LAMBDA_VIDEO_POOL_MAX=1` by default — overload just
+  queues/lates/cancels videos (best-effort by design), so the ceiling only
+  rises when trigger→complete latency shows real queueing. Floor 0 +
+  interest-based warm-up: app-open (`/v1/dev/lambda/ensure` side-effect) and
+  every stream open touch the pool; the next 60s tick launches an instance;
+  30-min idle reaps it. Sessions that start before the pool warms are
+  image-only and **lazily upgrade mid-session** (VideoSession re-acquires a
+  slot on each fire attempt). There is no fal-style video fallback — "no
+  video" IS the fallback. `LAMBDA_VIDEO_URL` remains as a static dev
+  override that takes precedence over the pool (mirrors LAMBDA_IMAGE_URL).
 - **Same TLS + auth scheme as the image fleet.** `/ws?token=` gate
   (HMAC(LAMBDA_API_KEY, instance-name)) + the shared self-signed fleet cert
   (`~/.kiki/lambda-tls` → `$FS/kiki/tls/`), pinned by the backend's existing
@@ -113,10 +129,19 @@ python3 model-servers/dev/video_client.py --url '<LAMBDA_VIDEO_URL>' \
   --image backend/scripts/lambda/test-sketch.jpg --prompt "gentle wind, subtle motion" --insecure
 #     → saves output.mp4 + video_last_frame.jpg
 
-# 3b. Full-path test: set LAMBDA_VIDEO_URL for the backend (local `npm run dev`
-#     env or Railway + `npm run deploy`), open a drawing on the iPad, draw,
-#     stop for 3 s → the result pane should morph into a looping animation.
-#     Nothing else needs enabling; iOS is already message-driven.
+# 3b. Full-path test, static instance: set LAMBDA_VIDEO_URL for the backend
+#     (local `npm run dev` env or Railway + `npm run deploy`), open a drawing
+#     on the iPad, draw, stop for 3 s → the result pane should morph into a
+#     looping animation. Nothing else needs enabling; iOS is message-driven.
+#
+# 3c. PRODUCTION path (managed pool): skip launch-video.ts entirely — set on
+#     Railway:  LAMBDA_VIDEO_POOL_ENABLED=true   (leave LAMBDA_VIDEO_URL unset)
+#     optional: LAMBDA_VIDEO_REGION / LAMBDA_VIDEO_POOL_MIN|MAX|TARGET_STREAMS
+#     then `npm run deploy`. Opening the app / starting a stream is pool
+#     interest → an instance launches within ~1 tick (60s) + ~5-10 min boot;
+#     sessions upgrade to video mid-session when it's ready; 30 min idle
+#     reaps it. A launch-video.ts instance left running gets ADOPTED by the
+#     pool at the next backend deploy (same name prefix + token scheme).
 
 # 4. When done — nothing left billing ($4.29/hr!)
 tsx scripts/lambda/launch-video.ts --terminate
@@ -142,9 +167,6 @@ launches skip the populate.
 
 ## Known gaps / next steps (post-POC)
 
-- **Pool-ify** (`videoPool.ts` ≈ `devPool.ts`): launch-on-interest, idle
-  scale-down, redeploy re-adoption, health probes, `lambda_pool_events`
-  telemetry. POC has a static instance + manual terminate.
 - **Metering decision** — per-video charge into `monthly_usage`?
 - **Sentry on the instance** — `SENTRY_DSN_POD` isn't set by boot.sh yet
   (same gap as the image fleet; wire both together).
