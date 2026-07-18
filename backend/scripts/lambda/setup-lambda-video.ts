@@ -54,7 +54,10 @@ const KIKI_PORT = 8766;
 const OS_IMAGE_FAMILY = 'lambda-stack-24-04';
 const EXPECTED_PY = '3.12';
 // Same torch pin as the image path so behavior is comparable across servers.
-const TORCH_SPEC = 'torch==2.9.1 torchvision --index-url https://download.pytorch.org/whl/cu128';
+// torchaudio is pinned here because ltx-core depends on it: left to the
+// default index, pip grabs a cu13-built torchaudio next to our cu128 torch
+// → libcudart.so.13 missing at import (hit live 2026-07-18).
+const TORCH_SPEC = 'torch==2.9.1 torchvision torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cu128';
 // Weight repos/files — must match model-servers/shared/config.py defaults.
 const LTX_MODEL_REPO = 'Lightricks/LTX-2.3';
 const LTX_MODEL_FILE = 'ltx-2.3-22b-distilled-1.1.safetensors';
@@ -222,6 +225,12 @@ pip install --upgrade pip -q
 python3 -c "import torch; print('torch already:', torch.__version__)" 2>/dev/null || \\
   pip install --no-cache-dir ${TORCH_SPEC}
 pip install --no-cache-dir -r $FS/kiki/app/requirements-video.txt
+# torchaudio arrives as an ltx-core dependency and the default index serves a
+# cu13-linked wheel next to our cu128 torch (libcudart.so.13 missing at
+# import — hit live 2026-07-18). Verify by IMPORT (a bad wheel can share the
+# version string) and force the cu128 build if broken.
+python3 -c "import torchaudio" 2>/dev/null || \
+  pip install --no-cache-dir --force-reinstall --no-deps 'torchaudio==2.9.1' --index-url https://download.pytorch.org/whl/cu128
 
 echo "=== torch sanity on GPU ==="
 python3 - <<'EOF'

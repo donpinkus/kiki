@@ -104,6 +104,30 @@ Sizing note (from the RunPod era, unverified on Lambda): filesystem holds
 venv (~8 GB) + LTX 22B checkpoint (~45 GB) + upscaler (~1 GB) + Gemma-3-12B
 (~24 GB) ≈ **~80 GB ≈ $16/mo** at $0.20/GiB-mo.
 
+## Live H100 measurements + quality sweep (2026-07-18)
+
+- **Boot**: populate smoke warmup 186s; serving instance launch→READY **321s**
+  (vs the 10-min estimate — NFS-warm weights). Fresh-region populate needs the
+  3.5h ssh ceiling (first attempt died at the old 1h ceiling mid-torch) and the
+  **cu128 torchaudio pin** (ltx-core pulls a cu13 wheel from the default index
+  → libcudart.so.13 missing; verified by import in the populate script now).
+- **Generation: 9.4–9.7s per video** (512², 145 frames, distilled 22B FP8 on
+  H100 SXM — well under the RunPod-era 15–30s). Wall ~11-12s including
+  transfer. **Raw cost ≈ $0.014/video**; charged at $0.05
+  (VIDEO_USD_PER_GENERATION) into the unified free tier.
+- **Quality sweep** (10 generations: 5 real Insights drawings from Donald's
+  sessions at early/mid/late completion × prompt variants, contact sheets in
+  the session scratchpad):
+  - Style + content adherence held everywhere — glossy-3D, painterly, and
+    fuzzy-diorama styles all animate without drifting off-style.
+  - The default motion prompt (gentle motion + slow drift-in) produces
+    pleasing ambient animation on every image, including a barely-started
+    blob sketch (no hallucinated content).
+  - Content-specific motion prompts STEER: "the frog blinks and hops onto
+    the lily pad" makes exactly that happen; "slow dramatic camera orbit"
+    orbits. This validates the Animate modal's motion-not-scene guidance.
+  - "calm, almost still" yields near-still shimmer — the quiet end works.
+
 ## Runbook — live H100 test (needs Donald's credentials)
 
 Prereqs in repo-root `.env.local`: `LAMBDA_API_KEY`, `HF_TOKEN` (must have
