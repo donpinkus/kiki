@@ -64,6 +64,10 @@ public actor StreamWebSocketClient {
     /// notices. The same correlation `requestId` propagates through every
     /// event so the UI can match them to a specific trigger.
     public enum VideoEvent: Sendable {
+        /// The backend fired a video_request (auto idle-trigger or the manual
+        /// Animate button). Emitted at generation START — frames only begin
+        /// arriving ~15-30s later — so the UI can show an "animating" state.
+        case started(requestId: String?)
         case frame(requestId: String?, image: Data, index: Int?, total: Int?)
         case complete(requestId: String?, mp4: Data, fps: Int?, frames: Int?)
         case cancelled(requestId: String?, atStep: Int?, error: String?)
@@ -339,6 +343,14 @@ public actor StreamWebSocketClient {
                                     ])
                                     await self.statusContinuation.yield(status)
                                 }
+                            } else if type == "video_started" {
+                                let event = StreamWebSocketClient.VideoEvent.started(
+                                    requestId: json["requestId"] as? String
+                                )
+                                Self.breadcrumb(category: "ws.video", message: "video_started", data: [
+                                    "requestId": (json["requestId"] as? String) ?? "",
+                                ])
+                                await self.videoContinuation.yield(event)
                             } else if type == "video_frame_data", let b64 = json["data"] as? String,
                                       let imageData = Data(base64Encoded: b64) {
                                 let meta = json["meta"] as? [String: Any] ?? [:]

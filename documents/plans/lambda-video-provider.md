@@ -17,9 +17,21 @@ the backend sends the **latest generated image** + prompt to a dedicated
 LTX-2.3 H100, which animates it into a ~6 s MP4 (512², 145 frames @ 24 fps,
 with audio) streamed back to the iPad. iOS's video render path
 (`VideoEvent` parsing, `ResultState.videoStreaming/.videoLooping`,
-`LoopingVideoView`) was never removed and needs **zero changes** — the wire
-contract (`video_frame_data` / `video_complete_data` / `video_cancelled`) is
+`LoopingVideoView`) was never removed — the render-path wire contract
+(`video_frame_data` / `video_complete_data` / `video_cancelled`) is
 byte-identical to the RunPod era.
+
+**Manual trigger (added same day):** an **Animate** button in the drawing
+top bar (`DrawingTopBar`) sends `{type:'animate'}` up the stream WS; the
+backend fires the video immediately (bypassing the idle window), reusing the
+same pipeline. Two small additions to the wire contract: the backend emits
+`{type:'video_started', requestId}` whenever a video_request fires (auto OR
+manual) — the button flips to a disabled "Animating…" until
+`video_complete_data`/`video_cancelled` — and a manual request that can't
+run (video disabled, no image yet, dead relay) gets a synthesized
+`video_cancelled` with an `error` reason so the button always resets.
+iOS state: `AppCoordinator.isAnimating` / `requestAnimate()`,
+`StreamSession.requestAnimate()`, `VideoEvent.started` parsing.
 
 ## Architecture decisions (POC)
 

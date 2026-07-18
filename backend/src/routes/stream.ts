@@ -381,6 +381,18 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
                 // Buffered for flush after wireRelay completes.
                 pendingConfig = parsed;
               }
+            } else if (parsed.type === 'animate') {
+              // Manual Animate button. When video is disabled for this
+              // session (no LAMBDA_VIDEO_URL / wiring failed), answer with a
+              // synthesized video_cancelled so the iPad's optimistically-
+              // disabled button resets instead of hanging on "Animating".
+              if (videoSession) {
+                videoSession.requestAnimate();
+              } else if (socket.readyState === socket.OPEN) {
+                socket.send(
+                  JSON.stringify({ type: 'video_cancelled', requestId: null, error: 'video_disabled' }),
+                );
+              }
             }
           } catch {
             request.log.warn({ userId, connId, streamId }, 'Invalid JSON from client');

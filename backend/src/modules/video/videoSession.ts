@@ -17,11 +17,16 @@
  * touches the image relay. Everything here is best-effort: any failure
  * disables video for the session and logs; the drawing loop never notices.
  *
- * iPad contract (unchanged from the RunPod era — the iOS handlers are intact
- * and purely message-driven):
+ * iPad contract (the *_data shapes are unchanged from the RunPod era — the
+ * iOS handlers are intact and purely message-driven):
+ *   { type: 'video_started',       requestId }        (NEW 2026-07-18: emitted
+ *       the moment a video_request fires — auto or manual — so the toolbar's
+ *       Animate button can show its disabled "Animating" state)
  *   { type: 'video_frame_data',    data: <b64 JPEG>, meta: {...} }
  *   { type: 'video_complete_data', data: <b64 MP4>,  meta: {...} }
- *   { type: 'video_cancelled',     requestId, ... }   (forwarded verbatim)
+ *   { type: 'video_cancelled',     requestId, ... }   (forwarded verbatim;
+ *       also synthesized locally when a manual animate request can't run,
+ *       so the button always resets)
  */
 
 import type { FastifyBaseLogger } from 'fastify';
@@ -149,6 +154,30 @@ export class VideoSession {
     this.lastConfig = cfg;
   }
 
+  /** Manual "Animate" button ({type:'animate'} from the iPad): fire NOW,
+   * bypassing the idle window and the once-per-idle flag, animating the
+   * newest generated image. When it can't run (no relay, no prompt, no
+   * image), synthesize a video_cancelled with an error so the iPad's
+   * optimistically-disabled button always resets. Ignored while a video is
+   * already in flight (the button is disabled client-side; this is the
+   * backstop). */
+  requestAnimate(): void {
+    if (this.closed) return;
+    if (this.inFlightRequestId) return;
+    const fail = (error: string): void => {
+      this.opts.log.info(
+        { ...this.opts.ctx, reason: error, event: 'video_animate_failed' },
+        'video_animate_failed',
+      );
+      this.opts.sendToClient(JSON.stringify({ type: 'video_cancelled', requestId: null, error }));
+    };
+    if (this.disabled || !this.relay) return fail('video_unavailable');
+    const prompt = this.lastConfig?.['prompt'];
+    if (typeof prompt !== 'string') return fail('no_prompt');
+    if (!this.lastGeneratedJpeg) return fail('no_image');
+    this.fire(prompt, 'manual');
+  }
+
   getStats(): VideoSessionStats {
     return { ...this.stats };
   }
@@ -226,6 +255,10 @@ export class VideoSession {
     this.inFlightRequestId = reqId;
     this.firedThisIdle = true;
     this.stats.videoTriggered += 1;
+    // Tell the iPad a video is generating (auto AND manual triggers) so the
+    // toolbar's Animate button flips to its disabled "Animating" state even
+    // when the user didn't tap it.
+    this.opts.sendToClient(JSON.stringify({ type: 'video_started', requestId: reqId }));
     this.opts.log.info(
       {
         ...this.opts.ctx,

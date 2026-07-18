@@ -531,6 +531,12 @@ final class AppCoordinator {
     }
     var showLayerPanel = false
     var resultState: ResultState = .empty
+    /// True while a video generation is in flight (from the manual Animate
+    /// button OR the backend's 3s-idle auto-trigger). Drives the toolbar
+    /// button's disabled "Animating" state. Set optimistically on tap and
+    /// authoritatively by `video_started`; cleared on complete/cancelled and
+    /// on stream teardown.
+    var isAnimating = false
     var dividerPosition: CGFloat = 0.5
     /// Message for the red error banner in `DrawingView`. Set on stream/auth
     /// failures; cleared automatically when the condition resolves (successful
@@ -2060,12 +2066,31 @@ final class AppCoordinator {
     }
 
     /// Direct map from stream readiness to `resultState`. The single rule:
+    /// True when there's a generated image the Animate button could animate.
+    /// (While animating the button is disabled anyway; the backend also
+    /// fail-safes with a synthesized video_cancelled if state races.)
+    var canAnimate: Bool {
+        lastSuccessfulImage != nil
+    }
+
+    /// Manual Animate button tap: optimistically flip to the disabled
+    /// "Animating" state (confirmed by the backend's `video_started`, reset
+    /// by video_complete/video_cancelled) and ask the backend to fire the
+    /// video now instead of waiting for the 3s idle trigger.
+    func requestAnimate() {
+        guard !isAnimating else { return }
+        isAnimating = true
+        streamLog.info("[result] animate button tapped")
+        streamSession?.requestAnimate()
+    }
+
     /// `.ready` shows the bottom-left badge over a preview/streaming image;
     /// every other readiness state shows the corresponding overlay, with
     /// `lastSuccessfulImage` dimmed underneath when one exists.
     private func applyReadinessToResultState(_ readiness: StreamSession.StreamReadiness) {
         switch readiness {
         case .disconnected:
+            isAnimating = false
             resultState = lastSuccessfulImage.map { .preview(image: $0) } ?? .empty
         case .warming(let message):
             resultState = .provisioning(
@@ -2078,6 +2103,7 @@ final class AppCoordinator {
             resultState = lastSuccessfulImage.map { .preview(image: $0) } ?? .empty
         case .failed(let msg):
             streamLog.error("Stream failed: \(msg)")
+            isAnimating = false
             resultState = .error(message: msg, previousImage: lastSuccessfulImage)
         }
     }
@@ -2099,6 +2125,12 @@ final class AppCoordinator {
     private func handleVideoEvent(_ event: StreamWebSocketClient.VideoEvent) {
         let prev = String(describing: resultState).prefix(40)
         switch event {
+        case .started(let requestId):
+            // Generation began backend-side (auto idle-trigger or our own
+            // Animate tap). No visual state change yet — frames arrive when
+            // decoding starts — but the toolbar button flips to "Animating".
+            isAnimating = true
+            streamLog.info("[result] video_started req=\(requestId ?? "-")")
         case .frame(_, let imageData, let index, let total):
             guard let frame = UIImage(data: imageData),
                   let fallback = lastSuccessfulImage else {
@@ -2118,6 +2150,9 @@ final class AppCoordinator {
                 Phase.set(.animating)
             }
         case .complete(_, let mp4Data, _, let frames):
+            // Generation finished — re-enable the Animate button regardless
+            // of whether the MP4 below decodes/writes cleanly.
+            isAnimating = false
             guard let fallback = lastSuccessfulImage else { return }
             // Clean up any prior MP4 we wrote — only one in flight at a time.
             if let prior = currentVideoMP4URL {
@@ -2142,6 +2177,10 @@ final class AppCoordinator {
                 }
             }
         case .cancelled(_, let atStep, let error):
+            // Covers user-resumed-drawing cancels, server-side failures, AND
+            // the backend's synthesized "can't animate" replies to the manual
+            // button — all of which must re-enable the Animate button.
+            isAnimating = false
             // If we're not currently in a video state, nothing to revert
             // (img2img already drove us out). Otherwise pop back to
             // .streaming on the last image.

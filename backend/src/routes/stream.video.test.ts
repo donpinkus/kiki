@@ -160,6 +160,9 @@ describe('stream route video wiring (e2e with mock lambda image + video servers)
     expect(req?.['prompt']).toBe('a dragon over mountains');
     expect(req?.['image_b64']).toBe(GENERATED_JPEG.toString('base64'));
 
+    // The iPad is told the video started (drives the Animate button state).
+    await until(() => messages.some((m) => m['type'] === 'video_started'));
+
     // Video streams back to the iPad in the wrapped *_data contract.
     await until(() => messages.some((m) => m['type'] === 'video_complete_data'));
     const vFrame = messages.find((m) => m['type'] === 'video_frame_data');

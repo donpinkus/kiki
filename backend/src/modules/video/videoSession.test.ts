@@ -149,6 +149,10 @@ describe('VideoSession idle trigger', () => {
     expect(req['prompt']).toBe('a dragon');
     expect(req['image_b64']).toBe(JPEG.toString('base64'));
 
+    // The iPad is told the moment the video fires (Animate button state).
+    const started = must(clientMessages.find((m) => m['type'] === 'video_started'), 'video_started');
+    expect(started['requestId']).toBe(req['requestId']);
+
     // iPad-facing contract: wrapped *_data messages, bare preambles dropped.
     await until(() => clientMessages.some((m) => m['type'] === 'video_complete_data'));
     const frameMsg = must(clientMessages.find((m) => m['type'] === 'video_frame_data'), 'video_frame_data');
@@ -239,6 +243,72 @@ describe('VideoSession idle trigger', () => {
     session.noteGeneratedFrame(JPEG);
     await sleep(150);
     expect(mock.received).toHaveLength(0);
+  });
+
+  it('manual requestAnimate fires immediately — no idle wait, no sketch required', async () => {
+    const mock = await startMockVideoServer();
+    cleanups.push(mock.close);
+    // Long idle window: proves the manual path doesn't depend on the timer.
+    const { session, clientMessages } = makeSession(mock.url, { idleMs: 60_000 });
+    cleanups.push(() => session.close());
+    await session.start();
+
+    session.noteConfig({ type: 'config', prompt: 'a whale' });
+    session.noteGeneratedFrame(JPEG);
+    session.requestAnimate();
+
+    await until(() => mock.received.some((m) => m['type'] === 'video_request'));
+    const req = must(mock.received.find((m) => m['type'] === 'video_request'), 'video_request');
+    expect(req['prompt']).toBe('a whale');
+    expect(req['image_b64']).toBe(JPEG.toString('base64'));
+    expect(clientMessages.some((m) => m['type'] === 'video_started')).toBe(true);
+    await until(() => clientMessages.some((m) => m['type'] === 'video_complete_data'));
+  });
+
+  it('manual requestAnimate with no generated image resets the button via video_cancelled', async () => {
+    const mock = await startMockVideoServer();
+    cleanups.push(mock.close);
+    const { session, clientMessages } = makeSession(mock.url, { idleMs: 60_000 });
+    cleanups.push(() => session.close());
+    await session.start();
+
+    session.noteConfig({ type: 'config', prompt: 'a whale' });
+    session.requestAnimate(); // no noteGeneratedFrame — nothing to animate
+
+    await until(() => clientMessages.some((m) => m['type'] === 'video_cancelled'));
+    const cancelled = must(clientMessages.find((m) => m['type'] === 'video_cancelled'), 'video_cancelled');
+    expect(cancelled['error']).toBe('no_image');
+    expect(mock.received.filter((m) => m['type'] === 'video_request')).toHaveLength(0);
+  });
+
+  it('manual requestAnimate is ignored while a video is already in flight', async () => {
+    const mock = await startMockVideoServer({ holdCompletion: true });
+    cleanups.push(mock.close);
+    const { session } = makeSession(mock.url, { idleMs: 60_000 });
+    cleanups.push(() => session.close());
+    await session.start();
+
+    session.noteConfig({ type: 'config', prompt: 'a bear' });
+    session.noteGeneratedFrame(JPEG);
+    session.requestAnimate();
+    await until(() => mock.pending.length === 1);
+    session.requestAnimate(); // in flight — must not fire or cancel anything
+    await sleep(100);
+    expect(mock.received.filter((m) => m['type'] === 'video_request')).toHaveLength(1);
+  });
+
+  it('manual requestAnimate on a dead relay resets the button via video_cancelled', async () => {
+    const { session, clientMessages } = makeSession('ws://127.0.0.1:1/ws', { idleMs: 60_000 });
+    cleanups.push(() => session.close());
+    await session.start(); // fails, disables video
+
+    session.noteConfig({ type: 'config', prompt: 'a deer' });
+    session.noteGeneratedFrame(JPEG);
+    session.requestAnimate();
+
+    await until(() => clientMessages.some((m) => m['type'] === 'video_cancelled'));
+    const cancelled = must(clientMessages.find((m) => m['type'] === 'video_cancelled'), 'video_cancelled');
+    expect(cancelled['error']).toBe('video_unavailable');
   });
 
   it('start() never throws when the instance is unreachable; note* calls are no-ops', async () => {

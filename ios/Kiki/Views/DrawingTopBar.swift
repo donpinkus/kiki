@@ -70,6 +70,20 @@ struct DrawingTopBar: View {
 
             KikiAIStatusBadge()
 
+            // Animate — manually trigger the idle-state animation of the
+            // current generated image (the backend also auto-fires one 3s
+            // after the pencil lifts). Disabled + "Animating…" while a video
+            // is generating, from either trigger.
+            Button {
+                coordinator.requestAnimate()
+            } label: {
+                Text(coordinator.isAnimating ? "Animating…" : "Animate")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(KikiTheme.icon)
+            }
+            .tint(KikiTheme.icon)
+            .disabled(coordinator.isAnimating || !coordinator.canAnimate)
+
             Spacer()
 
             // MARK: Center — Style, Prompt
