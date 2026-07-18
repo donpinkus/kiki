@@ -117,7 +117,14 @@ struct SpeedPaintReplayView: View {
     private func recompose() async {
         isComposing = true
         defer { isComposing = false }
-        guard let url = await coordinator.composeReplay(layout: layout, speed: speed, watermark: watermark) else { return }
+        guard let url = await coordinator.composeReplay(layout: layout, speed: speed, watermark: watermark) else {
+            // Only alert if we never managed to compose anything — a re-compose
+            // failure (layout/speed change) keeps showing the previous video.
+            if composedURL == nil {
+                statusMessage = "Couldn't build the replay — no recorded footage was found for this drawing."
+            }
+            return
+        }
         composedURL = url
         // A freshly replaced item starts at zero; just play.
         player.replaceCurrentItem(with: AVPlayerItem(url: url))
@@ -130,7 +137,10 @@ struct SpeedPaintReplayView: View {
             forName: .AVPlayerItemDidPlayToEndTime,
             object: nil,
             queue: .main
-        ) { _ in
+        ) { note in
+            // object: nil because the item is replaced on every recompose;
+            // filter here so other players' end events don't seek our replay.
+            guard let item = note.object as? AVPlayerItem, item === player.currentItem else { return }
             player.seek(to: .zero)
             player.play()
         }

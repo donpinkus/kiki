@@ -1168,9 +1168,28 @@ final class AppCoordinator {
     /// the latest strokes. Recording continues afterward. Call before opening the
     /// replay modal.
     func flushRecording() async {
-        guard let drawingId = currentDrawingId, let recorder else { return }
+        guard let drawingId = currentDrawingId, let recorder else {
+            streamLog.info("flushRecording: nothing to flush (drawing=\(self.currentDrawingId?.uuidString ?? "nil") recorder=\(self.recorder != nil)")
+            return
+        }
         if let urls = await recorder.checkpoint() {
-            try? RecordingStore.shared.appendSegment(canvasTemp: urls.canvas, generatedTemp: urls.generated, for: drawingId)
+            Self.appendSegmentReporting(canvasTemp: urls.canvas, generatedTemp: urls.generated, for: drawingId)
+        } else {
+            streamLog.info("flushRecording: checkpoint had <2 new frames — relying on stored segments")
+        }
+    }
+
+    /// `RecordingStore.appendSegment` with failure reporting — a failed move
+    /// here silently loses a replay segment, so it must never be `try?`.
+    /// Nonisolated: called from `finalizeRecording`'s detached task.
+    private nonisolated static func appendSegmentReporting(canvasTemp: URL, generatedTemp: URL, for drawingId: UUID) {
+        do {
+            try RecordingStore.shared.appendSegment(canvasTemp: canvasTemp, generatedTemp: generatedTemp, for: drawingId)
+        } catch {
+            streamLog.error("Recording segment append failed: \(error.localizedDescription)")
+            SentrySDK.capture(error: error) { scope in
+                scope.setTag(value: "replay.appendSegment", key: "op")
+            }
         }
     }
 
@@ -1181,7 +1200,15 @@ final class AppCoordinator {
     func composeReplay(layout: ReplayLayout, speed: Double, watermark: Bool) async -> URL? {
         guard let drawingId = currentDrawingId else { return nil }
         let segments = RecordingStore.shared.segmentURLs(for: drawingId)
-        guard !segments.canvas.isEmpty else { return nil }
+        guard !segments.canvas.isEmpty else {
+            streamLog.error("Replay compose: no stored segments for drawing \(drawingId.uuidString)")
+            Log.error("replay.no_segments", attributes: [
+                "event": "replay.no_segments",
+                "drawing_id": drawingId.uuidString,
+                "recorded_canvas_frames": recordedCanvasFrames,
+            ])
+            return nil
+        }
         let animationURL = RecordingStore.shared.generatedVideoURL(for: drawingId)
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let output = dir.appendingPathComponent("Speed Paint.mp4")
@@ -1210,11 +1237,7 @@ final class AppCoordinator {
         let bgTask = UIApplication.shared.beginBackgroundTask(withName: "finalize-recording")
         Task.detached {
             if let urls = await recorder.finish() {
-                try? RecordingStore.shared.appendSegment(
-                    canvasTemp: urls.canvas,
-                    generatedTemp: urls.generated,
-                    for: drawingId
-                )
+                Self.appendSegmentReporting(canvasTemp: urls.canvas, generatedTemp: urls.generated, for: drawingId)
             }
             await MainActor.run { UIApplication.shared.endBackgroundTask(bgTask) }
         }
@@ -1775,6 +1798,13 @@ final class AppCoordinator {
             streamSession?.stop()
             streamSession = nil
         }
+        // Finalize the in-flight timelapse recording before startStream()
+        // replaces the recorder — a provider toggle or paywall resume must
+        // not discard the footage captured so far.
+        if let recorder, let drawingId = currentDrawingId {
+            finalizeRecording(recorder, drawingId: drawingId)
+        }
+        recorder = nil
         startStream()
     }
 

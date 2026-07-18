@@ -1,5 +1,9 @@
 import AVFoundation
+import OSLog
+import Sentry
 import UIKit
+
+private let recorderLog = Logger(subsystem: "com.kiki.app", category: "VideoRecorder")
 
 /// Records two frame-locked H.264 tracks per drawing session — the user's canvas
 /// and the generated result — to temp MP4s via `AVAssetWriter`. A paired frame is
@@ -39,6 +43,14 @@ final class DrawingVideoRecorder {
             self.lastGenerated = nil
             self.blank = nil
             self.started = self.makeWritersLocked()
+            if !self.started {
+                // Without this the recorder silently drops every frame while
+                // the UI still offers the replay — must be loud.
+                recorderLog.error("Recorder start failed: AVAssetWriter setup unsuccessful")
+                SentrySDK.capture(message: "replay.recorder_start_failed") { scope in
+                    scope.setLevel(.error)
+                }
+            }
         }
     }
 
@@ -102,6 +114,7 @@ final class DrawingVideoRecorder {
                 guard self.started, self.frameIndex >= 2,
                       let oldCanvas = self.canvas, let oldGenerated = self.generated,
                       let oldCanvasURL = self.canvasTempURL, let oldGeneratedURL = self.generatedTempURL else {
+                    recorderLog.info("checkpoint: no segment (started=\(self.started) frames=\(self.frameIndex))")
                     continuation.resume(returning: nil)
                     return
                 }
@@ -128,6 +141,7 @@ final class DrawingVideoRecorder {
                 guard self.started, self.frameIndex >= 2,
                       let canvas = self.canvas, let generated = self.generated,
                       let canvasURL = self.canvasTempURL, let generatedURL = self.generatedTempURL else {
+                    recorderLog.info("finish: no segment (started=\(self.started) frames=\(self.frameIndex))")
                     self.teardownLocked(deleteTemps: true)
                     continuation.resume(returning: nil)
                     return
