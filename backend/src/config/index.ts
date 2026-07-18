@@ -59,6 +59,11 @@ export interface AppConfig {
    * grows. Measured: ~5 fully-served active drawers/instance at 4-step;
    * overload degrades gracefully, so this is a UX knob. */
   readonly LAMBDA_POOL_TARGET_STREAMS: number;
+  /** Base64 PEM of the fleet's self-signed TLS cert. When set, relays and
+   * sketchify connect wss:// and PIN this exact cert (hostname check skipped
+   * — instances are bare IPs). Empty = plain ws:// (pre-TLS dev). Decoded
+   * form exposed as LAMBDA_TLS_CA. */
+  readonly LAMBDA_TLS_CA: string;
   /** fal.ai API key — server-side only (CLAUDE.md #3: no secrets on client).
    * Used as `Authorization: Key <FAL_KEY>` on the fal realtime WS upgrade.
    * Required when `IMAGE_PROVIDER=fal`; ignored otherwise. */
@@ -208,6 +213,9 @@ function validateConfig(): AppConfig {
     LAMBDA_POOL_MIN: Number(process.env['LAMBDA_POOL_MIN'] ?? 0),
     LAMBDA_POOL_MAX: Number(process.env['LAMBDA_POOL_MAX'] ?? 3),
     LAMBDA_POOL_TARGET_STREAMS: Number(process.env['LAMBDA_POOL_TARGET_STREAMS'] ?? 4),
+    LAMBDA_TLS_CA: process.env['LAMBDA_TLS_CA_B64']
+      ? Buffer.from(process.env['LAMBDA_TLS_CA_B64'], 'base64').toString('utf-8')
+      : '',
     FAL_KEY: falKey,
     FAL_IDLE_CLOSE_MS: Number(process.env['FAL_IDLE_CLOSE_MS'] ?? 0),
     FAL_WARMER_ENABLED: process.env['FAL_WARMER_ENABLED'] !== 'false',

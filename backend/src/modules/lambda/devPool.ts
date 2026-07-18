@@ -23,6 +23,7 @@
  */
 
 import { createHmac } from 'node:crypto';
+import { request as httpsRequest } from 'node:https';
 import type { FastifyBaseLogger } from 'fastify';
 import { config } from '../../config/index.js';
 import { inBackgroundScope } from '../observability/scope.js';
@@ -95,6 +96,55 @@ function client(): LambdaClient {
   return new LambdaClient(config.LAMBDA_API_KEY);
 }
 
+function scheme(): string {
+  return config.LAMBDA_TLS_CA ? 'wss' : 'ws';
+}
+
+/** GET /health, speaking https with the pinned fleet cert when TLS is
+ * configured (hostname check skipped — instances are bare IPs), plain http
+ * otherwise. Resolves with the parsed body; rejects on error/timeout. */
+function probeHealth(ip: string, timeoutMs: number): Promise<{ status?: string }> {
+  if (!config.LAMBDA_TLS_CA) {
+    return fetch(`http://${ip}:${PORT}/health`, { signal: AbortSignal.timeout(timeoutMs) }).then(
+      (res) => {
+        if (!res.ok) throw new Error(`health ${res.status}`);
+        return res.json() as Promise<{ status?: string }>;
+      },
+    );
+  }
+  return new Promise((resolve, reject) => {
+    const req = httpsRequest(
+      {
+        host: ip,
+        port: PORT,
+        path: '/health',
+        ca: [config.LAMBDA_TLS_CA],
+        checkServerIdentity: () => undefined,
+        timeout: timeoutMs,
+      },
+      (res) => {
+        if ((res.statusCode ?? 500) >= 400) {
+          res.resume();
+          reject(new Error(`health ${res.statusCode}`));
+          return;
+        }
+        let body = '';
+        res.on('data', (c: Buffer) => (body += c));
+        res.on('end', () => {
+          try {
+            resolve(JSON.parse(body) as { status?: string });
+          } catch (err) {
+            reject(err as Error);
+          }
+        });
+      },
+    );
+    req.on('timeout', () => req.destroy(new Error('health timeout')));
+    req.on('error', reject);
+    req.end();
+  });
+}
+
 function wsToken(name: string): string {
   return createHmac('sha256', config.LAMBDA_API_KEY).update(name).digest('hex').slice(0, 32);
 }
@@ -142,7 +192,7 @@ export function acquireStream(): { name: string; url: string } | null {
   if (!inst) return null;
   inst.activeStreams += 1;
   inst.lastActivityMs = Date.now();
-  return { name: inst.name, url: `ws://${inst.ip}:${PORT}/ws?token=${wsToken(inst.name)}` };
+  return { name: inst.name, url: `${scheme()}://${inst.ip}:${PORT}/ws?token=${wsToken(inst.name)}` };
 }
 
 /** Release a stream slot (on session close or re-assignment). */
@@ -164,7 +214,7 @@ export function wsUrl(): string | null {
   const inst = ready[0];
   if (!inst?.ip) return null;
   touchInstance(inst.name);
-  return `ws://${inst.ip}:${PORT}/ws?token=${wsToken(inst.name)}`;
+  return `${scheme()}://${inst.ip}:${PORT}/ws?token=${wsToken(inst.name)}`;
 }
 
 /** User interest: make sure at least one instance exists/is coming. */
@@ -313,8 +363,7 @@ async function watchBoot(name: string): Promise<void> {
     }
     if (!instances.has(name)) return;
     try {
-      const res = await fetch(`http://${inst.ip}:${PORT}/health`, { signal: AbortSignal.timeout(3000) });
-      const health = (await res.json()) as { status?: string };
+      const health = await probeHealth(inst.ip, 3000);
       if (health.status === 'ok') break;
     } catch {
       // not up yet
@@ -338,11 +387,9 @@ async function tick(): Promise<void> {
   // Health-check ready instances (parallel, bounded by instance count).
   await Promise.all(
     readyInstances().map(async (inst) => {
+      if (!inst.ip) return;
       try {
-        const res = await fetch(`http://${inst.ip}:${PORT}/health`, {
-          signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
-        });
-        if (!res.ok) throw new Error(`health ${res.status}`);
+        await probeHealth(inst.ip, HEALTH_TIMEOUT_MS);
         inst.healthFails = 0;
       } catch {
         inst.healthFails += 1;

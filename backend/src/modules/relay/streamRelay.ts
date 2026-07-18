@@ -139,8 +139,13 @@ export class StreamRelay {
    * relay-internal logs can be cross-referenced with stream.ts session logs. */
   private logContext: Record<string, unknown> = {};
 
-  constructor(url: string) {
+  /** PEM of the fleet's self-signed cert to PIN (chain verified against
+   * exactly this cert; hostname check skipped — instances are bare IPs). */
+  private tlsCa: string | null = null;
+
+  constructor(url: string, opts?: { tlsCa?: string | null }) {
     this.url = url;
+    this.tlsCa = opts?.tlsCa ?? null;
   }
 
   /** Attach context (e.g. { connId, userId, role: 'image' }) included in
@@ -171,7 +176,18 @@ export class StreamRelay {
     this.breadcrumb('connect: start', {});
 
     return new Promise((resolve, reject) => {
-      const ws = new WebSocket(this.url, { perMessageDeflate: false });
+      const ws = new WebSocket(this.url, {
+        perMessageDeflate: false,
+        ...(this.tlsCa
+          ? {
+              ca: [this.tlsCa],
+              // Pinning, not PKI: trust exactly our cert, ignore that the
+              // peer presents an IP instead of the cert's CN. (false = no
+              // error, per ws's checkServerIdentity typing.)
+              checkServerIdentity: () => false,
+            }
+          : {}),
+      });
       let settled = false;
 
       const settle = (

@@ -473,7 +473,9 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
                 onConnection: (rec) =>
                   recordFalConnection('user', { userId, streamId }, rec, request.log),
               })
-            : new StreamRelay(upstreamUrl);
+            : new StreamRelay(upstreamUrl, {
+                tlsCa: upstreamUrl.startsWith('wss') ? config.LAMBDA_TLS_CA : null,
+              });
         newRelay.setLogContext({ userId, connId, streamId, role: 'image' });
         newRelay.onMessage((data, isBinary) => {
           if (socket.readyState !== socket.OPEN) return;

@@ -384,9 +384,16 @@ def _process_frame(jpeg_data: bytes, cfg: dict) -> bytes:
 
 
 if __name__ == "__main__":
+    # TLS: when FLUX_SSL_CERT/KEY are set (Lambda fleet — a self-signed cert
+    # on the shared filesystem that the backend PINS), serve wss/https.
+    # Unset = plain ws (local dev).
+    _ssl_cert = os.environ.get("FLUX_SSL_CERT") or None
+    _ssl_key = os.environ.get("FLUX_SSL_KEY") or None
     uvicorn.run(
         "image.server:app",
         host=config.HOST,
         port=config.PORT,
         log_level="info",
+        ssl_certfile=_ssl_cert,
+        ssl_keyfile=_ssl_key,
     )

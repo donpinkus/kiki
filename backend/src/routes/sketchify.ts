@@ -41,7 +41,12 @@ const TIMEOUT_MS = 30_000;
 
 function runSketchify(url: string, jpeg: Buffer, prompt: string): Promise<Buffer> {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(url, { perMessageDeflate: false });
+    const ws = new WebSocket(url, {
+      perMessageDeflate: false,
+      ...(url.startsWith('wss') && config.LAMBDA_TLS_CA
+        ? { ca: [config.LAMBDA_TLS_CA], checkServerIdentity: () => false }
+        : {}),
+    });
     const timer = setTimeout(() => {
       ws.close();
       reject(new Error('sketchify timed out'));
