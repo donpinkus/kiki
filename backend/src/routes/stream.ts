@@ -94,7 +94,6 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       // identity/budget/wire path (Node EventEmitter drops events with no
       // listener).
       let userId: string | null = null;
-      let source: 'jwt' | 'legacy_session' | null = null;
       let streamId: string | null = null;
       // Image relay: a Lambda StreamRelay or a fal FalImageRelay depending on
       // the provider. Both satisfy ImageRelay, so the wiring below is
@@ -155,11 +154,14 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       // Insights (see modules/insights/frameCapture.ts). Created lazily once
       // identity + streamId exist; null when capture is disabled/unconfigured.
       let frameCapture: FrameCapture | null = null;
-      const captureFrame = (kind: 'sketch' | 'generated', jpeg: Buffer): void => {
+      const ensureFrameCapture = (): FrameCapture | null => {
         if (!frameCapture && userId && streamId) {
           frameCapture = new FrameCapture(streamId, userId, request.log);
         }
-        frameCapture?.capture(kind, jpeg);
+        return frameCapture;
+      };
+      const captureFrame = (kind: 'sketch' | 'generated', jpeg: Buffer): void => {
+        ensureFrameCapture()?.capture(kind, jpeg);
       };
       let clientDisconnected = false;
       const sessionStartMs = Date.now();
@@ -213,6 +215,24 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       let lastEmittedState: string | null = null;
       let lastEmittedStateAt: number | null = null;
 
+      // Downgrade an auto-resolved lambda session to fal, in place. Used at
+      // initial connect (pool advertised ready but the connect failed / no
+      // slot) AND mid-session (upstream died with no replacement instance) —
+      // and NEVER for explicit `?imageProvider=lambda` overrides (those bounce
+      // so the A/B comparison stays honest). Metering exemption carries over.
+      // Only flips state; callers do any rewire + setupFalMetering + ready.
+      const downgradeAutoToFal = (why: string): void => {
+        request.log.warn(
+          { userId, connId, streamId, why, event: 'lambda_auto_downgrade_fal' },
+          'auto-resolved lambda session downgraded to fal',
+        );
+        billLambdaFrames(); // flush any frames already served on lambda
+        if (lambdaWired) lambdaDowngraded = true; // waterfall: had the H100, lost it
+        imageProvider = 'fal';
+        falMeteringEnabled = lambdaMeteringEnabled;
+        lambdaMeteringEnabled = false;
+      };
+
       // Send a `{type:'state', ...}` transition to the iPad. All transitions
       // happen inline in this handler (no cross-connection broker), so this
       // is a plain socket.send with diagnostics bookkeeping.
@@ -251,12 +271,12 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       };
       const wireRelayAttempts: WireRelayAttempt[] = [];
 
-      // Single-slot buffer for the latest config + frame received before the
-      // relay is wired. iOS sends initial config immediately after WS open,
-      // possibly before the relay is connected — pre-fix that config was
-      // dropped and the provider ran on whatever default it had until the
-      // iPad's next config tick, breaking the user's prompt for early frames.
-      let pendingConfig: Record<string, unknown> | null = null;
+      // Single-slot buffer for the latest frame received before the relay is
+      // wired (only the newest matters for img2img). Configs need no separate
+      // buffer: the message handler stores every config in `lastConfig`, and
+      // `wireRelay` re-sends `lastConfig` to the provider on every successful
+      // connect — so a config arriving pre-wire reaches the provider the
+      // moment wiring completes.
       let pendingFrame: Buffer | null = null;
 
       // ─── Idempotent cleanup ──────────────────────────────────────────
@@ -371,17 +391,12 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
               // Replay: record prompt changes (deduped in FrameCapture) so
               // the Gallery player can show which prompt drove each frame.
               if (typeof parsed['prompt'] === 'string') {
-                if (!frameCapture && userId && streamId) {
-                  frameCapture = new FrameCapture(streamId, userId, request.log);
-                }
-                frameCapture?.capturePrompt(parsed['prompt']);
+                ensureFrameCapture()?.capturePrompt(parsed['prompt']);
               }
               if (relay) {
                 relay.sendConfig(parsed);
-              } else {
-                // Buffered for flush after wireRelay completes.
-                pendingConfig = parsed;
               }
+              // else: nothing to buffer — wireRelay sends lastConfig on connect.
             }
           } catch {
             request.log.warn({ userId, connId, streamId }, 'Invalid JSON from client');
@@ -402,7 +417,9 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       }
 
       userId = identity.userId;
-      source = identity.source;
+      // Only read on the slow path (no close/error/message handler needs it),
+      // so unlike userId it doesn't have to be hoisted above the handlers.
+      const source = identity.source;
       // Non-nullable shadow for the slow path. The hoisted `let userId`
       // is captured by close/error/message handlers (which null-check it);
       // closures defined later in this scope (handleUpstreamClose) need a
@@ -563,11 +580,10 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
           // Defensive fallback for any non-WireRelayError that escapes —
           // shouldn't happen, but logging shape stays uniform.
           const wre = err instanceof WireRelayError ? err : null;
-          const elapsedMs = wre ? wre.elapsedMs : Date.now() - wireStart;
-          wireRelayAttempts.push({
+          const attemptRecord: WireRelayAttempt = {
             attempt: attemptIndex,
             kind: wre?.kind ?? 'socket_error',
-            elapsedMs,
+            elapsedMs: wre ? wre.elapsedMs : Date.now() - wireStart,
             phaseTimings: wre?.phaseTimings ?? {},
             wsCode: wre?.wsCode,
             httpStatus: wre?.httpStatus,
@@ -576,24 +592,16 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             errno: wre?.errno,
             syscall: wre?.syscall,
             message: (err as Error).message,
-          });
+          };
+          wireRelayAttempts.push(attemptRecord);
           request.log.warn(
             {
               userId,
               connId,
               streamId,
               upstreamUrl,
-              attempt: attemptIndex,
-              elapsedMs,
-              kind: wre?.kind ?? 'socket_error',
-              phaseTimings: wre?.phaseTimings ?? {},
-              wsCode: wre?.wsCode,
-              httpStatus: wre?.httpStatus,
-              httpHeaders: wre?.httpHeaders,
-              httpBodySample: wre?.httpBodySample,
-              errno: wre?.errno,
-              syscall: wre?.syscall,
-              err: (err as Error).message,
+              ...attemptRecord,
+              err: attemptRecord.message,
               event: 'wire_relay_failed',
             },
             'wire_relay_failed',
@@ -782,15 +790,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
               !clientDisconnected &&
               socket.readyState === socket.OPEN
             ) {
-              request.log.warn(
-                { userId, connId, streamId, event: 'lambda_auto_downgrade_fal' },
-                'auto-resolved lambda session downgraded to fal mid-session',
-              );
-              billLambdaFrames(); // flush frames already served on lambda
-              if (lambdaWired) lambdaDowngraded = true; // waterfall: had the H100, lost it
-              imageProvider = 'fal';
-              falMeteringEnabled = lambdaMeteringEnabled;
-              lambdaMeteringEnabled = false;
+              downgradeAutoToFal('upstream_died_no_replacement');
               await wireRelay('fal://flux-2-klein-realtime');
               setupFalMetering();
               if (clientDisconnected || socket.readyState !== socket.OPEN) return;
@@ -827,22 +827,6 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       // wiring lifecycle, in one filter.
       await withPhase('preparing', async () => {
       try {
-        // Downgrade an auto-resolved lambda session to fal — used at initial
-        // connect (pool advertised ready but the connect failed / no slot) and
-        // NEVER for explicit `?imageProvider=lambda` overrides (those bounce so
-        // the A/B comparison stays honest). Metering exemption carries over.
-        const downgradeAutoToFal = (why: string): void => {
-          request.log.warn(
-            { userId, connId, streamId, why, event: 'lambda_auto_downgrade_fal' },
-            'auto-resolved lambda session downgraded to fal',
-          );
-          billLambdaFrames(); // flush any frames already served on lambda
-          if (lambdaWired) lambdaDowngraded = true; // waterfall: had the H100, lost it
-          imageProvider = 'fal';
-          falMeteringEnabled = lambdaMeteringEnabled;
-          lambdaMeteringEnabled = false;
-        };
-
         if (imageProvider === 'lambda') {
           // Lambda Cloud path: relay to our own image server on a Lambda
           // H100 — either the static LAMBDA_IMAGE_URL instance or a pool
@@ -918,14 +902,9 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         }
         request.log.info({ userId, connId, streamId, event: 'relay_connected' }, 'Upstream connected, relaying');
 
-        // Flush any messages buffered by the early-registered message
-        // handler before the relay was wired. Order matters: config first
-        // (so the provider sees the right prompt before the first frame),
-        // then the latest pending frame.
-        if (pendingConfig && relay) {
-          relay.sendConfig(pendingConfig);
-          pendingConfig = null;
-        }
+        // Flush the latest pre-wire frame (config already went out inside
+        // wireRelay via lastConfig, before any frame — so the provider sees
+        // the right prompt before the first frame).
         if (pendingFrame && relay) {
           relay.sendFrame(pendingFrame);
           pendingFrame = null;
