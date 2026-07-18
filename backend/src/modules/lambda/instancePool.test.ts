@@ -8,6 +8,7 @@ import type { FastifyBaseLogger } from 'fastify';
 import { describe, expect, it } from 'vitest';
 
 import type { LambdaClient, LambdaInstance } from './client.js';
+import { LambdaApiError } from './client.js';
 import { createInstancePool, type InstancePool, type InstancePoolSpec } from './instancePool.js';
 
 const testLog = {
@@ -28,6 +29,10 @@ interface FakeCloud {
   terminated: string[];
   /** Instances the API reports (adoption reads this at start()). */
   seed: (inst: Partial<LambdaInstance> & { id: string; name: string }) => void;
+  /** Every launch attempt as `type@region`, in order (sweep-order assertions). */
+  attempts: string[];
+  /** Mark a (type@region) cell as having no capacity. */
+  setDry: (cell: string, dry: boolean) => void;
   /** Health probe behavior per instance ip; default healthy. */
   setHealth: (ip: string, healthy: boolean) => void;
   probe: (ip: string, timeoutMs: number) => Promise<{ status?: string }>;
@@ -40,9 +45,19 @@ function makeFakeCloud(): FakeCloud {
   const unhealthy = new Set<string>();
   let nextIp = 1;
 
+  // (type@region) cells that reject with insufficient-capacity; the sweep
+  // should move on and win the first open cell.
+  const dryCells = new Set<string>();
+  const attempts: string[] = [];
+
   const client = {
     listSshKeys: async () => [{ id: 'k1', name: 'test-key', public_key: 'ssh-ed25519 AAA test' }],
-    launch: async (req: { name?: string; region_name: string }) => {
+    launch: async (req: { name?: string; region_name: string; instance_type_name?: string }) => {
+      const cell = `${req.instance_type_name ?? '?'}@${req.region_name}`;
+      attempts.push(cell);
+      if (dryCells.has(cell)) {
+        throw new LambdaApiError(400, 'instance-operations/launch/insufficient-capacity', 'no capacity');
+      }
       const id = `inst-${launched.length + 1}`;
       const name = req.name ?? id;
       launched.push(name);
@@ -74,6 +89,8 @@ function makeFakeCloud(): FakeCloud {
     client,
     launched,
     terminated,
+    attempts,
+    setDry: (cell: string, dry: boolean) => { if (dry) dryCells.add(cell); else dryCells.delete(cell); },
     seed: (inst) => {
       instances.set(inst.id, {
         status: 'active',
@@ -102,8 +119,8 @@ function makePool(
     fsName: (r) => `kiki-test-${r}`,
     label: 'test GPU',
     enabled: () => true,
-    region: () => 'test-region',
-    instanceType: () => 'gpu_1x_test',
+    regions: () => ['test-region'],
+    instanceTypes: () => ['gpu_1x_test'],
     poolMin: () => 0,
     poolMax: () => 3,
     targetStreams: () => 2,
@@ -223,6 +240,54 @@ describe('instancePool', { timeout: 30_000 }, () => {
       // Instance is actually fine — the next tick's probe clears the strike.
       await until(() => pool.hasReady());
       expect(pool.acquireStream()?.name).toBe(name);
+    } finally {
+      pool.stop();
+    }
+  });
+
+  it('sweeps TYPE-MAJOR across regions: worse type only after every region refused the better one', async () => {
+    const cloud = makeFakeCloud();
+    const pool = makePool(cloud, {
+      regions: () => ['region-a', 'region-b'],
+      instanceTypes: () => ['gpu_best', 'gpu_worse'],
+      launchRetryMins: 1,
+    });
+    // Best type dry EVERYWHERE, worse type dry in region-a → the sweep should
+    // try best@a, best@b, worse@a, then win worse@b.
+    cloud.setDry('gpu_best@region-a', true);
+    cloud.setDry('gpu_best@region-b', true);
+    cloud.setDry('gpu_worse@region-a', true);
+    try {
+      pool.start(testLog);
+      pool.ensure();
+      await until(() => pool.hasReady());
+      expect(cloud.attempts.slice(0, 4)).toEqual([
+        'gpu_best@region-a',
+        'gpu_best@region-b',
+        'gpu_worse@region-a',
+        'gpu_worse@region-b',
+      ]);
+      expect(cloud.launched).toHaveLength(1);
+    } finally {
+      pool.stop();
+    }
+  });
+
+  it('region failover: capacity in the second region wins without type fallback', async () => {
+    const cloud = makeFakeCloud();
+    const pool = makePool(cloud, {
+      regions: () => ['region-a', 'region-b'],
+      instanceTypes: () => ['gpu_best'],
+      launchRetryMins: 1,
+    });
+    cloud.setDry('gpu_best@region-a', true);
+    try {
+      pool.start(testLog);
+      pool.ensure();
+      await until(() => pool.hasReady());
+      expect(cloud.attempts).toEqual(['gpu_best@region-a', 'gpu_best@region-b']);
+      const state = pool.getState();
+      expect(state.instances[0]?.name).toBeTruthy();
     } finally {
       pool.stop();
     }

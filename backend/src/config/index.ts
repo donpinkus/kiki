@@ -84,6 +84,18 @@ export interface AppConfig {
    * must be populated via scripts/lambda/setup-lambda-video.ts). Defaults to
    * LAMBDA_REGION. */
   readonly LAMBDA_VIDEO_REGION: string;
+  /** Ordered capacity-search REGION list for the image pool (csv env
+   * LAMBDA_REGIONS; falls back to [LAMBDA_REGION]). Every region listed must
+   * have a populated kiki-image-<region> filesystem. */
+  readonly LAMBDA_REGIONS: readonly string[];
+  /** Ordered instance-TYPE fallback list for the image pool, best first
+   * (csv env LAMBDA_INSTANCE_TYPES; falls back to [LAMBDA_INSTANCE_TYPE]).
+   * The pool sweeps TYPE-MAJOR across regions. Only add types benchmarked
+   * for acceptable gen time + VRAM fit (see lambda-image-provider.md). */
+  readonly LAMBDA_INSTANCE_TYPES: readonly string[];
+  readonly LAMBDA_VIDEO_REGIONS: readonly string[];
+  /** Video needs ≥80 GB VRAM (LTX 22B FP8 + Gemma ≈ 46 GiB resident). */
+  readonly LAMBDA_VIDEO_INSTANCE_TYPES: readonly string[];
   /** Video pool floor (default 0 — scale to zero when nobody is around). */
   readonly LAMBDA_VIDEO_POOL_MIN: number;
   /** Video pool ceiling (default 1 — video scales DELIBERATELY slowly: jobs
@@ -227,7 +239,13 @@ function validateConfig(): AppConfig {
   if (imageProvider === 'fal' && !falKey && nodeEnv !== 'test') {
     throw new Error("IMAGE_PROVIDER=fal requires FAL_KEY (fal.ai API key) to be set");
   }
-  const lambdaVideoUrl = process.env['LAMBDA_VIDEO_URL'] ?? '';
+  /** Parse an ordered comma-separated env list; fallback when unset/empty. */
+function csvList(raw: string | undefined, fallback: string[]): string[] {
+  const items = (raw ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+  return items.length > 0 ? items : fallback;
+}
+
+const lambdaVideoUrl = process.env['LAMBDA_VIDEO_URL'] ?? '';
   if (lambdaVideoUrl && !/^wss?:\/\//.test(lambdaVideoUrl)) {
     throw new Error(`Invalid LAMBDA_VIDEO_URL: ${lambdaVideoUrl} (expected ws:// or wss:// URL)`);
   }
@@ -264,6 +282,16 @@ function validateConfig(): AppConfig {
     LAMBDA_VIDEO_URL: lambdaVideoUrl,
     LAMBDA_VIDEO_POOL_ENABLED: process.env['LAMBDA_VIDEO_POOL_ENABLED'] === 'true',
     LAMBDA_VIDEO_REGION: process.env['LAMBDA_VIDEO_REGION'] ?? process.env['LAMBDA_REGION'] ?? 'us-south-2',
+    LAMBDA_REGIONS: csvList(process.env['LAMBDA_REGIONS'], [process.env['LAMBDA_REGION'] ?? 'us-south-2']),
+    LAMBDA_INSTANCE_TYPES: csvList(process.env['LAMBDA_INSTANCE_TYPES'], [process.env['LAMBDA_INSTANCE_TYPE'] ?? 'gpu_1x_h100_sxm5']),
+    LAMBDA_VIDEO_REGIONS: csvList(
+      process.env['LAMBDA_VIDEO_REGIONS'],
+      [process.env['LAMBDA_VIDEO_REGION'] ?? process.env['LAMBDA_REGION'] ?? 'us-south-2'],
+    ),
+    LAMBDA_VIDEO_INSTANCE_TYPES: csvList(
+      process.env['LAMBDA_VIDEO_INSTANCE_TYPES'],
+      [process.env['LAMBDA_INSTANCE_TYPE'] ?? 'gpu_1x_h100_sxm5'],
+    ),
     LAMBDA_VIDEO_POOL_MIN: Number(process.env['LAMBDA_VIDEO_POOL_MIN'] ?? 0),
     LAMBDA_VIDEO_POOL_MAX: Number(process.env['LAMBDA_VIDEO_POOL_MAX'] ?? 1),
     LAMBDA_VIDEO_POOL_TARGET_STREAMS: Number(process.env['LAMBDA_VIDEO_POOL_TARGET_STREAMS'] ?? 8),

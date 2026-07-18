@@ -238,6 +238,26 @@ function spacedLaunchSlot(spacingMs: number): Promise<void> {
   return slot;
 }
 
+/** One spaced launch attempt (account-wide rate-limit gate applied).
+ * Throws on failure; classify with isRetryableLaunchError. */
+export async function spacedLaunch(
+  client: LambdaClient,
+  req: LaunchRequest,
+  spacingMs: number = MIN_LAUNCH_SPACING_MS,
+): Promise<string[]> {
+  await spacedLaunchSlot(spacingMs);
+  return client.launch(req);
+}
+
+/** Errors worth moving on from (next region/type or retry later): capacity
+ * misses, the account-wide launch rate limit, transient network. Anything
+ * else (auth, quota, malformed request) should surface. */
+export function isRetryableLaunchError(e: unknown): boolean {
+  if (e instanceof LambdaApiError && /insufficient-capacity/.test(e.code)) return true;
+  if (e instanceof LambdaApiError && e.status === 429) return true;
+  return isTransientNetworkError(e);
+}
+
 export async function launchWithRetry(
   client: LambdaClient,
   req: LaunchRequest,

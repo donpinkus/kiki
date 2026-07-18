@@ -21,11 +21,12 @@
  *   tsx scripts/lambda/setup-lambda.ts --region us-east-1 --type gpu_1x_h100_pcie --keep
  *
  * Run scripts/lambda/capacity.ts first to see which regions have H100 capacity.
- * Requires in .env.local: LAMBDA_API_KEY (HF_TOKEN not needed — klein is ungated).
+ * Requires in .env.local: LAMBDA_API_KEY + HF_TOKEN (FLUX.2-klein-9b-kv — the
+ * production serving model — is license-gated; base 4B is not).
  */
 
 import { spawn } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { launchWithRetry, requireClient, sleep, REPO_ROOT, type Instance } from './lambdaApi.js';
@@ -82,6 +83,20 @@ function runSsh(ip: string, cmd: string, timeoutMs = 60 * 60 * 1000): Promise<vo
       clearTimeout(t);
       code === 0 ? res() : rej(new Error(`ssh exited ${code}`));
     });
+  });
+}
+
+function runScp(ip: string, localFile: string, remotePath: string): Promise<void> {
+  const args = [
+    '-i', SSH_KEY_PATH,
+    '-o', 'StrictHostKeyChecking=no',
+    '-o', 'UserKnownHostsFile=/dev/null',
+    localFile,
+    `ubuntu@${ip}:${remotePath}`,
+  ];
+  return new Promise((res, rej) => {
+    const proc = spawn('scp', args, { stdio: ['ignore', 'inherit', 'inherit'] });
+    proc.on('exit', (code) => (code === 0 ? res() : rej(new Error(`scp exited ${code}`))));
   });
 }
 
@@ -163,7 +178,10 @@ echo "[kiki-boot] $(date -u +%FT%TZ) starting image.server"
 exec python3 -u -m image.server
 `;
 
+const HF_TOKEN = process.env['HF_TOKEN'] ?? '';
+
 const POPULATE_CMD = `set -euo pipefail
+export HF_TOKEN='${HF_TOKEN}'
 FS=${FS_ROOT}
 if [ ! -d "$FS" ]; then echo "filesystem not mounted at $FS"; ls /lambda/nfs/; exit 1; fi
 mkdir -p $FS/kiki
@@ -205,6 +223,21 @@ p = snapshot_download(
     allow_patterns=['*.json','*.safetensors','*.txt','tokenizer*/*','text_encoder*/*','transformer/*','vae/*','scheduler/*','model_index.json'],
 )
 print('base weights at', p)
+"
+
+echo "=== FLUX.2-klein-9b-kv weights (~33 GB, GATED — the PRODUCTION serving model) ==="
+# boot.sh runs FLUX_MODEL=black-forest-labs/FLUX.2-klein-9b-kv; without these
+# weights a serving instance dies at load. HF_TOKEN's account must have
+# accepted the license (Donald's whatsdonisdon has, 2026-07-17).
+python3 -c "
+import os
+from huggingface_hub import snapshot_download
+p = snapshot_download(
+    'black-forest-labs/FLUX.2-klein-9b-kv',
+    token=os.environ.get('HF_TOKEN') or None,
+    allow_patterns=['*.json','*.safetensors','*.txt','tokenizer*/*','text_encoder*/*','transformer/*','vae/*','scheduler/*','model_index.json'],
+)
+print('9b-kv weights at', p)
 "
 
 echo "=== boot.sh ==="
@@ -281,6 +314,20 @@ try {
   await runRsync(inst.ip!, resolve(REPO_ROOT, 'model-servers'), `${FS_ROOT}/kiki/app`);
   // Write boot.sh via stdin-safe heredoc (avoid quoting hell in one ssh arg)
   await runSsh(inst.ip!, `cat > ${FS_ROOT}/kiki/boot.sh <<'KIKI_BOOT_EOF'\n${BOOT_SH}KIKI_BOOT_EOF`);
+  // Fleet TLS cert → this region's filesystem (backend pins it via
+  // LAMBDA_TLS_CA_B64; boot.sh serves wss iff the cert exists).
+  {
+    const tlsDir = resolve(homedir(), '.kiki', 'lambda-tls');
+    if (existsSync(resolve(tlsDir, 'cert.pem')) && existsSync(resolve(tlsDir, 'key.pem'))) {
+      console.log('[setup] copying fleet TLS cert from ~/.kiki/lambda-tls...');
+      await runSsh(inst.ip!, `mkdir -p ${FS_ROOT}/kiki/tls`);
+      await runScp(inst.ip!, resolve(tlsDir, 'cert.pem'), `${FS_ROOT}/kiki/tls/cert.pem`);
+      await runScp(inst.ip!, resolve(tlsDir, 'key.pem'), `${FS_ROOT}/kiki/tls/key.pem`);
+      await runSsh(inst.ip!, `chmod 600 ${FS_ROOT}/kiki/tls/key.pem`);
+    } else {
+      console.log('[setup] no ~/.kiki/lambda-tls cert — instances will serve plain ws:// (dev only)');
+    }
+  }
   console.log('[setup] populating venv + weights (~10-25 min on first run)...');
   await runSsh(inst.ip!, POPULATE_CMD);
   console.log('[setup] populate complete.');

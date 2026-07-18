@@ -46,8 +46,8 @@ const pool = createInstancePool({
   // Flag off → instancePool's disabled tick DRAINS running video instances
   // within ~60s, so the kill switch also stops the billing, not just launches.
   enabled: () => videoGenerationEnabled() && config.LAMBDA_API_KEY.length > 0,
-  region: () => config.LAMBDA_VIDEO_REGION,
-  instanceType: () => config.LAMBDA_INSTANCE_TYPE,
+  regions: () => [...config.LAMBDA_VIDEO_REGIONS],
+  instanceTypes: () => [...config.LAMBDA_VIDEO_INSTANCE_TYPES],
   poolMin: () => config.LAMBDA_VIDEO_POOL_MIN,
   poolMax: () => config.LAMBDA_VIDEO_POOL_MAX,
   targetStreams: () => config.LAMBDA_VIDEO_POOL_TARGET_STREAMS,

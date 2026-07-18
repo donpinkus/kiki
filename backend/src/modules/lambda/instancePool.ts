@@ -32,7 +32,7 @@ import type { FastifyBaseLogger } from 'fastify';
 import { config } from '../../config/index.js';
 import { query } from '../../postgres/client.js';
 import { inBackgroundScope } from '../observability/scope.js';
-import { LambdaClient, launchWithRetry, lambdaSleep } from './client.js';
+import { LambdaClient, isRetryableLaunchError, lambdaSleep, spacedLaunch } from './client.js';
 
 const PORT = 8766;
 const OS_IMAGE_FAMILY = 'lambda-stack-24-04';
@@ -87,8 +87,14 @@ export interface InstancePoolSpec {
   /** Human label used in state messages ("H100" / "video H100"). */
   label: string;
   enabled: () => boolean;
-  region: () => string;
-  instanceType: () => string;
+  /** Ordered capacity-search space. The sweep is TYPE-MAJOR: for each type
+   * (best first), try every region before falling to the next type — a
+   * worse GPU anywhere is accepted ONLY after every region has been asked
+   * for the better type. Every region listed MUST have a populated
+   * `fsName(region)` filesystem (operator-managed; launching into an
+   * unpopulated region boots a dead instance). */
+  regions: () => string[];
+  instanceTypes: () => string[];
   poolMin: () => number;
   poolMax: () => number;
   targetStreams: () => number;
@@ -386,8 +392,8 @@ runcmd:
       status,
       instanceId: ready[0]?.id ?? front?.id,
       ip: ready[0]?.ip ?? front?.ip,
-      region: spec.region(),
-      instanceType: spec.instanceType(),
+      region: spec.regions()[0] ?? '',
+      instanceType: spec.instanceTypes()[0] ?? '',
       message: messages[status],
       lastError,
       launchedAtMs,
@@ -413,53 +419,100 @@ runcmd:
     launchesInFlight += 1;
     if (launchesInFlight === 1) searchStartedAtMs = Date.now();
     const name = `${spec.namePrefix}${Date.now()}`;
-    const region = spec.region();
     const searchStartMs = Date.now();
-    recordPoolEvent('launch_requested', name, region);
+    const types = spec.instanceTypes();
+    const regions = spec.regions();
+    recordPoolEvent('launch_requested', name, regions[0], undefined, `${types.length} types × ${regions.length} regions`);
     try {
       const c = client();
       const keys = await c.listSshKeys();
       const firstKey = keys[0];
       if (!firstKey) throw new Error('no SSH key registered on the Lambda account');
-      const [id] = await launchWithRetry(
-        c,
-        {
-          region_name: region,
-          instance_type_name: spec.instanceType(),
-          ssh_key_names: [firstKey.name],
-          file_system_names: [spec.fsName(region)],
-          name,
-          image: { family: OS_IMAGE_FAMILY },
-          user_data: userData(name, region),
-        },
-        LAUNCH_RETRY_MINS,
-        undefined,
-        (msg) => log.info({ pool: spec.kind, event: 'lambda_pool_launch_retry' }, msg),
-        spec.launchSpacingMs,
-      );
-      if (!id) throw new Error('Lambda launch returned no instance id');
+
+      // TYPE-MAJOR capacity sweep: circle the (type × region) grid until a
+      // cell grants capacity or the retry window expires. Attempt pacing
+      // comes from the account-wide launch spacing gate (client.ts), so
+      // multiple pools sweeping concurrently still respect Lambda's launch
+      // rate limit.
+      const deadline = Date.now() + LAUNCH_RETRY_MINS * 60_000;
+      let launched: { id: string; region: string; type: string } | null = null;
+      let lastErr: unknown = null;
+      sweep: for (;;) {
+        for (const type of types) {
+          for (const region of regions) {
+            if (!enabled() || !instancesWanted()) break sweep;
+            try {
+              const [id] = await spacedLaunch(
+                c,
+                {
+                  region_name: region,
+                  instance_type_name: type,
+                  ssh_key_names: [firstKey.name],
+                  file_system_names: [spec.fsName(region)],
+                  name,
+                  image: { family: OS_IMAGE_FAMILY },
+                  user_data: userData(name, region),
+                },
+                spec.launchSpacingMs,
+              );
+              if (!id) throw new Error('Lambda launch returned no instance id');
+              launched = { id, region, type };
+              break sweep;
+            } catch (err) {
+              lastErr = err;
+              if (!isRetryableLaunchError(err)) throw err;
+              log.info(
+                { pool: spec.kind, type, region, err: (err as Error).message, event: 'lambda_pool_launch_retry' },
+                `[launch] no ${type} in ${region} — sweeping on`,
+              );
+            }
+          }
+        }
+        if (Date.now() > deadline) {
+          throw (lastErr as Error) ?? new Error('capacity sweep window expired');
+        }
+      }
+      if (!launched) {
+        log.info({ pool: spec.kind, event: 'lambda_pool_sweep_abandoned' }, 'capacity sweep abandoned — demand gone');
+        return;
+      }
       instances.set(name, {
-        id,
+        id: launched.id,
         name,
-        region,
+        region: launched.region,
         status: 'booting',
         launchedAtMs: Date.now(),
         activeStreams: 0,
         lastActivityMs: Date.now(),
         healthFails: 0,
       });
-      log.info({ instanceId: id, name, pool: spec.kind, event: 'lambda_pool_launched' }, `launched ${spec.namePrefix} instance`);
-      // duration = how long the capacity search took (launch API retries).
-      recordPoolEvent('launched', name, region, Date.now() - searchStartMs);
+      log.info(
+        { instanceId: launched.id, name, type: launched.type, region: launched.region, pool: spec.kind, event: 'lambda_pool_launched' },
+        `launched ${spec.namePrefix} instance`,
+      );
+      // duration = capacity-search time; detail = which (type, region) won.
+      recordPoolEvent('launched', name, launched.region, Date.now() - searchStartMs, `${launched.type}@${launched.region}`);
       await watchBoot(name);
     } catch (err) {
       lastError = (err as Error).message;
       log.error({ err, pool: spec.kind, event: 'lambda_pool_launch_failed' }, 'lambda pool launch failed');
-      recordPoolEvent('launch_failed', name, region, Date.now() - searchStartMs, (err as Error).message);
+      recordPoolEvent('launch_failed', name, regions[0], Date.now() - searchStartMs, (err as Error).message);
     } finally {
       launchesInFlight -= 1;
       if (launchesInFlight === 0) searchStartedAtMs = 0;
     }
+  }
+
+  /** Mid-sweep demand check: keep hunting only while something would still
+   * use the instance (active streams, a floor, or fresh interest). Without
+   * this, a long sweep started by a since-departed user keeps buying GPUs. */
+  function instancesWanted(): boolean {
+    const totalStreams = [...instances.values()].reduce((a, i) => a + i.activeStreams, 0);
+    return (
+      totalStreams > 0 ||
+      spec.poolMin() > 0 ||
+      Date.now() - lastInterestMs < INTEREST_WINDOW_MS
+    );
   }
 
   /** True boot-start epoch: the name suffix IS the launch timestamp
