@@ -15,7 +15,7 @@ Running notebook of things FLUX.2-klein-4B can do that Kiki isn't currently usin
 - Pipeline: diffusers `Flux2KleinPipeline`
 - Mode in use: single-reference img2img (sketch VAE-encoded, concatenated as reference tokens)
 - LoRAs: none
-- Hardware: RTX 5090 spot (Blackwell, SM 10+). Revertable via `IMAGE_PROVIDER=runpod`.
+- Hardware: RTX 5090 spot (Blackwell, SM 10+). (No longer revertable — the RunPod system was removed 2026-07-17; the self-hosted path is now FLUX.2-klein-9B-KV on Lambda Cloud H100.)
 
 ## Architectural facts about klein (shared between 4B and 9B)
 

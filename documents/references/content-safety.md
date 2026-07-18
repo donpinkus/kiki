@@ -31,8 +31,8 @@ Content safety is infrastructure, not a feature. Must be operational before any 
 ## Privacy Commitments (must be in consent screen)
 
 1. Sketches and prompts are sent to our server for AI processing
-2. Our server forwards them to fal.ai's hosted FLUX.2-klein model for image generation (the inference provider to disclose under guideline 5.1.2(i); video idle-state animation runs on RunPod)
-3. Sketch data is deleted after processing — not stored or used for training
+2. Our server forwards them to our own FLUX.2-klein servers hosted on Lambda Cloud, or to fal.ai's hosted FLUX.2-klein model as fallback (providers to disclose under guideline 5.1.2(i); video idle-state animation is archived pending a Lambda port — no RunPod)
+3. A throttled sample of sketches and generated images **is stored server-side** for admin review/replay (owner decision 2026-07-15 — see CLAUDE.md constraint #6; retained ≤ `CAPTURE_RETENTION_DAYS` = 14 days), and is not used for training. The privacy policy + App Store data-collection disclosure MUST state this before any external build.
 4. Generated images cached for up to 7 days for re-download
 5. Your Apple sign-in identifier and email (or an Apple private-relay address, if you choose Hide My Email) are stored to manage your account. (Sign in requests the `.email` scope as of 2026-06-06; Apple returns it only on first authorization.)
 6. Link to full privacy policy

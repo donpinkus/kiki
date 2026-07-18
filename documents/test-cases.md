@@ -2,17 +2,17 @@
 
 High-level UX expectations for the app. Each test describes what the user should experience — not implementation details. If any of these break, it's a regression.
 
-Last updated: 2026-04-19
+Last updated: 2026-07-18 (rewritten for the fal + Lambda H100 provider architecture; pod-provisioning-era tests replaced)
 
 ---
 
 ## App Launch & Connection
 
-1. **Cold start provisioning.** User opens the app for the first time (or after a long idle). On the drawing canvas page, the 'generated image' pane shows a warm-up progress bar with status messages (e.g. "Reserving GPU...", "Pulling container image...", "Loading AI model..."). The user can start drawing immediately — the canvas is fully responsive during provisioning. Once the pod is ready, the first generated image appears automatically without any user action.
+1. **Cold start.** User opens the app for the first time (or after a long idle). Entering a drawing starts the stream automatically; while the image provider warms up, the result pane shows an honest connecting/warm-up state — never a blank pane or silent dead state. The user can start drawing immediately — the canvas is fully responsive during warm-up. Once the provider is ready, the first generated image appears automatically without any user action.
 
-2. **Warm reconnection.** User closes and reopens the app within 30 minutes. The existing pod is reused — no provisioning delay. Generation resumes immediately.
+2. **Warm reconnection.** User closes and reopens the app shortly after. Generation resumes quickly with no cold-start wait (the fal keep-warm pinger and/or a running H100 pool instance keep the first stroke fast).
 
-3. **Gallery pre-warming.** When the user is on the gallery page, the GPU pod is already provisioning in the background. By the time they tap into a drawing, the pod may already be ready.
+3. **AI readiness visibility.** The "Kiki's AI" status badge shows ambient H100-pool readiness, with a detail popover. When the pool is asleep, the badge shows a distinct "asleep" state with a **Wake up** action that starts pool warm-up before the user commits to drawing.
 
 ---
 
@@ -42,7 +42,7 @@ Last updated: 2026-04-19
 
 13. **Never blank after first image.** Once the first successful generated image appears, the right pane never shows a blank/empty state — even during errors, reconnections, or provisioning. The last successful image stays visible.
 
-14. **Result layouts.** Settings → Display toggles between **Split** (fixed result pane on the left half) and **Fullscreen** (the result floats as an image-only panel over the canvas). The choice persists across launches.
+14. **Result layouts.** Settings → Display toggles between **Overlay** (the default — generated image locked opaque exactly on top of the canvas, transforming with it; fresh strokes flash on a visual-only surface and clear on each returned frame), **Split** (fixed result pane on the left half), and **Fullscreen** (the result floats as an image-only panel over the canvas). The choice persists across launches.
 
 15. **Error toast.** If generation fails, a non-blocking error toast appears at the bottom of the result pane. It auto-dismisses after 10 seconds. The last successful image remains visible behind it.
 
@@ -64,15 +64,15 @@ Last updated: 2026-04-19
 
 20. **Upstream drop mid-session.** If the image provider connection drops mid-session (fal pool churn, network blip), the backend reconnects transparently. The user may see a brief interruption in generation but the app does not crash, freeze, or show a permanent error. Generation resumes automatically.
 
-21. **Pod provisioning failure.** If pod provisioning fails (no GPU capacity, container pull timeout, etc.), the app retries automatically with exponential backoff. The user sees provisioning status messages during retry, not a dead "Connecting..." state.
+21. **Provider failure mid-session.** If an H100 pool instance dies mid-session (auto mode), the session degrades to fal transparently — frames keep flowing. The user never lands in a dead "Connecting..." state; explicit `?imageProvider=` test-account overrides never silently switch provider.
 
-22. **Idle timeout.** If the user leaves the app idle for more than 30 minutes, the pod is terminated to save cost. When the user returns and starts drawing, a new pod is provisioned automatically. The user sees the warm-up progress bar again.
+22. **Idle timeout.** Idle costs are bounded invisibly: the fal socket closes shortly after the last frame and reopens on the next stroke, and idle H100 pool instances scale down after ~30 minutes. A user returning after a long idle can draw immediately and generation resumes automatically (possibly served by fal while the pool warms).
 
-23. **App background/foreground.** Backgrounding the app stops the stream cleanly. Foregrounding resumes it — reusing the existing pod if within the 30-minute idle window, or provisioning a new one if not.
+23. **App background/foreground.** Backgrounding the app stops the stream cleanly. Foregrounding resumes it automatically — the user just keeps drawing; at most a brief warm-up state appears.
 
-24. **Network interruption.** If the network drops briefly during drawing, the app reconnects automatically (up to 5 attempts with backoff). The pod stays alive during the interruption. Once reconnected, generation resumes from the current canvas state.
+24. **Network interruption.** If the network drops briefly during drawing, the app reconnects automatically (up to 5 attempts with backoff). Once reconnected, generation resumes from the current canvas state.
 
-25. **Backend redeploy.** If the Railway backend redeploys while the user is connected, the WebSocket drops and the app reconnects to the new backend instance. The existing pod is reused if still alive.
+25. **Backend redeploy.** If the Railway backend redeploys while the user is connected, the WebSocket drops and the app reconnects to the new backend instance. Generation resumes on a fresh provider session.
 
 ---
 
