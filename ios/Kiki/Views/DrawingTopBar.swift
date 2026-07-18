@@ -47,6 +47,11 @@ struct DrawingTopBar: View {
                             }
                         }
                     }
+                    if let animationURL = coordinator.generatedAnimationURL {
+                        Button("Animation (MP4)") {
+                            shareItem = ShareItem(url: animationURL)
+                        }
+                    }
                 }
                 if coordinator.canShareVideo {
                     Section("Share video") {

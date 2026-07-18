@@ -1351,7 +1351,14 @@ final class AppCoordinator {
     /// Stitch the current drawing's recorded segments into a playable
     /// composition for the replay modal's instant preview (no encode pass —
     /// the player renders layout + speed live).
-    func buildReplayComposition(layout: ReplayLayout, speed: ReplaySpeed) async -> SideBySideVideoComposer.BuiltReplay? {
+    /// URL of this drawing's generated animation, when one has been saved.
+    /// Backs the Share menu's "Animation (MP4)" item and the replay modal's
+    /// animation-tail toggle.
+    var generatedAnimationURL: URL? {
+        currentDrawingId.flatMap { RecordingStore.shared.generatedVideoURL(for: $0) }
+    }
+
+    func buildReplayComposition(layout: ReplayLayout, speed: ReplaySpeed, animationTail: Bool = true) async -> SideBySideVideoComposer.BuiltReplay? {
         guard let drawingId = currentDrawingId else { return nil }
         let segments = RecordingStore.shared.segmentURLs(for: drawingId)
         guard !segments.canvas.isEmpty else {
@@ -1369,7 +1376,8 @@ final class AppCoordinator {
                 generatedSegments: segments.generated,
                 generatedVideoURL: RecordingStore.shared.generatedVideoURL(for: drawingId),
                 layout: layout,
-                speed: speed
+                speed: speed,
+                animationTail: animationTail
             )
             Log.info("replay.built", attributes: [
                 "event": "replay.built",
@@ -1394,8 +1402,8 @@ final class AppCoordinator {
     /// burned). Writes a fresh file in its own temp dir (so a preview player
     /// never reads a file being overwritten), named "Speed Paint.mp4" for a
     /// clean Save-to-Files name.
-    func composeReplay(layout: ReplayLayout, speed: ReplaySpeed, watermark: Bool) async -> URL? {
-        guard let built = await buildReplayComposition(layout: layout, speed: speed) else { return nil }
+    func composeReplay(layout: ReplayLayout, speed: ReplaySpeed, watermark: Bool, animationTail: Bool = true) async -> URL? {
+        guard let built = await buildReplayComposition(layout: layout, speed: speed, animationTail: animationTail) else { return nil }
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let output = dir.appendingPathComponent("Speed Paint.mp4")
         do {

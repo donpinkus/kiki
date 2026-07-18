@@ -43,6 +43,9 @@ struct SpeedPaintReplayView: View {
 
     @State private var layout: ReplayLayout = .vertical
     @State private var speed: SpeedChoice = .fit12
+    /// End the replay with the drawing's generated animation instead of the
+    /// 3s freeze frame (only offered when an animation exists).
+    @State private var animationTail = true
     @State private var watermark = true
     @State private var isComposing = false
     @State private var hasPreview = false
@@ -79,6 +82,12 @@ struct SpeedPaintReplayView: View {
 
                 Toggle(isOn: $watermark) {
                     Label("“Drawn with Kiki” watermark", systemImage: "sparkles")
+                }
+
+                if coordinator.generatedAnimationURL != nil {
+                    Toggle(isOn: $animationTail) {
+                        Label("End with the animation", systemImage: "film")
+                    }
                 }
 
                 VStack(spacing: 12) {
@@ -210,7 +219,7 @@ struct SpeedPaintReplayView: View {
     private func rebuildPreview() async {
         isComposing = true
         defer { isComposing = false }
-        guard let built = await coordinator.buildReplayComposition(layout: layout, speed: speed.composerSpeed) else {
+        guard let built = await coordinator.buildReplayComposition(layout: layout, speed: speed.composerSpeed, animationTail: animationTail) else {
             // Only alert if we never managed to compose anything — a re-compose
             // failure (layout/speed change) keeps showing the previous video.
             if !hasPreview {
@@ -327,7 +336,7 @@ struct SpeedPaintReplayView: View {
         exportTask?.cancel()
         exportTaskKey = key
         exportTask = Task { @MainActor in
-            let url = await coordinator.composeReplay(layout: layout, speed: speed.composerSpeed, watermark: watermark)
+            let url = await coordinator.composeReplay(layout: layout, speed: speed.composerSpeed, watermark: watermark, animationTail: animationTail)
             if let url, !Task.isCancelled {
                 exportedURL = url
                 exportedKey = key
@@ -359,7 +368,7 @@ struct SpeedPaintReplayView: View {
                 url = await task.value
             } else {
                 exportTask?.cancel()
-                url = await coordinator.composeReplay(layout: layout, speed: speed.composerSpeed, watermark: watermark)
+                url = await coordinator.composeReplay(layout: layout, speed: speed.composerSpeed, watermark: watermark, animationTail: animationTail)
             }
             guard let url else {
                 statusMessage = "Couldn't export the replay — try again."
