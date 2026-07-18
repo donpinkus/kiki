@@ -204,6 +204,22 @@ export const getConnections = (source: SourceFilter) =>
     `/admin/api/ops/connections${source === 'all' ? '' : `?source=${source}`}`,
   );
 
+export interface VideoFlagStatus {
+  schemaReady: boolean;
+  seeded: boolean;
+  config: { enabled: boolean };
+  updatedAt: string | null;
+}
+
+export const getVideoFlag = () => api<VideoFlagStatus>('/admin/api/ops/video');
+
+export const putVideoFlag = (enabled: boolean) =>
+  api<{ ok: boolean; config: { enabled: boolean } }>('/admin/api/ops/video', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled }),
+  });
+
 export const putWarmer = (config: WarmerConfig) =>
   api<{ ok: boolean; config: WarmerConfig }>('/admin/api/ops/warmer', {
     method: 'PUT',

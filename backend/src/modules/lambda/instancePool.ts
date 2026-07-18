@@ -501,7 +501,25 @@ runcmd:
   // ── periodic tick: autoscale + idle scale-down + health ─────────────────
 
   async function tick(): Promise<void> {
-    if (!enabled()) return;
+    if (!enabled()) {
+      // DRAIN, don't just idle: a pool disabled at runtime (Insights feature
+      // flag, env flip) must not leave instances running — with the tick's
+      // normal path off, nothing else would ever reap them and they'd bill
+      // until someone noticed. Registry adoption still runs at start() (key
+      // permitting), so even instances from before a redeploy get drained.
+      if (config.LAMBDA_API_KEY && instances.size > 0) {
+        for (const inst of [...instances.values()]) {
+          log.info(
+            { name: inst.name, instanceId: inst.id, pool: spec.kind, event: 'lambda_pool_disabled_terminate' },
+            'pool disabled — terminating instance',
+          );
+          recordPoolEvent('disabled_terminate', inst.name, inst.region);
+          instances.delete(inst.name);
+          void client().terminate([inst.id]).catch(() => {});
+        }
+      }
+      return;
+    }
 
     // Health-check ready instances (parallel, bounded by instance count).
     await Promise.all(
@@ -569,13 +587,20 @@ runcmd:
 
   function start(logger: FastifyBaseLogger): void {
     log = logger;
-    if (!enabled()) {
-      logger.info(`lambda ${spec.kind} pool disabled`);
+    // The tick timer runs even while disabled: enabled() is re-read every
+    // tick, so a runtime flag flip (Insights) takes effect within ~60s in
+    // BOTH directions — on → adopt/launch, off → drain (see tick()).
+    tickTimer = setInterval(() => void inBackgroundScope(scopeName, () => tick()), TICK_MS);
+    if (!config.LAMBDA_API_KEY) {
+      logger.info(`lambda ${spec.kind} pool: no LAMBDA_API_KEY — inert`);
       return;
     }
-    tickTimer = setInterval(() => void inBackgroundScope(scopeName, () => tick()), TICK_MS);
+    if (!enabled()) {
+      logger.info(`lambda ${spec.kind} pool disabled (drain-only)`);
+    }
     // Adopt instances surviving a redeploy: register as booting; the boot
-    // watcher promotes them to ready via /health (usually instantly).
+    // watcher promotes them to ready via /health (usually instantly). Runs
+    // even when disabled so leftover instances are found and drained.
     void inBackgroundScope(scopeName, async () => {
       try {
         const existing = (await client().listInstances()).filter(

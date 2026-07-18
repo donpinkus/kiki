@@ -343,7 +343,10 @@ try {
     console.log('[setup-video] no ~/.kiki/lambda-tls cert found — instances will serve plain ws:// (dev only)');
   }
   console.log('[setup-video] populating venv + weights (~20-40 min on first run; ~70 GB of downloads)...');
-  await runSsh(inst.ip!, POPULATE_CMD);
+  // 3.5h ceiling: the venv (torch → NFS) + ~70 GB of weights are pure-IO
+  // bound on NFS write throughput — the default 1h ceiling killed a real
+  // populate mid-torch-install (2026-07-18).
+  await runSsh(inst.ip!, POPULATE_CMD, 3.5 * 60 * 60 * 1000);
   if (SKIP_SMOKE) {
     console.log('[setup-video] --skip-smoke: not running the on-instance pipeline smoke test');
   } else {

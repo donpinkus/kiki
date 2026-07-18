@@ -47,6 +47,8 @@ function warmerStateNow(cfg: WarmerConfig | null): { label: string; cls: string 
 
 export function Ops() {
   const [status, setStatus] = useState<WarmerStatus | null>(null);
+  const [videoFlag, setVideoFlag] = useState<{ enabled: boolean; updatedAt: string | null } | null>(null);
+  const [videoSaving, setVideoSaving] = useState(false);
   const [connections, setConnections] = useState<ConnectionRow[]>([]);
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>('all');
   const [form, setForm] = useState<WarmerConfig | null>(null);
@@ -68,6 +70,31 @@ export function Ops() {
     const t = setInterval(load, 30_000);
     return () => clearInterval(t);
   }, []);
+
+  useEffect(() => {
+    const loadVideo = () =>
+      getVideoFlag()
+        .then((v) => setVideoFlag({ enabled: v.config.enabled, updatedAt: v.updatedAt }))
+        .catch((e) => setError(String(e)));
+    loadVideo();
+    const t = setInterval(loadVideo, 30_000);
+    return () => clearInterval(t);
+  }, []);
+
+  const toggleVideo = async () => {
+    if (!videoFlag || videoSaving) return;
+    setVideoSaving(true);
+    setError(null);
+    try {
+      const next = !videoFlag.enabled;
+      await putVideoFlag(next);
+      setVideoFlag({ enabled: next, updatedAt: new Date().toISOString() });
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setVideoSaving(false);
+    }
+  };
 
   useEffect(() => {
     const loadConns = () =>
@@ -113,6 +140,35 @@ export function Ops() {
 
   return (
     <div className="container">
+      <div className="section-title">Video generation (LTX idle-state animation)</div>
+      <div className="stat-row">
+        <div className="stat">
+          <div className="label">Video generation</div>
+          <div className="value">
+            <span className={`pill ${videoFlag?.enabled ? 'warm' : 'fail'}`}>
+              {videoFlag ? (videoFlag.enabled ? 'enabled' : 'disabled') : 'loading…'}
+            </span>
+          </div>
+          <div className="sub">
+            {videoFlag?.enabled
+              ? 'video H100s launch on demand; animation UX visible in-app'
+              : 'no video H100s will spin up (running ones drain in ~60s); animation UX hidden in-app'}
+          </div>
+        </div>
+        <div className="stat">
+          <div className="label">Kill switch</div>
+          <div className="value">
+            <button className="btn" onClick={toggleVideo} disabled={!videoFlag || videoSaving}>
+              {videoSaving ? 'saving…' : videoFlag?.enabled ? 'Disable video' : 'Enable video'}
+            </button>
+          </div>
+          <div className="sub">
+            backend applies within ~60s
+            {videoFlag?.updatedAt ? ` · last changed ${fmtAgo(videoFlag.updatedAt)}` : ''}
+          </div>
+        </div>
+      </div>
+
       <div className="section-title">fal keep-warm — last 24h</div>
       <div className="stat-row">
         <div className="stat">

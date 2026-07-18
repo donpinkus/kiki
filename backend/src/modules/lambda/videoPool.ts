@@ -33,6 +33,7 @@
 
 import type { FastifyBaseLogger } from 'fastify';
 import { config } from '../../config/index.js';
+import { videoGenerationEnabled } from '../video/videoFlag.js';
 import { createInstancePool } from './instancePool.js';
 
 export type { DevPoolState, DevPoolStatusKind } from './instancePool.js';
@@ -42,7 +43,10 @@ const pool = createInstancePool({
   namePrefix: 'kiki-video-',
   fsName: (region) => `kiki-video-${region}`,
   label: 'video H100',
-  enabled: () => config.LAMBDA_VIDEO_POOL_ENABLED && config.LAMBDA_API_KEY.length > 0,
+  // Env opt-in AND the runtime Insights flag (admin_config.video_generation).
+  // Flag off → instancePool's disabled tick DRAINS running video instances
+  // within ~60s, so the kill switch also stops the billing, not just launches.
+  enabled: () => videoGenerationEnabled() && config.LAMBDA_API_KEY.length > 0,
   region: () => config.LAMBDA_VIDEO_REGION,
   instanceType: () => config.LAMBDA_INSTANCE_TYPE,
   poolMin: () => config.LAMBDA_VIDEO_POOL_MIN,
@@ -66,7 +70,7 @@ export const getState = pool.getState;
 /** True when the video pool is configured on (used by stream.ts to decide
  * whether to create a pool-backed VideoSession at all). */
 export function poolEnabled(): boolean {
-  return config.LAMBDA_VIDEO_POOL_ENABLED && config.LAMBDA_API_KEY.length > 0;
+  return videoGenerationEnabled() && config.LAMBDA_API_KEY.length > 0;
 }
 
 export function start(logger: FastifyBaseLogger): void {

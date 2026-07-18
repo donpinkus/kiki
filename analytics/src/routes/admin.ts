@@ -864,6 +864,45 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
       return { ok: true, config: value };
     });
 
+    // ─── Ops: video-generation kill switch ─────────────────────────────────
+    // The backend polls `admin_config.video_generation` every 60s
+    // (modules/video/videoFlag.ts): off → the video pool DRAINS its H100s
+    // (billing stops) and the iPad hides all animation UX; on → restored
+    // within one poll+tick cycle. No backend redeploy needed.
+    gated.get('/admin/api/ops/video', async () => {
+      try {
+        const cfg = await query(
+          `SELECT value, updated_at FROM admin_config WHERE key = 'video_generation'`,
+        );
+        const row = cfg.rows[0] as { value?: { enabled?: boolean }; updated_at?: string } | undefined;
+        return {
+          schemaReady: true,
+          seeded: row !== undefined,
+          config: { enabled: row?.value?.enabled === true },
+          updatedAt: row?.updated_at ?? null,
+        };
+      } catch (err) {
+        if ((err as { code?: string }).code === '42P01') {
+          return { schemaReady: false, seeded: false, config: { enabled: false }, updatedAt: null };
+        }
+        throw err;
+      }
+    });
+
+    gated.put('/admin/api/ops/video', async (request, reply) => {
+      const b = (request.body ?? {}) as Record<string, unknown>;
+      if (typeof b['enabled'] !== 'boolean') {
+        return reply.code(400).send({ error: 'expected {enabled: bool}' });
+      }
+      const value = { enabled: b['enabled'] };
+      await query(
+        `INSERT INTO admin_config (key, value) VALUES ('video_generation', $1)
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+        [JSON.stringify(value)],
+      );
+      return { ok: true, config: value };
+    });
+
     // Serve blob assets (admin-gated; SPA <img> sends the cookie same-origin).
     gated.get('/blobs/*', async (request, reply) => {
       const key = (request.params as Record<string, string>)['*'];
