@@ -1291,11 +1291,12 @@ final class AppCoordinator {
         Task.detached {
             if let urls = await recorder.finish() {
                 Self.appendSegmentReporting(canvasTemp: urls.canvas, generatedTemp: urls.generated, for: drawingId)
-                // Session over, no replay UI can be reading the files — keep
-                // the per-drawing segment count bounded across sessions.
-                if RecordingStore.shared.segmentURLs(for: drawingId).canvas.count >= 4 {
-                    await Self.consolidateReporting(for: drawingId)
-                }
+                // Deliberately NO consolidation here: stopStream also fires
+                // when the app backgrounds WHILE the replay modal is open,
+                // and consolidation deletes the files the on-screen preview
+                // composition is reading. The pre-modal flush consolidates,
+                // which is the only moment it matters — segments merely
+                // accumulate on disk until then.
             }
             await MainActor.run { UIApplication.shared.endBackgroundTask(bgTask) }
         }

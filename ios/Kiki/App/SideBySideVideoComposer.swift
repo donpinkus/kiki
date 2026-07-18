@@ -198,11 +198,11 @@ enum SideBySideVideoComposer {
 
         // Speed: scale only the content range to 1/multiplier of its
         // duration; the tail segments after it shift left and stay real-time.
-        // The scaled duration is SNAPPED to the output 30 fps frame grid —
-        // AVAssetExportSession silently truncates everything from the first
-        // tail boundary that falls off the output grid (empirical, verified
-        // in the Mac harness across 8 scenarios), so the content must end
-        // exactly on an output frame. The snap stretches content ≤ 17 ms.
+        // The scaled duration is snapped to the output 30 fps frame grid so
+        // the content→tail boundary lands on an output frame (hygiene — the
+        // export-truncation bug this originally chased turned out to be the
+        // composition-trick tail, fixed above; the snap stretches ≤ 17 ms
+        // and keeps boundaries clean, so it stays).
         let targetSeconds = baseDuration.seconds / effectiveMultiplier
         let contentDuration = CMTime(value: CMTimeValue(max(Int((targetSeconds * 30).rounded()), 1)), timescale: 30)
         if contentDuration != baseDuration {
@@ -277,6 +277,10 @@ enum SideBySideVideoComposer {
         let duration = try await asset.load(.duration)
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
+        // Exact-time extraction — the default infinite tolerance may return a
+        // much earlier frame, and this image becomes the 3s freeze-hold.
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .positiveInfinity
         let target = CMTime(seconds: max(duration.seconds - 0.05, 0), preferredTimescale: 600)
         return try await generator.image(at: target).image
     }

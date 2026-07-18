@@ -120,11 +120,15 @@ struct RecordingStore {
         try await Self.concatenate(segments.canvas, to: tmpCanvas)
         try await Self.concatenate(segments.generated, to: tmpGenerated)
         let fm = FileManager.default
-        for url in segments.canvas + segments.generated {
+        // Swap order is duplicate-over-loss: atomically replace the index-0
+        // pair FIRST, then delete the extras. A crash mid-swap leaves index 0
+        // holding everything plus stale 1..N (footage repeats once, and the
+        // next consolidation collapses it) — never an empty store.
+        _ = try fm.replaceItemAt(canvasURL(drawingId, 0), withItemAt: tmpCanvas)
+        _ = try fm.replaceItemAt(generatedURL(drawingId, 0), withItemAt: tmpGenerated)
+        for url in segments.canvas.dropFirst() + segments.generated.dropFirst() {
             try? fm.removeItem(at: url)
         }
-        try fm.moveItem(at: tmpCanvas, to: canvasURL(drawingId, 0))
-        try fm.moveItem(at: tmpGenerated, to: generatedURL(drawingId, 0))
     }
 
     /// Concatenate same-codec MP4s into one file without re-encoding.
