@@ -212,7 +212,12 @@ async function tick(logger: FastifyBaseLogger): Promise<void> {
 }
 
 export function start(logger: FastifyBaseLogger): void {
-  if (config.IMAGE_PROVIDER !== 'fal' || !config.FAL_KEY) return;
+  // Run under 'auto' too: fal is auto-mode's fallback (pool cold / instance
+  // death mid-session), and a cold fal pool means ~2-6 min of silently
+  // dropped frames exactly when sessions get downgraded onto it — measured
+  // in the 2026-07-18 induced-death soak. Only a hard IMAGE_PROVIDER=lambda
+  // (no fal in the serving path at all) skips the warmer.
+  if ((config.IMAGE_PROVIDER !== 'fal' && config.IMAGE_PROVIDER !== 'auto') || !config.FAL_KEY) return;
   void inBackgroundScope('fal_warmer', () => tick(logger));
   tickTimer = setInterval(() => void inBackgroundScope('fal_warmer', () => tick(logger)), TICK_MS);
   tickTimer.unref?.();

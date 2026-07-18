@@ -179,7 +179,9 @@ const start = async () => {
     await migrate();
     app.log.info('Postgres connected and schema applied');
 
-    // Keep the fal realtime pool warm (no-op unless IMAGE_PROVIDER=fal).
+    // Keep the fal realtime pool warm (no-op unless IMAGE_PROVIDER=fal or
+    // 'auto' — fal is auto-mode's fallback and must not be cold when the
+    // H100 pool degrades a session onto it).
     startFalWarmer(app.log);
     // Lambda dev pool idle-reaper + redeploy re-adoption (no-op unless
     // LAMBDA_DEV_POOL_ENABLED). Instance launch happens on demand via
