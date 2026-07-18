@@ -14,6 +14,18 @@ Record implementation decisions here as they are made. Newest first. This preven
 
 ---
 
+### 2026-07-18 — Video idle-state animation returns on a DEDICATED Lambda H100, triggered by a backend 3s-idle timer
+
+**Context:** Owner asked to rebuild the video generation feature (removed with RunPod 2026-07-17, archived in `archive/video-ltx/`) on the new Lambda H100 infrastructure, as a proof of concept: image generation always has priority; a video of the user's drawing generates after 3 s of drawing inactivity.
+
+**Decision:** (1) Video runs on its **own** H100 (`kiki-video-*` instances, `kiki-video-<region>` filesystem) — separate venv, separate weights, separate GPU. This is forced by memory (LTX 22B FP8 + Gemma ≈ 46 GiB resident vs the image server's ~37 GiB — they don't fit together on 80 GB) and independently desired for priority isolation: image latency cannot be affected by video work it never shares hardware with. The video fleet will scale much more slowly than the image fleet (one-shot ~15-30 s jobs, many users per instance). (2) The trigger moved from the RunPod-era pod-side `queueEmpty` signal to a **backend-side 3 s idle timer** (`VIDEO_IDLE_TRIGGER_MS`) armed on every incoming sketch frame — provider-agnostic (works over fal AND lambda image paths), animates the newest generated image, waits for the final in-flight generation when the timer beats it, fires once per idle period, cancels on drawing resume. (3) POC topology is one static instance behind `LAMBDA_VIDEO_URL` (env presence = feature gate); pool-ification and metering are deliberately deferred until the POC validates quality/latency.
+
+**Alternatives considered:** Sharing the image-pool H100s under a priority scheduler (rejected — models don't co-fit in VRAM, and even with a smaller video model the tail-latency risk to the sacred drawing loop isn't worth it); keeping the `queueEmpty` trigger (rejected — only exists on our own image server, and 3 s-idle is the actual product semantic); building the pool manager now (rejected — POC first, the devPool pattern ports mechanically).
+
+**Consequences:** New env vars `LAMBDA_VIDEO_URL` (+ optional `VIDEO_IDLE_TRIGGER_MS`); `model-servers/video/` is live code again (token-gated `/ws`, wss via the shared fleet cert — one `LAMBDA_TLS_CA_B64` pin covers both fleets); `model-servers/requirements-video.txt` defines the separate video venv; iOS needed zero changes (the `video_*` message contract is byte-identical). The archived RunPod serving code in `archive/video-ltx/video/` is now superseded by `model-servers/video/`; the archive's docs remain the deep reference. LTX-2 license caveat unchanged. Live H100 validation still pending (`documents/plans/lambda-video-provider.md` runbook).
+
+---
+
 ### 2026-07-17 — Remove RunPod orchestration + PostHog; Kiki Insights is the analytics store
 
 **Context:** The production image path moved to fal.ai on 2026-06-06 and the Lambda Cloud H100 path became the in-progress self-hosted alternative; the RunPod image path had been dormant for six weeks and the LTX video idle-state was off. PostHog had been fully shadowed by Kiki Insights (every event dual-written) since 2026-06. Owner asked for a cleanup pass: eliminate RunPod entirely, archive what a future Lambda video port needs, drop PostHog, keep Sentry.

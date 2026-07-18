@@ -28,3 +28,23 @@ tsx scripts/lambda/instances.ts --terminate-all
 
 Generated frames from the bench land in `scripts/lambda/out/` for eyeballing
 adherence (input sketch: `test-sketch.jpg`, override with `--image`).
+
+## Video (LTX-2.3 idle-state animation, dedicated H100)
+
+The video path runs on its own filesystem (`kiki-video-<region>`) and its own
+`kiki-video-*` instances — never shared with the image pool (models don't fit
+on one 80 GB card together, and image latency must never contend with video).
+Architecture + full runbook: `documents/plans/lambda-video-provider.md`.
+
+```bash
+# One-time per region: filesystem + video venv + LTX/Gemma weights + boot.sh
+# (requires HF_TOKEN in .env.local — Gemma is license-gated)
+tsx scripts/lambda/setup-lambda-video.ts --region us-south-2 --retry-mins 30
+
+# Launch the serving instance; prints LAMBDA_VIDEO_URL for the backend
+tsx scripts/lambda/launch-video.ts --region us-south-2 --retry-mins 30
+
+# List / stop ($4.29/hr while up!)
+tsx scripts/lambda/launch-video.ts --list
+tsx scripts/lambda/launch-video.ts --terminate
+```

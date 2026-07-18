@@ -1,0 +1,41 @@
+# Video (LTX-2.3) server requirements — self-contained list for the dedicated
+# Lambda video instance's venv (built by backend/scripts/lambda/setup-lambda-video.ts
+# on the kiki-video-<region> filesystem). The video venv is SEPARATE from the
+# image venv: different diffusion stack (ltx-pipelines vs diffusers), different
+# filesystem, dedicated GPU.
+#
+# Torch + torchvision are installed by the setup script (torch==2.9.1 cu128,
+# same pin as the image path so behavior is comparable), not listed here.
+
+# ─── LTX-2.3 via Lightricks' official packages ──────────────────────────────
+# Lightricks doesn't publish to PyPI. Install from the LTX-2 monorepo, pinned
+# to a specific SHA so model loading doesn't break on upstream main churn.
+# Both packages must be present — ltx-pipelines depends on ltx-core.
+# License: LTX-2 Community License Agreement (NOT Apache-2.0). Verify before
+# any commercial deployment.
+ltx-core @ git+https://github.com/Lightricks/LTX-2.git@41d924371612b692c0fd1e4d9d94c3dfb3c02cb3#subdirectory=packages/ltx-core
+ltx-pipelines @ git+https://github.com/Lightricks/LTX-2.git@41d924371612b692c0fd1e4d9d94c3dfb3c02cb3#subdirectory=packages/ltx-pipelines
+
+# transformers>=4.52 required by ltx-core (Gemma-3 text encoder).
+transformers>=4.52,<5
+accelerate>=0.28.0,<2
+sentencepiece>=0.2.0
+safetensors>=0.4.0
+huggingface-hub>=0.25.0
+
+# MP4 encoder uses imageio-ffmpeg (bundled static ffmpeg, ~30 MB).
+# ltx-pipelines exposes a PyAV-based encode_video() but its API expects a
+# tensor iterator, file path, and pre-computed video_chunks_number — different
+# shape than our streamed-then-muxed output. Our _encode_mp4 has been hardened
+# (tempfile output, ffmpeg 7.x compatible).
+imageio-ffmpeg>=0.4.9
+
+# ─── Server ─────────────────────────────────────────────────────────────────
+fastapi>=0.108.0
+uvicorn[standard]>=0.25.0
+websockets>=12.0
+Pillow>=10.0.0
+
+# Sentry — structured logs + error tracking. 2.35.0+ for enable_logs /
+# LoggingIntegration.sentry_logs_level. No-op when SENTRY_DSN_POD is unset.
+sentry-sdk>=2.35.0

@@ -21,6 +21,7 @@ import {
   reportFailure as poolReportFailure,
 } from '../modules/lambda/devPool.js';
 import { trackSessionClosed, trackProviderSession } from '../modules/analytics/index.js';
+import { VideoSession } from '../modules/video/videoSession.js';
 
 /**
  * WebSocket relay from the iPad to the image provider (fal hosted realtime,
@@ -156,6 +157,12 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       };
       let clientDisconnected = false;
       const sessionStartMs = Date.now();
+      // Video idle-state animation (LTX-2.3 on a dedicated Lambda H100).
+      // Best-effort side-channel: created only when LAMBDA_VIDEO_URL is set;
+      // fed sketch/generated/config events and fires a video_request 3s
+      // after the last sketch frame. Never touches the image relay — the
+      // video model runs on its own GPU (see modules/video/videoSession.ts).
+      let videoSession: VideoSession | null = null;
       // Which provider serves this session. Hoisted (with the default) so the
       // close handler can read it even if the client disconnects before the
       // per-session override below resolves — a mid-handler `let` would be in
@@ -261,6 +268,8 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         if (didCleanup) return;
         didCleanup = true;
         clientDisconnected = true;
+        videoSession?.close();
+        videoSession = null;
         // Final fal spend flush: persist the last partial open span BEFORE
         // closing the relay (close() would finalize it out of reach). Read the
         // delta synchronously; fire-and-forget the DB write (low-stakes ~cents).
@@ -298,6 +307,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             everReachedReady,
             lastEmittedState,
             lastStateAgeMs,
+            video: videoSession?.getStats(),
             event: 'session_close',
           },
           'session_close',
@@ -340,6 +350,9 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       socket.on('message', (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
         const buf = Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data as ArrayBuffer);
         if (isBinary) {
+          // The user is drawing: reset the video idle window and cancel any
+          // in-flight video (a new sketch supersedes it).
+          videoSession?.noteSketchFrame();
           if (relay) {
             relay.sendFrame(buf);
             captureFrame('sketch', buf);
@@ -353,6 +366,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             const parsed = JSON.parse(text) as Record<string, unknown>;
             if (parsed.type === 'config') {
               lastConfig = parsed;
+              videoSession?.noteConfig(parsed);
               // Replay: record prompt changes (deduped in FrameCapture) so
               // the Gallery player can show which prompt drove each frame.
               if (typeof parsed['prompt'] === 'string') {
@@ -484,6 +498,31 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         }
       }
 
+      // Video idle-state animation (POC): connect to the dedicated Lambda
+      // video instance in parallel with image wiring. Best-effort — start()
+      // never throws; a dead/absent instance leaves the session image-only.
+      // Gate is env presence (LAMBDA_VIDEO_URL set by ops after
+      // scripts/lambda/launch-video.ts prints it).
+      if (config.LAMBDA_VIDEO_URL) {
+        videoSession = new VideoSession({
+          url: config.LAMBDA_VIDEO_URL,
+          tlsCa: config.LAMBDA_TLS_CA || null,
+          idleMs: config.VIDEO_IDLE_TRIGGER_MS,
+          sendToClient: (text) => {
+            if (!clientDisconnected && socket.readyState === socket.OPEN) socket.send(text);
+          },
+          isClientOpen: () => !clientDisconnected && socket.readyState === socket.OPEN,
+          log: request.log,
+          ctx: { userId, connId, streamId },
+        });
+        // Feed state that arrived before creation (iOS sends config — and
+        // possibly a first frame — immediately at WS open, ahead of the
+        // identity/budget slow path that gates creation).
+        if (lastConfig) videoSession.noteConfig(lastConfig);
+        if (pendingFrame) videoSession.noteSketchFrame();
+        void videoSession.start();
+      }
+
       // Wire a fresh relay to the upstream: install message/close/error
       // handlers, connect, resend lastConfig. On success, `relay` and
       // `currentUpstreamUrl` are updated. Used for the initial connect and
@@ -536,6 +575,10 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
               if (lambdaUnbilledFrames >= 25) billLambdaFrames();
             }
             captureFrame('generated', buf);
+            // Feed the video idle-trigger: this is the image a fired
+            // video_request would animate (also un-blocks a trigger that
+            // was waiting for the final generation to land).
+            videoSession?.noteGeneratedFrame(buf);
           } else {
             // Forward text frames (frame_meta, status, error) to the iPad
             // unchanged.

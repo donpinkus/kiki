@@ -64,6 +64,19 @@ export interface AppConfig {
    * — instances are bare IPs). Empty = plain ws:// (pre-TLS dev). Decoded
    * form exposed as LAMBDA_TLS_CA. */
   readonly LAMBDA_TLS_CA: string;
+
+  // ─── Video (LTX-2.3 idle-state animation on a dedicated Lambda H100) ──
+  /** Full WS URL of the dedicated Lambda VIDEO instance (LTX-2.3 server),
+   * including path and token — printed by scripts/lambda/launch-video.ts.
+   * Empty = video disabled (the POC gate). The video GPU is SEPARATE from
+   * the image pool: LTX 22B FP8 + Gemma hold ~46 GiB resident and cannot
+   * share an 80 GB H100 with the 9B-KV image server (~37 GB) — which also
+   * guarantees image-generation latency is never impacted by video work. */
+  readonly LAMBDA_VIDEO_URL: string;
+  /** Idle window: a video_request fires this many ms after the user's LAST
+   * sketch frame (provided a generated image newer than that sketch exists).
+   * Default 3000 (product decision 2026-07-18). */
+  readonly VIDEO_IDLE_TRIGGER_MS: number;
   /** fal.ai API key — server-side only (CLAUDE.md #3: no secrets on client).
    * Used as `Authorization: Key <FAL_KEY>` on the fal realtime WS upgrade.
    * Required when `IMAGE_PROVIDER=fal`; ignored otherwise. */
@@ -187,6 +200,11 @@ function validateConfig(): AppConfig {
   if (imageProvider === 'fal' && !falKey && nodeEnv !== 'test') {
     throw new Error("IMAGE_PROVIDER=fal requires FAL_KEY (fal.ai API key) to be set");
   }
+  const lambdaVideoUrl = process.env['LAMBDA_VIDEO_URL'] ?? '';
+  if (lambdaVideoUrl && !/^wss?:\/\//.test(lambdaVideoUrl)) {
+    throw new Error(`Invalid LAMBDA_VIDEO_URL: ${lambdaVideoUrl} (expected ws:// or wss:// URL)`);
+  }
+
   const lambdaImageUrl = process.env['LAMBDA_IMAGE_URL'] ?? '';
   const lambdaDevPoolEnabled = process.env['LAMBDA_DEV_POOL_ENABLED'] === 'true';
   if (imageProvider === 'lambda' && !/^wss?:\/\//.test(lambdaImageUrl) && !lambdaDevPoolEnabled) {
@@ -216,6 +234,8 @@ function validateConfig(): AppConfig {
     LAMBDA_TLS_CA: process.env['LAMBDA_TLS_CA_B64']
       ? Buffer.from(process.env['LAMBDA_TLS_CA_B64'], 'base64').toString('utf-8')
       : '',
+    LAMBDA_VIDEO_URL: lambdaVideoUrl,
+    VIDEO_IDLE_TRIGGER_MS: Number(process.env['VIDEO_IDLE_TRIGGER_MS'] ?? 3000),
     FAL_KEY: falKey,
     FAL_IDLE_CLOSE_MS: Number(process.env['FAL_IDLE_CLOSE_MS'] ?? 0),
     FAL_WARMER_ENABLED: process.env['FAL_WARMER_ENABLED'] !== 'false',
