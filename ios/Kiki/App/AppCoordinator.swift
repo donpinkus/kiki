@@ -694,17 +694,20 @@ final class AppCoordinator {
     /// own default is 2.3 (looser/more restyling). Default 1.2 (more adherence).
     var streamScheduleMu: Double = 1.2 { didSet { syncStreamConfig() } }
 
-    /// Which backend image path serves this device's stream: "fal" (hosted
-    /// realtime) or "lambda" (our own FLUX pipeline on a Lambda Cloud H100 —
-    /// reference-mode VAE-concat conditioning, the adherence A/B). Sent as
-    /// `?imageProvider=` on the stream WS; the backend honors it for TEST
-    /// ACCOUNTS only. Unlike the config-push params above this is a WS query
-    /// param, so changing it reconnects the stream. Persisted.
-    var imageProvider: String = UserDefaults.standard.string(forKey: "imageProvider") ?? "fal" {
+    /// Which backend image path serves this device's stream: "auto" (what
+    /// real users get — H100 pool when assignable, else fal; the backend
+    /// decides and can downgrade mid-session), "fal" (pin hosted realtime) or
+    /// "lambda" (pin our FLUX pipeline on a Lambda Cloud H100 — the adherence
+    /// A/B). Sent as `?imageProvider=` on the stream WS; the backend honors
+    /// the fal/lambda pins for TEST ACCOUNTS only and ignores "auto" (which
+    /// therefore falls through to the server-side IMAGE_PROVIDER). Unlike the
+    /// config-push params above this is a WS query param, so changing it
+    /// reconnects the stream. Persisted.
+    var imageProvider: String = UserDefaults.standard.string(forKey: "imageProvider") ?? "auto" {
         didSet {
             guard imageProvider != oldValue else { return }
             UserDefaults.standard.set(imageProvider, forKey: "imageProvider")
-            if imageProvider == "lambda" { ensureLambdaPool() }
+            if imageProvider != "fal" { ensureLambdaPool() }
             if streamSession != nil { resumeStream() }
         }
     }

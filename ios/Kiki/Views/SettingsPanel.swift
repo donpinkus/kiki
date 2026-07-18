@@ -175,6 +175,7 @@ struct SettingsPanel: View {
 
         return Section {
             Picker("Image provider", selection: $coordinator.imageProvider) {
+                Text("Auto (H100 → fal)").tag("auto")
                 Text("fal realtime").tag("fal")
                 Text("Lambda H100").tag("lambda")
             }
@@ -187,7 +188,7 @@ struct SettingsPanel: View {
         } header: {
             Text("Diagnostics")
         } footer: {
-            Text("Provider: fal = hosted feedback-loop img2img; Lambda = our reference-mode pipeline on an H100 (adherence A/B, test accounts only — switching reconnects the stream). Profiling currently has no effect on the hosted fal path (kept for the future self-hosted video/image revival).")
+            Text("Provider: Auto = what real users get (H100 pool when ready, fal otherwise — the backend decides); fal = hosted feedback-loop img2img; Lambda = our reference-mode pipeline on an H100 (adherence A/B — both pins are test-account only; switching reconnects the stream). Profiling currently has no effect on the hosted fal path (kept for the future self-hosted video/image revival).")
         }
     }
 }
