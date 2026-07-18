@@ -43,6 +43,7 @@ import { sketchifyRoute } from './routes/sketchify.js';
 import { start as startLambdaDevPool, stop as stopLambdaDevPool } from './modules/lambda/devPool.js';
 import { start as startLambdaVideoPool, stop as stopLambdaVideoPool } from './modules/lambda/videoPool.js';
 import { startVideoFlag, stopVideoFlag } from './modules/video/videoFlag.js';
+import { start as startCapacityMonitor, stop as stopCapacityMonitor } from './modules/lambda/capacityMonitor.js';
 import { installAuth } from './modules/auth/index.js';
 import { start as startFalWarmer, stop as stopFalWarmer } from './modules/fal/falWarmer.js';
 import { shutdownAnalytics } from './modules/analytics/index.js';
@@ -150,6 +151,8 @@ const start = async () => {
     // Insights → Ops) — loaded before the pool so its first tick sees it.
     startVideoFlag(app.log);
     startLambdaVideoPool(app.log);
+    // Free read-only /instance-types heartbeat → Insights Capacity page.
+    startCapacityMonitor(app.log);
 
     await app.listen({ port: config.PORT, host: config.HOST });
     app.log.info(`Server listening on ${config.HOST}:${config.PORT}`);
@@ -171,6 +174,7 @@ async function gracefulShutdown(signal: string): Promise<void> {
   stopLambdaDevPool();
   stopLambdaVideoPool();
   stopVideoFlag();
+  stopCapacityMonitor();
   try {
     await shutdownAnalytics();
   } catch (err) {

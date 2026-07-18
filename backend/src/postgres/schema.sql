@@ -143,3 +143,27 @@ CREATE TABLE IF NOT EXISTS lambda_pool_events (
 ALTER TABLE lambda_pool_events ADD COLUMN IF NOT EXISTS pool TEXT NOT NULL DEFAULT 'image';
 CREATE INDEX IF NOT EXISTS lambda_pool_events_ts ON lambda_pool_events (ts);
 CREATE INDEX IF NOT EXISTS lambda_pool_events_event ON lambda_pool_events (event, ts);
+
+-- Lambda ADVERTISED capacity snapshots (free /instance-types poll, ~2 min).
+-- One row per (type, region) that reported capacity at a given tick; a tick
+-- with no capacity for a type writes zero rows for it, so "available" is
+-- COUNT>0 and "sampled" is DISTINCT tick_at. NOT a reservation — Lambda's
+-- capacity flag has no depth and can be stale by seconds; ground truth for
+-- "did we actually get one" stays lambda_pool_events. Kiki Insights →
+-- Capacity reads this; retention 14 days.
+CREATE TABLE IF NOT EXISTS lambda_capacity_samples (
+  tick_at        TIMESTAMPTZ NOT NULL,
+  instance_type  TEXT NOT NULL,
+  region         TEXT NOT NULL,
+  PRIMARY KEY (tick_at, instance_type, region)
+);
+CREATE INDEX IF NOT EXISTS lambda_capacity_samples_ts ON lambda_capacity_samples (tick_at);
+CREATE INDEX IF NOT EXISTS lambda_capacity_samples_type ON lambda_capacity_samples (instance_type, tick_at);
+
+-- Every tick's timestamp, so a type/region with zero capacity all week is
+-- still a known-sampled 0% (not missing data). Written once per poll.
+CREATE TABLE IF NOT EXISTS lambda_capacity_ticks (
+  tick_at        TIMESTAMPTZ PRIMARY KEY,
+  types_seen     INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS lambda_capacity_ticks_ts ON lambda_capacity_ticks (tick_at);

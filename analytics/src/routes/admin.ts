@@ -1041,6 +1041,88 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
     // (modules/video/videoFlag.ts): off → the video pool DRAINS its H100s
     // (billing stops) and the iPad hides all animation UX; on → restored
     // within one poll+tick cycle. No backend redeploy needed.
+    // ─── GPU Capacity (dedicated tab): Lambda ADVERTISED availability over
+    // time, from the backend's free /instance-types heartbeat. NOT a
+    // reservation — capacity flag has no depth, can be stale by seconds; the
+    // Fleet tab's real launch outcomes remain ground truth. Tables are
+    // backend-owned (shared Postgres); absent before the backend deploy that
+    // creates them → schemaReady:false, not a 500.
+    gated.get('/admin/api/capacity', async (request) => {
+      const days = Math.min(14, Math.max(1, Number((request.query as { days?: string }).days) || 7));
+      const iv = `${days} days`;
+      try {
+        const [ticks, byCell, timeline, heatmap] = await Promise.all([
+          // Denominator: how many polls happened in the window.
+          query(`SELECT count(*)::int AS ticks, min(tick_at) AS first_at, max(tick_at) AS last_at
+                 FROM lambda_capacity_ticks WHERE tick_at > now() - interval '${iv}'`),
+          // Per (type, region): % of ticks with capacity + last-seen.
+          query(
+            `WITH t AS (SELECT count(*)::float AS n FROM lambda_capacity_ticks WHERE tick_at > now() - interval '${iv}')
+             SELECT s.instance_type, s.region,
+                    count(*)::int AS available_ticks,
+                    round(100.0 * count(*) / NULLIF((SELECT n FROM t), 0))::int AS pct,
+                    max(s.tick_at) AS last_available
+             FROM lambda_capacity_samples s
+             WHERE s.tick_at > now() - interval '${iv}'
+             GROUP BY s.instance_type, s.region
+             ORDER BY s.instance_type, pct DESC`,
+          ),
+          // Per-type availability across the window, bucketed for a sparkline:
+          // fraction of ticks in each bucket where the type had capacity in
+          // ANY region (what the pool's cross-region sweep effectively sees).
+          query(
+            `WITH tick_hours AS (
+               SELECT date_trunc('hour', tick_at) AS hour, count(*)::int AS ticks
+               FROM lambda_capacity_ticks WHERE tick_at > now() - interval '${iv}'
+               GROUP BY 1
+             ),
+             avail AS (
+               SELECT date_trunc('hour', tick_at) AS hour, instance_type,
+                      count(DISTINCT tick_at)::int AS avail_ticks
+               FROM lambda_capacity_samples WHERE tick_at > now() - interval '${iv}'
+               GROUP BY 1, 2
+             )
+             SELECT to_char(th.hour, 'YYYY-MM-DD"T"HH24:00') AS hour, a.instance_type,
+                    th.ticks, a.avail_ticks,
+                    round(100.0 * a.avail_ticks / NULLIF(th.ticks, 0))::int AS pct
+             FROM tick_hours th JOIN avail a ON a.hour = th.hour
+             ORDER BY th.hour, a.instance_type`,
+          ),
+          // Time-of-day heatmap (Pacific hour × type): avg availability %,
+          // to surface daily drought windows.
+          query(
+            `WITH th AS (
+               SELECT extract(hour from tick_at AT TIME ZONE 'America/Los_Angeles')::int AS hod,
+                      count(*)::int AS ticks
+               FROM lambda_capacity_ticks WHERE tick_at > now() - interval '${iv}' GROUP BY 1
+             ),
+             av AS (
+               SELECT extract(hour from tick_at AT TIME ZONE 'America/Los_Angeles')::int AS hod,
+                      instance_type, count(DISTINCT tick_at)::int AS avail_ticks
+               FROM lambda_capacity_samples WHERE tick_at > now() - interval '${iv}' GROUP BY 1, 2
+             )
+             SELECT th.hod, av.instance_type,
+                    round(100.0 * av.avail_ticks / NULLIF(th.ticks, 0))::int AS pct
+             FROM th JOIN av ON av.hod = th.hod
+             ORDER BY th.hod, av.instance_type`,
+          ),
+        ]);
+        return {
+          schemaReady: true,
+          days,
+          ticks: ticks.rows[0] ?? { ticks: 0, first_at: null, last_at: null },
+          cells: byCell.rows,
+          timeline: timeline.rows,
+          heatmap: heatmap.rows,
+        };
+      } catch (err) {
+        if ((err as { code?: string }).code === '42P01') {
+          return { schemaReady: false, days, ticks: { ticks: 0 }, cells: [], timeline: [], heatmap: [] };
+        }
+        throw err;
+      }
+    });
+
     gated.get('/admin/api/ops/video', async () => {
       try {
         const cfg = await query(

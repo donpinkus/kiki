@@ -11,6 +11,7 @@ import { Tests } from './pages/Tests';
 import { BrushTargets } from './pages/BrushTargets';
 import { Launch } from './pages/Launch';
 import { Fleet } from './pages/Fleet';
+import { Capacity } from './pages/Capacity';
 
 type AuthState = 'loading' | 'authed' | 'anon';
 
@@ -47,6 +48,7 @@ export function App() {
         <nav style={{ display: 'flex', gap: 16, flex: 1, marginLeft: 24 }}>
           <Link to="/launch">Launch</Link>
           <Link to="/fleet">GPU Fleet</Link>
+          <Link to="/capacity">Capacity</Link>
           <Link to="/">Users</Link>
           <Link to="/gallery">Gallery</Link>
           <Link to="/tests">Tests</Link>
@@ -61,6 +63,7 @@ export function App() {
         <Route path="/" element={<Users />} />
         <Route path="/launch" element={<Launch />} />
         <Route path="/fleet" element={<Fleet />} />
+        <Route path="/capacity" element={<Capacity />} />
         <Route path="/users/:id" element={<UserDetail />} />
         <Route path="/gallery" element={<Gallery />} />
         <Route path="/gallery/:streamId" element={<Replay />} />

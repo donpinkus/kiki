@@ -257,6 +257,24 @@ export interface FleetData {
   daily: FleetDailyRow[];
 }
 
+export interface CapacityCell {
+  instance_type: string; region: string;
+  available_ticks: number; pct: number; last_available: string | null;
+}
+export interface CapacityHeatCell { hod: number; instance_type: string; pct: number; }
+export interface CapacityTimelineRow { hour: string; instance_type: string; ticks: number; avail_ticks: number; pct: number; }
+export interface CapacityData {
+  schemaReady: boolean;
+  days: number;
+  ticks: { ticks: number; first_at?: string | null; last_at?: string | null };
+  cells: CapacityCell[];
+  timeline: CapacityTimelineRow[];
+  heatmap: CapacityHeatCell[];
+}
+
+export const getCapacity = (days: number) =>
+  api<CapacityData>(`/admin/api/capacity?days=${days}`);
+
 export const getFleet = (excludeTest: boolean) =>
   api<FleetData>(`/admin/api/fleet${excludeTest ? '?excludeTest=1' : ''}`);
 
