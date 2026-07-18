@@ -339,6 +339,40 @@ Source-level read of diffusers @1aadc65 (agent-verified, code-cited) + on-GPU te
   real WS path = **p50 609 ms vs 716 uncompiled (1.18×)**, warmup absorbs 158 s
   (both shapes). us-south-2 filesystem boot.sh + app code updated; us-southeast-1
   still pending the same edit (needs capacity there).
+- **NFS compile cache verified (2026-07-17):** `TORCHINDUCTOR_CACHE_DIR` +
+  `TRITON_CACHE_DIR` on the region filesystem. Cold-cache boot pays the full
+  compile in warmup (382 s, populating the cache); warm-cache restart =
+  **91 s to healthy (warmup 48 s vs 310 s baseline)**. Cache is
+  **machine-portable**: a *different* H100 in the same region hit ready in
+  95 s / warmup 52 s off the shared cache. Fleet consequence: only the
+  first-ever boot per (region, model, torch) pays compile; scale-ups and
+  restarts get compiled kernels for free.
+- **Production soak + induced-death validation (2026-07-18, IMAGE_PROVIDER=auto live):**
+  6 paced clients through the deployed backend on the wss pool. Round 1 found a
+  real failover defect (recovery re-acquired the SAME dead instance — still
+  "ready" until the 3-strike probe cycle — and closed clients 1011, no fal
+  fallback). Fixed (commit `47419ff`): relays mark instances **suspect** on
+  connect failure (`reportFailure` — one strike, assignment skips suspects
+  immediately, tick probes still own the kill), failover refuses the
+  just-failed instance, and **auto-resolved sessions degrade to fal
+  in-session** (metering exemption carries over; explicit overrides keep the
+  hard bounce). Round 2 with the fix: all 6 sessions survived instance death
+  (ready → connecting → ready, zero error closes), suspect+downgrade events
+  fired, and the pool ran the full lifecycle unattended — `launch_requested`
+  (pressure 6 streams > target 4) → `instance_dead` (3 strikes, ~1.8 min
+  after real death) → `launched` (259 s capacity search) → fresh instance
+  provisioned via cloud-init. Round 2 also surfaced the last gap: the fal
+  fallback was COLD (warmer no-op'd unless IMAGE_PROVIDER=fal exactly) →
+  downgraded sessions stalled frameless ~6 min. Fixed (`d339642`): warmer
+  runs under 'auto' too.
+- **TLS pinning live (2026-07-17):** one shared self-signed cert (10-yr EC
+  P-256, CN=kiki-image-fleet) at `$FS/kiki/tls/` per region filesystem;
+  uvicorn serves wss when boot.sh finds it. Backend pins the exact cert via
+  `LAMBDA_TLS_CA_B64` (Railway env) in StreamRelay, sketchify, and pool
+  health probes, skipping hostname checks (bare IPs). Verified from prod
+  path: pinned CA connects; default trust store and unpinned-hostname both
+  correctly refuse. Local copy of cert+key: `~/.kiki/lambda-tls/` (key is
+  otherwise only on the filesystems — regenerating both is the rotation).
 
 ### Ship-now config (Donald-locked, 2026-07-17)
 
