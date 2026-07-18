@@ -1,4 +1,5 @@
 import AVKit
+import Sentry
 import SwiftUI
 
 /// Modal that previews the speed-paint replay in an autoplaying, looping player
@@ -213,6 +214,41 @@ struct SpeedPaintReplayView: View {
         player.replaceCurrentItem(with: item)
         player.play()
         hasPreview = true
+        watchItemStatus(item)
+    }
+
+    /// Surface player-item load failures instead of a silent black player —
+    /// a composition that builds fine can still fail to PLAY (decoder
+    /// limits, strict videoComposition validation on device, unreadable
+    /// source files). The error is shown, logged, and shipped to Sentry.
+    private func watchItemStatus(_ item: AVPlayerItem) {
+        Task { @MainActor in
+            for _ in 0..<50 where item.status == .unknown {
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            guard item === player.currentItem else { return }  // superseded
+            switch item.status {
+            case .failed:
+                let detail = item.error.map(String.init(describing:)) ?? "unknown"
+                statusMessage = "Preview failed to load: \(item.error?.localizedDescription ?? "unknown error")"
+                Log.error("replay.preview_item_failed", attributes: [
+                    "event": "replay.preview_item_failed",
+                    "error": detail,
+                ])
+                SentrySDK.capture(message: "replay.preview_item_failed") { scope in
+                    scope.setExtra(value: detail, key: "error")
+                }
+            case .unknown:
+                Log.error("replay.preview_item_stuck", attributes: [
+                    "event": "replay.preview_item_stuck",
+                ])
+                SentrySDK.capture(message: "replay.preview_item_stuck")
+            default:
+                Log.info("replay.preview_item_ready", attributes: [
+                    "event": "replay.preview_item_ready",
+                ])
+            }
+        }
     }
 
     private func startLooping() {

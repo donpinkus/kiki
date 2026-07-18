@@ -1247,13 +1247,19 @@ final class AppCoordinator {
             return nil
         }
         do {
-            return try await SideBySideVideoComposer.build(
+            let built = try await SideBySideVideoComposer.build(
                 canvasSegments: segments.canvas,
                 generatedSegments: segments.generated,
                 generatedVideoURL: RecordingStore.shared.generatedVideoURL(for: drawingId),
                 layout: layout,
                 speed: speed
             )
+            Log.info("replay.built", attributes: [
+                "event": "replay.built",
+                "segments": segments.canvas.count,
+                "duration_s": built.composition.duration.seconds,
+            ])
+            return built
         } catch {
             streamLog.error("Replay build failed: \(error.localizedDescription)")
             SentrySDK.capture(error: error) { scope in
