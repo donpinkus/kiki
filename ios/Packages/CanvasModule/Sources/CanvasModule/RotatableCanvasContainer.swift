@@ -110,7 +110,7 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
     /// screen-fixed behind the document, like Procreate's). Colors mirror
     /// `KikiTheme.canvasBacking` in the app target; keep in sync by eye.
     private static let canvasBackingPattern: UIColor = {
-        let cell: CGFloat = 44
+        let cell: CGFloat = 26
         let backing = UIColor(white: 0.135, alpha: 1)
         let line = UIColor(white: 0.175, alpha: 1)
         let format = UIGraphicsImageRendererFormat()
