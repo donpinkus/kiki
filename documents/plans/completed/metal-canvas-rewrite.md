@@ -1,5 +1,16 @@
 # Metal Canvas Rewrite — Full Architecture Plan
 
+> **Status (2026-07-18): ✅ Implemented** — the Metal engine shipped and is the
+> live canvas (`MetalCanvasView.swift` + `CanvasRenderer.swift`). Deltas from
+> this plan: shaders are embedded MSL inside `CanvasRenderer.swift` (no
+> `Shaders.metal`); the stamp pipeline landed as `StrokeStampGenerator.swift`;
+> `LayerStack`/`CanvasUndoManager`/`BrushMaskGenerator` never became separate
+> files; lasso extraction shipped; and smudge shipped via the **wet engine**
+> (`BrushConfig.smudge`/`WetStrokeWalker`), not the fragment-shader ping-pong
+> pass sketched here. The "Context" below describes the pre-rewrite
+> CGBitmapContext canvas — historical. Current engine docs:
+> `ios/Packages/CanvasModule/CLAUDE.md`.
+
 ## Context
 
 Kiki's drawing canvas is backed by `CGBitmapContext` + `UIView.draw(rect:)`. Every frame, the full retina-resolution canvas (~20–30 MB) must be re-read from CPU RAM into the view's backing store. This is fundamentally too slow for interactive painting tools — smudge hit <1 fps, and even brush/eraser pay an unnecessary per-frame tax.
