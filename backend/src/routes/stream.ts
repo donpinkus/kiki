@@ -115,6 +115,18 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       let lambdaUnbilledFrames = 0;
       let lambdaBillInFlight = false;
       const LAMBDA_USD_PER_FRAME = 0.001;
+      // Shared cap-reached cut (session-start denial, lambda mid-session,
+      // fal mid-session): one place owns the user-facing message + close.
+      const sendLimitReachedAndClose = (): void => {
+        socket.send(
+          JSON.stringify({
+            type: 'error',
+            code: 'free_limit_reached',
+            message: "You're out of free drawing time this month — subscribe to keep drawing.",
+          }),
+        );
+        socket.close(1008, 'free_limit_reached');
+      };
       const billLambdaFrames = (): void => {
         if (!lambdaMeteringEnabled || lambdaBillInFlight || lambdaUnbilledFrames === 0) return;
         const uidNow = userId;
@@ -132,12 +144,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
                 { userId: uidNow, connId, streamId, spendUsd: total, event: 'free_limit_reached' },
                 'AI spend cap reached mid-session (lambda) — cutting stream',
               );
-              socket.send(JSON.stringify({
-                type: 'error',
-                code: 'free_limit_reached',
-                message: "You're out of free drawing time this month — subscribe to keep drawing.",
-              }));
-              socket.close(1008, 'free_limit_reached');
+              sendLimitReachedAndClose();
             }
           })
           .catch(() => { lambdaUnbilledFrames += count; })  // retry on next flush
@@ -255,8 +262,15 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       // ─── Idempotent cleanup ──────────────────────────────────────────
       // close + error can both fire for one underlying socket teardown,
       // and the wiring catch may also reach this path. didCleanup gates
-      // everything: relay.close plus the per-close logline + analytics.
+      // relay teardown + the final spend flush; didFinalize separately
+      // gates the per-close logline, lambda billing, pool release, and
+      // analytics. They must be separate flags: ws emits `error` BEFORE
+      // `close`, and when the error handler ran cleanup first, the close
+      // handler still has to finalize (pre-fix it bailed on didCleanup —
+      // leaking the pool stream slot and dropping the final lambda bill +
+      // session analytics on every error-first teardown).
       let didCleanup = false;
+      let didFinalize = false;
       const cleanupOnDisconnect = (): void => {
         if (didCleanup) return;
         didCleanup = true;
@@ -280,9 +294,10 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       // slow path is observed and cleaned up. Pre-fix the late registration
       // dropped close events emitted on Node's EventEmitter.
       socket.on('close', (code: number, reason: Buffer) => {
-        // didCleanup gates the per-close logline + analytics so it fires
-        // exactly once even if `error` arrives first.
-        if (didCleanup) return;
+        // didFinalize gates the per-close logline + analytics so they fire
+        // exactly once — but still fire when `error` arrived first.
+        if (didFinalize) return;
+        didFinalize = true;
         const durationMs = Date.now() - sessionStartMs;
         const lastStateAgeMs = lastEmittedStateAt
           ? Date.now() - lastEmittedStateAt
@@ -459,14 +474,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
               { userId, connId, streamId, spendUsd: budget.spendUsd, capUsd: budget.capUsd, event: 'free_limit_reached' },
               'AI spend cap reached at session start — denying',
             );
-            socket.send(
-              JSON.stringify({
-                type: 'error',
-                code: 'free_limit_reached',
-                message: "You're out of free drawing time this month — subscribe to keep drawing.",
-              }),
-            );
-            socket.close(1008, 'free_limit_reached');
+            sendLimitReachedAndClose();
             return;
           }
           falMeteringEnabled = imageProvider === 'fal' && !budget.exempt;
@@ -631,16 +639,9 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             { userId, connId, streamId, spendUsd, capUsd: config.FREE_TIER_FAL_USD, event: 'free_limit_reached' },
             'fal spend cap reached mid-session — cutting stream',
           );
-          socket.send(
-            JSON.stringify({
-              type: 'error',
-              code: 'free_limit_reached',
-              message: "You're out of free drawing time this month — subscribe to keep drawing.",
-            }),
-          );
           // Any reconnect re-hits the start-of-session budget gate and is
           // denied cleanly (no cut→reconnect loop).
-          socket.close(1008, 'free_limit_reached');
+          sendLimitReachedAndClose();
         };
         const meterFalUsage = async (): Promise<void> => {
           if (!relay?.cumulativeOpenMs) return;
