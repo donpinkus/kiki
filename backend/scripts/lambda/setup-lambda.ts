@@ -55,6 +55,10 @@ function getArg(flag: string): string | undefined {
 const REGION = getArg('--region');
 const TYPE = getArg('--type') ?? 'gpu_1x_h100_pcie';
 const KEEP = process.argv.includes('--keep');
+// Populate-only mode: skip the on-instance pipeline smoke test. Lets a cheap
+// setup instance (A10) populate a filesystem whose serving model wouldn't fit
+// its VRAM — the GPU-type benchmark validates serving separately.
+const SKIP_SMOKE = process.argv.includes('--skip-smoke');
 if (!REGION) {
   console.error('Usage: tsx scripts/lambda/setup-lambda.ts --region <region> [--type gpu_1x_h100_pcie] [--keep]');
   process.exit(1);
@@ -245,6 +249,10 @@ chmod +x $FS/kiki/boot.sh
 echo "=== sizes ==="
 du -sh $FS/kiki/venv $FS/kiki/huggingface $FS/kiki/app
 
+if [ "${SKIP_SMOKE ? '1' : '0'}" = "1" ]; then
+  echo "=== smoke test SKIPPED (--skip-smoke) ==="
+  exit 0
+fi
 echo "=== smoke test: load pipeline + one warmup inference on THIS instance ==="
 cd $FS/kiki/app
 FLUX_USE_NVFP4=0 HF_HOME=$FS/kiki/huggingface HF_HUB_OFFLINE=1 python3 - <<'EOF'
