@@ -73,7 +73,8 @@ enum SideBySideVideoComposer {
         generatedVideoURL: URL? = nil,
         layout: ReplayLayout = .horizontal,
         speed: ReplaySpeed = .multiplier(1),
-        side: Int = 768
+        side: Int = 768,
+        animationTail: Bool = true
     ) async throws -> BuiltReplay {
         guard !canvasSegments.isEmpty, canvasSegments.count == generatedSegments.count else {
             throw ComposeError.missingTrack
@@ -118,16 +119,20 @@ enum SideBySideVideoComposer {
         // Resolve the effective multiplier. `fitTotal` sizes content so
         // content + hold hits the target; clamped to ≥1 so short recordings
         // play at real speed instead of slow motion.
+        // The animation tail is a user OPTION (replay modal toggle): replaces
+        // the 3s freeze-hold with the drawing's generated animation. In
+        // fitTotal mode an appended animation makes the export run past the
+        // target by the animation's length — the user opted into that.
         let effectiveMultiplier: Double
         let useAnimationTail: Bool
         switch speed {
         case .multiplier(let m):
             effectiveMultiplier = max(m, 0.01)
-            useAnimationTail = true
+            useAnimationTail = animationTail
         case .fitTotal(let totalSeconds):
             let contentTarget = max(totalSeconds - holdSeconds, 0.5)
             effectiveMultiplier = max(baseDuration.seconds / contentTarget, 1.0)
-            useAnimationTail = false
+            useAnimationTail = animationTail
         }
 
         let renderSize = layout.renderSize

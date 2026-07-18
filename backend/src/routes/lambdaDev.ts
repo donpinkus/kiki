@@ -13,10 +13,15 @@
 
 import type { FastifyPluginAsync } from 'fastify';
 import { ensure, getState } from '../modules/lambda/devPool.js';
+import { poolEnabled as videoPoolEnabled, ensure as ensureVideoPool } from '../modules/lambda/videoPool.js';
 import { testAccountsOnly } from '../modules/falBudget/index.js';
 
 export const lambdaDevRoute: FastifyPluginAsync = async (fastify) => {
   fastify.post('/v1/dev/lambda/ensure', { preHandler: testAccountsOnly }, async (request) => {
+    // Side-effect: app-open is also video-pool interest, so the LTX node
+    // starts its ~10 min boot before the user's first idle pause. (The
+    // response stays the IMAGE pool state — iOS's status line parses it.)
+    if (videoPoolEnabled()) ensureVideoPool();
     const state = ensure();
     request.log.info(
       { userId: request.userId, poolStatus: state.status, instanceId: state.instanceId, event: 'lambda_pool_ensure' },

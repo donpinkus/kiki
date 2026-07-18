@@ -64,9 +64,18 @@ public actor StreamWebSocketClient {
     /// notices. The same correlation `requestId` propagates through every
     /// event so the UI can match them to a specific trigger.
     public enum VideoEvent: Sendable {
+        /// The backend fired a video_request (auto idle-trigger or the manual
+        /// Animate button). Emitted at generation START — frames only begin
+        /// arriving ~15-30s later — so the UI can show an "animating" state.
+        case started(requestId: String?)
         case frame(requestId: String?, image: Data, index: Int?, total: Int?)
         case complete(requestId: String?, mp4: Data, fps: Int?, frames: Int?)
         case cancelled(requestId: String?, atStep: Int?, error: String?)
+        /// Backend's system-availability push — BOTH H100 systems in one
+        /// message. image: off|warming|ready (off = pool asleep/disabled; fal
+        /// still serves images). video: off = feature flag disabled (hide all
+        /// animation UX) | warming | ready. etaSeconds present while warming.
+        case availability(image: String, imageEtaSeconds: Int?, video: String, videoEtaSeconds: Int?)
     }
 
     /// Sendable payload for `ConnectionEvent`. Holds a human-readable message
@@ -339,6 +348,14 @@ public actor StreamWebSocketClient {
                                     ])
                                     await self.statusContinuation.yield(status)
                                 }
+                            } else if type == "video_started" {
+                                let event = StreamWebSocketClient.VideoEvent.started(
+                                    requestId: json["requestId"] as? String
+                                )
+                                Self.breadcrumb(category: "ws.video", message: "video_started", data: [
+                                    "requestId": (json["requestId"] as? String) ?? "",
+                                ])
+                                await self.videoContinuation.yield(event)
                             } else if type == "video_frame_data", let b64 = json["data"] as? String,
                                       let imageData = Data(base64Encoded: b64) {
                                 let meta = json["meta"] as? [String: Any] ?? [:]
@@ -368,6 +385,21 @@ public actor StreamWebSocketClient {
                                     "frames": (meta["frames"] as? Int) ?? -1,
                                 ])
                                 await self.videoContinuation.yield(event)
+                            } else if type == "system_availability" {
+                                let image = json["image"] as? [String: Any] ?? [:]
+                                let video = json["video"] as? [String: Any] ?? [:]
+                                let imageAvail = image["availability"] as? String ?? "off"
+                                let videoAvail = video["availability"] as? String ?? "off"
+                                Self.breadcrumb(category: "ws.video", message: "system_availability", data: [
+                                    "image": imageAvail,
+                                    "video": videoAvail,
+                                ])
+                                await self.videoContinuation.yield(.availability(
+                                    image: imageAvail,
+                                    imageEtaSeconds: image["etaSeconds"] as? Int,
+                                    video: videoAvail,
+                                    videoEtaSeconds: video["etaSeconds"] as? Int
+                                ))
                             } else if type == "video_cancelled" {
                                 let event = StreamWebSocketClient.VideoEvent.cancelled(
                                     requestId: json["requestId"] as? String,

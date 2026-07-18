@@ -158,6 +158,47 @@ export function Launch() {
         })()}
       </div>
 
+      {(data.video_pool || data.video_generation) &&
+        ((data.video_pool?.launch_requests ?? 0) > 0 || (data.video_generation?.video_sessions ?? 0) > 0) && (
+        <>
+          <div className="section-title">Video H100 + animations (7d)</div>
+          <div className="stat-row">
+            <div className="stat">
+              <div className="label">Video node acquisition</div>
+              <div className="value">
+                {data.video_pool?.became_ready ?? 0}/{data.video_pool?.launch_requests ?? 0}
+              </div>
+              <div className="sub">
+                ready/requested · search p50 {data.video_pool?.search_p50_ms != null ? `${Math.round(data.video_pool.search_p50_ms / 1000)}s` : '—'} · boot p50 {data.video_pool?.boot_p50_ms != null ? `${Math.round(data.video_pool.boot_p50_ms / 1000)}s` : '—'}
+              </div>
+            </div>
+            <div className="stat">
+              <div className="label">Node losses</div>
+              <div className="value">{(data.video_pool?.died ?? 0) + (data.video_pool?.boot_stalled ?? 0)}</div>
+              <div className="sub">
+                {data.video_pool?.died ?? 0} died · {data.video_pool?.boot_stalled ?? 0} boot-stalled · {data.video_pool?.drained ?? 0} drained (kill switch)
+              </div>
+            </div>
+            <div className="stat">
+              <div className="label">Sessions with video</div>
+              <div className="value">
+                {data.video_generation?.sessions_delivered ?? 0}/{data.video_generation?.video_sessions ?? 0}
+              </div>
+              <div className="sub">≥1 animation delivered / sessions on the video path</div>
+            </div>
+            <div className="stat">
+              <div className="label">Animations</div>
+              <div className="value">
+                {data.video_generation?.videos_delivered ?? 0}/{data.video_generation?.videos_triggered ?? 0}
+              </div>
+              <div className="sub">
+                delivered/triggered · {data.video_generation?.videos_cancelled ?? 0} cancelled (drew again) · {data.video_generation?.videos_failed ?? 0} failed
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+
       {data.h100_waterfall && data.h100_waterfall.sessions > 0 && (
         <>
           <div className="section-title">H100 waterfall — how far sessions got (7d)</div>

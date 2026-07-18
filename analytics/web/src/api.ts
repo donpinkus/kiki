@@ -204,6 +204,22 @@ export const getConnections = (source: SourceFilter) =>
     `/admin/api/ops/connections${source === 'all' ? '' : `?source=${source}`}`,
   );
 
+export interface VideoFlagStatus {
+  schemaReady: boolean;
+  seeded: boolean;
+  config: { enabled: boolean };
+  updatedAt: string | null;
+}
+
+export const getVideoFlag = () => api<VideoFlagStatus>('/admin/api/ops/video');
+
+export const putVideoFlag = (enabled: boolean) =>
+  api<{ ok: boolean; config: { enabled: boolean } }>('/admin/api/ops/video', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled }),
+  });
+
 export const putWarmer = (config: WarmerConfig) =>
   api<{ ok: boolean; config: WarmerConfig }>('/admin/api/ops/warmer', {
     method: 'PUT',
@@ -368,7 +384,33 @@ export interface LaunchData {
   providers: ProviderStatsRow[];
   h100_waterfall: H100Waterfall | null;
   h100_pool: H100Pool | null;
+  video_pool: VideoPool | null;
+  video_generation: VideoGeneration | null;
   drawing_funnel: DrawingFunnel | null;
+}
+
+/** Video pool lifecycle counts (7d, lambda_pool_events pool='video'). */
+export interface VideoPool {
+  launch_requests: number;
+  capacity_granted: number;
+  became_ready: number;
+  launch_failed: number;
+  died: number;
+  boot_stalled: number;
+  drained: number;
+  search_p50_ms: number | null;
+  boot_p50_ms: number | null;
+}
+
+/** Video generation funnel (7d, stream.provider_session video_* counters). */
+export interface VideoGeneration {
+  video_sessions: number;
+  sessions_triggered: number;
+  sessions_delivered: number;
+  videos_triggered: number;
+  videos_delivered: number;
+  videos_cancelled: number;
+  videos_failed: number;
 }
 
 /** Drawing-experience waterfall: `opened` from drawing.opened; every other

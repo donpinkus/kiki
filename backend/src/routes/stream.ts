@@ -21,6 +21,16 @@ import {
   reportFailure as poolReportFailure,
 } from '../modules/lambda/devPool.js';
 import { trackSessionClosed, trackProviderSession } from '../modules/analytics/index.js';
+import { VideoSession } from '../modules/video/videoSession.js';
+import {
+  poolEnabled as videoPoolEnabled,
+  getState as videoPoolGetState,
+  touch as touchVideoPool,
+  acquireStream as videoPoolAcquire,
+  releaseStream as videoPoolRelease,
+  touchInstance as videoPoolTouchInstance,
+  reportFailure as videoPoolReportFailure,
+} from '../modules/lambda/videoPool.js';
 
 /**
  * WebSocket relay from the iPad to the image provider (fal hosted realtime,
@@ -111,6 +121,29 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       // per 4-step frame (590ms @ $4.29/hr H100), charged at $0.001 to absorb
       // pool idle overhead. Batched writes every 25 frames; fail-open like fal.
       let lambdaMeteringEnabled = false;
+      // Video metering: flat per-DELIVERED-video charge into the same ledger
+      // (stale/cancelled renders never bill — the hook fires post-guard).
+      let videoMeteringEnabled = false;
+      const billVideoGeneration = (): void => {
+        if (!videoMeteringEnabled) return;
+        const uidNow = userId;
+        if (!uidNow) return;
+        void addMonthlySpendUsd(uidNow, config.VIDEO_USD_PER_GENERATION)
+          .then((total) => {
+            if (clientDisconnected || socket.readyState !== socket.OPEN) return;
+            socket.send(JSON.stringify({ type: 'usage', spendUsd: total, capUsd: config.FREE_TIER_FAL_USD }));
+            if (total >= config.FREE_TIER_FAL_USD) {
+              request.log.info(
+                { userId: uidNow, connId, streamId, spendUsd: total, event: 'free_limit_reached' },
+                'AI spend cap reached mid-session (video) — cutting stream',
+              );
+              sendLimitReachedAndClose();
+            }
+          })
+          .catch(() => {
+            // Fail-open: a dropped ~$0.05 write is preferable to blocking video.
+          });
+      };
       let lambdaUnbilledFrames = 0;
       let lambdaBillInFlight = false;
       const LAMBDA_USD_PER_FRAME = 0.001;
@@ -170,7 +203,17 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         ensureFrameCapture()?.capture(kind, jpeg);
       };
       let clientDisconnected = false;
+      /** Video-availability push timer; assigned on the slow path, cleared in
+       * cleanup. Hoisted so cleanupOnDisconnect can run before assignment
+       * (early client disconnect) without a TDZ throw. */
+      let videoAvailTimer: NodeJS.Timeout | null = null;
       const sessionStartMs = Date.now();
+      // Video idle-state animation (LTX-2.3 on a dedicated Lambda H100).
+      // Best-effort side-channel: created only when LAMBDA_VIDEO_URL is set;
+      // fed sketch/generated/config events and fires a video_request 3s
+      // after the last sketch frame. Never touches the image relay — the
+      // video model runs on its own GPU (see modules/video/videoSession.ts).
+      let videoSession: VideoSession | null = null;
       // Which provider serves this session. Hoisted (with the default) so the
       // close handler can read it even if the client disconnects before the
       // per-session override below resolves — a mid-handler `let` would be in
@@ -301,6 +344,8 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         if (didCleanup) return;
         didCleanup = true;
         clientDisconnected = true;
+        videoSession?.close();
+        videoSession = null;
         // Final fal spend flush: persist the last partial open span BEFORE
         // closing the relay (close() would finalize it out of reach). Read the
         // delta synchronously; fire-and-forget the DB write (low-stakes ~cents).
@@ -317,6 +362,8 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         }
         relay?.close();
         relay = null;
+        if (videoAvailTimer) clearInterval(videoAvailTimer);
+        videoAvailTimer = null;
       };
 
       // ─── Register close/error/message handlers BEFORE any await ───────
@@ -344,6 +391,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             everReachedReady,
             lastEmittedState,
             lastStateAgeMs,
+            video: videoSession?.getStats(),
             event: 'session_close',
           },
           'session_close',
@@ -373,6 +421,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             lambdaFirstFrameMs,
             lambdaDowngraded,
             everReachedReady,
+            videoStats: videoSession?.getStats() ?? null,
           });
         }
         cleanupOnDisconnect();
@@ -386,6 +435,9 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       socket.on('message', (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
         const buf = Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data as ArrayBuffer);
         if (isBinary) {
+          // The user is drawing: reset the video idle window and cancel any
+          // in-flight video (a new sketch supersedes it).
+          videoSession?.noteSketchFrame();
           if (relay) {
             relay.sendFrame(buf);
             captureFrame('sketch', buf);
@@ -399,6 +451,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             const parsed = JSON.parse(text) as Record<string, unknown>;
             if (parsed.type === 'config') {
               lastConfig = parsed;
+              videoSession?.noteConfig(parsed);
               // Replay: record prompt changes (deduped in FrameCapture) so
               // the Gallery player can show which prompt drove each frame.
               if (typeof parsed['prompt'] === 'string') {
@@ -408,6 +461,18 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
                 relay.sendConfig(parsed);
               }
               // else: nothing to buffer — wireRelay sends lastConfig on connect.
+            } else if (parsed.type === 'animate') {
+              // Manual Animate button. When video is disabled for this
+              // session (no video pool / wiring failed), answer with a
+              // synthesized video_cancelled so the iPad's optimistically-
+              // disabled button resets instead of hanging on "Animating".
+              if (videoSession) {
+                videoSession.requestAnimate();
+              } else if (socket.readyState === socket.OPEN) {
+                socket.send(
+                  JSON.stringify({ type: 'video_cancelled', requestId: null, error: 'video_disabled' }),
+                );
+              }
             }
           } catch {
             request.log.warn({ userId, connId, streamId }, 'Invalid JSON from client');
@@ -507,6 +572,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
           }
           falMeteringEnabled = imageProvider === 'fal' && !budget.exempt;
           lambdaMeteringEnabled = imageProvider === 'lambda' && !budget.exempt;
+          videoMeteringEnabled = !budget.exempt;
         } catch (err) {
           // Fail-open: if the budget DB is unreachable, let the user draw rather
           // than hang or hard-deny. Enable metering so spend resumes capping
@@ -517,7 +583,101 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
           );
           falMeteringEnabled = imageProvider === 'fal';
           lambdaMeteringEnabled = imageProvider === 'lambda';
+          videoMeteringEnabled = true;
         }
+      }
+
+      // ─── System availability push: BOTH H100 systems in one message,
+      // driving the iPad's dual status badge and whether animation UX is
+      // shown at all. This is the availability channel for EVERYONE — the
+      // detailed /v1/dev/lambda/status poll is test-account-gated, so real
+      // users' badges depend on this push alone.
+      //   image: 'ready' (assignable instance) | 'warming' (launching/
+      //          booting) | 'off' (pool disabled / asleep / error — fal
+      //          serves images either way).
+      //   video: 'off' = kill switch off (iOS hides all animation UX);
+      //          'warming'; 'ready'. etaSeconds rides along while warming.
+      // Pushed on change only (checked every 15s + once at wiring), so a
+      // mid-session Insights flag flip reaches open sessions within ~75s
+      // (flag poll 60s + push check 15s).
+      const availabilityOf = (
+        status: string,
+      ): 'off' | 'warming' | 'ready' =>
+        status === 'ready' ? 'ready' : status === 'booting' || status === 'launching' ? 'warming' : 'off';
+      const computeSystemAvailability = (): Record<string, unknown> => {
+        const image = poolGetState();
+        let video: { availability: string; etaSeconds: number | null };
+        if (config.LAMBDA_VIDEO_URL) {
+          video = { availability: 'ready', etaSeconds: null }; // static dev override
+        } else if (!videoPoolEnabled()) {
+          video = { availability: 'off', etaSeconds: null };
+        } else {
+          const vp = videoPoolGetState();
+          video = { availability: availabilityOf(vp.status), etaSeconds: vp.etaSeconds };
+        }
+        return {
+          type: 'system_availability',
+          image: { availability: availabilityOf(image.status), etaSeconds: image.etaSeconds },
+          video,
+        };
+      };
+      let lastAvailabilityJson: string | null = null;
+      const pushVideoAvailability = (): void => {
+        if (clientDisconnected || socket.readyState !== socket.OPEN) return;
+        const payload = JSON.stringify(computeSystemAvailability());
+        if (payload === lastAvailabilityJson) return;
+        lastAvailabilityJson = payload;
+        socket.send(payload);
+      };
+      videoAvailTimer = setInterval(pushVideoAvailability, 15_000);
+      videoAvailTimer.unref?.();
+
+      // Video idle-state animation: connect to a dedicated Lambda video
+      // instance in parallel with image wiring. Best-effort — start() never
+      // throws; with no instance assignable the session stays image-only and
+      // lazily upgrades when the pool warms. Sources, in precedence order:
+      //   1. LAMBDA_VIDEO_URL — static manually-launched instance (dev).
+      //   2. The video pool (LAMBDA_VIDEO_POOL_ENABLED) — production:
+      //      interest-launched on app open / stream start, idle-reaped,
+      //      redeploy-adopted (modules/lambda/videoPool.ts).
+      if (config.LAMBDA_VIDEO_URL || videoPoolEnabled()) {
+        const staticUrl = config.LAMBDA_VIDEO_URL;
+        if (!staticUrl) touchVideoPool(); // interest → next tick launches if none
+        videoSession = new VideoSession({
+          acquire: staticUrl ? () => ({ url: staticUrl }) : videoPoolAcquire,
+          release: staticUrl ? undefined : videoPoolRelease,
+          reportFailure: staticUrl ? undefined : videoPoolReportFailure,
+          touchInstance: staticUrl ? undefined : videoPoolTouchInstance,
+          tlsCa: config.LAMBDA_TLS_CA || null,
+          idleMs: config.VIDEO_IDLE_TRIGGER_MS,
+          sendToClient: (text) => {
+            if (!clientDisconnected && socket.readyState === socket.OPEN) socket.send(text);
+          },
+          isClientOpen: () => !clientDisconnected && socket.readyState === socket.OPEN,
+          onVideoDelivered: (mp4, meta) => {
+            billVideoGeneration();
+            ensureFrameCapture()?.captureVideo(mp4);
+            request.log.info(
+              {
+                userId,
+                connId,
+                streamId,
+                bytes: mp4.length,
+                genMs: typeof meta['genMs'] === 'number' ? meta['genMs'] : undefined,
+                event: 'video_delivered',
+              },
+              'video_delivered',
+            );
+          },
+          log: request.log,
+          ctx: { userId, connId, streamId },
+        });
+        // Feed state that arrived before creation (iOS sends config — and
+        // possibly a first frame — immediately at WS open, ahead of the
+        // identity/budget slow path that gates creation).
+        if (lastConfig) videoSession.noteConfig(lastConfig);
+        if (pendingFrame) videoSession.noteSketchFrame();
+        void videoSession.start();
       }
 
       // Wire a fresh relay to the upstream: install message/close/error
@@ -579,6 +739,10 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
               if (lambdaUnbilledFrames >= 25) billLambdaFrames();
             }
             captureFrame('generated', buf);
+            // Feed the video idle-trigger: this is the image a fired
+            // video_request would animate (also un-blocks a trigger that
+            // was waiting for the final generation to land).
+            videoSession?.noteGeneratedFrame(buf);
           } else {
             // Forward text frames (frame_meta, status, error) to the iPad
             // unchanged.
@@ -938,6 +1102,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         // Relay connected AND any buffered messages flushed — iOS frames
         // are now flowing to the provider. Safe to tell iOS we're truly ready.
         sendState('ready');
+        pushVideoAvailability();
       } catch (err) {
         // Distinguish "user closed the app mid-connect" from "real wiring
         // failure". The early-registered close handler sets

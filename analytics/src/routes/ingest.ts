@@ -115,6 +115,10 @@ export const ingestRoute: FastifyPluginAsync = async (app) => {
   app.addContentTypeParser('image/jpeg', { parseAs: 'buffer' }, (_req, body, done) => {
     done(null, body);
   });
+  // Completed animations (kind=video) arrive as raw MP4 bodies.
+  app.addContentTypeParser('video/mp4', { parseAs: 'buffer', bodyLimit: 30 * 1024 * 1024 }, (_req, body, done) => {
+    done(null, body);
+  });
 
   // ─── Session replay frame (raw JPEG body) ─────────────────────────────────
   // Backend-only (service key): mirrors a throttled sample of a live drawing
@@ -134,24 +138,25 @@ export const ingestRoute: FastifyPluginAsync = async (app) => {
     const ts = Number(q['ts']);
     const jpeg = request.body as Buffer | undefined;
 
-    if (!streamId || !userId || (kind !== 'sketch' && kind !== 'generated')) {
-      return reply.code(400).send({ error: 'stream_id, user_id, kind=sketch|generated required' });
+    if (!streamId || !userId || (kind !== 'sketch' && kind !== 'generated' && kind !== 'video')) {
+      return reply.code(400).send({ error: 'stream_id, user_id, kind=sketch|generated|video required' });
     }
     if (!Number.isInteger(seq) || seq < 1 || !Number.isFinite(ts)) {
       return reply.code(400).send({ error: 'seq (int ≥1) and ts (epoch ms) required' });
     }
     if (!Buffer.isBuffer(jpeg) || jpeg.length === 0) {
-      return reply.code(400).send({ error: 'JPEG body required (Content-Type: image/jpeg)' });
+      return reply.code(400).send({ error: 'body required (image/jpeg or video/mp4)' });
     }
-    if (jpeg.length > 2 * 1024 * 1024) {
-      return reply.code(400).send({ error: 'frame too large (max 2MB)' });
+    const maxBytes = kind === 'video' ? 25 * 1024 * 1024 : 2 * 1024 * 1024;
+    if (jpeg.length > maxBytes) {
+      return reply.code(400).send({ error: `body too large (max ${maxBytes} bytes)` });
     }
     // stream_id lands in blob paths — reject anything path-shaped.
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(streamId)) {
       return reply.code(400).send({ error: 'invalid stream_id' });
     }
 
-    const key = `captures/${streamId}/${kind}-${String(seq).padStart(5, '0')}.jpg`;
+    const key = `captures/${streamId}/${kind}-${String(seq).padStart(5, '0')}.${kind === 'video' ? 'mp4' : 'jpg'}`;
     await blobStore.put(key, jpeg);
     await query(
       `INSERT INTO capture_frames (stream_id, user_id, kind, seq, captured_at, blob_key)

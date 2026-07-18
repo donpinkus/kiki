@@ -47,6 +47,11 @@ struct DrawingTopBar: View {
                             }
                         }
                     }
+                    if let animationURL = coordinator.generatedAnimationURL {
+                        Button("Animation (MP4)") {
+                            shareItem = ShareItem(url: animationURL)
+                        }
+                    }
                 }
                 if coordinator.canShareVideo {
                     Section("Share video") {
@@ -230,6 +235,15 @@ struct KikiAIStatusBadge: View {
     static let warmPink = Color(red: 1.0, green: 0.71, blue: 0.82)
 
     private var dotColor: Color {
+        // The WS push reaches every user; the polled state (test accounts
+        // only — the REST endpoint 403s otherwise) refines it when present.
+        if let pushed = coordinator.imageAvailability, coordinator.lambdaPoolState == nil {
+            switch pushed {
+            case .ready: return .green
+            case .warming: return Self.warmPink
+            case .off: return Self.warmPink // asleep — same soft state as "none"
+            }
+        }
         switch coordinator.lambdaPoolState?.status {
         case "ready": return .green
         case "launching", "booting", "none": return Self.warmPink
@@ -248,6 +262,17 @@ struct KikiAIStatusBadge: View {
         }
     }
 
+    /// Second dot: the VIDEO system. Hidden entirely while the feature flag
+    /// is off (availability == .off) so the badge is unchanged for
+    /// image-only operation.
+    private var videoDotColor: Color? {
+        switch coordinator.videoAvailability {
+        case .off: return nil
+        case .warming: return Self.warmPink
+        case .ready: return .green
+        }
+    }
+
     var body: some View {
         Button {
             showDetails = true
@@ -256,6 +281,17 @@ struct KikiAIStatusBadge: View {
                 Circle()
                     .fill(dotColor)
                     .frame(width: 7, height: 7)
+                if let videoDot = videoDotColor {
+                    Circle()
+                        .fill(videoDot)
+                        .frame(width: 7, height: 7)
+                        .overlay(
+                            // Tiny ▶ glyph differentiates the video dot at a glance.
+                            Image(systemName: "play.fill")
+                                .font(.system(size: 4))
+                                .foregroundStyle(.black.opacity(0.55))
+                        )
+                }
                 Text(label)
                     .font(.caption.weight(.medium))
                     .foregroundStyle(KikiTheme.icon)
@@ -323,6 +359,25 @@ private struct KikiAIStatusDetails: View {
                 Text("Powers the Edit button — turning generated images back into editable sketches.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
+                if coordinator.videoAvailability != .off {
+                    Divider()
+                    Text("Kiki's video AI")
+                        .font(.headline)
+                    switch coordinator.videoAvailability {
+                    case .ready:
+                        Label("Ready — animations are available.", systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                    case .warming:
+                        Label("Warming up — animations will be available in a couple of minutes.", systemImage: "flame")
+                            .foregroundStyle(KikiAIStatusBadge.warmPink)
+                    case .off:
+                        EmptyView()
+                    }
+                    Text("Powers the Animate button and the automatic animation when you pause drawing.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
             .font(.subheadline)
         }

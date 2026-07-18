@@ -526,6 +526,50 @@ final class AppCoordinator {
     }
     var showLayerPanel = false
     var resultState: ResultState = .empty
+    /// True while a video generation is in flight (from the manual Animate
+    /// button OR the backend's 3s-idle auto-trigger). Drives the toolbar
+    /// button's disabled "Animating" state. Set optimistically on tap and
+    /// authoritatively by `video_started`; cleared on complete/cancelled and
+    /// on stream teardown.
+    var isAnimating = false
+
+    /// Availability of the video H100 system, pushed by the backend
+    /// ({type:'video_availability'}): .off = feature flag disabled (hide ALL
+    /// animation UX), .warming = enabled but the video instance is booting,
+    /// .ready = a video H100 is serving. Also feeds the dual status badge.
+    enum VideoAvailability: String {
+        case off
+        case warming
+        case ready
+    }
+    var videoAvailability: VideoAvailability = .off
+
+    /// IMAGE system availability from the same push. Unlike the detailed
+    /// lambdaPoolState (test-account-gated REST poll), this reaches EVERY
+    /// user — the badge prefers it when present. nil until the first push.
+    var imageAvailability: VideoAvailability?
+
+    /// Animate modal (prompt editor) visibility.
+    var showAnimateModal = false
+
+    /// The drawing's animation prompt (motion description for the video
+    /// model). Persisted per drawing; empty = server default. Sent on every
+    /// config push so auto (3s-idle) animations use it too.
+    var animationPromptText = "" {
+        didSet {
+            if !isSuppressingObservation {
+                scheduleSave()
+            }
+            syncStreamConfig()
+        }
+    }
+
+    /// Mirrors the backend's DEFAULT_ANIMATION_PROMPT (videoSession.ts) —
+    /// shown as the modal's placeholder so users see what runs if they
+    /// leave it empty.
+    static let defaultAnimationPrompt =
+        "gentle cinematic motion: the scene subtly comes alive with natural movement, " +
+        "soft ambient animation, camera slowly drifting closer"
     var dividerPosition: CGFloat = 0.5
     /// Message for the red error banner in `DrawingView`. Set on stream/auth
     /// failures; cleared automatically when the condition resolves (successful
@@ -1312,7 +1356,14 @@ final class AppCoordinator {
     /// Stitch the current drawing's recorded segments into a playable
     /// composition for the replay modal's instant preview (no encode pass —
     /// the player renders layout + speed live).
-    func buildReplayComposition(layout: ReplayLayout, speed: ReplaySpeed) async -> SideBySideVideoComposer.BuiltReplay? {
+    /// URL of this drawing's generated animation, when one has been saved.
+    /// Backs the Share menu's "Animation (MP4)" item and the replay modal's
+    /// animation-tail toggle.
+    var generatedAnimationURL: URL? {
+        currentDrawingId.flatMap { RecordingStore.shared.generatedVideoURL(for: $0) }
+    }
+
+    func buildReplayComposition(layout: ReplayLayout, speed: ReplaySpeed, animationTail: Bool = true) async -> SideBySideVideoComposer.BuiltReplay? {
         guard let drawingId = currentDrawingId else { return nil }
         let segments = RecordingStore.shared.segmentURLs(for: drawingId)
         guard !segments.canvas.isEmpty else {
@@ -1330,7 +1381,8 @@ final class AppCoordinator {
                 generatedSegments: segments.generated,
                 generatedVideoURL: RecordingStore.shared.generatedVideoURL(for: drawingId),
                 layout: layout,
-                speed: speed
+                speed: speed,
+                animationTail: animationTail
             )
             Log.info("replay.built", attributes: [
                 "event": "replay.built",
@@ -1355,8 +1407,8 @@ final class AppCoordinator {
     /// burned). Writes a fresh file in its own temp dir (so a preview player
     /// never reads a file being overwritten), named "Speed Paint.mp4" for a
     /// clean Save-to-Files name.
-    func composeReplay(layout: ReplayLayout, speed: ReplaySpeed, watermark: Bool) async -> URL? {
-        guard let built = await buildReplayComposition(layout: layout, speed: speed) else { return nil }
+    func composeReplay(layout: ReplayLayout, speed: ReplaySpeed, watermark: Bool, animationTail: Bool = true) async -> URL? {
+        guard let built = await buildReplayComposition(layout: layout, speed: speed, animationTail: animationTail) else { return nil }
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let output = dir.appendingPathComponent("Speed Paint.mp4")
         do {
@@ -1436,6 +1488,7 @@ final class AppCoordinator {
 
         // Reset all state
         promptText = ""
+        animationPromptText = ""
         selectedStyle = .default
         streamSeed = seed
         lastSuccessfulImage = nil
@@ -1468,6 +1521,7 @@ final class AppCoordinator {
 
         // Restore settings
         promptText = drawing.promptText
+        animationPromptText = drawing.animationPrompt ?? ""
         selectedStyle = PromptStyle.from(id: drawing.styleId)
         streamSeed = drawing.streamSeed
 
@@ -1596,6 +1650,7 @@ final class AppCoordinator {
         drawing.generatedImageData = lastSuccessfulImage?.jpegData(compressionQuality: 0.85)
         drawing.canvasThumbnailData = canvasViewModel.generateThumbnail()?.jpegData(compressionQuality: 0.7)
         drawing.promptText = promptText
+        drawing.animationPrompt = animationPromptText.isEmpty ? nil : animationPromptText
         drawing.styleId = selectedStyle.id
         drawing.streamSeed = streamSeed
 
@@ -2051,12 +2106,26 @@ final class AppCoordinator {
     }
 
     /// Direct map from stream readiness to `resultState`. The single rule:
+    /// Manual Animate button tap: optimistically flip to the disabled
+    /// "Animating" state (confirmed by the backend's `video_started`, reset
+    /// by video_complete/video_cancelled) and ask the backend to fire the
+    /// video now instead of waiting for the 3s idle trigger.
+    func requestAnimate() {
+        guard !isAnimating else { return }
+        isAnimating = true
+        streamLog.info("[result] animate fired (prompt len=\(self.animationPromptText.count))")
+        streamSession?.requestAnimate(
+            prompt: animationPromptText.isEmpty ? nil : animationPromptText
+        )
+    }
+
     /// `.ready` shows the bottom-left badge over a preview/streaming image;
     /// every other readiness state shows the corresponding overlay, with
     /// `lastSuccessfulImage` dimmed underneath when one exists.
     private func applyReadinessToResultState(_ readiness: StreamSession.StreamReadiness) {
         switch readiness {
         case .disconnected:
+            isAnimating = false
             resultState = lastSuccessfulImage.map { .preview(image: $0) } ?? .empty
         case .warming(let message):
             resultState = .provisioning(
@@ -2069,6 +2138,7 @@ final class AppCoordinator {
             resultState = lastSuccessfulImage.map { .preview(image: $0) } ?? .empty
         case .failed(let msg):
             streamLog.error("Stream failed: \(msg)")
+            isAnimating = false
             resultState = .error(message: msg, previousImage: lastSuccessfulImage)
         }
     }
@@ -2090,6 +2160,12 @@ final class AppCoordinator {
     private func handleVideoEvent(_ event: StreamWebSocketClient.VideoEvent) {
         let prev = String(describing: resultState).prefix(40)
         switch event {
+        case .started(let requestId):
+            // Generation began backend-side (auto idle-trigger or our own
+            // Animate tap). No visual state change yet — frames arrive when
+            // decoding starts — but the toolbar button flips to "Animating".
+            isAnimating = true
+            streamLog.info("[result] video_started req=\(requestId ?? "-")")
         case .frame(_, let imageData, let index, let total):
             guard let frame = UIImage(data: imageData),
                   let fallback = lastSuccessfulImage else {
@@ -2109,6 +2185,9 @@ final class AppCoordinator {
                 Phase.set(.animating)
             }
         case .complete(_, let mp4Data, _, let frames):
+            // Generation finished — re-enable the Animate button regardless
+            // of whether the MP4 below decodes/writes cleanly.
+            isAnimating = false
             guard let fallback = lastSuccessfulImage else { return }
             // Clean up any prior MP4 we wrote — only one in flight at a time.
             if let prior = currentVideoMP4URL {
@@ -2132,7 +2211,18 @@ final class AppCoordinator {
                     scope.setTag(value: "video.mp4_write", key: "op")
                 }
             }
+        case .availability(let image, _, let video, _):
+            let videoValue = VideoAvailability(rawValue: video) ?? .off
+            if videoValue != videoAvailability {
+                videoAvailability = videoValue
+                streamLog.info("[result] video availability → \(video)")
+            }
+            imageAvailability = VideoAvailability(rawValue: image) ?? .off
         case .cancelled(_, let atStep, let error):
+            // Covers user-resumed-drawing cancels, server-side failures, AND
+            // the backend's synthesized "can't animate" replies to the manual
+            // button — all of which must re-enable the Animate button.
+            isAnimating = false
             // If we're not currently in a video state, nothing to revert
             // (img2img already drove us out). Otherwise pop back to
             // .streaming on the last image.
@@ -2259,6 +2349,7 @@ final class AppCoordinator {
             videoHeight: videoResolution,
             videoFrames: videoFrames,
             videoPromptSuffix: videoPromptSuffix,
+            animationPrompt: animationPromptText.isEmpty ? nil : animationPromptText,
             enableProfiling: enableProfiling
         )
     }

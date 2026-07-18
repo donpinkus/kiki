@@ -28,6 +28,10 @@ final class Drawing {
     var promptText: String
     var stylePresetRawValue: String
 
+    /// The Animate modal's motion prompt for this drawing (nil = server
+    /// default). Drives both manual and auto idle-trigger animations.
+    var animationPrompt: String?
+
     /// Fixed seed for generation. Persists across sessions so reopening a
     /// drawing produces the same output.
     var streamSeed: Int?

@@ -5,6 +5,12 @@ the backend. The video idle-state feature (generate a short animation from the
 user's drawing when they pause) is **planned to return on Lambda Cloud** — this
 directory holds everything reusable for that port.
 
+> **UPDATE 2026-07-18: the port happened.** `video/{server,pipeline}.py` and
+> `video_client.py` were copied back to `model-servers/video/` +
+> `model-servers/dev/` (with a token gate + wss added for Lambda's public
+> IPs) — the copies HERE are now historical. The docs/ subdirectory remains
+> the live deep reference. See `documents/plans/lambda-video-provider.md`.
+
 ## What's here
 
 | File | What it is | Provider coupling |

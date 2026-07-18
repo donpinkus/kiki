@@ -33,6 +33,10 @@ public struct StreamConfig: Codable, Sendable, Equatable {
     public let videoHeight: Int
     public let videoFrames: Int
     public let videoPromptSuffix: String
+    /// The drawing's animation prompt (Animate modal). Backend caches it and
+    /// uses it for BOTH manual and auto (3s-idle) video fires; nil = server
+    /// default motion prompt.
+    public let animationPrompt: String?
     public let enableProfiling: Bool
 
     private enum CodingKeys: String, CodingKey {
@@ -47,6 +51,7 @@ public struct StreamConfig: Codable, Sendable, Equatable {
         case videoHeight
         case videoFrames
         case videoPromptSuffix
+        case animationPrompt
         case enableProfiling
     }
 
@@ -61,6 +66,7 @@ public struct StreamConfig: Codable, Sendable, Equatable {
         videoHeight: Int = 512,
         videoFrames: Int = 145,
         videoPromptSuffix: String = "",
+        animationPrompt: String? = nil,
         enableProfiling: Bool = false
     ) {
         self.type = "config"
@@ -74,6 +80,7 @@ public struct StreamConfig: Codable, Sendable, Equatable {
         self.videoHeight = videoHeight
         self.videoFrames = videoFrames
         self.videoPromptSuffix = videoPromptSuffix
+        self.animationPrompt = animationPrompt
         self.enableProfiling = enableProfiling
     }
 }
