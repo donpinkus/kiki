@@ -242,10 +242,13 @@ struct KikiAIStatusBadge: View {
     @Environment(AppCoordinator.self) private var coordinator
     @State private var showDetails = false
 
+    /// Softer than .pink, which reads as red against the dark chrome.
+    static let warmPink = Color(red: 1.0, green: 0.71, blue: 0.82)
+
     private var dotColor: Color {
         switch coordinator.lambdaPoolState?.status {
         case "ready": return .green
-        case "launching", "booting", "none": return .pink
+        case "launching", "booting", "none": return Self.warmPink
         case "error": return .red
         default: return .gray
         }
@@ -301,15 +304,15 @@ private struct KikiAIStatusDetails: View {
                         .foregroundStyle(.green)
                 case "launching":
                     Label("Finding a GPU…", systemImage: "hourglass")
-                        .foregroundStyle(.pink)
+                        .foregroundStyle(KikiAIStatusBadge.warmPink)
                     warmingDetail
                 case "booting":
                     Label("Warming up…", systemImage: "flame")
-                        .foregroundStyle(.pink)
+                        .foregroundStyle(KikiAIStatusBadge.warmPink)
                     warmingDetail
                 case "none":
                     Label("Asleep — powered down after 30 quiet minutes.", systemImage: "moon.zzz")
-                        .foregroundStyle(.pink)
+                        .foregroundStyle(KikiAIStatusBadge.warmPink)
                     Button("Wake up") { coordinator.ensureLambdaPool() }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
