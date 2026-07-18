@@ -73,7 +73,7 @@ import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import websocket from '@fastify/websocket';
 import { config } from './config/index.js';
-import { AppError, RateLimitedError } from './errors.js';
+import { AppError } from './errors.js';
 import { healthRoute } from './routes/health.js';
 import { streamRoute } from './routes/stream.js';
 import { authRoute } from './routes/auth.js';
@@ -142,10 +142,6 @@ app.setErrorHandler((error, request, reply) => {
       message: error.message,
       statusCode: error.statusCode,
     };
-
-    if (error instanceof RateLimitedError && error.retryAfter) {
-      void reply.header('Retry-After', String(error.retryAfter));
-    }
 
     return reply.status(error.statusCode).send(response);
   }
