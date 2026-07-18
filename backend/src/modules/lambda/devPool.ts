@@ -73,6 +73,9 @@ interface PoolInstance {
   activeStreams: number;
   lastActivityMs: number;
   healthFails: number;
+  /** Re-registered at backend redeploy — launchedAtMs is adoption time, not a
+   * real boot start, so waterfall 'ready' timings must exclude it. */
+  adopted?: boolean;
 }
 
 export interface DevPoolState {
@@ -378,11 +381,25 @@ async function launchOne(): Promise<void> {
   }
 }
 
+/** True boot-start epoch: the name suffix IS the launch timestamp
+ * (`kiki-serve-<epochMs>`), which survives backend redeploys. Adoption sets
+ * launchedAtMs to adoption time, so without this a wedged instance gets a
+ * FRESH 25-min boot deadline on every redeploy and can stall forever under
+ * frequent deploys (observed 2026-07-18). Falls back to launchedAtMs for
+ * unparseable names. */
+function trueLaunchMs(inst: PoolInstance): number {
+  const suffix = Number(inst.name.slice(NAME_PREFIX.length));
+  return Number.isFinite(suffix) && suffix > 1_700_000_000_000 ? suffix : inst.launchedAtMs;
+}
+
 async function watchBoot(name: string): Promise<void> {
   const c = client();
   const inst = instances.get(name);
   if (!inst) return;
-  const deadline = inst.launchedAtMs + BOOT_TIMEOUT_MS;
+  // Deadline from TRUE launch time, with a 5-min floor from now so a
+  // just-redeployed backend still gives a genuinely-booting instance a
+  // grace window before declaring it stalled.
+  const deadline = Math.max(trueLaunchMs(inst) + BOOT_TIMEOUT_MS, Date.now() + 5 * 60_000);
   // IP first…
   while (!inst.ip) {
     if (Date.now() > deadline) throw new Error(`boot timed out waiting for IP (${name})`);
@@ -404,6 +421,7 @@ async function watchBoot(name: string): Promise<void> {
     if (Date.now() > deadline) {
       instances.delete(name);
       void c.terminate([inst.id]).catch(() => {});
+      recordPoolEvent('boot_stalled', name, inst.region, Date.now() - trueLaunchMs(inst));
       throw new Error(`boot timed out waiting for /health (${name})`);
     }
     if (!instances.has(name)) return;
@@ -422,8 +440,10 @@ async function watchBoot(name: string): Promise<void> {
     { instanceId: inst.id, name, ip: inst.ip, bootMs: inst.readyAtMs - inst.launchedAtMs, event: 'lambda_pool_ready' },
     'lambda pool instance ready',
   );
-  // duration = boot/warm time (capacity granted → OUR /health ok).
-  recordPoolEvent('ready', name, inst.region, inst.readyAtMs - inst.launchedAtMs);
+  // duration = boot/warm time (capacity granted → OUR /health ok). Adopted
+  // instances skip this — their launchedAtMs is adoption time, and a ~0s
+  // "boot" would corrupt the waterfall's boot p50.
+  if (!inst.adopted) recordPoolEvent('ready', name, inst.region, inst.readyAtMs - inst.launchedAtMs);
 }
 
 // ── periodic tick: autoscale + idle scale-down + health ─────────────────────
@@ -518,6 +538,7 @@ export function start(logger: FastifyBaseLogger): void {
           ip: remote.ip ?? undefined,
           status: 'booting',
           launchedAtMs: Date.now(),
+          adopted: true,
           activeStreams: 0,
           lastActivityMs: Date.now(),
           healthFails: 0,
