@@ -10,7 +10,7 @@ import type { AddressInfo } from 'node:net';
 import { WebSocketServer, type WebSocket as WsSocket } from 'ws';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { VideoSession } from './videoSession.js';
+import { DEFAULT_ANIMATION_PROMPT, VideoSession } from './videoSession.js';
 
 const JPEG = Buffer.from('fake-jpeg-bytes');
 const MP4 = Buffer.from('fake-mp4-bytes');
@@ -158,7 +158,9 @@ describe('VideoSession idle trigger', { timeout: 30_000 }, () => {
 
     await until(() => mock.received.some((m) => m['type'] === 'video_request'));
     const req = must(mock.received.find((m) => m['type'] === 'video_request'), 'video_request');
-    expect(req['prompt']).toBe('a dragon');
+    // The IMAGE prompt never drives video — with no animationPrompt set, the
+    // default motion prompt is used.
+    expect(req['prompt']).toBe(DEFAULT_ANIMATION_PROMPT);
     expect(req['image_b64']).toBe(JPEG.toString('base64'));
 
     // The iPad is told the moment the video fires (Animate button state).
@@ -244,17 +246,19 @@ describe('VideoSession idle trigger', { timeout: 30_000 }, () => {
     expect(second['image_b64']).toBe(Buffer.from('newer-image').toString('base64'));
   });
 
-  it('skips (once per idle period) when no prompt is cached', async () => {
+  it('auto-fires use the drawing animationPrompt from config when set', async () => {
     const mock = await startMockVideoServer();
     cleanups.push(mock.close);
     const { session } = makeSession(mock.url);
     cleanups.push(() => session.close());
     await session.start();
 
+    session.noteConfig({ type: 'config', prompt: 'a dragon', animationPrompt: 'wings flap slowly' });
     session.noteSketchFrame();
     session.noteGeneratedFrame(JPEG);
-    await sleep(150);
-    expect(mock.received).toHaveLength(0);
+    await until(() => mock.received.some((m) => m['type'] === 'video_request'));
+    const req = must(mock.received.find((m) => m['type'] === 'video_request'), 'video_request');
+    expect(req['prompt']).toBe('wings flap slowly');
   });
 
   it('manual requestAnimate fires immediately — no idle wait, no sketch required', async () => {
@@ -267,11 +271,12 @@ describe('VideoSession idle trigger', { timeout: 30_000 }, () => {
 
     session.noteConfig({ type: 'config', prompt: 'a whale' });
     session.noteGeneratedFrame(JPEG);
-    session.requestAnimate();
+    session.requestAnimate('the whale dives, splashing water');
 
     await until(() => mock.received.some((m) => m['type'] === 'video_request'));
     const req = must(mock.received.find((m) => m['type'] === 'video_request'), 'video_request');
-    expect(req['prompt']).toBe('a whale');
+    // The modal's prompt drives this fire (and sticks for later auto-fires).
+    expect(req['prompt']).toBe('the whale dives, splashing water');
     expect(req['image_b64']).toBe(JPEG.toString('base64'));
     expect(clientMessages.some((m) => m['type'] === 'video_started')).toBe(true);
     await until(() => clientMessages.some((m) => m['type'] === 'video_complete_data'));
@@ -291,6 +296,65 @@ describe('VideoSession idle trigger', { timeout: 30_000 }, () => {
     const cancelled = must(clientMessages.find((m) => m['type'] === 'video_cancelled'), 'video_cancelled');
     expect(cancelled['error']).toBe('no_image');
     expect(mock.received.filter((m) => m['type'] === 'video_request')).toHaveLength(0);
+  });
+
+  it('drops a stale completion whose cancel raced the finished render (same requestId)', async () => {
+    const mock = await startMockVideoServer({ holdCompletion: true });
+    cleanups.push(mock.close);
+    const { session, clientMessages } = makeSession(mock.url);
+    cleanups.push(() => session.close());
+    await session.start();
+
+    session.noteSketchFrame();
+    session.noteGeneratedFrame(JPEG);
+    await until(() => mock.pending.length === 1);
+    const held = must(mock.pending[0], 'held request');
+
+    // User resumes drawing (cancel goes out) — but the render already
+    // finished server-side: the completion hits the wire before the mock
+    // even processes the cancel. Same requestId, out-of-date image.
+    session.noteSketchFrame();
+    mock.completeRequest(held);
+
+    await until(() => clientMessages.some((m) => m['type'] === 'video_cancelled'));
+    // The stale MP4 (and its frame preamble pair) must never reach the iPad.
+    expect(clientMessages.some((m) => m['type'] === 'video_complete_data')).toBe(false);
+    expect(clientMessages.some((m) => m['type'] === 'video_frame_data')).toBe(false);
+    expect(session.getStats().videoCompleted).toBe(0);
+  });
+
+  it('drops a completion for a superseded requestId while a newer request is in flight', async () => {
+    const mock = await startMockVideoServer({ holdCompletion: true });
+    cleanups.push(mock.close);
+    const { session, clientMessages } = makeSession(mock.url);
+    cleanups.push(() => session.close());
+    await session.start();
+
+    session.noteSketchFrame();
+    session.noteGeneratedFrame(JPEG);
+    await until(() => mock.pending.length === 1);
+    const first = must(mock.pending[0], 'first held request');
+
+    // Draw again → cancel + new idle period → second request fires.
+    session.noteSketchFrame();
+    session.noteGeneratedFrame(Buffer.from('newer-image'));
+    await until(() => mock.pending.length === 1 && mock.pending[0]?.requestId !== first.requestId);
+    const second = must(mock.pending[0], 'second held request');
+
+    // The FIRST render limps in late — wrong requestId → dropped.
+    mock.completeRequest(first);
+    await sleep(150);
+    expect(clientMessages.some((m) => m['type'] === 'video_complete_data')).toBe(false);
+
+    // The CURRENT request completes normally and is delivered.
+    mock.completeRequest(second);
+    await until(() => clientMessages.some((m) => m['type'] === 'video_complete_data'));
+    const complete = must(
+      clientMessages.find((m) => m['type'] === 'video_complete_data'),
+      'video_complete_data',
+    );
+    expect((complete['meta'] as Record<string, unknown>)['requestId']).toBe(second.requestId);
+    expect(session.getStats().videoCompleted).toBe(1);
   });
 
   it('manual requestAnimate is ignored while a video is already in flight', async () => {

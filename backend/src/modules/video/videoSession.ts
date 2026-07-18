@@ -32,6 +32,14 @@
 import type { FastifyBaseLogger } from 'fastify';
 import { StreamRelay } from '../relay/streamRelay.js';
 
+/** Video prompt when the user hasn't written one (modal untouched). Describes
+ * MOTION, not content — LTX gets the content from the input image; the prompt
+ * steers how it moves. Tuned in the 2026-07-18 quality sweep (see
+ * documents/plans/lambda-video-provider.md). */
+export const DEFAULT_ANIMATION_PROMPT =
+  'gentle cinematic motion: the scene subtly comes alive with natural movement, ' +
+  'soft ambient animation, camera slowly drifting closer';
+
 export interface VideoSessionOptions {
   /** Get a video-instance slot to relay to. Static mode (LAMBDA_VIDEO_URL)
    * returns the fixed URL every time; pool mode proxies
@@ -55,6 +63,9 @@ export interface VideoSessionOptions {
   sendToClient: (text: string) => void;
   /** True while the iPad WS is open. */
   isClientOpen: () => boolean;
+  /** A completed MP4 was delivered to the iPad (fires AFTER the stale guard —
+   * never for cancelled/stale renders). Metering + Insights capture hook. */
+  onVideoDelivered?: (mp4: Buffer, meta: Record<string, unknown>) => void;
   log: FastifyBaseLogger;
   ctx: { userId: string | null; connId: string; streamId: string | null };
 }
@@ -91,10 +102,20 @@ export class VideoSession {
   private lastGeneratedSeq = 0;
   /** Latest config from the iPad (prompt + optional video* overrides). */
   private lastConfig: Record<string, unknown> | null = null;
+  /** The drawing's animation prompt: set by config pushes (`animationPrompt`,
+   * persisted per drawing on the iPad) and by the Animate modal's
+   * `{type:'animate', prompt}`. Drives BOTH manual and auto (idle) fires;
+   * falls back to DEFAULT_ANIMATION_PROMPT. The IMAGE prompt is deliberately
+   * not used — it describes content (already in the input image), not motion. */
+  private animationPrompt: string | null = null;
   /** One video per idle period: set on fire, cleared by the next sketch. */
   private firedThisIdle = false;
   /** requestId of the in-flight generation on the video instance. */
   private inFlightRequestId: string | null = null;
+  /** Sketch seq at fire time — a completion is STALE (animates an out-of-date
+   * drawing) when the user sketched after the fire, even if the requestId
+   * still matches (our video_cancel raced the finished render). */
+  private inFlightSketchSeq = 0;
   private requestCounter = 0;
 
   // ── protocol state (preamble → binary pairing, mirrors old wireVideoRelay)
@@ -194,6 +215,14 @@ export class VideoSession {
   noteConfig(cfg: Record<string, unknown>): void {
     if (this.closed) return;
     this.lastConfig = cfg;
+    if (typeof cfg['animationPrompt'] === 'string' && cfg['animationPrompt'].trim().length > 0) {
+      this.animationPrompt = cfg['animationPrompt'];
+    }
+  }
+
+  /** The prompt a fire would use right now. */
+  private videoPrompt(): string {
+    return this.animationPrompt ?? DEFAULT_ANIMATION_PROMPT;
   }
 
   /** Manual "Animate" button ({type:'animate'} from the iPad): fire NOW,
@@ -203,9 +232,14 @@ export class VideoSession {
    * optimistically-disabled button always resets. Ignored while a video is
    * already in flight (the button is disabled client-side; this is the
    * backstop). */
-  requestAnimate(): void {
+  requestAnimate(modalPrompt?: string): void {
     if (this.closed) return;
     if (this.inFlightRequestId) return;
+    // The modal's prompt becomes the drawing's animation prompt for the rest
+    // of the session (auto-fires reuse it; iOS persists it per drawing too).
+    if (typeof modalPrompt === 'string' && modalPrompt.trim().length > 0) {
+      this.animationPrompt = modalPrompt;
+    }
     const fail = (error: string): void => {
       this.opts.log.info(
         { ...this.opts.ctx, reason: error, event: 'video_animate_failed' },
@@ -213,11 +247,9 @@ export class VideoSession {
       );
       this.opts.sendToClient(JSON.stringify({ type: 'video_cancelled', requestId: null, error }));
     };
-    const prompt = this.lastConfig?.['prompt'];
-    if (typeof prompt !== 'string') return fail('no_prompt');
     if (!this.lastGeneratedJpeg) return fail('no_image');
     if (this.relay) {
-      this.fire(prompt, 'manual');
+      this.fire(this.videoPrompt(), 'manual');
       return;
     }
     // No relay yet (pool booting / previous instance lost): acquire + wire,
@@ -225,8 +257,7 @@ export class VideoSession {
     void this.ensureRelay().then((ok) => {
       if (this.closed || this.inFlightRequestId) return;
       if (!ok) return fail('video_unavailable');
-      const p = this.lastConfig?.['prompt'];
-      if (typeof p === 'string' && this.lastGeneratedJpeg) this.fire(p, 'manual');
+      if (this.lastGeneratedJpeg) this.fire(this.videoPrompt(), 'manual');
     });
   }
 
@@ -280,16 +311,6 @@ export class VideoSession {
       this.armIdleTimer();
       return;
     }
-    const prompt = this.lastConfig?.['prompt'];
-    if (typeof prompt !== 'string') {
-      this.opts.log.warn(
-        { ...this.opts.ctx, reason: 'prompt_not_cached', event: 'video_skipped' },
-        'video_skipped',
-      );
-      // Don't retry this idle period — the next sketch resets the flag.
-      this.firedThisIdle = true;
-      return;
-    }
     if (!this.lastGeneratedJpeg || this.lastGeneratedSeq < this.lastSketchSeq) {
       // The final image generation for the finished drawing hasn't landed
       // yet — noteGeneratedFrame() calls back into maybeFire when it does.
@@ -304,7 +325,7 @@ export class VideoSession {
       });
       return;
     }
-    this.fire(prompt, source);
+    this.fire(this.videoPrompt(), source);
   }
 
   private fire(prompt: string, source: string): void {
@@ -331,6 +352,7 @@ export class VideoSession {
     }
     relay.sendConfig(payload);
     this.inFlightRequestId = reqId;
+    this.inFlightSketchSeq = this.lastSketchSeq;
     this.firedThisIdle = true;
     this.stats.videoTriggered += 1;
     // Tell the iPad a video is generating (auto AND manual triggers) so the
@@ -383,6 +405,8 @@ export class VideoSession {
       const buf = data as Buffer;
       const wrap = this.pendingBinaryWrapper;
       this.pendingBinaryWrapper = null;
+      // Stale preamble marked for dropping — swallow its binary too.
+      if (wrap?.type === '__stale__') return;
       const wrapperType =
         wrap?.type === 'video_complete'
           ? 'video_complete_data'
@@ -392,6 +416,11 @@ export class VideoSession {
       this.opts.sendToClient(
         JSON.stringify({ type: wrapperType, data: buf.toString('base64'), meta: wrap?.meta ?? {} }),
       );
+      // A finished MP4 actually reached the iPad — the billing/capture
+      // moment (stale + cancelled renders never get here).
+      if (wrapperType === 'video_complete_data') {
+        this.opts.onVideoDelivered?.(buf, wrap?.meta ?? {});
+      }
       return;
     }
     if (typeof data !== 'string') return;
@@ -407,6 +436,36 @@ export class VideoSession {
     }
     const t = parsed['type'];
     if (t === 'video_frame' || t === 'video_complete') {
+      // ── Stale guard (product rule: a video generated from an out-of-date
+      // image must never reach the iPad). Stale when (a) the requestId isn't
+      // the in-flight one (superseded request whose frames were already in
+      // the pipe), or (b) the user sketched after this request fired — our
+      // video_cancel raced a render that finished anyway. The preamble is
+      // marked so its paired binary gets swallowed too.
+      const reqId = typeof parsed['requestId'] === 'string' ? parsed['requestId'] : null;
+      const wrongRequest = reqId !== null && reqId !== this.inFlightRequestId;
+      const sketchedSinceFire = this.lastSketchSeq > this.inFlightSketchSeq;
+      if (wrongRequest || sketchedSinceFire) {
+        this.pendingBinaryWrapper = { type: '__stale__', meta: parsed };
+        if (t === 'video_complete') {
+          this.stats.videoCancelled += 1;
+          if (!wrongRequest) this.inFlightRequestId = null;
+          this.opts.log.info(
+            {
+              ...this.opts.ctx,
+              req: reqId,
+              inFlight: this.inFlightRequestId,
+              reason: wrongRequest ? 'superseded_request' : 'user_sketched_since_fire',
+              event: 'video_stale_dropped',
+            },
+            'stale video dropped',
+          );
+          // The idle gate re-checks: if the user went idle again after the
+          // stale render, this idle period still deserves a fresh video.
+          this.maybeFire('stale_dropped');
+        }
+        return;
+      }
       this.pendingBinaryWrapper = { type: t as string, meta: parsed };
       if (t === 'video_complete') {
         this.stats.videoCompleted += 1;
