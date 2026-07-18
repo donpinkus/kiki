@@ -24,6 +24,18 @@ swiftformat ios/
 ios/scripts/ipad.sh deploy            # build + install + relaunch on the iPad
 ios/scripts/ipad.sh screenshot        # capture iPad screen → prints PNG path (Read it to view)
 ios/scripts/ipad.sh logs 15           # stream Kiki process syslog for N seconds
+
+# iPad-Simulator dev loop — FULLY autonomous (no human touch needed): auth
+# bypass skips Sign in with Apple (pre-minted JWTs via launch args, see
+# DevAutomation.swift + backend/scripts/mint-dev-token.ts), and recorded
+# stroke fixtures replay onto the live canvas through the real engine
+# (pressure-faithful; feeds autosave + the generation stream like hand-drawn
+# strokes). Simulator caveats: no Pencil pressure from *live* touches, no wet
+# brush (no framebuffer fetch; eraser uses a fixed-function fallback PSO).
+ios/scripts/sim.sh mint               # mint dev JWTs (once; needs railway CLI)
+ios/scripts/sim.sh deploy             # boot sim + build + install + launch signed-in
+ios/scripts/sim.sh replay <fixture>   # paint a BrushHarness fixture onto the canvas
+ios/scripts/sim.sh screenshot         # capture sim screen → prints PNG path
 ```
 
 ### Backend

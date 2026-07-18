@@ -1265,8 +1265,36 @@ public final class MetalCanvasView: UIView {
                 fed.append(contentsOf: st.finish())
                 points = fed
             }
-            paintRetained(Stroke(id: retained.id, points: points, brush: brush))
+            paintRetained(Stroke(id: retained.id, points: points, brush: brush), scale: canvasScale)
         }
+        isDirty = true
+    }
+
+    /// Replay recorded strokes onto the live canvas — the simulator/testing bypass
+    /// for synthetic input (there is no way to fabricate UITouch, so recorded
+    /// fixtures are the only pressure-faithful stroke source off-device). Strokes
+    /// must be in canvas-pixel space (the `BrushFixture` contract — what
+    /// `onStrokeCompleted` emits); pass the fixture's `canvasSide` so recordings
+    /// from a different document size rescale. Commits through the same engine
+    /// routing as the live path, one undo snapshot for the whole batch.
+    public func replayStrokes(_ strokes: [Stroke], canvasSide: Int? = nil) {
+        guard !strokes.isEmpty else { return }
+        pushUndoSnapshot()
+        let rescale = CGFloat(Self.documentSide) / CGFloat(canvasSide ?? Self.documentSide)
+        for var stroke in strokes {
+            if rescale != 1 {
+                stroke.brush.baseWidth *= rescale
+                stroke.points = stroke.points.map { point in
+                    var p = point
+                    p.position = CGPoint(x: p.position.x * rescale, y: p.position.y * rescale)
+                    return p
+                }
+            }
+            paintRetained(stroke, scale: 1)
+            strokeCount += 1
+        }
+        onDrawingChanged?()
+        onStateChanged?()
         isDirty = true
     }
 
@@ -1274,7 +1302,9 @@ public final class MetalCanvasView: UIView {
     /// BrushHarness use: dry via StrokeStampGenerator → commitStampsToCanvas, wet ink
     /// via a whole-stroke walker (canvas pristine per stroke), smudge via batched
     /// walker advances with queue drains so the pickup sees its own deposits.
-    private func paintRetained(_ stroke: Stroke) {
+    /// `scale` converts the stroke's space to canvas pixels: `canvasScale` for
+    /// retained view-space geometry, 1 for already-canvas-space fixture strokes.
+    private func paintRetained(_ stroke: Stroke, scale: CGFloat) {
         let brush = stroke.brush
         guard let start = stroke.points.first?.position else { return }
 
@@ -1288,7 +1318,7 @@ public final class MetalCanvasView: UIView {
                                     points: Array(stroke.points.prefix(upTo)),
                                     brush: brush)
                 let stamps = walker.advance(
-                    stroke: prefix, scale: canvasScale, clipPath: nil,
+                    stroke: prefix, scale: scale, clipPath: nil,
                     sample: { [renderer] x, y in renderer.sampleLayerColor(x: x, y: y) },
                     sampleAveraged: { [renderer] x, y, r in renderer.sampleLayerColorAveraged(x: x, y: y, radius: r) },
                     mix: { [renderer] a, b, t in renderer.kmMixCPU(a, b, t) })
@@ -1308,14 +1338,14 @@ public final class MetalCanvasView: UIView {
             renderer.waitUntilQueueDrained()
             var walker = WetStrokeWalker(startPosition: start, brush: brush)
             let stamps = walker.advance(
-                stroke: stroke, scale: canvasScale, clipPath: nil,
+                stroke: stroke, scale: scale, clipPath: nil,
                 sample: { [renderer] x, y in renderer.sampleLayerColor(x: x, y: y) },
                 sampleAveraged: { [renderer] x, y, r in renderer.sampleLayerColorAveraged(x: x, y: y, radius: r) },
                 mix: { [renderer] a, b, t in renderer.kmMixCPU(a, b, t) })
             renderer.commitStampsToCanvas(stamps, strokeOpacity: Float(brush.opacity), wetInk: true)
             return
         }
-        let stamps = generateStampsForStroke(stroke, scale: canvasScale)
+        let stamps = generateStampsForStroke(stroke, scale: scale)
         renderer.commitStampsToCanvas(stamps,
                                       strokeOpacity: Float(brush.opacity),
                                       shapeTexture: renderer.shapeTexture(for: brush.shapeID),

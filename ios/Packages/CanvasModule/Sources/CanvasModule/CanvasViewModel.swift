@@ -187,6 +187,18 @@ public final class CanvasViewModel {
         canvasView?.wetOrderingPerStamp = on
     }
 
+    /// True once a live canvas view is attached (replay and other canvas ops
+    /// silently no-op before that).
+    public var isCanvasAttached: Bool { canvasView != nil }
+
+    /// Dev/testing: replay a recorded stroke fixture onto the live canvas
+    /// through the real engine (see `MetalCanvasView.replayStrokes`). Fires the
+    /// normal drawing-changed plumbing, so autosave and stream capture behave
+    /// as if the strokes were drawn by hand.
+    public func replayFixture(_ fixture: BrushFixture) {
+        canvasView?.replayStrokes(fixture.strokes, canvasSide: fixture.canvasSide)
+    }
+
     // MARK: - Lasso Selection
 
     func handleLassoSelectionStarted(path: CGPath, bounds: CGRect) {

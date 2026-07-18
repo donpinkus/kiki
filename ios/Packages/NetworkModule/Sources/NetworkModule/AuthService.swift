@@ -449,3 +449,23 @@ private struct BackendError: Decodable {
     let error: String?
     let message: String?
 }
+
+#if DEBUG
+extension AuthService {
+    /// Simulator dev bypass: persist a pre-minted token bundle exactly as a
+    /// real sign-in would, so the app launches signed-in without Sign in with
+    /// Apple (which can't complete in the simulator). Tokens come from
+    /// `backend/scripts/mint-dev-token.ts`; the injection call site is
+    /// `DevAutomation.swift` in the app target. Same-file extension so the
+    /// private keychain account constants stay private.
+    public static func devInjectTokens(
+        access: String, refresh: String, expiresAt: Date, userId: String
+    ) throws {
+        let keychain = KeychainStore.default
+        try keychain.set(access, for: keychainAccessToken)
+        try keychain.set(refresh, for: keychainRefreshToken)
+        try keychain.set(String(expiresAt.timeIntervalSince1970), for: keychainAccessExpiresAt)
+        try keychain.set(userId, for: keychainUserId)
+    }
+}
+#endif

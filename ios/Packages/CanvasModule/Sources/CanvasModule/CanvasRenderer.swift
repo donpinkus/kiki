@@ -1635,6 +1635,23 @@ public final class CanvasRenderer {
             // function blending is off — the shader returns the final pixel value.
             desc.fragmentFunction = library.makeFunction(name: "eraserStampFragment")
             ca.isBlendingEnabled = false
+            if let pso = try? device.makeRenderPipelineState(descriptor: desc) {
+                return pso
+            }
+            // Simulator fallback: rendertarget reads are unsupported there
+            // ("reading from a rendertarget is not supported"), which would
+            // nil the whole renderer. Approximate with fixed-function
+            // destination-out (dst *= 1 - mask.alpha) — same erase, minus the
+            // snap-near-clear-to-zero nicety. Device builds never take this
+            // path: the programmable PSO above compiles on real hardware.
+            desc.fragmentFunction = library.makeFunction(name: "brushStampFragment")
+            ca.isBlendingEnabled = true
+            ca.rgbBlendOperation = .add
+            ca.alphaBlendOperation = .add
+            ca.sourceRGBBlendFactor = .zero
+            ca.destinationRGBBlendFactor = .oneMinusSourceAlpha
+            ca.sourceAlphaBlendFactor = .zero
+            ca.destinationAlphaBlendFactor = .oneMinusSourceAlpha
         } else {
             // Source-over (premultiplied): dst = src + dst * (1 - src.alpha).
             desc.fragmentFunction = library.makeFunction(name: "brushStampFragment")

@@ -549,6 +549,11 @@ final class AppCoordinator {
     /// user — the badge prefers it when present. nil until the first push.
     var imageAvailability: VideoAvailability?
 
+    /// Full pushed status per system (stage + boot-progress timing) — drives
+    /// the badge popover's independent image/video sections for ALL users.
+    var imageSystemStatus: StreamWebSocketClient.SystemStatus?
+    var videoSystemStatus: StreamWebSocketClient.SystemStatus?
+
     /// Animate modal (prompt editor) visibility.
     var showAnimateModal = false
 
@@ -979,6 +984,15 @@ final class AppCoordinator {
         if let stored = UserDefaults.standard.string(forKey: "drawingLayout"),
            let layout = DrawingLayout(rawValue: stored) {
             self.drawingLayout = layout
+        }
+
+        // Simulator dev bypass: seed Keychain from launch-argument tokens
+        // BEFORE the auth gate below reads it, and start the stroke-replay
+        // listener. Both are no-ops outside DEBUG simulator builds.
+        DevAutomation.injectAuthIfRequested()
+        DevAutomation.startReplayListener()
+        DevAutomation.onReplayRequested = { [weak self] fixture in
+            self?.devReplayFixture(fixture)
         }
 
         // Gate on auth: if no Keychain token, show sign-in. Otherwise the
@@ -1510,6 +1524,30 @@ final class AppCoordinator {
 
         startStream()
         seedResultStateForCurrentDrawing()
+    }
+
+    /// Simulator dev automation: replay a recorded stroke fixture onto the live
+    /// canvas (triggered via DevAutomation's Darwin notification). Routes into a
+    /// drawing first when needed and waits for the canvas view to attach — the
+    /// canvas is created lazily when DrawingView appears.
+    func devReplayFixture(_ fixture: BrushFixture) {
+        Task { @MainActor in
+            if currentScreen != .drawing {
+                newDrawing()
+            }
+            for _ in 0..<20 where !canvasViewModel.isCanvasAttached {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+            guard canvasViewModel.isCanvasAttached else {
+                Log.info("dev.replay.no_canvas", attributes: ["event": "dev.replay.no_canvas"])
+                return
+            }
+            canvasViewModel.replayFixture(fixture)
+            Log.info("dev.replay.done", attributes: [
+                "event": "dev.replay.done",
+                "strokes": fixture.strokes.count,
+            ])
+        }
     }
 
     func openDrawing(_ drawing: Drawing) {
@@ -2211,13 +2249,15 @@ final class AppCoordinator {
                     scope.setTag(value: "video.mp4_write", key: "op")
                 }
             }
-        case .availability(let image, _, let video, _):
-            let videoValue = VideoAvailability(rawValue: video) ?? .off
+        case .availability(let image, let video):
+            let videoValue = VideoAvailability(rawValue: video.availability) ?? .off
             if videoValue != videoAvailability {
                 videoAvailability = videoValue
-                streamLog.info("[result] video availability → \(video)")
+                streamLog.info("[result] video availability → \(video.availability)")
             }
-            imageAvailability = VideoAvailability(rawValue: image) ?? .off
+            imageAvailability = VideoAvailability(rawValue: image.availability) ?? .off
+            imageSystemStatus = image
+            videoSystemStatus = video
         case .cancelled(_, let atStep, let error):
             // Covers user-resumed-drawing cancels, server-side failures, AND
             // the backend's synthesized "can't animate" replies to the manual
