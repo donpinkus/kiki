@@ -15,6 +15,7 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { WebSocketServer, WebSocket as WsClient } from 'ws';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { DEFAULT_ANIMATION_PROMPT } from '../modules/video/videoSession.js';
 
 const GENERATED_JPEG = Buffer.from('generated-jpeg-from-image-server');
 const VIDEO_JPEG = Buffer.from('video-frame-jpeg');
@@ -159,7 +160,9 @@ describe('stream route video wiring (e2e with mock lambda image + video servers)
     // Idle 150ms → the backend fires video_request with the GENERATED image.
     await until(() => mockVideo.received.some((m) => m['type'] === 'video_request'));
     const req = mockVideo.received.find((m) => m['type'] === 'video_request');
-    expect(req?.['prompt']).toBe('a dragon over mountains');
+    // Video prompts describe MOTION, not content: with no animationPrompt in
+    // the config, fires use the default motion prompt (NOT the image prompt).
+    expect(req?.['prompt']).toBe(DEFAULT_ANIMATION_PROMPT);
     expect(req?.['image_b64']).toBe(GENERATED_JPEG.toString('base64'));
 
     // The iPad is told the video started (drives the Animate button state).

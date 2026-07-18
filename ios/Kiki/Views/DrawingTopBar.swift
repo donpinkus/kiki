@@ -70,20 +70,6 @@ struct DrawingTopBar: View {
 
             KikiAIStatusBadge()
 
-            // Animate — manually trigger the idle-state animation of the
-            // current generated image (the backend also auto-fires one 3s
-            // after the pencil lifts). Disabled + "Animating…" while a video
-            // is generating, from either trigger.
-            Button {
-                coordinator.requestAnimate()
-            } label: {
-                Text(coordinator.isAnimating ? "Animating…" : "Animate")
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(KikiTheme.icon)
-            }
-            .tint(KikiTheme.icon)
-            .disabled(coordinator.isAnimating || !coordinator.canAnimate)
-
             Spacer()
 
             // MARK: Center — Style, Prompt
@@ -262,6 +248,17 @@ struct KikiAIStatusBadge: View {
         }
     }
 
+    /// Second dot: the VIDEO system. Hidden entirely while the feature flag
+    /// is off (availability == .off) so the badge is unchanged for
+    /// image-only operation.
+    private var videoDotColor: Color? {
+        switch coordinator.videoAvailability {
+        case .off: return nil
+        case .warming: return Self.warmPink
+        case .ready: return .green
+        }
+    }
+
     var body: some View {
         Button {
             showDetails = true
@@ -270,6 +267,17 @@ struct KikiAIStatusBadge: View {
                 Circle()
                     .fill(dotColor)
                     .frame(width: 7, height: 7)
+                if let videoDot = videoDotColor {
+                    Circle()
+                        .fill(videoDot)
+                        .frame(width: 7, height: 7)
+                        .overlay(
+                            // Tiny ▶ glyph differentiates the video dot at a glance.
+                            Image(systemName: "play.fill")
+                                .font(.system(size: 4))
+                                .foregroundStyle(.black.opacity(0.55))
+                        )
+                }
                 Text(label)
                     .font(.caption.weight(.medium))
                     .foregroundStyle(KikiTheme.icon)
@@ -337,6 +345,25 @@ private struct KikiAIStatusDetails: View {
                 Text("Powers the Edit button — turning generated images back into editable sketches.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
+                if coordinator.videoAvailability != .off {
+                    Divider()
+                    Text("Kiki's video AI")
+                        .font(.headline)
+                    switch coordinator.videoAvailability {
+                    case .ready:
+                        Label("Ready — animations are available.", systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                    case .warming:
+                        Label("Warming up — animations will be available in a couple of minutes.", systemImage: "flame")
+                            .foregroundStyle(KikiAIStatusBadge.warmPink)
+                    case .off:
+                        EmptyView()
+                    }
+                    Text("Powers the Animate button and the automatic animation when you pause drawing.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
             .font(.subheadline)
         }

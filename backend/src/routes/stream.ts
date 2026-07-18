@@ -24,6 +24,7 @@ import { trackSessionClosed, trackProviderSession } from '../modules/analytics/i
 import { VideoSession } from '../modules/video/videoSession.js';
 import {
   poolEnabled as videoPoolEnabled,
+  hasReady as videoPoolHasReady,
   touch as touchVideoPool,
   acquireStream as videoPoolAcquire,
   releaseStream as videoPoolRelease,
@@ -179,6 +180,10 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         ensureFrameCapture()?.capture(kind, jpeg);
       };
       let clientDisconnected = false;
+      /** Video-availability push timer; assigned on the slow path, cleared in
+       * cleanup. Hoisted so cleanupOnDisconnect can run before assignment
+       * (early client disconnect) without a TDZ throw. */
+      let videoAvailTimer: NodeJS.Timeout | null = null;
       const sessionStartMs = Date.now();
       // Video idle-state animation (LTX-2.3 on a dedicated Lambda H100).
       // Best-effort side-channel: created only when LAMBDA_VIDEO_URL is set;
@@ -334,6 +339,8 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         }
         relay?.close();
         relay = null;
+        if (videoAvailTimer) clearInterval(videoAvailTimer);
+        videoAvailTimer = null;
       };
 
       // ─── Register close/error/message handlers BEFORE any await ───────
@@ -553,6 +560,30 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
           lambdaMeteringEnabled = imageProvider === 'lambda';
         }
       }
+
+      // ─── Video availability push (drives the iPad's dual status badge +
+      // whether animation UX is shown at all). 'off' = kill switch off (or
+      // no video path configured) → iOS hides the Animate button and the
+      // video segment of the status badge; 'warming' = enabled but no ready
+      // instance yet; 'ready' = a video H100 is serving. Pushed on change
+      // only (checked every 15s + once at wiring), so a mid-session Insights
+      // flag flip propagates to open sessions within ~75s (flag poll 60s +
+      // push check 15s).
+      const computeVideoAvailability = (): 'off' | 'warming' | 'ready' => {
+        if (config.LAMBDA_VIDEO_URL) return 'ready'; // static dev override
+        if (!videoPoolEnabled()) return 'off';
+        return videoPoolHasReady() ? 'ready' : 'warming';
+      };
+      let lastVideoAvailability: string | null = null;
+      const pushVideoAvailability = (): void => {
+        if (clientDisconnected || socket.readyState !== socket.OPEN) return;
+        const v = computeVideoAvailability();
+        if (v === lastVideoAvailability) return;
+        lastVideoAvailability = v;
+        socket.send(JSON.stringify({ type: 'video_availability', availability: v }));
+      };
+      videoAvailTimer = setInterval(pushVideoAvailability, 15_000);
+      videoAvailTimer.unref?.();
 
       // Video idle-state animation: connect to a dedicated Lambda video
       // instance in parallel with image wiring. Best-effort — start() never
@@ -1009,6 +1040,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         // Relay connected AND any buffered messages flushed — iOS frames
         // are now flowing to the provider. Safe to tell iOS we're truly ready.
         sendState('ready');
+        pushVideoAvailability();
       } catch (err) {
         // Distinguish "user closed the app mid-connect" from "real wiring
         // failure". The early-registered close handler sets

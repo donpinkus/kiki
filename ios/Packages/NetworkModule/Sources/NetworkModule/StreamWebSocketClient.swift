@@ -71,6 +71,9 @@ public actor StreamWebSocketClient {
         case frame(requestId: String?, image: Data, index: Int?, total: Int?)
         case complete(requestId: String?, mp4: Data, fps: Int?, frames: Int?)
         case cancelled(requestId: String?, atStep: Int?, error: String?)
+        /// Backend's availability push: "off" (feature disabled — hide all
+        /// animation UX), "warming" (video H100 booting), "ready".
+        case availability(String)
     }
 
     /// Sendable payload for `ConnectionEvent`. Holds a human-readable message
@@ -380,6 +383,12 @@ public actor StreamWebSocketClient {
                                     "frames": (meta["frames"] as? Int) ?? -1,
                                 ])
                                 await self.videoContinuation.yield(event)
+                            } else if type == "video_availability",
+                                      let availability = json["availability"] as? String {
+                                Self.breadcrumb(category: "ws.video", message: "video_availability", data: [
+                                    "availability": availability,
+                                ])
+                                await self.videoContinuation.yield(.availability(availability))
                             } else if type == "video_cancelled" {
                                 let event = StreamWebSocketClient.VideoEvent.cancelled(
                                     requestId: json["requestId"] as? String,

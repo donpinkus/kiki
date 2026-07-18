@@ -214,6 +214,11 @@ export function createInstancePool(spec: InstancePoolSpec): InstancePool {
     return spec.enabled();
   }
 
+  /** A Lambda API client is constructible: injected (tests) or env key. */
+  function haveClient(): boolean {
+    return Boolean(spec.createClient) || config.LAMBDA_API_KEY.length > 0;
+  }
+
   function client(): LambdaClient {
     return spec.createClient ? spec.createClient() : new LambdaClient(config.LAMBDA_API_KEY);
   }
@@ -507,7 +512,7 @@ runcmd:
       // normal path off, nothing else would ever reap them and they'd bill
       // until someone noticed. Registry adoption still runs at start() (key
       // permitting), so even instances from before a redeploy get drained.
-      if (config.LAMBDA_API_KEY && instances.size > 0) {
+      if (haveClient() && instances.size > 0) {
         for (const inst of [...instances.values()]) {
           log.info(
             { name: inst.name, instanceId: inst.id, pool: spec.kind, event: 'lambda_pool_disabled_terminate' },
@@ -591,7 +596,7 @@ runcmd:
     // tick, so a runtime flag flip (Insights) takes effect within ~60s in
     // BOTH directions — on → adopt/launch, off → drain (see tick()).
     tickTimer = setInterval(() => void inBackgroundScope(scopeName, () => tick()), TICK_MS);
-    if (!config.LAMBDA_API_KEY) {
+    if (!haveClient()) {
       logger.info(`lambda ${spec.kind} pool: no LAMBDA_API_KEY — inert`);
       return;
     }

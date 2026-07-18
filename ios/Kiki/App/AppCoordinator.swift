@@ -532,6 +532,39 @@ final class AppCoordinator {
     /// authoritatively by `video_started`; cleared on complete/cancelled and
     /// on stream teardown.
     var isAnimating = false
+
+    /// Availability of the video H100 system, pushed by the backend
+    /// ({type:'video_availability'}): .off = feature flag disabled (hide ALL
+    /// animation UX), .warming = enabled but the video instance is booting,
+    /// .ready = a video H100 is serving. Also feeds the dual status badge.
+    enum VideoAvailability: String {
+        case off
+        case warming
+        case ready
+    }
+    var videoAvailability: VideoAvailability = .off
+
+    /// Animate modal (prompt editor) visibility.
+    var showAnimateModal = false
+
+    /// The drawing's animation prompt (motion description for the video
+    /// model). Persisted per drawing; empty = server default. Sent on every
+    /// config push so auto (3s-idle) animations use it too.
+    var animationPromptText = "" {
+        didSet {
+            if !isSuppressingObservation {
+                scheduleSave()
+            }
+            syncStreamConfig()
+        }
+    }
+
+    /// Mirrors the backend's DEFAULT_ANIMATION_PROMPT (videoSession.ts) —
+    /// shown as the modal's placeholder so users see what runs if they
+    /// leave it empty.
+    static let defaultAnimationPrompt =
+        "gentle cinematic motion: the scene subtly comes alive with natural movement, " +
+        "soft ambient animation, camera slowly drifting closer"
     var dividerPosition: CGFloat = 0.5
     /// Message for the red error banner in `DrawingView`. Set on stream/auth
     /// failures; cleared automatically when the condition resolves (successful
@@ -1442,6 +1475,7 @@ final class AppCoordinator {
 
         // Reset all state
         promptText = ""
+        animationPromptText = ""
         selectedStyle = .default
         streamSeed = seed
         lastSuccessfulImage = nil
@@ -1474,6 +1508,7 @@ final class AppCoordinator {
 
         // Restore settings
         promptText = drawing.promptText
+        animationPromptText = drawing.animationPrompt ?? ""
         selectedStyle = PromptStyle.from(id: drawing.styleId)
         streamSeed = drawing.streamSeed
 
@@ -1602,6 +1637,7 @@ final class AppCoordinator {
         drawing.generatedImageData = lastSuccessfulImage?.jpegData(compressionQuality: 0.85)
         drawing.canvasThumbnailData = canvasViewModel.generateThumbnail()?.jpegData(compressionQuality: 0.7)
         drawing.promptText = promptText
+        drawing.animationPrompt = animationPromptText.isEmpty ? nil : animationPromptText
         drawing.styleId = selectedStyle.id
         drawing.streamSeed = streamSeed
 
@@ -2071,8 +2107,10 @@ final class AppCoordinator {
     func requestAnimate() {
         guard !isAnimating else { return }
         isAnimating = true
-        streamLog.info("[result] animate button tapped")
-        streamSession?.requestAnimate()
+        streamLog.info("[result] animate fired (prompt len=\(self.animationPromptText.count))")
+        streamSession?.requestAnimate(
+            prompt: animationPromptText.isEmpty ? nil : animationPromptText
+        )
     }
 
     /// `.ready` shows the bottom-left badge over a preview/streaming image;
@@ -2166,6 +2204,12 @@ final class AppCoordinator {
                 SentrySDK.capture(error: error) { scope in
                     scope.setTag(value: "video.mp4_write", key: "op")
                 }
+            }
+        case .availability(let raw):
+            let availability = VideoAvailability(rawValue: raw) ?? .off
+            if availability != videoAvailability {
+                videoAvailability = availability
+                streamLog.info("[result] video_availability → \(raw)")
             }
         case .cancelled(_, let atStep, let error):
             // Covers user-resumed-drawing cancels, server-side failures, AND
@@ -2298,6 +2342,7 @@ final class AppCoordinator {
             videoHeight: videoResolution,
             videoFrames: videoFrames,
             videoPromptSuffix: videoPromptSuffix,
+            animationPrompt: animationPromptText.isEmpty ? nil : animationPromptText,
             enableProfiling: enableProfiling
         )
     }

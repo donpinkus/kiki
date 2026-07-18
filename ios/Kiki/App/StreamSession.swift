@@ -227,12 +227,13 @@ final class StreamSession {
     /// window) using the latest generated image. Best-effort fire-and-forget
     /// — when the backend can't animate it replies `video_cancelled` (with
     /// an error reason), which resets the button via the video event path.
-    func requestAnimate() {
+    func requestAnimate(prompt: String?) {
         struct AnimateMessage: Encodable, Sendable {
             var type = "animate"
+            var prompt: String?
         }
         Task { [client] in
-            try? await client.sendConfig(AnimateMessage())
+            try? await client.sendConfig(AnimateMessage(prompt: prompt))
         }
     }
 

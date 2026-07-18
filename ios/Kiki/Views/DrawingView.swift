@@ -206,7 +206,7 @@ struct DrawingView: View {
                         // has allowsHitTesting(false) so strokes pass through).
                         ZStack(alignment: .bottomTrailing) {
                             Color.clear
-                            editButton.padding(4)
+                            resultActionButtons.padding(4)
                         }
                         .frame(
                             width: PanelLayout.baseSize(for: image, in: geometry.size).width,
@@ -226,7 +226,7 @@ struct DrawingView: View {
                        coordinator.resultState.displayImage != nil {
                         ZStack(alignment: .bottomTrailing) {
                             Color.clear
-                            editButton.padding(4)
+                            resultActionButtons.padding(4)
                         }
                         .frame(width: canvasSide, height: canvasSide)
                         .zIndex(3)
@@ -276,6 +276,10 @@ struct DrawingView: View {
             BrushStudioPage()
                 .environment(coordinator)
         }
+        .sheet(isPresented: $coordinator.showAnimateModal) {
+            AnimateModalView()
+                .environment(coordinator)
+        }
     }
 
     // MARK: - QuickShape Tooltip
@@ -320,7 +324,7 @@ struct DrawingView: View {
                         streamSwapBar
                     }
                     if coordinator.resultState.displayImage != nil {
-                        editButton
+                        resultActionButtons
                     }
                 }
                 .padding(4)
@@ -338,6 +342,35 @@ struct DrawingView: View {
     }
 
     // MARK: - Private
+
+    /// Animate + Edit, bottom-right of the generated image. Animate is
+    /// hidden entirely while the video feature flag is off
+    /// (videoAvailability == .off — the backend's availability push).
+    private var resultActionButtons: some View {
+        HStack(spacing: 6) {
+            if coordinator.videoAvailability != .off {
+                animateButton
+            }
+            editButton
+        }
+    }
+
+    /// "Animate" → open the animation-prompt modal (which fires the video).
+    /// Disabled + "Animating…" while a generation is in flight (either the
+    /// manual fire or the 3s-idle auto trigger).
+    private var animateButton: some View {
+        Button {
+            coordinator.showAnimateModal = true
+        } label: {
+            Text(coordinator.isAnimating ? "Animating…" : "Animate")
+                .font(.caption.weight(.semibold))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 5)
+                .background(.ultraThinMaterial, in: Capsule())
+                .opacity(coordinator.isAnimating ? 0.5 : 1)
+        }
+        .disabled(coordinator.isAnimating)
+    }
 
     /// "Edit" → sketchify the generated image onto the canvas as a new layer.
     /// Ready: menu with the two import modes. Warming: dimmed button whose tap
@@ -492,4 +525,91 @@ private struct PromptTitleBar: View {
 #Preview {
     DrawingView()
         .environment(AppCoordinator(modelContext: try! ModelContainer(for: Drawing.self).mainContext))
+}
+
+
+/// The Animate modal: edit the drawing's animation prompt and fire a video.
+/// The prompt describes MOTION (the video model already sees the image for
+/// content); persisted per drawing and reused by the automatic 3s-idle
+/// animations. Empty prompt = server default (shown as the placeholder).
+private struct AnimateModalView: View {
+    @Environment(AppCoordinator.self) private var coordinator
+    @Environment(\.dismiss) private var dismiss
+    @FocusState private var promptFocused: Bool
+
+    private static let examples = [
+        "wings beat slowly, clouds drift past",
+        "waves ripple, hair sways in the breeze",
+        "rain falls softly, puddles shimmer",
+    ]
+
+    var body: some View {
+        @Bindable var coordinator = coordinator
+        NavigationStack {
+            Form {
+                Section {
+                    TextField(
+                        AppCoordinator.defaultAnimationPrompt,
+                        text: $coordinator.animationPromptText,
+                        axis: .vertical
+                    )
+                    .lineLimit(3...6)
+                    .focused($promptFocused)
+                } header: {
+                    Text("Animation prompt")
+                } footer: {
+                    Text("Describe the **motion**, not the scene — the video already knows what's in your drawing. Short, physical phrases work best; camera moves like \"slow zoom in\" work too. Leave empty for a gentle default.")
+                }
+
+                Section("Examples — tap to use") {
+                    ForEach(Self.examples, id: \.self) { example in
+                        Button {
+                            coordinator.animationPromptText = example
+                        } label: {
+                            Text(example)
+                                .font(.callout)
+                                .foregroundStyle(.primary)
+                        }
+                    }
+                }
+
+                Section {
+                    Button {
+                        coordinator.requestAnimate()
+                        dismiss()
+                    } label: {
+                        HStack {
+                            Spacer()
+                            Text(animateCTA)
+                                .font(.headline)
+                            Spacer()
+                        }
+                    }
+                    .disabled(!canFire)
+                } footer: {
+                    if coordinator.videoAvailability == .warming {
+                        Text("Kiki's video AI is still warming up — you can save your prompt now and animate in a couple of minutes.")
+                    }
+                }
+            }
+            .navigationTitle("Animate")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+
+    private var canFire: Bool {
+        coordinator.videoAvailability == .ready && !coordinator.isAnimating
+    }
+
+    private var animateCTA: String {
+        if coordinator.isAnimating { return "Animating…" }
+        if coordinator.videoAvailability == .warming { return "Warming up…" }
+        return "Animate"
+    }
 }
