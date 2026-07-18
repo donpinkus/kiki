@@ -89,15 +89,23 @@ final class BrushAssetLibrary {
             .appendingPathComponent("\(id).png")
         try? FileManager.default.removeItem(at: url)
         assets.removeAll { $0.id == id }
+        thumbnailCache[id] = nil
         persist()
     }
 
-    /// Thumbnail for the picker chips (small, decoded once per appearance).
+    /// Thumbnail for the picker chips — decoded + downscaled once, then cached (the
+    /// full asset can be 1024²; chips are ~26 pt and re-render on selection changes).
+    private var thumbnailCache: [String: UIImage] = [:]
+
     func image(for asset: BrushAsset) -> UIImage? {
+        if let cached = thumbnailCache[asset.id] { return cached }
         let url = Self.directory
             .appendingPathComponent(asset.kind == .shape ? "shapes" : "grains")
             .appendingPathComponent("\(asset.id).png")
-        return UIImage(contentsOfFile: url.path)
+        guard let full = UIImage(contentsOfFile: url.path) else { return nil }
+        let thumb = Self.downscaled(full, maxSide: 64)
+        thumbnailCache[asset.id] = thumb
+        return thumb
     }
 
     private func persist() {

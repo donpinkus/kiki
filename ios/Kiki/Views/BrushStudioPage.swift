@@ -564,12 +564,12 @@ private struct GrainSection: View {
                     BrushSliderRow("Scale", value: $coordinator.toolGrainScale, range: 0.5...3.0, help: BrushHelpCatalog.help["Grain Scale"]!,
                                    format: { String(format: "%.1f\u{00D7}", $0) })
                     BrushSliderRow("Depth", value: $coordinator.toolGrainDepth, range: 0.0...1.0, help: BrushHelpCatalog.help["Grain Depth"]!)
+                    BrushSliderRow("Depth Jitter", value: $coordinator.toolGrainDepthJitter, range: 0.0...1.0, help: BrushHelpCatalog.help["Grain Depth Jitter"]!)
                 }
                 .disabled(wet).opacity(wet ? 0.35 : 1)
                 GapRow("Zoom", note: "Cropped vs Follow Size grain scaling.")
                 GapRow("Rotation", note: "Grain rotation vs stroke direction.")
                 GapRow("Depth Minimum", note: "Floor for pressure-driven depth (curve Min in Dynamics → Grain).")
-                BrushSliderRow("Depth Jitter", value: $coordinator.toolGrainDepthJitter, range: 0.0...1.0, help: BrushHelpCatalog.help["Grain Depth Jitter"]!)
                 GapRow("Offset Jitter", note: "Random grain offset per stamp.")
                 GapRow("Blend Mode", note: "Grain blend mode — Kiki grain is multiplicative carve only.")
                 GapRow("Brightness / Contrast", note: "Grain texture pre-adjustment.")
