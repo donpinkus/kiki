@@ -594,14 +594,17 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             message: (err as Error).message,
           };
           wireRelayAttempts.push(attemptRecord);
+          // Log the same record; the error string goes out as `err` (the
+          // pre-existing attribute name), not `message`.
+          const { message: attemptMessage, ...attemptFields } = attemptRecord;
           request.log.warn(
             {
               userId,
               connId,
               streamId,
               upstreamUrl,
-              ...attemptRecord,
-              err: attemptRecord.message,
+              ...attemptFields,
+              err: attemptMessage,
               event: 'wire_relay_failed',
             },
             'wire_relay_failed',
