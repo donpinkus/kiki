@@ -2,6 +2,11 @@
 
 **Written:** 2026-06-06 · **Status updated:** 2026-06-07
 
+> **Note (2026-07-18):** the per-feature phasing below is superseded by
+> `unified-brush-engine.md` (committed target architecture — phases map onto it
+> as additive parameters, its §6). For current brush work also see
+> `documents/research/krita-brush/` (Brush Studio / Procreate-parity workstream).
+
 ## Status (2026-06-07)
 
 Shipped to `origin/main` and verified on device:
