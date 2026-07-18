@@ -10,18 +10,39 @@ struct StylePickerView: View {
         GridItem(.flexible(), spacing: 16)
     ]
 
+    /// (title, members) for every picker section, in display order.
+    private var sections: [(title: String, styles: [PromptStyle])] {
+        var result: [(String, [PromptStyle])] = [("Featured", PromptStyle.featuredStyles)]
+        for category in PromptStyle.Category.allCases {
+            let members = PromptStyle.styles(in: category)
+            if !members.isEmpty {
+                result.append((category.displayName, members))
+            }
+        }
+        return result
+    }
+
     var body: some View {
         NavigationStack {
             ScrollView {
-                LazyVGrid(columns: columns, spacing: 20) {
-                    ForEach(PromptStyle.allStyles) { style in
-                        StyleTile(
-                            style: style,
-                            preview: coordinator.stylePreviewController.previews[style.id],
-                            isSelected: coordinator.selectedStyle == style
-                        ) {
-                            coordinator.selectedStyle = style
-                            dismiss()
+                VStack(alignment: .leading, spacing: 28) {
+                    ForEach(sections, id: \.title) { section in
+                        VStack(alignment: .leading, spacing: 14) {
+                            Text(section.title)
+                                .font(.title3.weight(.semibold))
+                                .foregroundStyle(.primary)
+                            LazyVGrid(columns: columns, spacing: 20) {
+                                ForEach(section.styles) { style in
+                                    StyleTile(
+                                        style: style,
+                                        preview: coordinator.stylePreviewController.previews[style.id],
+                                        isSelected: coordinator.selectedStyle == style
+                                    ) {
+                                        coordinator.selectedStyle = style
+                                        dismiss()
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -320,14 +341,38 @@ private struct StyleThumbnailSpec {
             return StyleThumbnailSpec(colors: [rgb(0.68, 0.70, 0.74), rgb(0.34, 0.36, 0.4)], symbolName: "slash.circle", motif: .diagonalStripes)
         case "beautiful_paint":
             return StyleThumbnailSpec(colors: [rgb(0.36, 0.52, 0.78), rgb(0.86, 0.66, 0.42)], symbolName: "paintbrush.pointed.fill", motif: .circles)
-        case "studio_commercial":
-            return StyleThumbnailSpec(colors: [rgb(0.92, 0.9, 0.84), rgb(0.18, 0.22, 0.26)], symbolName: "camera.aperture", motif: .circles)
-        case "pixar_movie":
-            return StyleThumbnailSpec(colors: [rgb(0.3, 0.58, 0.9), rgb(0.96, 0.76, 0.32)], symbolName: "lightbulb.fill", motif: .circles)
-        case "pastel_animation":
+        case "concept_art":
+            return StyleThumbnailSpec(colors: [rgb(0.26, 0.3, 0.42), rgb(0.9, 0.62, 0.3)], symbolName: "sparkles", motif: .triangles)
+        case "hand_painted_animation":
             return StyleThumbnailSpec(colors: [rgb(0.95, 0.68, 0.74), rgb(0.56, 0.78, 0.92)], symbolName: "paintpalette.fill", motif: .circles)
-        case "lego_stop_motion":
-            return StyleThumbnailSpec(colors: [rgb(0.94, 0.78, 0.04), rgb(0.1, 0.38, 0.82)], symbolName: "square.grid.2x2.fill", motif: .grid)
+        case "ghibli_cel":
+            return StyleThumbnailSpec(colors: [rgb(0.62, 0.8, 0.62), rgb(0.92, 0.9, 0.78)], symbolName: "leaf.fill", motif: .circles)
+        case "paper_craft":
+            return StyleThumbnailSpec(colors: [rgb(0.92, 0.62, 0.5), rgb(0.62, 0.5, 0.78)], symbolName: "scissors", motif: .panels)
+        case "clay_model":
+            return StyleThumbnailSpec(colors: [rgb(0.8, 0.56, 0.44), rgb(0.52, 0.36, 0.3)], symbolName: "hand.raised.fill", motif: .circles)
+        case "felt_craft":
+            return StyleThumbnailSpec(colors: [rgb(0.94, 0.72, 0.6), rgb(0.66, 0.82, 0.72)], symbolName: "circle.hexagongrid.fill", motif: .grid)
+        case "bronze_sculpture":
+            return StyleThumbnailSpec(colors: [rgb(0.55, 0.42, 0.22), rgb(0.28, 0.22, 0.14)], symbolName: "trophy.fill", motif: .circles)
+        case "neon_glow":
+            return StyleThumbnailSpec(colors: [rgb(0.08, 0.06, 0.16), rgb(0.9, 0.2, 0.62)], symbolName: "bolt.fill", motif: .scanlines)
+        case "pop_art":
+            return StyleThumbnailSpec(colors: [rgb(0.96, 0.76, 0.1), rgb(0.86, 0.22, 0.5)], symbolName: "burst.fill", motif: .triangles)
+        case "dark_fantasy":
+            return StyleThumbnailSpec(colors: [rgb(0.12, 0.12, 0.2), rgb(0.44, 0.2, 0.5)], symbolName: "moon.stars.fill", motif: .triangles)
+        case "chalkboard":
+            return StyleThumbnailSpec(colors: [rgb(0.16, 0.24, 0.2), rgb(0.3, 0.4, 0.36)], symbolName: "scribble.variable", motif: .scanlines)
+        case "sticker":
+            return StyleThumbnailSpec(colors: [rgb(0.5, 0.78, 0.94), rgb(0.94, 0.94, 0.96)], symbolName: "seal.fill", motif: .circles)
+        case "watercolor":
+            return StyleThumbnailSpec(colors: [rgb(0.62, 0.78, 0.92), rgb(0.94, 0.78, 0.84)], symbolName: "drop.fill", motif: .circles)
+        case "oil_painting":
+            return StyleThumbnailSpec(colors: [rgb(0.66, 0.5, 0.3), rgb(0.3, 0.42, 0.5)], symbolName: "paintbrush.fill", motif: .diagonalStripes)
+        case "gouache":
+            return StyleThumbnailSpec(colors: [rgb(0.86, 0.7, 0.56), rgb(0.5, 0.66, 0.62)], symbolName: "paintbrush.pointed.fill", motif: .panels)
+        case "colored_pencil":
+            return StyleThumbnailSpec(colors: [rgb(0.94, 0.66, 0.4), rgb(0.46, 0.68, 0.86)], symbolName: "pencil.tip", motif: .diagonalStripes)
         default:
             return StyleThumbnailSpec(colors: [rgb(0.28, 0.34, 0.42), rgb(0.52, 0.6, 0.7)], symbolName: "wand.and.stars", motif: .circles)
         }
