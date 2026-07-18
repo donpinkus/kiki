@@ -31,7 +31,7 @@ enum DevAutomation {
     /// post this notification. Drives taps the harness can't perform
     /// (popovers, modals) deterministically:
     ///   xcrun simctl spawn <sim> notifyutil -p com.don.kiki.dev.ui
-    /// Actions: openDrawing | statusDetails | animateModal | dismiss
+    /// Actions: openDrawing | statusDetails | animateModal | lasso | dismiss
     static let uiNotificationName = "com.don.kiki.dev.ui"
     static let uiActionPath = "/tmp/kiki-ui-action.txt"
 

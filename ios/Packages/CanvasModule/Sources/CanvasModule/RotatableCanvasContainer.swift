@@ -506,6 +506,11 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
             || gestureRecognizer === canvasPinchGesture
             || gestureRecognizer === canvasRotationGesture
             || gestureRecognizer === undoTapGesture {
+            // A floating lasso selection owns all two-finger transforms — the
+            // LassoSelectionView's own pan/pinch/rotate recognizers move & scale
+            // the selected pixels. The canvas underneath must NOT transform too
+            // (that's the "resizing the selection resizes the canvas" bug).
+            if hasActiveLassoSelection { return false }
             return !overPanel
         }
         return true

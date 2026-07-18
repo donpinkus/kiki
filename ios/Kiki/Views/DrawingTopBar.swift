@@ -106,18 +106,10 @@ struct DrawingTopBar: View {
             // MARK: Right — Pen, Eraser, Lasso, Reset Transform, Layers
             toolButton(icon: "pencil.tip", tool: .brush)
             toolButton(icon: "eraser", tool: .eraser)
+            // Lasso publishes its on-screen frame so DrawingView can float the
+            // "Clear Lasso" button directly beneath it (clearly associated).
             toolButton(icon: "lasso", tool: .lasso)
-
-            if coordinator.canvasViewModel.hasLassoSelection {
-                Button {
-                    coordinator.canvasViewModel.clearLasso()
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 16, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 28, height: 28)
-                }
-            }
+                .anchorPreference(key: LassoButtonAnchorKey.self, value: .bounds) { $0 }
 
             Button {
                 coordinator.showLayerPanel.toggle()
@@ -209,6 +201,15 @@ struct DrawingTopBar: View {
 private struct ShareItem: Identifiable {
     let id = UUID()
     let url: URL
+}
+
+/// Reports the lasso tool button's on-screen bounds up the view tree so
+/// `DrawingView` can anchor the floating "Clear Lasso" button beneath it.
+struct LassoButtonAnchorKey: PreferenceKey {
+    static let defaultValue: Anchor<CGRect>? = nil
+    static func reduce(value: inout Anchor<CGRect>?, nextValue: () -> Anchor<CGRect>?) {
+        value = nextValue() ?? value
+    }
 }
 
 private extension Color {

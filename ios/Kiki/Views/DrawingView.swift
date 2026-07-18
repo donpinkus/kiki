@@ -134,25 +134,6 @@ struct DrawingView: View {
                         .frame(maxHeight: .infinity, alignment: .leading)
                         .zIndex(3)
 
-                    if coordinator.canvasViewModel.hasLassoSelection {
-                        let topMargin = (geometry.size.height - canvasSide) / 2
-                        Button {
-                            coordinator.canvasViewModel.clearLasso()
-                        } label: {
-                            Label("Clear Lasso", systemImage: "xmark.circle.fill")
-                                .font(.subheadline.weight(.medium))
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .tint(.secondary)
-                        .controlSize(.small)
-                        .frame(width: canvasSide, height: max(topMargin, 0), alignment: .center)
-                        .frame(
-                            maxWidth: .infinity,
-                            alignment: coordinator.drawingLayout == .splitScreen ? .trailing : .center
-                        )
-                        .zIndex(10)
-                    }
-
                     // QuickShape NUX tooltip — appears once per device, on the
                     // user's first successful snap. Auto-dismisses after 5s
                     // or on tap. AppStorage flag suppresses subsequent showings.
@@ -256,6 +237,19 @@ struct DrawingView: View {
             // from the centered canvas square's own bounds, not the pane height.
             .ignoresSafeArea(edges: .bottom)
         }
+        // Floating "Clear Lasso" button, anchored directly below the lasso tool
+        // button in the top bar (so it's clearly associated with it) and given a
+        // generous tap target. Lives here — as an overlay on the whole screen —
+        // so it always draws above the canvas regardless of top-bar draw order.
+        .overlayPreferenceValue(LassoButtonAnchorKey.self) { lassoAnchor in
+            GeometryReader { proxy in
+                if coordinator.canvasViewModel.hasLassoSelection, let lassoAnchor {
+                    let lassoRect = proxy[lassoAnchor]
+                    clearLassoButton
+                        .position(x: lassoRect.midX, y: lassoRect.maxY + 8 + clearLassoButtonHeight / 2)
+                }
+            }
+        }
         .animation(.easeInOut(duration: 0.3), value: coordinator.generationError != nil)
         .animation(.easeOut(duration: 0.25), value: coordinator.shouldShowQuickShapeTooltip)
         .ignoresSafeArea(.keyboard)
@@ -303,6 +297,27 @@ struct DrawingView: View {
         withAnimation(.easeOut(duration: 0.25)) {
             coordinator.shouldShowQuickShapeTooltip = false
         }
+    }
+
+    // MARK: - Clear Lasso
+
+    /// Fixed height so the overlay can place the button a precise gap below the
+    /// lasso tool button via `.position` (which centers on its point).
+    private let clearLassoButtonHeight: CGFloat = 44
+
+    private var clearLassoButton: some View {
+        Button {
+            coordinator.canvasViewModel.clearLasso()
+        } label: {
+            Label("Clear Lasso", systemImage: "xmark.circle.fill")
+                .font(.subheadline.weight(.semibold))
+                .padding(.horizontal, 18)
+                .frame(height: clearLassoButtonHeight)
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(.secondary)
+        .fixedSize()
+        .shadow(color: .black.opacity(0.2), radius: 6, y: 2)
     }
 
     // MARK: - Split Screen Result Pane

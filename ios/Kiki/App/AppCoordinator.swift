@@ -1544,6 +1544,10 @@ final class AppCoordinator {
             devShowStatusDetails = true
         case "animateModal":
             showAnimateModal = true
+        case "lasso":
+            #if DEBUG && targetEnvironment(simulator)
+            canvasViewModel.devSimulateLasso()
+            #endif
         case "dismiss":
             devShowStatusDetails = false
             showAnimateModal = false

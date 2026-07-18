@@ -201,6 +201,14 @@ public final class CanvasViewModel {
 
     // MARK: - Lasso Selection
 
+    #if DEBUG && targetEnvironment(simulator)
+    /// Sim-only: drive a synthetic lasso selection (host tooling can't inject
+    /// the freeform drag gesture). Reuses the real extraction path.
+    public func devSimulateLasso() {
+        canvasView?.devSimulateLassoRect()
+    }
+    #endif
+
     func handleLassoSelectionStarted(path: CGPath, bounds: CGRect) {
         lassoClosedPath = path
         container?.showLassoSelection(bounds: bounds, path: path)

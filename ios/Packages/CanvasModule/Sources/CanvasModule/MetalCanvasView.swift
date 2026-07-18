@@ -2364,6 +2364,24 @@ public final class MetalCanvasView: UIView {
 
     // MARK: - Lasso Public API
 
+    #if DEBUG && targetEnvironment(simulator)
+    /// Sim-only: synthesize a lasso selection over a centered rectangle by
+    /// feeding a closed path through the real `finishLasso` extraction path.
+    /// simctl can't inject the freeform drag a lasso needs, so this lets host
+    /// tooling exercise the lasso UI deterministically.
+    public func devSimulateLassoRect() {
+        let r = bounds.insetBy(dx: bounds.width * 0.25, dy: bounds.height * 0.25)
+        pushUndoSnapshot()
+        lassoPoints = [
+            CGPoint(x: r.minX, y: r.minY),
+            CGPoint(x: r.maxX, y: r.minY),
+            CGPoint(x: r.maxX, y: r.maxY),
+            CGPoint(x: r.minX, y: r.maxY),
+        ]
+        finishLasso()
+    }
+    #endif
+
     /// Update the floating selection's position from gesture state.
     public func updateSelectionTransform(translation: CGPoint, scale: CGFloat, rotation: CGFloat) {
         renderer.updateSelectionVertices(translation: translation, scale: scale, rotation: rotation)
