@@ -730,10 +730,14 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
                     FILTER (WHERE (properties->>'image_gen_ms_p50') ~ '^[0-9.]+$'))::int AS gen_p50_ms,
                   round(percentile_cont(0.9) WITHIN GROUP (ORDER BY (properties->>'image_gen_ms_p90')::float)
                     FILTER (WHERE (properties->>'image_gen_ms_p90') ~ '^[0-9.]+$'))::int AS gen_p90_ms,
-                  COALESCE(sum((properties->>'frames_delivered')::int), 0)::int AS frames_delivered,
+                  -- Render-ratio sums PAIRED over sessions that report
+                  -- sketches_sent (instrumented 2026-07-18) — mixing older
+                  -- frames-only sessions would inflate the ratio nonsensically.
+                  COALESCE(sum((properties->>'frames_delivered')::int)
+                    FILTER (WHERE COALESCE((properties->>'sketches_sent')::int, 0) > 0), 0)::int AS frames_delivered,
                   COALESCE(sum((properties->>'sketches_sent')::int), 0)::int AS sketches_sent,
                   COALESCE(sum((properties->>'frames_delivered')::int)
-                    FILTER (WHERE ${wired}), 0)::int AS h100_frames_delivered,
+                    FILTER (WHERE ${wired} AND COALESCE((properties->>'sketches_sent')::int, 0) > 0), 0)::int AS h100_frames_delivered,
                   COALESCE(sum((properties->>'sketches_sent')::int)
                     FILTER (WHERE ${wired}), 0)::int AS h100_sketches_sent
            FROM events
@@ -810,7 +814,8 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
                   count(*) FILTER (WHERE ${wired})::int AS wired,
                   round(percentile_cont(0.5) WITHIN GROUP (ORDER BY (properties->>'time_to_provider_ms')::float)
                     FILTER (WHERE ${wired} AND (properties->>'time_to_provider_ms') ~ '^[0-9.]+$'))::int AS wait_p50_ms,
-                  COALESCE(sum((properties->>'frames_delivered')::int),0)::int AS frames,
+                  COALESCE(sum((properties->>'frames_delivered')::int)
+                    FILTER (WHERE COALESCE((properties->>'sketches_sent')::int, 0) > 0),0)::int AS frames,
                   COALESCE(sum((properties->>'sketches_sent')::int),0)::int AS sketches,
                   COALESCE(sum((properties->>'video_completed')::int),0)::int AS videos
            FROM events
