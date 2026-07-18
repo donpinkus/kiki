@@ -13,7 +13,10 @@ import { checkFalBudget, isTestAccount, addMonthlySpendUsd, RATE_USD_PER_SEC } f
 import {
   ensure as ensureDevPool,
   touch as touchDevPool,
-  wsUrl as devPoolWsUrl,
+  acquireStream as poolAcquireStream,
+  releaseStream as poolReleaseStream,
+  touchInstance as poolTouchInstance,
+  hasReady as poolHasReady,
 } from '../modules/lambda/devPool.js';
 import { trackSessionClosed, trackProviderSession } from '../modules/analytics/index.js';
 
@@ -164,6 +167,9 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       let upstreamReconnects = 0;
       let wiredAtMs: number | null = null;
       let lambdaBounced = false;
+      // Pool instance this session's stream slot is held on (lambda only);
+      // released on close / re-assignment.
+      let poolInstanceName: string | null = null;
       // Per-WS short id so back-to-back reconnects from the same userId can
       // be told apart in logs. Diagnostics-only — never sent on the wire.
       const connId = randomBytes(4).toString('hex');
@@ -271,6 +277,10 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
           'session_close',
         );
         billLambdaFrames();
+        if (poolInstanceName) {
+          poolReleaseStream(poolInstanceName);
+          poolInstanceName = null;
+        }
         if (userId) {
           trackSessionClosed({ userId, durationMs });
           trackProviderSession({
@@ -377,6 +387,18 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
           }
         }
       }
+      // `auto` (the launch mode): serve from the H100 pool when it has a
+      // ready instance, else fal — nobody waits on a boot. Interest is
+      // recorded either way so the pool warms while fal serves.
+      if (imageProvider === 'auto') {
+        touchDevPool();
+        imageProvider = poolHasReady() || config.LAMBDA_IMAGE_URL ? 'lambda' : 'fal';
+        request.log.info(
+          { userId, connId, streamId, imageProvider, event: 'image_provider_auto' },
+          'auto provider resolved',
+        );
+      }
+
       // User attribution comes from the `userId` Pino field on every log line
       // in this handler — promoted to `user_id` Sentry log attribute by
       // `beforeSendLog` in `index.ts`. Don't `Sentry.setUser` here: the
@@ -456,7 +478,10 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         newRelay.onMessage((data, isBinary) => {
           if (socket.readyState !== socket.OPEN) return;
           // Keep the Lambda dev-pool idle reaper honest while frames flow.
-          if (imageProvider === 'lambda') touchDevPool();
+          if (imageProvider === 'lambda') {
+            if (poolInstanceName) poolTouchInstance(poolInstanceName);
+            else touchDevPool();
+          }
           if (isBinary) {
             const buf = data as Buffer;
             const base64 = buf.toString('base64');
@@ -609,10 +634,30 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
               }
             }
 
-            // No replacement pool behind either provider: fal reconnects to
-            // the same hosted endpoint (already tried above), and the Lambda
-            // dev instance is a fixed VM. Bounce the client with an explicit
-            // error; iOS auto-retries with a fresh connection.
+            // Lambda failover: the instance is gone — hand the session to a
+            // DIFFERENT pool instance if one is ready. (The dead instance's
+            // health checks will get it terminated + replaced by the scaler.)
+            if (imageProvider === 'lambda' && poolInstanceName) {
+              poolReleaseStream(poolInstanceName);
+              poolInstanceName = null;
+              const slot = poolAcquireStream();
+              if (slot && !clientDisconnected && socket.readyState === socket.OPEN) {
+                poolInstanceName = slot.name;
+                request.log.info(
+                  { userId, connId, streamId, newInstance: slot.name, event: 'lambda_pool_failover' },
+                  'reassigning session to another pool instance',
+                );
+                await wireRelay(slot.url);
+                if (clientDisconnected || socket.readyState !== socket.OPEN) return;
+                sendState('ready');
+                return;
+              }
+            }
+
+            // Nothing to fail over to: fal reconnects hit the same hosted
+            // endpoint (already tried above); the pool has no second ready
+            // instance. Bounce the client with an explicit error; iOS
+            // auto-retries with a fresh connection.
             if (socket.readyState === socket.OPEN) {
               socket.send(
                 JSON.stringify({ type: 'error', message: 'Image provider unreachable' }),
@@ -643,7 +688,14 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
           // H100 — either the static LAMBDA_IMAGE_URL instance or the dev
           // pool's kiki-serve instance (modules/lambda/devPool.ts). No
           // metering: test-account-only A/B path.
-          const lambdaUrl = config.LAMBDA_IMAGE_URL || devPoolWsUrl();
+          let lambdaUrl = config.LAMBDA_IMAGE_URL || null;
+          if (!lambdaUrl) {
+            const slot = poolAcquireStream();
+            if (slot) {
+              poolInstanceName = slot.name;
+              lambdaUrl = slot.url;
+            }
+          }
           if (!lambdaUrl) {
             // Not up yet — kick the pool and tell the iPad explicitly. Serving
             // fal silently here would corrupt the A/B comparison; an explicit

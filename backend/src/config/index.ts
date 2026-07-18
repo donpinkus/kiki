@@ -31,7 +31,7 @@ export interface AppConfig {
    * (~1.5s first frame). `lambda` relays to a Lambda Cloud H100 instance
    * running our own image server (scripts/lambda/) — dev toggle for
    * sketch-adherence comparison vs fal. */
-  readonly IMAGE_PROVIDER: 'fal' | 'lambda';
+  readonly IMAGE_PROVIDER: 'fal' | 'lambda' | 'auto';
   /** Full WS URL of a manually-launched Lambda image instance, including path
    * and token (printed by scripts/lambda/coldstart-bench.ts --keep). Optional
    * static override — when set it takes precedence over the dev pool. */
@@ -50,6 +50,15 @@ export interface AppConfig {
   readonly LAMBDA_REGION: string;
   /** Instance type for dev-pool instances. */
   readonly LAMBDA_INSTANCE_TYPE: string;
+  /** Pool floor — instances kept warm regardless of load (0 = scale to zero
+   * when nobody has shown interest for 10 min). */
+  readonly LAMBDA_POOL_MIN: number;
+  /** Pool ceiling — hard cap on concurrent instances ($4.29/hr each). */
+  readonly LAMBDA_POOL_MAX: number;
+  /** Autoscale dial: target concurrent streams per instance before the pool
+   * grows. Measured: ~5 fully-served active drawers/instance at 4-step;
+   * overload degrades gracefully, so this is a UX knob. */
+  readonly LAMBDA_POOL_TARGET_STREAMS: number;
   /** fal.ai API key — server-side only (CLAUDE.md #3: no secrets on client).
    * Used as `Authorization: Key <FAL_KEY>` on the fal realtime WS upgrade.
    * Required when `IMAGE_PROVIDER=fal`; ignored otherwise. */
@@ -166,8 +175,8 @@ function validateConfig(): AppConfig {
   }
 
   const imageProvider = (process.env['IMAGE_PROVIDER'] ?? 'fal') as AppConfig['IMAGE_PROVIDER'];
-  if (!['fal', 'lambda'].includes(imageProvider)) {
-    throw new Error(`Invalid IMAGE_PROVIDER: ${imageProvider} (expected 'fal' or 'lambda')`);
+  if (!['fal', 'lambda', 'auto'].includes(imageProvider)) {
+    throw new Error(`Invalid IMAGE_PROVIDER: ${imageProvider} (expected 'fal', 'lambda', or 'auto')`);
   }
   const falKey = process.env['FAL_KEY'] ?? '';
   if (imageProvider === 'fal' && !falKey && nodeEnv !== 'test') {
@@ -196,6 +205,9 @@ function validateConfig(): AppConfig {
     LAMBDA_DEV_POOL_ENABLED: lambdaDevPoolEnabled,
     LAMBDA_REGION: process.env['LAMBDA_REGION'] ?? 'us-south-2',
     LAMBDA_INSTANCE_TYPE: process.env['LAMBDA_INSTANCE_TYPE'] ?? 'gpu_1x_h100_sxm5',
+    LAMBDA_POOL_MIN: Number(process.env['LAMBDA_POOL_MIN'] ?? 0),
+    LAMBDA_POOL_MAX: Number(process.env['LAMBDA_POOL_MAX'] ?? 3),
+    LAMBDA_POOL_TARGET_STREAMS: Number(process.env['LAMBDA_POOL_TARGET_STREAMS'] ?? 4),
     FAL_KEY: falKey,
     FAL_IDLE_CLOSE_MS: Number(process.env['FAL_IDLE_CLOSE_MS'] ?? 0),
     FAL_WARMER_ENABLED: process.env['FAL_WARMER_ENABLED'] !== 'false',
