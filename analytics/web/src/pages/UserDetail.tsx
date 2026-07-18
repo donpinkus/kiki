@@ -252,6 +252,32 @@ export function UserDetail() {
         )}
       </div>
 
+
+      {/* Per-provider stream outcomes (H100 vs fal) */}
+      {(data.provider_stats?.length ?? 0) > 0 && (
+        <>
+          <div className="section-title">Image providers</div>
+          <table className="data-table">
+            <thead>
+              <tr><th>Provider</th><th>Sessions</th><th>Bounced</th><th>Time to provider (p50)</th><th>Frames</th><th>Disconnects</th><th>Recovered</th></tr>
+            </thead>
+            <tbody>
+              {data.provider_stats.map((r) => (
+                <tr key={r.provider}>
+                  <td>{r.provider}</td>
+                  <td>{r.sessions}</td>
+                  <td>{r.bounced}</td>
+                  <td>{r.wait_p50_ms != null ? `${(r.wait_p50_ms / 1000).toFixed(1)}s` : '—'}</td>
+                  <td>{Number(r.frames).toLocaleString()}</td>
+                  <td>{r.disconnects}</td>
+                  <td>{r.reconnects}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
+
       {/* Session / login timeline */}
       <div className="section-title">Activity by day</div>
       <ActivityChart data={data.daily_activity ?? []} />

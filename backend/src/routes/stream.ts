@@ -15,7 +15,7 @@ import {
   touch as touchDevPool,
   wsUrl as devPoolWsUrl,
 } from '../modules/lambda/devPool.js';
-import { trackSessionClosed } from '../modules/analytics/index.js';
+import { trackSessionClosed, trackProviderSession } from '../modules/analytics/index.js';
 
 /**
  * WebSocket relay from the iPad to the image provider (fal hosted realtime,
@@ -115,6 +115,19 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       };
       let clientDisconnected = false;
       const sessionStartMs = Date.now();
+      // Which provider serves this session. Hoisted (with the default) so the
+      // close handler can read it even if the client disconnects before the
+      // per-session override below resolves — a mid-handler `let` would be in
+      // its temporal dead zone at early-close time. Assigned (not redeclared)
+      // by the override block.
+      let imageProvider: typeof config.IMAGE_PROVIDER = config.IMAGE_PROVIDER;
+      // Provider-session accounting → trackProviderSession at close (Insights
+      // Launch tab H100 visibility + per-user provider breakdown).
+      let framesDelivered = 0;
+      let upstreamDisconnects = 0;
+      let upstreamReconnects = 0;
+      let wiredAtMs: number | null = null;
+      let lambdaBounced = false;
       // Per-WS short id so back-to-back reconnects from the same userId can
       // be told apart in logs. Diagnostics-only — never sent on the wire.
       const connId = randomBytes(4).toString('hex');
@@ -221,7 +234,21 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
           },
           'session_close',
         );
-        if (userId) trackSessionClosed({ userId, durationMs });
+        if (userId) {
+          trackSessionClosed({ userId, durationMs });
+          trackProviderSession({
+            userId,
+            streamId,
+            provider: imageProvider,
+            durationMs,
+            framesDelivered,
+            timeToProviderMs: wiredAtMs !== null ? wiredAtMs - sessionStartMs : null,
+            upstreamDisconnects,
+            upstreamReconnects,
+            lambdaBounced,
+            everReachedReady,
+          });
+        }
         cleanupOnDisconnect();
       });
 
@@ -294,9 +321,8 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       // Per-session image-provider override (`?imageProvider=fal|lambda`) —
       // the iPad Settings dev toggle for sketch-adherence A/B. Honored for
       // JWT-authed TEST ACCOUNTS only; everyone else stays on the global
-      // config.IMAGE_PROVIDER. `imageProvider` shadows the config value for
-      // the rest of this handler (budget gate, relay selection, recovery).
-      let imageProvider: typeof config.IMAGE_PROVIDER = config.IMAGE_PROVIDER;
+      // config.IMAGE_PROVIDER. `imageProvider` (hoisted above) shadows the
+      // config value for the rest of this handler.
       const requestedProvider = extractQueryParam(request.url, 'imageProvider');
       if (requestedProvider && requestedProvider !== imageProvider) {
         if ((requestedProvider === 'fal' || requestedProvider === 'lambda') && source === 'jwt') {
@@ -396,6 +422,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             const buf = data as Buffer;
             const base64 = buf.toString('base64');
             socket.send(JSON.stringify({ type: 'frame', data: base64 }));
+            framesDelivered += 1;
             captureFrame('generated', buf);
           } else {
             // Forward text frames (frame_meta, status, error) to the iPad
@@ -472,6 +499,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
           'wire_relay_open',
         );
         relay = newRelay;
+        wiredAtMs ??= Date.now();
         currentUpstreamUrl = upstreamUrl;
         if (lastConfig) newRelay.sendConfig(lastConfig);
       };
@@ -484,6 +512,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       // handles its own idle-close/lazy-reconnect internally and only
       // surfaces terminal closes here.)
       function handleUpstreamClose(code: number, reason: string): void {
+        upstreamDisconnects += 1;
         request.log.info(
           { userId, connId, streamId, code, reason, currentUpstreamUrl, event: 'upstream_closed' },
           'Upstream closed',
@@ -508,6 +537,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
               const reconnectStart = Date.now();
               try {
                 await wireRelay(currentUpstreamUrl);
+                upstreamReconnects += 1;
                 if (clientDisconnected || socket.readyState !== socket.OPEN) return;
                 request.log.info(
                   {
@@ -587,6 +617,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
                 message: `Lambda H100 not ready: ${poolState.message}. Toggle back to fal or retry in ~3 min.`,
               }),
             );
+            lambdaBounced = true;
             socket.close(1013, 'lambda_not_ready');
             return;
           }

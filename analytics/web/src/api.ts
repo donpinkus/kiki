@@ -68,6 +68,7 @@ export interface UserDetail {
   sessions: SessionRow[];
   events: EventRow[];
   drawings: DrawingRow[];
+  provider_stats: ProviderStatsRow[];
 }
 
 class AuthError extends Error {}
@@ -300,6 +301,18 @@ export interface LaunchDaily {
   ttfi_p90?: number | null;
 }
 
+export interface ProviderStatsRow {
+  provider: string;
+  sessions: number;
+  bounced: number;
+  wired?: number;
+  wait_p50_ms: number | null;
+  wait_p90_ms?: number | null;
+  frames: number | string; // bigint may arrive as string
+  disconnects: number;
+  reconnects: number;
+}
+
 export interface LaunchData {
   daily: LaunchDaily[];
   funnel: { signed_up: number; opened_drawing: number; saw_image: number; returned: number };
@@ -313,6 +326,7 @@ export interface LaunchData {
     properties: Record<string, unknown>;
   }[];
   summary: { ttfi_p50_7d: number | null; ttfi_p90_7d: number | null } | null;
+  providers: ProviderStatsRow[];
 }
 
 export const getLaunch = (excludeTest: boolean) =>

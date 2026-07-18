@@ -277,7 +277,7 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
       );
       if (userRes.rowCount === 0) return reply.code(404).send({ error: 'user not found' });
 
-      const [sessions, events, drawings, usage, dailyActivity] = await Promise.all([
+      const [sessions, events, drawings, usage, dailyActivity, providerStats] = await Promise.all([
         query(
           `SELECT id, source, started_at, ended_at, duration_ms::int AS duration_ms, drawing_id
            FROM sessions WHERE user_id = $1 ORDER BY started_at DESC LIMIT 500`,
@@ -310,6 +310,22 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
            GROUP BY 1 ORDER BY 1`,
           [id],
         ),
+        // Per-provider stream outcomes (all-time) from stream.provider_session
+        // — H100 acquisition success, wait, disconnects, frame share.
+        query(
+          `SELECT COALESCE(properties->>'provider', 'unknown') AS provider,
+                  count(*)::int AS sessions,
+                  count(*) FILTER (WHERE (properties->>'lambda_bounced')::bool)::int AS bounced,
+                  round(percentile_cont(0.5) WITHIN GROUP (ORDER BY (properties->>'time_to_provider_ms')::float)
+                    FILTER (WHERE (properties->>'time_to_provider_ms') ~ '^[0-9.]+$'))::int AS wait_p50_ms,
+                  COALESCE(sum((properties->>'frames_delivered')::int), 0)::bigint AS frames,
+                  COALESCE(sum((properties->>'upstream_disconnects')::int), 0)::int AS disconnects,
+                  COALESCE(sum((properties->>'upstream_reconnects')::int), 0)::int AS reconnects
+           FROM events
+           WHERE user_id = $1 AND name = 'stream.provider_session'
+           GROUP BY 1 ORDER BY sessions DESC`,
+          [id],
+        ),
       ]);
 
       return {
@@ -318,6 +334,7 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
         daily_activity: dailyActivity.rows,
         sessions: sessions.rows,
         events: events.rows,
+        provider_stats: providerStats.rows,
         drawings: drawings.rows.map((d) => ({
           ...d,
           thumbnail_url: d['thumbnail_key'] ? blobStore.urlFor(d['thumbnail_key'] as string) : null,
@@ -336,7 +353,7 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
       // number on the page. Applied server-side: events rows don't carry the
       // flag, so each query filters via the users table.
       const excl = (request.query as { excludeTest?: string }).excludeTest === '1';
-      const [daily, newUsers, funnelRows, errorUsers, recentErrors, summary] = await Promise.all([
+      const [daily, newUsers, funnelRows, errorUsers, recentErrors, summary, providers] = await Promise.all([
         query(
           `SELECT to_char(occurred_at AT TIME ZONE 'America/Los_Angeles', 'YYYY-MM-DD') AS day,
                   count(DISTINCT user_id)::int AS dau,
@@ -423,6 +440,29 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
                   (SELECT user_id::text FROM users WHERE is_test_account))`,
           [excl],
         ),
+      // ─── H100 / provider visibility (7d): per-provider session outcomes ──
+      // from stream.provider_session (emitted by the backend at socket close).
+      query(
+        `SELECT COALESCE(properties->>'provider', 'unknown') AS provider,
+                count(*)::int AS sessions,
+                count(*) FILTER (WHERE (properties->>'lambda_bounced')::bool)::int AS bounced,
+                count(*) FILTER (WHERE properties->>'time_to_provider_ms' IS NOT NULL)::int AS wired,
+                round(percentile_cont(0.5) WITHIN GROUP (ORDER BY (properties->>'time_to_provider_ms')::float)
+                  FILTER (WHERE (properties->>'time_to_provider_ms') ~ '^[0-9.]+$'))::int AS wait_p50_ms,
+                round(percentile_cont(0.9) WITHIN GROUP (ORDER BY (properties->>'time_to_provider_ms')::float)
+                  FILTER (WHERE (properties->>'time_to_provider_ms') ~ '^[0-9.]+$'))::int AS wait_p90_ms,
+                COALESCE(sum((properties->>'frames_delivered')::int), 0)::bigint AS frames,
+                COALESCE(sum((properties->>'upstream_disconnects')::int), 0)::int AS disconnects,
+                COALESCE(sum((properties->>'upstream_reconnects')::int), 0)::int AS reconnects
+         FROM events
+         WHERE name = 'stream.provider_session'
+           AND occurred_at > now() - interval '7 days'
+           AND ($1::bool = false OR user_id NOT IN
+                (SELECT user_id::text FROM users WHERE is_test_account))
+         GROUP BY 1
+         ORDER BY sessions DESC`,
+        [excl],
+      )
       ]);
 
       // Merge the two daily sources and aggregate the per-user funnel rows.
@@ -456,6 +496,7 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
         errorUsers: errorUsers.rows,
         recentErrors: recentErrors.rows,
         summary: summary.rows[0] ?? null,
+        providers: providers.rows,
       };
     });
 

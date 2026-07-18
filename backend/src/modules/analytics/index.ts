@@ -40,3 +40,36 @@ export function trackSessionClosed(props: {
     duration_ms: props.durationMs,
   });
 }
+
+/**
+ * Per-stream provider summary, emitted once at socket close. Powers the
+ * Insights Launch tab's H100 visibility (success rate, time-to-H100,
+ * disconnects, fal-vs-lambda frame share) and the per-user breakdown.
+ * `timeToProviderMs` is WS-open → relay wired: for lambda sessions that IS
+ * "how long until the H100 was serving me". `lambdaBounced` marks sessions
+ * that requested lambda but were turned away (lambda_not_ready).
+ */
+export function trackProviderSession(props: {
+  userId: string;
+  streamId: string | null;
+  provider: string;
+  durationMs: number;
+  framesDelivered: number;
+  timeToProviderMs: number | null;
+  upstreamDisconnects: number;
+  upstreamReconnects: number;
+  lambdaBounced: boolean;
+  everReachedReady: boolean;
+}): void {
+  capture(props.userId, 'stream.provider_session', {
+    stream_id: props.streamId,
+    provider: props.provider,
+    duration_ms: props.durationMs,
+    frames_delivered: props.framesDelivered,
+    time_to_provider_ms: props.timeToProviderMs,
+    upstream_disconnects: props.upstreamDisconnects,
+    upstream_reconnects: props.upstreamReconnects,
+    lambda_bounced: props.lambdaBounced,
+    ever_reached_ready: props.everReachedReady,
+  });
+}

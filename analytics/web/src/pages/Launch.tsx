@@ -106,6 +106,49 @@ export function Launch() {
         </div>
       </div>
 
+
+      <div className="section-title">Image providers — H100 visibility (7d)</div>
+      <div className="stat-row">
+        {(() => {
+          const rows = data.providers ?? [];
+          const lam = rows.find((r) => r.provider === 'lambda');
+          const fal = rows.find((r) => r.provider === 'fal');
+          const framesOf = (r?: { frames: number | string }) => Number(r?.frames ?? 0);
+          const totalFrames = rows.reduce((a, r) => a + framesOf(r), 0);
+          const lamAttempts = lam ? lam.sessions : 0;
+          const lamOk = lam ? lam.sessions - lam.bounced : 0;
+          return (
+            <>
+              <div className="stat">
+                <div className="label">H100 sessions (7d)</div>
+                <div className="value">{lamOk}/{lamAttempts || '0'}</div>
+                <div className="sub">{lam && lamAttempts > 0 ? `${Math.round((lamOk / lamAttempts) * 100)}% got the H100 · ${lam.bounced} bounced` : 'no lambda sessions'}</div>
+              </div>
+              <div className="stat">
+                <div className="label">Time to H100</div>
+                <div className="value">{lam?.wait_p50_ms != null ? fmtMsShort(lam.wait_p50_ms) : '—'}</div>
+                <div className="sub">p50 · p90 {lam?.wait_p90_ms != null ? fmtMsShort(lam.wait_p90_ms) : '—'}</div>
+              </div>
+              <div className="stat">
+                <div className="label">H100 disconnects</div>
+                <div className="value">{lam?.disconnects ?? 0}</div>
+                <div className="sub">{lam?.reconnects ?? 0} recovered in-session</div>
+              </div>
+              <div className="stat">
+                <div className="label">Frames by provider</div>
+                <div className="value">{totalFrames > 0 ? `${Math.round((framesOf(lam) / totalFrames) * 100)}%` : '—'}</div>
+                <div className="sub">lambda · fal {totalFrames > 0 ? `${Math.round((framesOf(fal) / totalFrames) * 100)}%` : '—'} · {totalFrames.toLocaleString()} total</div>
+              </div>
+              <div className="stat">
+                <div className="label">fal sessions (7d)</div>
+                <div className="value">{fal?.sessions ?? 0}</div>
+                <div className="sub">{fal?.disconnects ?? 0} disconnects</div>
+              </div>
+            </>
+          );
+        })()}
+      </div>
+
       <div className="section-title">Trends (30 days)</div>
       <div className="launch-grid">
         <DailyBars title="New users" byDay={seriesMap(data.daily, 'new_users')} />
