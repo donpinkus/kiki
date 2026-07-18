@@ -2,25 +2,57 @@ import AVKit
 import SwiftUI
 
 /// Modal that previews the speed-paint replay in an autoplaying, looping player
-/// and lets the user pick a layout (side-by-side / stacked) and playback speed
-/// (1x / 2x / 5x) before sharing. The preview re-composes whenever the layout or
-/// speed changes.
+/// and lets the user pick a layout (side-by-side / stacked) and speed
+/// (1x / 2x / 5x / fit-to-12s) before sharing. The preview plays the stitched
+/// composition directly — no encode pass — so it appears near-instantly and
+/// re-composes live when layout or speed changes. The MP4 is only encoded when
+/// a share action is tapped, which is also when the watermark is burned
+/// (`AVVideoCompositionCoreAnimationTool` is export-only); the preview shows
+/// the watermark as a SwiftUI overlay instead.
 struct SpeedPaintReplayView: View {
     @Environment(AppCoordinator.self) private var coordinator
     @Environment(\.dismiss) private var dismiss
 
+    /// Speed options. `fit12` sizes content + the 3s final hold to 12s total,
+    /// so the export never splits into multiple videos when shared to
+    /// Instagram / TikTok.
+    private enum SpeedChoice: String, CaseIterable, Identifiable {
+        case x1, x2, x5, fit12
+
+        var id: String { rawValue }
+
+        var label: String {
+            switch self {
+            case .x1: return "1x"
+            case .x2: return "2x"
+            case .x5: return "5x"
+            case .fit12: return "12s"
+            }
+        }
+
+        var composerSpeed: ReplaySpeed {
+            switch self {
+            case .x1: return .multiplier(1)
+            case .x2: return .multiplier(2)
+            case .x5: return .multiplier(5)
+            case .fit12: return .fitTotal(seconds: 12)
+            }
+        }
+    }
+
     @State private var layout: ReplayLayout = .vertical
-    @State private var speed: Double = 2
+    @State private var speed: SpeedChoice = .fit12
     @State private var watermark = true
-    @State private var composedURL: URL?
     @State private var isComposing = false
+    @State private var hasPreview = false
+    @State private var isExporting = false
+    @State private var exportedURL: URL?
+    @State private var exportedKey: String?
     @State private var shareItem: ReplayShareItem?
     @State private var statusMessage: String?
 
     @State private var player = AVPlayer()
     @State private var loopObserver: NSObjectProtocol?
-
-    private let speeds: [Double] = [1, 2, 5]
 
     var body: some View {
         NavigationStack {
@@ -33,7 +65,7 @@ struct SpeedPaintReplayView: View {
                 .pickerStyle(.segmented)
 
                 Picker("Speed", selection: $speed) {
-                    ForEach(speeds, id: \.self) { Text("\(Int($0))x").tag($0) }
+                    ForEach(SpeedChoice.allCases) { Text($0.label).tag($0) }
                 }
                 .pickerStyle(.segmented)
 
@@ -67,7 +99,14 @@ struct SpeedPaintReplayView: View {
                     .buttonStyle(.bordered)
                 }
                 .controlSize(.large)
-                .disabled(composedURL == nil || isComposing)
+                .disabled(!hasPreview || isComposing || isExporting)
+                .overlay {
+                    if isExporting {
+                        ProgressView("Preparing video…")
+                            .padding()
+                            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                    }
+                }
             }
             .padding()
             .navigationTitle("Speed paint replay")
@@ -89,7 +128,7 @@ struct SpeedPaintReplayView: View {
                 Text(statusMessage ?? "")
             }
         }
-        .task(id: composeKey) { await recompose() }
+        .task(id: previewKey) { await rebuildPreview() }
         .onAppear { startLooping() }
         .onDisappear {
             player.pause()
@@ -108,27 +147,58 @@ struct SpeedPaintReplayView: View {
                 ProgressView().controlSize(.large)
             }
         }
+        .overlay(alignment: .topTrailing) {
+            // Preview-only stand-in for the burned watermark (which only
+            // exists in exported files). Extra trailing inset in the story
+            // layout mirrors the export's clearance for Instagram's corner UI.
+            if watermark && hasPreview {
+                watermarkBadge
+                    .padding(.top, 10)
+                    .padding(.trailing, layout == .vertical ? 34 : 12)
+            }
+        }
         .aspectRatio(layout.aspectRatio, contentMode: .fit)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private var composeKey: String { "\(layout.rawValue)-\(Int(speed))-\(watermark)" }
+    private var watermarkBadge: some View {
+        HStack(spacing: 5) {
+            (Text("Drawn with ")
+                .foregroundColor(Color(red: 0.15, green: 0.17, blue: 0.24))
+                + Text("Kiki")
+                .foregroundColor(Color(hue: 0.75, saturation: 0.85, brightness: 0.92)))
+                .font(.system(size: 13, weight: .bold, design: .rounded))
+            if let icon = UIImage(named: "kiki_mark") {
+                Image(uiImage: icon)
+                    .resizable()
+                    .frame(width: 22, height: 22)
+                    .clipShape(RoundedRectangle(cornerRadius: 5))
+            }
+        }
+        .shadow(color: .white, radius: 2, y: 1)
+        .opacity(0.9)
+    }
 
-    private func recompose() async {
+    // MARK: - Preview composition (instant, no encode)
+
+    private var previewKey: String { "\(layout.rawValue)-\(speed.rawValue)" }
+
+    private func rebuildPreview() async {
         isComposing = true
         defer { isComposing = false }
-        guard let url = await coordinator.composeReplay(layout: layout, speed: speed, watermark: watermark) else {
+        guard let built = await coordinator.buildReplayComposition(layout: layout, speed: speed.composerSpeed) else {
             // Only alert if we never managed to compose anything — a re-compose
             // failure (layout/speed change) keeps showing the previous video.
-            if composedURL == nil {
+            if !hasPreview {
                 statusMessage = "Couldn't build the replay — no recorded footage was found for this drawing."
             }
             return
         }
-        composedURL = url
-        // A freshly replaced item starts at zero; just play.
-        player.replaceCurrentItem(with: AVPlayerItem(url: url))
+        let item = AVPlayerItem(asset: built.composition)
+        item.videoComposition = built.videoComposition
+        player.replaceCurrentItem(with: item)
         player.play()
+        hasPreview = true
     }
 
     private func startLooping() {
@@ -146,38 +216,64 @@ struct SpeedPaintReplayView: View {
         }
     }
 
+    // MARK: - Sharing (export on demand — this is where the encode happens)
+
+    private var exportKey: String { "\(layout.rawValue)-\(speed.rawValue)-\(watermark)" }
+
+    /// Run `action` with an exported MP4 for the current settings, encoding one
+    /// if the cached export is stale. The encode is the slow part (seconds for
+    /// long recordings), so it happens only here — never for the preview.
+    private func withExportedReplay(target: String, _ action: @escaping @MainActor (URL) -> Void) {
+        track(target: target)
+        Task { @MainActor in
+            if let exportedURL, exportedKey == exportKey {
+                action(exportedURL)
+                return
+            }
+            isExporting = true
+            defer { isExporting = false }
+            guard let url = await coordinator.composeReplay(layout: layout, speed: speed.composerSpeed, watermark: watermark) else {
+                statusMessage = "Couldn't export the replay — try again."
+                return
+            }
+            exportedURL = url
+            exportedKey = exportKey
+            action(url)
+        }
+    }
+
     private func shareToInstagram() {
-        guard let url = composedURL else { return }
-        track(target: "instagram_stories")
-        InstagramStories.share(videoURL: url) { success in
-            if !success {
-                statusMessage = "Couldn't open Instagram — make sure the app is installed."
+        withExportedReplay(target: "instagram_stories") { url in
+            InstagramStories.share(videoURL: url) { success in
+                if !success {
+                    statusMessage = "Couldn't open Instagram — make sure the app is installed."
+                }
             }
         }
     }
 
     private func saveToPhotos() {
-        guard let url = composedURL else { return }
-        Task {
-            let saved = await PhotoLibrarySaver.saveVideo(url)
-            track(target: "photos")
-            statusMessage = saved
-                ? "Saved to Photos."
-                : "Couldn't save — check photo access in Settings."
+        withExportedReplay(target: "photos") { url in
+            Task {
+                let saved = await PhotoLibrarySaver.saveVideo(url)
+                statusMessage = saved
+                    ? "Saved to Photos."
+                    : "Couldn't save — check photo access in Settings."
+            }
         }
     }
 
     private func share() {
-        guard let url = composedURL else { return }
-        track(target: "share_sheet")
-        shareItem = ReplayShareItem(url: url)
+        withExportedReplay(target: "share_sheet") { url in
+            shareItem = ReplayShareItem(url: url)
+        }
     }
 
     private func track(target: String) {
         Analytics.track(.videoShared, properties: [
             "format": "mp4",
             "layout": layout.rawValue,
-            "speed": Int(speed),
+            "speed": speed.label,
             "target": target,
         ])
     }

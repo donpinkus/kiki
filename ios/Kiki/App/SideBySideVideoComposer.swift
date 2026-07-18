@@ -31,6 +31,18 @@ enum ReplayLayout: String, CaseIterable, Identifiable {
     var aspectRatio: CGFloat { renderSize.width / renderSize.height }
 }
 
+/// How the replay timeline is scaled.
+enum ReplaySpeed: Equatable {
+    /// Fixed multiplier (2 = twice as fast).
+    case multiplier(Double)
+    /// Scale the drawn content so content + final hold total `seconds` —
+    /// sized so the exported video never splits when shared to Instagram /
+    /// TikTok. Never slower than real time (short recordings just come out
+    /// shorter than the target). The animation tail is skipped in this mode
+    /// (fixed 3s freeze-hold only) so the target is exact.
+    case fitTotal(seconds: Double)
+}
+
 /// Composes the two recorded tracks (canvas + generated) into one replay MP4 in
 /// the chosen layout and playback speed, on demand. The tracks are equal length
 /// and frame-locked by construction, so this is a layout + time-scale pass.
@@ -42,19 +54,27 @@ enum SideBySideVideoComposer {
         case exportFailed(Error?)
     }
 
-    /// Build the replay and write it to `outputURL` (overwritten if present).
-    /// `side` is the per-track source edge (matches the recorder); `speed` scales
-    /// the timeline (2 = twice as fast).
-    static func compose(
+    /// A composed-but-not-encoded replay. Hand `composition` + `videoComposition`
+    /// straight to an `AVPlayerItem` for instant preview (no export pass), or run
+    /// it through `export(...)` to encode an MP4. The watermark is burned only at
+    /// export (`AVVideoCompositionCoreAnimationTool` is export-only — attaching
+    /// it to a player item throws), so previews overlay the watermark in SwiftUI.
+    struct BuiltReplay {
+        let composition: AVMutableComposition
+        let videoComposition: AVMutableVideoComposition
+        let layout: ReplayLayout
+    }
+
+    /// Stitch the recorded segments into a playable composition. `side` is the
+    /// per-track source edge (matches the recorder).
+    static func build(
         canvasSegments: [URL],
         generatedSegments: [URL],
         generatedVideoURL: URL? = nil,
-        outputURL: URL,
         layout: ReplayLayout = .horizontal,
-        speed: Double = 1,
-        watermark: Bool = true,
+        speed: ReplaySpeed = .multiplier(1),
         side: Int = 768
-    ) async throws {
+    ) async throws -> BuiltReplay {
         guard !canvasSegments.isEmpty, canvasSegments.count == generatedSegments.count else {
             throw ComposeError.missingTrack
         }
@@ -92,10 +112,28 @@ enum SideBySideVideoComposer {
         let baseDuration = cursor
         let baseRange = CMTimeRange(start: .zero, duration: baseDuration)
 
-        // Speed: scale both tracks' timelines to 1/speed of their duration.
+        // How long the final frame holds at the end (freeze or animation floor).
+        let holdSeconds = 3.0
+
+        // Resolve the effective multiplier. `fitTotal` sizes content so
+        // content + hold hits the target; clamped to ≥1 so short recordings
+        // play at real speed instead of slow motion.
+        let effectiveMultiplier: Double
+        let useAnimationTail: Bool
+        switch speed {
+        case .multiplier(let m):
+            effectiveMultiplier = max(m, 0.01)
+            useAnimationTail = true
+        case .fitTotal(let totalSeconds):
+            let contentTarget = max(totalSeconds - holdSeconds, 0.5)
+            effectiveMultiplier = max(baseDuration.seconds / contentTarget, 1.0)
+            useAnimationTail = false
+        }
+
+        // Speed: scale both tracks' timelines to 1/multiplier of their duration.
         var finalDuration: CMTime
-        if speed != 1, speed > 0 {
-            let scaled = CMTimeMultiplyByFloat64(baseDuration, multiplier: 1.0 / speed)
+        if effectiveMultiplier != 1 {
+            let scaled = CMTimeMultiplyByFloat64(baseDuration, multiplier: 1.0 / effectiveMultiplier)
             canvasComp.scaleTimeRange(baseRange, toDuration: scaled)
             generatedComp.scaleTimeRange(baseRange, toDuration: scaled)
             finalDuration = scaled
@@ -107,7 +145,8 @@ enum SideBySideVideoComposer {
 
         // Tail: append the generated animation (canvas frozen on the final drawing
         // | animation playing in the generated pane), or — if there's no animation
-        // — hold the final frame for 2s. Real-time, not sped up.
+        // (or the mode wants an exact total) — hold the final frame. Real-time,
+        // not sped up.
         let oneFrame = CMTime(value: 1, timescale: 12)
         let tailStart = finalDuration
         var tailGeneratedTransform: CGAffineTransform?
@@ -119,7 +158,7 @@ enum SideBySideVideoComposer {
                 let lastFrameRange = CMTimeRange(start: lastSegmentDuration - oneFrame, duration: oneFrame)
                 var appendedAnimation = false
 
-                if let generatedVideoURL {
+                if useAnimationTail, let generatedVideoURL {
                     let animAsset = AVURLAsset(url: generatedVideoURL)
                     let animTrack = try? await animAsset.loadTracks(withMediaType: .video).first
                     // Use the TRACK's own range — the asset duration can exceed it,
@@ -138,7 +177,7 @@ enum SideBySideVideoComposer {
                 }
 
                 if !appendedAnimation, let lastGeneratedTrack {
-                    let hold = CMTime(seconds: 2, preferredTimescale: 600)
+                    let hold = CMTime(seconds: holdSeconds, preferredTimescale: 600)
                     try canvasComp.insertTimeRange(lastFrameRange, of: lastCanvasTrack, at: tailStart)
                     try generatedComp.insertTimeRange(lastFrameRange, of: lastGeneratedTrack, at: tailStart)
                     let frozen = CMTimeRange(start: tailStart, duration: oneFrame)
@@ -177,15 +216,25 @@ enum SideBySideVideoComposer {
         videoComposition.frameDuration = CMTime(value: 1, timescale: 30)
         videoComposition.instructions = [instruction]
 
+        return BuiltReplay(composition: composition, videoComposition: videoComposition, layout: layout)
+    }
+
+    /// Encode a built replay to `outputURL` (overwritten if present), burning
+    /// the watermark when requested. Mutates `built.videoComposition` — pass a
+    /// fresh `build(...)` result, never one currently attached to a player.
+    static func export(_ built: BuiltReplay, outputURL: URL, watermark: Bool) async throws {
         if watermark {
-            videoComposition.animationTool = watermarkTool(renderSize: renderSize, layout: layout)
+            built.videoComposition.animationTool = watermarkTool(
+                renderSize: built.videoComposition.renderSize,
+                layout: built.layout
+            )
         }
 
         try? FileManager.default.removeItem(at: outputURL)
-        guard let export = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetHighestQuality) else {
+        guard let export = AVAssetExportSession(asset: built.composition, presetName: AVAssetExportPresetHighestQuality) else {
             throw ComposeError.exportSetupFailed
         }
-        export.videoComposition = videoComposition
+        export.videoComposition = built.videoComposition
         export.outputURL = outputURL
         export.outputFileType = .mp4
 

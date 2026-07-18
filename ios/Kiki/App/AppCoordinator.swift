@@ -1194,11 +1194,10 @@ final class AppCoordinator {
         }
     }
 
-    /// Compose the current drawing's recorded segments into a speed-paint replay
-    /// MP4 in the chosen layout + speed, for preview and sharing. Writes a fresh
-    /// file in its own temp dir (so the preview player never reads a file being
-    /// overwritten), named "Speed Paint.mp4" for a clean Save-to-Files name.
-    func composeReplay(layout: ReplayLayout, speed: Double, watermark: Bool) async -> URL? {
+    /// Stitch the current drawing's recorded segments into a playable
+    /// composition for the replay modal's instant preview (no encode pass —
+    /// the player renders layout + speed live).
+    func buildReplayComposition(layout: ReplayLayout, speed: ReplaySpeed) async -> SideBySideVideoComposer.BuiltReplay? {
         guard let drawingId = currentDrawingId else { return nil }
         let segments = RecordingStore.shared.segmentURLs(for: drawingId)
         guard !segments.canvas.isEmpty else {
@@ -1210,24 +1209,40 @@ final class AppCoordinator {
             ])
             return nil
         }
-        let animationURL = RecordingStore.shared.generatedVideoURL(for: drawingId)
+        do {
+            return try await SideBySideVideoComposer.build(
+                canvasSegments: segments.canvas,
+                generatedSegments: segments.generated,
+                generatedVideoURL: RecordingStore.shared.generatedVideoURL(for: drawingId),
+                layout: layout,
+                speed: speed
+            )
+        } catch {
+            streamLog.error("Replay build failed: \(error.localizedDescription)")
+            SentrySDK.capture(error: error) { scope in
+                scope.setTag(value: "replay.build", key: "op")
+            }
+            return nil
+        }
+    }
+
+    /// Export the replay to an MP4 for sharing (this is where the watermark is
+    /// burned). Writes a fresh file in its own temp dir (so a preview player
+    /// never reads a file being overwritten), named "Speed Paint.mp4" for a
+    /// clean Save-to-Files name.
+    func composeReplay(layout: ReplayLayout, speed: ReplaySpeed, watermark: Bool) async -> URL? {
+        guard let built = await buildReplayComposition(layout: layout, speed: speed) else { return nil }
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let output = dir.appendingPathComponent("Speed Paint.mp4")
         do {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            try await SideBySideVideoComposer.compose(
-                canvasSegments: segments.canvas,
-                generatedSegments: segments.generated,
-                generatedVideoURL: animationURL,
-                outputURL: output,
-                layout: layout,
-                speed: speed,
-                watermark: watermark
-            )
+            try await SideBySideVideoComposer.export(built, outputURL: output, watermark: watermark)
             return output
         } catch {
-            streamLog.error("Replay compose failed: \(error.localizedDescription)")
-            SentrySDK.capture(error: error)
+            streamLog.error("Replay export failed: \(error.localizedDescription)")
+            SentrySDK.capture(error: error) { scope in
+                scope.setTag(value: "replay.export", key: "op")
+            }
             return nil
         }
     }
@@ -1625,6 +1640,28 @@ final class AppCoordinator {
     /// has been finalized to disk.
     private var recordedCanvasFrames = 0
 
+    /// Periodic recording checkpoint while a session is live, so a crash or
+    /// hard-kill loses at most ~1 min of replay footage instead of the whole
+    /// session. `flushRecording` no-ops (returns nil checkpoint) when fewer
+    /// than 2 new frames exist, so idle sessions don't accumulate segments.
+    private var recordingCheckpointTask: Task<Void, Never>?
+
+    private func startRecordingCheckpoints() {
+        recordingCheckpointTask?.cancel()
+        recordingCheckpointTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(60))
+                guard let self, !Task.isCancelled else { return }
+                await self.flushRecording()
+            }
+        }
+    }
+
+    private func stopRecordingCheckpoints() {
+        recordingCheckpointTask?.cancel()
+        recordingCheckpointTask = nil
+    }
+
     @MainActor
     private func startStreamSession(request: URLRequest, backendWsURL: URL) {
         let session = StreamSession(
@@ -1639,8 +1676,15 @@ final class AppCoordinator {
         // generated frame in onImageReceived).
         let videoRecorder = DrawingVideoRecorder()
         videoRecorder.start()
+        // Seed the generated pane with the drawing's last generated image so a
+        // resumed session's segment doesn't open on white frames (visible as a
+        // flash at each session boundary in the stitched replay).
+        if let seed = lastSuccessfulImage {
+            videoRecorder.seedGenerated(seed)
+        }
         recorder = videoRecorder
         recordedCanvasFrames = 0
+        startRecordingCheckpoints()
         session.onCanvasFrameCaptured = { [weak self] canvasImage in
             guard let self else { return }
             self.recordedCanvasFrames += 1
@@ -1802,6 +1846,7 @@ final class AppCoordinator {
         // Finalize the in-flight timelapse recording before startStream()
         // replaces the recorder — a provider toggle or paywall resume must
         // not discard the footage captured so far.
+        stopRecordingCheckpoints()
         if let recorder, let drawingId = currentDrawingId {
             finalizeRecording(recorder, drawingId: drawingId)
         }
@@ -1852,6 +1897,7 @@ final class AppCoordinator {
         // Finalize this session's timelapse recording (distinct from the LTX
         // idle-animation MP4 above). If the recorder was cancelled (empty
         // drawing) finish() no-ops and stores nothing.
+        stopRecordingCheckpoints()
         if let recorder, let drawingId = currentDrawingId {
             finalizeRecording(recorder, drawingId: drawingId)
         }

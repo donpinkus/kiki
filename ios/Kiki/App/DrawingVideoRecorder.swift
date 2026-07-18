@@ -72,6 +72,18 @@ final class DrawingVideoRecorder {
         return true
     }
 
+    /// Seed the generated pane's "last frame" without appending anything —
+    /// used at session start with the drawing's saved generated image so a
+    /// resumed session's first frames don't render a white generated pane.
+    /// No-op once a real generated frame exists.
+    func seedGenerated(_ image: UIImage) {
+        queue.async {
+            guard self.started, self.lastGenerated == nil,
+                  let buffer = self.pixelBuffer(from: image) else { return }
+            self.lastGenerated = buffer
+        }
+    }
+
     /// Call when the canvas visibly changed (passes the capture-loop dirty check).
     func canvasChanged(_ image: UIImage) {
         queue.async {
