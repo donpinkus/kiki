@@ -454,6 +454,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       socket.on('message', (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
         const buf = Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data as ArrayBuffer);
         if (isBinary) {
+          sketchesSent += 1;
           // The user is drawing: reset the video idle window and cancel any
           // in-flight video (a new sketch supersedes it).
           videoSession?.noteSketchFrame();
