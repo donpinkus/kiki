@@ -24,7 +24,8 @@ Use this file as a thin entrypoint only. Use [`README.md`](./README.md) for huma
 - `ios/Kiki/App/AppCoordinator.swift`
 - `ios/Kiki/Views/DrawingView.swift`
 - `backend/src/routes/stream.ts`
-- `backend/src/modules/orchestrator/orchestrator.ts`
+- `backend/src/modules/fal/falImageRelay.ts`
+- `backend/src/modules/lambda/devPool.ts`
 
 ## Working Notes
 

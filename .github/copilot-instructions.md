@@ -6,8 +6,8 @@ Read [`../CLAUDE.md`](../CLAUDE.md) first. It is the primary source of truth for
 
 Kiki is an iPad sketch-to-image app:
 - SwiftUI iPad client in `ios/`
-- Fastify backend and RunPod orchestrator in `backend/`
-- Python FLUX.2-klein pod server in `model-servers/`
+- Fastify WebSocket relay backend in `backend/` (fal.ai + Lambda Cloud H100 image providers)
+- Python FLUX.2-klein image server in `model-servers/` (served on Lambda Cloud)
 
 ## Working Priorities
 
@@ -28,7 +28,8 @@ Kiki is an iPad sketch-to-image app:
 - `ios/Kiki/App/AppCoordinator.swift`
 - `ios/Kiki/Views/DrawingView.swift`
 - `backend/src/routes/stream.ts`
-- `backend/src/modules/orchestrator/orchestrator.ts`
+- `backend/src/modules/fal/falImageRelay.ts`
+- `backend/src/modules/lambda/devPool.ts`
 
 ## Important Note
 
