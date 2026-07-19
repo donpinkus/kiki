@@ -33,6 +33,11 @@ public struct StreamConfig: Codable, Sendable, Equatable {
     /// scaling): >1 follows the sketch harder, <1 frees the prompt, 1.0 =
     /// stock. Wire key `reference_scale`; ignored by the fal relay.
     public let referenceScale: Double
+    /// Extra reference images (base64 JPEG, ≤512px) for the Lambda KV
+    /// pipeline's multi-reference conditioning — e.g. a pinned object/
+    /// character whose identity should persist across generations. Wire key
+    /// `reference_images`; ignored by the fal relay. nil/empty = none.
+    public let referenceImages: [String]?
     public let videoWidth: Int
     public let videoHeight: Int
     public let videoFrames: Int
@@ -52,6 +57,7 @@ public struct StreamConfig: Codable, Sendable, Equatable {
         case imageSize = "image_size"
         case scheduleMu = "schedule_mu"
         case referenceScale = "reference_scale"
+        case referenceImages = "reference_images"
         case videoWidth
         case videoHeight
         case videoFrames
@@ -68,6 +74,7 @@ public struct StreamConfig: Codable, Sendable, Equatable {
         imageSize: String = "square_hd",
         scheduleMu: Double = 1.2,
         referenceScale: Double = 1.0,
+        referenceImages: [String]? = nil,
         videoWidth: Int = 512,
         videoHeight: Int = 512,
         videoFrames: Int = 145,
@@ -83,6 +90,7 @@ public struct StreamConfig: Codable, Sendable, Equatable {
         self.imageSize = imageSize
         self.scheduleMu = scheduleMu
         self.referenceScale = referenceScale
+        self.referenceImages = referenceImages
         self.videoWidth = videoWidth
         self.videoHeight = videoHeight
         self.videoFrames = videoFrames

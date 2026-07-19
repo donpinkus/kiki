@@ -221,6 +221,17 @@ class FluxKleinPipeline:
                 steps=config.STEPS,
                 seed=0,
             )
+            # Third warmup: the 2-reference shape (sketch + one pinned object
+            # from the library). Another distinct compile family — without
+            # this, the first frame after a user pins an object stalls ~80s.
+            if config.PIPELINE_VARIANT == "kv":
+                _ = self.generate_reference(
+                    image=Image.new("RGB", (config.DEFAULT_WIDTH, config.DEFAULT_HEIGHT), "white"),
+                    prompt="warmup",
+                    steps=config.STEPS,
+                    seed=0,
+                    extra_references=[Image.new("RGB", (config.DEFAULT_WIDTH, config.DEFAULT_HEIGHT), "white")],
+                )
         self._phase_timings["warmup_inference_ms"] = int((time.time() - t_phase) * 1000)
         warmup_s = self._phase_timings["warmup_inference_ms"] / 1000
         logger.info(
@@ -253,6 +264,7 @@ class FluxKleinPipeline:
         steps: int = config.STEPS,
         seed: int | None = None,
         reference_scale: float = 1.0,
+        extra_references: list[Image.Image] | None = None,
     ) -> Image.Image:
         """Run reference-mode img2img generation.
 
@@ -265,8 +277,21 @@ class FluxKleinPipeline:
         >1 follows the sketch harder, <1 frees the prompt, 1.0 = stock
         behavior (numerically a no-op). Applied under the lock so a config
         update can't tear a mid-flight generation.
+
+        ``extra_references`` (KV variant) are appended AFTER the sketch in the
+        multi-reference list — klein stamps each reference with its own RoPE
+        time coordinate, so the sketch keeps its usual coordinate (identical
+        conditioning) and each extra image (e.g. a pinned object/character
+        from the library) conditions identity separately. Each extra ref adds
+        ~a sketch's worth of tokens: expect moderately higher per-frame cost
+        and a one-time compile for each new ref-count shape (warmed for 1
+        extra ref at boot).
         """
         generator = self._make_generator(seed)
+
+        images: Image.Image | list[Image.Image] = image
+        if extra_references and config.PIPELINE_VARIANT == "kv":
+            images = [image, *extra_references]
 
         with self._lock:
             if config.PIPELINE_VARIANT == "kv":
@@ -275,7 +300,7 @@ class FluxKleinPipeline:
                 set_scale(reference_scale)
             result = self.pipe(
                 prompt=prompt,
-                image=image,
+                image=images,
                 height=config.DEFAULT_HEIGHT,
                 width=config.DEFAULT_WIDTH,
                 num_inference_steps=steps,

@@ -71,8 +71,20 @@ struct ObjectsDrawer: View {
                 .frame(width: 96, height: 96)
                 .overlay(
                     RoundedRectangle(cornerRadius: 10)
-                        .strokeBorder(Color(.separator), lineWidth: 1)
+                        .strokeBorder(
+                            coordinator.pinnedObjectID == object.id ? Color.accentColor : Color(.separator),
+                            lineWidth: coordinator.pinnedObjectID == object.id ? 2 : 1
+                        )
                 )
+                .overlay(alignment: .topTrailing) {
+                    if coordinator.pinnedObjectID == object.id {
+                        Image(systemName: "pin.circle.fill")
+                            .font(.body)
+                            .symbolRenderingMode(.palette)
+                            .foregroundStyle(.white, Color.accentColor)
+                            .offset(x: 6, y: -6)
+                    }
+                }
                 Text(object.name)
                     .font(.caption2)
                     .lineLimit(1)
@@ -81,6 +93,22 @@ struct ObjectsDrawer: View {
         }
         .buttonStyle(.plain)
         .contextMenu {
+            // Identity conditioning: the pinned object rides the generation
+            // stream as an extra klein reference so its look/identity
+            // persists across generations (Kiki's AI path only).
+            if coordinator.pinnedObjectID == object.id {
+                Button {
+                    coordinator.unpinObject()
+                } label: {
+                    Label("Unpin from generation", systemImage: "pin.slash")
+                }
+            } else {
+                Button {
+                    coordinator.pinObject(object)
+                } label: {
+                    Label("Pin as generation reference", systemImage: "pin")
+                }
+            }
             Button {
                 renameText = object.name
                 renaming = object

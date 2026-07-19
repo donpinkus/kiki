@@ -67,6 +67,7 @@ enum AnalyticsEvent: String {
     // Object library
     case objectSaved = "objects.saved"
     case objectInserted = "objects.inserted"
+    case objectPinned = "objects.pinned"
 
     // AI Edit (inpaint)
     case aiEditRequested = "canvas.ai_edit_requested"

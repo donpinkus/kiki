@@ -29,6 +29,7 @@ Correlation:
 from __future__ import annotations
 
 import asyncio
+import base64
 import io
 import json
 import logging
@@ -181,6 +182,11 @@ async def websocket_stream(ws: WebSocket):
         # Sketch-adherence dial (KV pipeline): >1 follow the sketch harder,
         # <1 free the prompt. 1.0 = stock behavior.
         "reference_scale": 1.0,
+        # Extra reference images (KV pipeline multi-reference): decoded PIL
+        # images appended after the sketch — e.g. a pinned object/character
+        # whose identity should persist across generations. Decoded once per
+        # config update, reused every frame.
+        "reference_pils": [],
     }
 
     # Single-slot frame buffer: only the latest frame is kept.
@@ -233,6 +239,19 @@ async def websocket_stream(ws: WebSocket):
                                         current_config["reference_scale"] = max(0.0, min(3.0, rs))
                                 except (TypeError, ValueError):
                                     pass
+                            if "reference_images" in data:
+                                pils = []
+                                for b64 in (data["reference_images"] or [])[:2]:
+                                    try:
+                                        raw = base64.b64decode(b64.split(",", 1)[-1])
+                                        pil = Image.open(io.BytesIO(raw)).convert("RGB")
+                                        pils.append(pil)
+                                    except Exception:
+                                        logger.warning(
+                                            f"Client {client_id} sent undecodable reference image",
+                                            extra={"client_id": client_id},
+                                        )
+                                current_config["reference_pils"] = pils
                             # Snapshotted with cfg in process_loop so the
                             # outgoing frame_meta matches the frame the client
                             # will pair it with, even if a new config arrives
@@ -400,6 +419,7 @@ def _process_frame(jpeg_data: bytes, cfg: dict) -> bytes:
         steps=cfg.get("steps", config.STEPS),
         seed=cfg.get("seed"),
         reference_scale=cfg.get("reference_scale", 1.0),
+        extra_references=cfg.get("reference_pils") or None,
     )
 
     buffer = io.BytesIO()

@@ -57,6 +57,13 @@ async def run_test(args):
             "seed": args.seed,
             "reference_scale": args.reference_scale,
         }
+        if args.reference:
+            import base64
+            ref = Image.open(args.reference).convert("RGB")
+            ref.thumbnail((512, 512))
+            buf = io.BytesIO()
+            ref.save(buf, format="JPEG", quality=85)
+            config["reference_images"] = [base64.b64encode(buf.getvalue()).decode()]
 
         await ws.send(json.dumps(config))
         print(
@@ -150,6 +157,10 @@ def main():
     parser.add_argument(
         "--reference-scale", type=float, default=1.0,
         help="Sketch-adherence dial (KV pipeline): >1 tighter, <1 looser, 1.0 stock",
+    )
+    parser.add_argument(
+        "--reference", default=None,
+        help="Extra reference image path (identity conditioning, KV multi-reference)",
     )
     args = parser.parse_args()
 

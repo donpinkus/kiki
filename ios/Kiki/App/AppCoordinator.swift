@@ -1741,8 +1741,46 @@ final class AppCoordinator {
     }
 
     func deleteObject(_ object: SavedObject) {
+        if pinnedObjectID == object.id { unpinObject() }
         modelContext.delete(object)
         try? modelContext.save()
+    }
+
+    // MARK: - Object identity conditioning (pin as generation reference)
+
+    /// The object currently riding the generation stream as an identity
+    /// reference (Lambda KV pipeline multi-reference; the fal relay ignores
+    /// the key). Session-scoped: cleared on unpin/delete; re-pin per launch.
+    private(set) var pinnedObjectID: UUID?
+    /// Pre-encoded ≤512px JPEG base64 of the pinned object (composited on
+    /// white — klein wants RGB), built once at pin time.
+    private var pinnedObjectB64: String?
+
+    func pinObject(_ object: SavedObject) {
+        guard let image = object.image else { return }
+        let maxSide: CGFloat = 512
+        let scale = min(1, maxSide / max(image.size.width, image.size.height))
+        let size = CGSize(width: image.size.width * scale, height: image.size.height * scale)
+        let format = UIGraphicsImageRendererFormat()
+        format.preferredRange = .standard
+        format.scale = 1
+        let composited = UIGraphicsImageRenderer(size: size, format: format).image { ctx in
+            UIColor.white.setFill()
+            ctx.fill(CGRect(origin: .zero, size: size))
+            image.draw(in: CGRect(origin: .zero, size: size))
+        }
+        guard let jpeg = composited.jpegData(compressionQuality: 0.85) else { return }
+        pinnedObjectID = object.id
+        pinnedObjectB64 = jpeg.base64EncodedString()
+        Analytics.track(.objectPinned)
+        showTransientBanner("\(object.name) pinned — Kiki keeps its look in mind while generating.")
+        syncStreamConfig()
+    }
+
+    func unpinObject() {
+        pinnedObjectID = nil
+        pinnedObjectB64 = nil
+        syncStreamConfig()
     }
 
     // MARK: - Sticker sharing
@@ -2129,6 +2167,15 @@ final class AppCoordinator {
             if currentScreen == .gallery { openMostRecentDrawing() }
         case "statusDetails":
             devShowStatusDetails = true
+        case let a where a.hasPrefix("brushStudio"):
+            // "brushStudio" or "brushStudio:<StudioSection rawValue>" (e.g.
+            // "brushStudio:Apple Pencil") to open on a specific tab.
+            if currentScreen == .drawing {
+                if let colon = a.firstIndex(of: ":") {
+                    devStudioSection = StudioSection(rawValue: String(a[a.index(after: colon)...]))
+                }
+                showBrushStudio = true
+            }
         case "animateModal", "animateScreen":
             // Legacy dev-action name kept: opens the Animate screen now.
             if currentScreen == .drawing {
@@ -2261,6 +2308,8 @@ final class AppCoordinator {
     /// Dev-automation binding for the status badge popover (normally
     /// @State-local to the badge; the sim bridge needs to open it).
     var devShowStatusDetails = false
+    /// Dev-action seam: section the next Brush Studio open should land on.
+    var devStudioSection: StudioSection?
 
     func devReplayFixture(_ fixture: BrushFixture) {
         Task { @MainActor in
@@ -3161,6 +3210,7 @@ final class AppCoordinator {
             imageSize: streamResolution >= 1024 ? "square_hd" : "square",
             scheduleMu: streamScheduleMu,
             referenceScale: streamReferenceScale,
+            referenceImages: pinnedObjectB64.map { [$0] },
             videoWidth: videoResolution,
             videoHeight: videoResolution,
             videoFrames: videoFrames,
