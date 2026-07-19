@@ -8,7 +8,6 @@ struct DrawingTopBar: View {
     @State private var showSettings = false
     @State private var showColorPicker = false
     @State private var shareItem: ShareItem?
-    @State private var showReplay = false
 
     var body: some View {
         @Bindable var coordinator = coordinator
@@ -57,10 +56,10 @@ struct DrawingTopBar: View {
                 if coordinator.canShareVideo {
                     Section("Share video") {
                         Button("Speed paint replay") {
-                            Task { @MainActor in
-                                await coordinator.flushRecording(consolidate: true)
-                                showReplay = true
-                            }
+                            // Present immediately — the modal flushes/
+                            // consolidates behind its own spinner, so there
+                            // is no dead delay before anything appears.
+                            coordinator.showReplayModal = true
                         }
                     }
                 }
@@ -110,6 +109,21 @@ struct DrawingTopBar: View {
             // "Clear Lasso" button directly beneath it (clearly associated).
             toolButton(icon: "lasso", tool: .lasso)
                 .anchorPreference(key: LassoButtonAnchorKey.self, value: .bounds) { $0 }
+            // Magic wand (SAM tap-to-select) publishes its frame the same way so
+            // DrawingView can hang the wand panel / "Clear Masks" beneath it.
+            toolButton(icon: "wand.and.stars", tool: .magicWand)
+                .anchorPreference(key: WandButtonAnchorKey.self, value: .bounds) { $0 }
+
+            // AI Edit (inpaint): edits the active selection if one exists,
+            // else the whole drawing. Highlighted while a preview is live.
+            Button {
+                coordinator.showAIEditSheet = true
+            } label: {
+                chromeIcon(
+                    "sparkles",
+                    color: coordinator.aiEditPhase != .idle ? Color.accentColor : KikiTheme.icon
+                )
+            }
 
             Button {
                 coordinator.showLayerPanel.toggle()
@@ -133,7 +147,7 @@ struct DrawingTopBar: View {
         .sheet(item: $shareItem) { item in
             ShareSheet(activityItems: [item.url])
         }
-        .fullScreenCover(isPresented: $showReplay) {
+        .fullScreenCover(isPresented: $coordinator.showReplayModal) {
             SpeedPaintReplayView()
                 .environment(coordinator)
         }
@@ -206,6 +220,14 @@ private struct ShareItem: Identifiable {
 /// Reports the lasso tool button's on-screen bounds up the view tree so
 /// `DrawingView` can anchor the floating "Clear Lasso" button beneath it.
 struct LassoButtonAnchorKey: PreferenceKey {
+    static let defaultValue: Anchor<CGRect>? = nil
+    static func reduce(value: inout Anchor<CGRect>?, nextValue: () -> Anchor<CGRect>?) {
+        value = nextValue() ?? value
+    }
+}
+
+/// Same for the magic wand button (wand panel + "Clear Masks").
+struct WandButtonAnchorKey: PreferenceKey {
     static let defaultValue: Anchor<CGRect>? = nil
     static func reduce(value: inout Anchor<CGRect>?, nextValue: () -> Anchor<CGRect>?) {
         value = nextValue() ?? value

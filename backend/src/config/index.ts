@@ -112,6 +112,10 @@ export interface AppConfig {
    * absorb video-pool idle overhead. Exempt users (test accounts, active
    * subscribers) are never billed. */
   readonly VIDEO_USD_PER_GENERATION: number;
+  /** Flat charge per AI Edit (POST /v1/edit → fal klein 9B edit) into
+   * monthly_usage. fal bills the edit endpoint per output image (~$0.03/MP);
+   * charged slightly higher for margin. Exempt users are never billed. */
+  readonly EDIT_USD_PER_GENERATION: number;
   /** fal.ai API key — server-side only (CLAUDE.md #3: no secrets on client).
    * Used as `Authorization: Key <FAL_KEY>` on the fal realtime WS upgrade.
    * Required when `IMAGE_PROVIDER=fal`; ignored otherwise. */
@@ -292,6 +296,7 @@ const lambdaVideoUrl = process.env['LAMBDA_VIDEO_URL'] ?? '';
     LAMBDA_VIDEO_POOL_MAX: Number(process.env['LAMBDA_VIDEO_POOL_MAX'] ?? 1),
     LAMBDA_VIDEO_POOL_TARGET_STREAMS: Number(process.env['LAMBDA_VIDEO_POOL_TARGET_STREAMS'] ?? 8),
     VIDEO_USD_PER_GENERATION: Number(process.env['VIDEO_USD_PER_GENERATION'] ?? 0.05),
+    EDIT_USD_PER_GENERATION: Number(process.env['EDIT_USD_PER_GENERATION'] ?? 0.04),
     FAL_KEY: falKey,
     FAL_IDLE_CLOSE_MS: Number(process.env['FAL_IDLE_CLOSE_MS'] ?? 0),
     FAL_WARMER_ENABLED: process.env['FAL_WARMER_ENABLED'] !== 'false',

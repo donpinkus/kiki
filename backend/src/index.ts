@@ -42,6 +42,7 @@ import { usageRoute } from './routes/usage.js';
 import { lambdaDevRoute } from './routes/lambdaDev.js';
 import { internalPoolsRoute } from './routes/internalPools.js';
 import { sketchifyRoute } from './routes/sketchify.js';
+import { editRoute } from './routes/edit.js';
 import { start as startLambdaDevPool, stop as stopLambdaDevPool } from './modules/lambda/devPool.js';
 import { start as startLambdaVideoPool, stop as stopLambdaVideoPool } from './modules/lambda/videoPool.js';
 import { startVideoFlag, stopVideoFlag } from './modules/video/videoFlag.js';
@@ -94,6 +95,7 @@ await app.register(animateRoute);
 await app.register(lambdaDevRoute);
 await app.register(internalPoolsRoute);
 await app.register(sketchifyRoute);
+await app.register(editRoute);
 
 // --- Sentry error handler (must be before custom error handler) ---
 Sentry.setupFastifyErrorHandler(app);

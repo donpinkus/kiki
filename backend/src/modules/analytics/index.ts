@@ -70,6 +70,23 @@ export function trackVideoGeneration(props: {
   });
 }
 
+/** One AI Edit (inpaint) generation via POST /v1/edit. `scope` is 'region'
+ * (lasso/wand selection, masked client-side) or 'full' (whole drawing). */
+export function trackImageEdit(props: {
+  userId: string;
+  scope: string;
+  steps: number;
+  elapsedMs: number;
+  bytes: number;
+}): void {
+  capture(props.userId, 'canvas.ai_edit', {
+    scope: props.scope,
+    steps: props.steps,
+    elapsed_ms: props.elapsedMs,
+    bytes: props.bytes,
+  });
+}
+
 export function trackProviderSession(props: {
   userId: string;
   streamId: string | null;

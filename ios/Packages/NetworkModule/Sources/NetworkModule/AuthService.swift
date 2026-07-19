@@ -280,6 +280,67 @@ public actor AuthService {
         return sketch
     }
 
+    /// Errors specific to POST /v1/edit (AI Edit / inpaint).
+    public enum EditError: Error, Sendable {
+        /// Free-tier fal cap hit (402).
+        case freeLimitReached
+        case failed(String)
+    }
+
+    /// Result of an AI Edit generation.
+    public struct EditResult: Sendable {
+        public let image: Data
+        public let seed: Int?
+    }
+
+    /// One-shot AI Edit of the drawing (POST /v1/edit → fal klein 9B edit).
+    /// `image` is the flattened composite (JPEG); `scope` is "region"|"full"
+    /// (analytics only — masking is client-side). Returns the edited PNG.
+    public func editImage(
+        image: Data,
+        prompt: String,
+        scope: String,
+        steps: Int,
+        seed: Int?,
+        width: Int,
+        height: Int
+    ) async throws -> EditResult {
+        let token = try await currentAccessToken()
+        let url = backendURL.appendingPathComponent("/v1/edit")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        // Generous: fal's pool can cold-start; the backend's own fal timeout is 120 s.
+        request.timeoutInterval = 180
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        struct Body: Encodable {
+            let imageBase64: String
+            let prompt: String
+            let scope: String
+            let steps: Int
+            let seed: Int?
+            let width: Int
+            let height: Int
+        }
+        request.httpBody = try JSONEncoder().encode(Body(
+            imageBase64: image.base64EncodedString(),
+            prompt: prompt, scope: scope, steps: steps, seed: seed,
+            width: width, height: height
+        ))
+        let (data, rawResponse) = try await urlSession.data(for: request)
+        guard let http = rawResponse as? HTTPURLResponse else { throw AuthError.invalidResponse }
+        if http.statusCode == 402 { throw EditError.freeLimitReached }
+        guard (200..<300).contains(http.statusCode) else {
+            struct Err: Decodable { let message: String? }
+            let body = try? JSONDecoder().decode(Err.self, from: data)
+            throw EditError.failed(body?.message ?? "HTTP \(http.statusCode)")
+        }
+        struct Resp: Decodable { let imageBase64: String; let seed: Int? }
+        let resp = try JSONDecoder().decode(Resp.self, from: data)
+        guard let bytes = Data(base64Encoded: resp.imageBase64) else { throw AuthError.invalidResponse }
+        return EditResult(image: bytes, seed: resp.seed)
+    }
+
     /// Fetch the signed-in user's current free-tier usage (for the in-app
     /// meter). Authenticated; auto-refreshes the access token.
     public func fetchUsage() async throws -> UsageResponse {

@@ -39,6 +39,15 @@ public final class CanvasViewModel {
     public private(set) var isInteracting = false
     public private(set) var hasLassoSelection = false
 
+    /// Magic wand session (SAM tap-to-select). Its published clip path rides the
+    /// same `setClipPath` machinery as the lasso; `wand.hasSelection` gates the
+    /// "Clear Masks" contextual UI.
+    public let wand = MagicWandController()
+    public var hasWandSelection: Bool { wand.hasSelection }
+    /// Monotonic content version — bumps on every committed canvas change. The
+    /// wand re-encodes its SAM embedding when this moves between objects.
+    public private(set) var contentVersion = 0
+
     // MARK: - Layer State
 
     public private(set) var layers: [LayerInfo] = [LayerInfo(name: "Layer 1")]
@@ -96,6 +105,7 @@ public final class CanvasViewModel {
         let (stream, continuation) = AsyncStream.makeStream(of: SketchSnapshot.self)
         canvasChanges = stream
         changesContinuation = continuation
+        wand.segmenterFactory = { try SAM2Segmenter.bundled() }
     }
 
     deinit {
@@ -124,6 +134,18 @@ public final class CanvasViewModel {
 
         applySelectedToolToAttachedViews()
 
+        // Magic wand wiring. The tap source and selection sink both live on the
+        // canvas view; the AppCoordinator supplies the image + segmenter factory.
+        canvasView.onWandTap = { [weak self] point in
+            self?.handleWandTap(at: point)
+        }
+        wand.contentVersionProvider = { [weak self] in self?.contentVersion ?? 0 }
+        wand.onSelectionChanged = { [weak self] path, markers in
+            guard let self, let canvasView = self.canvasView else { return }
+            canvasView.setClipPath(path)
+            canvasView.setWandMarkers(markers)
+        }
+
         // Re-apply overlay drawing-mode state (the container may be freshly created).
         if overlayActive {
             container.setOverlayActive(true)
@@ -143,6 +165,11 @@ public final class CanvasViewModel {
 
     public func selectLasso() {
         selectedTool = .lasso
+        applySelectedToolToAttachedViews()
+    }
+
+    public func selectMagicWand() {
+        selectedTool = .magicWand
         applySelectedToolToAttachedViews()
     }
 
@@ -264,6 +291,52 @@ public final class CanvasViewModel {
         hasLassoSelection = false
     }
 
+    // MARK: - Magic Wand
+
+    private func handleWandTap(at point: CGPoint) {
+        guard let canvasView else { return }
+        wand.handleTap(at: point, viewSize: canvasView.bounds.size)
+    }
+
+    /// Clear the whole wand selection (masks, markers, clip path).
+    public func clearWand() {
+        wand.clearAll()
+    }
+
+    /// Wand-session snapshot of what the user sees on the canvas square:
+    /// all layers over the lineart background, on white, capped at SAM's input
+    /// resolution. Overlay mode substitutes the generated image at the
+    /// AppCoordinator level (see its `wandSourceImage`).
+    public func wandCanvasSnapshot() -> CGImage? {
+        guard let canvasView else { return nil }
+        return canvasView.opaqueImageSnapshot(
+            backgroundImage: container?.backgroundImage,
+            maxPixelDimension: 1024
+        )?.cgImage
+    }
+
+    #if DEBUG && targetEnvironment(simulator)
+    /// Sim-only: inject a wand tap at a normalized canvas position (host tooling
+    /// drives the wand deterministically; simctl taps can't hit exact canvas UVs).
+    public func devSimulateWandTap(u: CGFloat, v: CGFloat, positive: Bool) {
+        guard let canvasView else { return }
+        let size = canvasView.bounds.size
+        let previousMode = wand.mode
+        wand.mode = positive ? .add : .subtract
+        wand.handleTap(at: CGPoint(x: u * size.width, y: v * size.height), viewSize: size)
+        wand.mode = previousMode
+    }
+
+    /// Sim-only: inject a synthetic circular wand mask (see
+    /// `MagicWandController.devInjectCircleMask` for why SAM can't run in the sim).
+    public func devSimulateWandMask(u: CGFloat, v: CGFloat, radiusFraction: CGFloat) {
+        guard let canvasView else { return }
+        wand.devInjectCircleMask(
+            centerU: u, centerV: v, radiusFraction: radiusFraction,
+            viewSize: canvasView.bounds.size)
+    }
+    #endif
+
     // MARK: - Layer Management
 
     public func addLayer() {
@@ -321,6 +394,49 @@ public final class CanvasViewModel {
         let ok = canvasView.importImageAsNewLayer(image, name: name)
         if ok { updateState() }
         return ok
+    }
+
+    // MARK: - AI Edit
+
+    /// Whether the user has an active region selection (lasso or wand) that an
+    /// AI Edit should scope to.
+    public var hasSelectionForEdit: Bool { hasLassoSelection || hasWandSelection }
+
+    /// Document-space grayscale selection mask (white = selected), aligned
+    /// pixel-for-pixel with `editSourceSnapshot()` at the same side. A Phase-A
+    /// floating lasso is first committed to clip mode so its path is
+    /// rasterizable. Returns nil when there is no selection.
+    public func selectionMaskForEdit(side: Int) -> CGImage? {
+        guard let canvasView else { return nil }
+        if !canvasView.hasClipSelection, hasLassoSelection {
+            transitionToClipMode()
+        }
+        return canvasView.selectionMaskImage(side: side)
+    }
+
+    /// Flattened "what you see" composite for the AI Edit source image: all
+    /// visible layers over the background image, on white, capped at `side`.
+    public func editSourceSnapshot(side: Int) -> CGImage? {
+        guard let canvasView else { return nil }
+        return canvasView.opaqueImageSnapshot(
+            backgroundImage: container?.backgroundImage,
+            maxPixelDimension: side
+        )?.cgImage
+    }
+
+    /// Commit an accepted AI Edit result as a new top layer, keeping existing
+    /// layers visible (region results carry transparency outside the mask).
+    /// Returns false when the layer limit is reached.
+    public func addEditResultLayer(_ image: UIImage, name: String) -> Bool {
+        guard let canvasView else { return false }
+        let ok = canvasView.addImageAsNewLayer(image, name: name)
+        if ok { updateState() }
+        return ok
+    }
+
+    /// Show/hide the visual-only AI Edit preview locked over the canvas.
+    public func setEditPreview(_ image: UIImage?) {
+        container?.setEditPreview(image)
     }
 
     public func resetViewTransform() {
@@ -399,6 +515,7 @@ public final class CanvasViewModel {
     // MARK: - Internal
 
     func handleDrawingChanged() {
+        contentVersion &+= 1
         onContentChanged?()
         updateState()
         changesContinuation.yield(SketchSnapshot(
@@ -476,6 +593,9 @@ public final class CanvasViewModel {
             )
         case .lasso:
             canvasView?.currentTool = .lasso
+            container?.updateCursorSize(diameter: 0)
+        case .magicWand:
+            canvasView?.currentTool = .magicWand
             container?.updateCursorSize(diameter: 0)
         }
     }

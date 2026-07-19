@@ -1,4 +1,6 @@
 import AVFoundation
+import CoreImage
+import CoreImage.CIFilterBuiltins
 import SwiftUI
 import SwiftData
 import os
@@ -14,18 +16,21 @@ enum DrawingTool: String, CaseIterable, Hashable {
     case brush
     case eraser
     case lasso
+    case magicWand
 }
 
 enum AppScreen: Equatable {
     case signIn
     case gallery
     case drawing
+    case animate
 
     var analyticsName: String {
         switch self {
         case .signIn: return "SignIn"
         case .gallery: return "Gallery"
         case .drawing: return "Drawing"
+        case .animate: return "Animate"
         }
     }
 }
@@ -68,6 +73,19 @@ final class AppCoordinator {
                 }
                 // Switching back to lasso or between pen/eraser: clip mask persists.
                 // User must explicitly clear it via "Clear Lasso" button.
+            }
+            // Lasso and wand are mutually exclusive clip sources — activating
+            // one clears the other's selection (a single clip path exists).
+            if currentTool == .magicWand, canvasViewModel.hasLassoSelection {
+                canvasViewModel.clearLasso()
+            }
+            if currentTool == .lasso, canvasViewModel.hasWandSelection {
+                canvasViewModel.clearWand()
+            }
+            // Leaving the wand freezes the in-progress object; its mask stays
+            // active as the clip (brush/eraser draw only inside), like lasso.
+            if oldValue == .magicWand, currentTool != .magicWand {
+                canvasViewModel.wand.toolDeactivated()
             }
             // Stash the outgoing tool's size/opacity and load the incoming tool's.
             swapToolValues(from: oldValue, to: currentTool)
@@ -486,32 +504,38 @@ final class AppCoordinator {
     private var storedToolSizes: [DrawingTool: CGFloat] = [
         .brush: 15,
         .eraser: 25,
-        .lasso: 5
+        .lasso: 5,
+        .magicWand: 5
     ]
     private var storedToolOpacities: [DrawingTool: CGFloat] = [
         .brush: 1.0,
         .eraser: 1.0,
-        .lasso: 1.0
+        .lasso: 1.0,
+        .magicWand: 1.0
     ]
     private var storedToolFlows: [DrawingTool: CGFloat] = [
         .brush: 1.0,
         .eraser: 1.0,
-        .lasso: 1.0
+        .lasso: 1.0,
+        .magicWand: 1.0
     ]
     private var storedToolStreamlines: [DrawingTool: CGFloat] = [
         .brush: 0.35,
         .eraser: 0.0,
-        .lasso: 0.0
+        .lasso: 0.0,
+        .magicWand: 0.0
     ]
     private var storedToolHardnesses: [DrawingTool: CGFloat] = [
         .brush: 0.5,
         .eraser: 1.0,
-        .lasso: 1.0
+        .lasso: 1.0,
+        .magicWand: 1.0
     ]
     private var storedToolSpacings: [DrawingTool: CGFloat] = [
         .brush: 0.3,
         .eraser: 0.3,
-        .lasso: 0.3
+        .lasso: 0.3,
+        .magicWand: 0.3
     ]
     /// Per-tool brush shape. Absent = procedural round; only the brush meaningfully uses it.
     private var storedToolShapes: [DrawingTool: String] = [:]
@@ -576,24 +600,33 @@ final class AppCoordinator {
         }
     }
     var showLayerPanel = false
+
+    /// Speed-paint replay modal (fullScreenCover in DrawingTopBar). Lives on
+    /// the coordinator (not top-bar @State) so the dev-automation bridge can
+    /// present it in the simulator.
+    var showReplayModal = false
+    /// TEMP DEBUG (black-preview bisect): present the replay modal from the
+    /// gallery (RootView cover) with no canvas ever created.
+    var devShowReplayFromGallery = false
     var resultState: ResultState = .empty
-    /// True while a video generation is in flight (from the manual Animate
-    /// button OR the backend's 3s-idle auto-trigger). Drives the toolbar
-    /// button's disabled "Animating" state. Set optimistically on tap and
-    /// authoritatively by `video_started`; cleared on complete/cancelled and
-    /// on stream teardown.
-    var isAnimating = false
 
     /// Availability of the video H100 system, pushed by the backend
-    /// ({type:'video_availability'}): .off = feature flag disabled (hide ALL
-    /// animation UX), .warming = enabled but the video instance is booting,
-    /// .ready = a video H100 is serving. Also feeds the dual status badge.
+    /// (`system_availability` on the stream AND animate sockets): .off =
+    /// feature flag disabled (hide ALL animation UX), .warming = enabled but
+    /// the video instance is booting, .ready = a video H100 is serving.
+    /// Persisted across launches so the gallery's Animate entry isn't blind
+    /// before the first socket opens.
     enum VideoAvailability: String {
         case off
         case warming
         case ready
     }
-    var videoAvailability: VideoAvailability = .off
+    var videoAvailability: VideoAvailability =
+        VideoAvailability(rawValue: UserDefaults.standard.string(forKey: "lastVideoAvailability") ?? "") ?? .off {
+        didSet {
+            UserDefaults.standard.set(videoAvailability.rawValue, forKey: "lastVideoAvailability")
+        }
+    }
 
     /// IMAGE system availability from the same push. Unlike the detailed
     /// lambdaPoolState (test-account-gated REST poll), this reaches EVERY
@@ -605,19 +638,22 @@ final class AppCoordinator {
     var imageSystemStatus: StreamWebSocketClient.SystemStatus?
     var videoSystemStatus: StreamWebSocketClient.SystemStatus?
 
-    /// Animate modal (prompt editor) visibility.
-    var showAnimateModal = false
+    /// The Animate screen's controller. Created lazily on first entry and
+    /// kept for the app's lifetime so prompt/keyframes/history selection
+    /// survive leaving and re-entering the screen.
+    var animate: AnimateController?
+    /// Where the Animate screen's Back button returns to.
+    private var animateReturnScreen: AppScreen = .gallery
 
     /// The drawing's animation prompt (motion description for the video
-    /// model). Persisted per drawing; empty = server default. Sent on every
-    /// config push so auto (3s-idle) animations use it too.
+    /// model). Persisted per drawing; prefills the Animate screen when
+    /// entering from this drawing.
     var animationPromptText = "" {
         didSet {
             noteInteraction()
             if !isSuppressingObservation {
                 scheduleSave()
             }
-            syncStreamConfig()
         }
     }
 
@@ -863,10 +899,6 @@ final class AppCoordinator {
         isStreamIdlePaused = true
     }
 
-    /// Currently-playing video MP4 temp path. Tracked so we can delete it
-    /// when the user resumes drawing (state leaves video) and avoid
-    /// littering NSTemporaryDirectory across many idle/draw cycles.
-    private var currentVideoMP4URL: URL?
     private(set) var streamFrameCount = 0
     /// Strokes completed during the CURRENT canvas session (reset on every
     /// drawing open). Shipped as `strokes_added` on `drawing.closed` — powers
@@ -1046,6 +1078,201 @@ final class AppCoordinator {
         }
     }
 
+    // MARK: - AI Edit (inpaint via POST /v1/edit)
+
+    enum AIEditPhase: Equatable {
+        case idle
+        /// Request in flight (~3-5 s on a warm fal pool).
+        case generating
+        /// Result composited and showing as a visual-only preview over the
+        /// canvas; waiting for Accept / Retry / Discard.
+        case preview
+    }
+
+    /// Presents the AI Edit prompt sheet.
+    var showAIEditSheet = false
+    private(set) var aiEditPhase: AIEditPhase = .idle
+    var aiEditPrompt = ""
+    /// Raw model params (surfaced in the sheet's Advanced disclosure).
+    var aiEditSteps = 8
+    /// Blank = random seed each generation.
+    var aiEditSeedText = ""
+    /// True when the current/last edit was scoped to a selection.
+    private(set) var aiEditIsRegion = false
+
+    /// Captured at Generate time so Retry re-rolls against the exact same
+    /// source + mask even if the selection changes meanwhile.
+    private var aiEditSourceCG: CGImage?
+    private var aiEditMaskCG: CGImage?
+    /// What Accept commits: full result (full scope) or masked region with
+    /// transparency outside the selection (region scope).
+    private var aiEditCommitImage: UIImage?
+    private var aiEditTask: Task<Void, Never>?
+
+    /// Source/mask resolution sent to the model (klein edit caps ~1 MP).
+    private static let aiEditSide = 1024
+    /// Slight mask feather (px at aiEditSide) so the committed region doesn't
+    /// leave a razor seam against untouched strokes.
+    private static let aiEditMaskFeather = 1.5
+    private static let aiEditCIContext = CIContext(
+        options: [.workingColorSpace: CGColorSpace(name: CGColorSpace.sRGB)!]
+    )
+
+    /// Kick off an AI Edit from the sheet. Scope is implicit: an active lasso
+    /// or wand selection → region edit (masked client-side); none → whole
+    /// drawing. Captures the flattened composite + mask, then generates.
+    func startAIEdit() {
+        guard aiEditPhase != .generating else { return }
+        let prompt = aiEditPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty else { return }
+        guard let source = canvasViewModel.editSourceSnapshot(side: Self.aiEditSide) else {
+            showTransientBanner("Draw something first — the canvas is empty.")
+            return
+        }
+        let isRegion = canvasViewModel.hasSelectionForEdit
+        let mask = isRegion ? canvasViewModel.selectionMaskForEdit(side: source.width) : nil
+        aiEditSourceCG = source
+        aiEditMaskCG = mask
+        aiEditIsRegion = mask != nil
+        Analytics.track(.aiEditRequested, properties: [
+            "scope": aiEditIsRegion ? "region" : "full",
+            "steps": aiEditSteps,
+        ])
+        runAIEdit()
+    }
+
+    /// Re-roll the last edit (same source + mask; random seed unless pinned).
+    func retryAIEdit() {
+        guard aiEditPhase == .preview else { return }
+        runAIEdit()
+    }
+
+    private func runAIEdit() {
+        guard let source = aiEditSourceCG,
+              let jpeg = UIImage(cgImage: source).jpegData(compressionQuality: 0.92) else { return }
+        aiEditPhase = .generating
+        let prompt = aiEditPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let seed = Int(aiEditSeedText.trimmingCharacters(in: .whitespaces))
+        let steps = aiEditSteps
+        let scope = aiEditIsRegion ? "region" : "full"
+        aiEditTask?.cancel()
+        aiEditTask = Task { @MainActor in
+            do {
+                let result = try await authService.editImage(
+                    image: jpeg, prompt: prompt, scope: scope, steps: steps,
+                    seed: seed, width: source.width, height: source.height
+                )
+                guard !Task.isCancelled else { return }
+                guard let resultUI = UIImage(data: result.image), let resultCG = resultUI.cgImage else {
+                    throw AuthService.EditError.failed("unreadable result image")
+                }
+                applyAIEditResult(resultCG)
+            } catch is CancellationError {
+                // discarded mid-flight — state already reset
+            } catch AuthService.EditError.freeLimitReached {
+                aiEditPhase = .idle
+                showTransientBanner("You've used this month's free AI budget. Subscribe for unlimited edits.")
+            } catch {
+                guard !Task.isCancelled else { return }
+                aiEditPhase = .idle
+                showTransientBanner("AI Edit failed — try again in a moment.")
+                Log.info("ai_edit.failed", attributes: [
+                    "event": "ai_edit.failed",
+                    "error": String(describing: error),
+                ])
+            }
+        }
+    }
+
+    /// Composite the returned image and enter preview. Region scope: the
+    /// commit image is the result masked to the selection (feathered alpha,
+    /// transparent outside — outside-selection pixels are guaranteed
+    /// untouched); the preview blends it over the captured source. Full
+    /// scope: result is both. All Core Image; the sRGB output tag + the
+    /// module's CI-based layer load keep the color pipeline correct.
+    private func applyAIEditResult(_ resultCG: CGImage) {
+        guard let source = aiEditSourceCG else { return }
+        let extent = CGRect(x: 0, y: 0, width: source.width, height: source.height)
+        var resultCI = CIImage(cgImage: resultCG)
+        // fal may return a slightly different size than requested — normalize
+        // onto the source grid so the mask lines up pixel-for-pixel.
+        if resultCG.width != source.width || resultCG.height != source.height {
+            resultCI = resultCI.transformed(by: CGAffineTransform(
+                scaleX: CGFloat(source.width) / CGFloat(resultCG.width),
+                y: CGFloat(source.height) / CGFloat(resultCG.height)
+            ))
+        }
+
+        let commitCI: CIImage
+        let previewCI: CIImage
+        if let mask = aiEditMaskCG {
+            let maskCI = CIImage(cgImage: mask)
+                .applyingGaussianBlur(sigma: Self.aiEditMaskFeather)
+                .cropped(to: extent)
+            let sourceCI = CIImage(cgImage: source)
+
+            let commitBlend = CIFilter.blendWithMask()
+            commitBlend.inputImage = resultCI
+            commitBlend.backgroundImage = CIImage(color: .clear).cropped(to: extent)
+            commitBlend.maskImage = maskCI
+            guard let commit = commitBlend.outputImage else { return }
+            commitCI = commit
+
+            let previewBlend = CIFilter.blendWithMask()
+            previewBlend.inputImage = resultCI
+            previewBlend.backgroundImage = sourceCI
+            previewBlend.maskImage = maskCI
+            guard let preview = previewBlend.outputImage else { return }
+            previewCI = preview
+        } else {
+            commitCI = resultCI
+            previewCI = resultCI
+        }
+
+        let srgb = CGColorSpace(name: CGColorSpace.sRGB)!
+        guard let commitCG = Self.aiEditCIContext.createCGImage(commitCI, from: extent, format: .RGBA8, colorSpace: srgb),
+              let previewCG = Self.aiEditCIContext.createCGImage(previewCI, from: extent, format: .RGBA8, colorSpace: srgb)
+        else {
+            aiEditPhase = .idle
+            showTransientBanner("AI Edit failed — try again in a moment.")
+            return
+        }
+        aiEditCommitImage = UIImage(cgImage: commitCG)
+        canvasViewModel.setEditPreview(UIImage(cgImage: previewCG))
+        aiEditPhase = .preview
+    }
+
+    /// Accept → the edit lands as a NEW top layer (existing layers stay
+    /// visible; region commits carry transparency outside the mask). One undo
+    /// restores the previous stack.
+    func acceptAIEdit() {
+        guard aiEditPhase == .preview, let image = aiEditCommitImage else { return }
+        if !canvasViewModel.addEditResultLayer(image, name: "AI Edit") {
+            showTransientBanner("Layer limit reached — delete a layer first.")
+            return
+        }
+        Analytics.track(.aiEditAccepted, properties: ["scope": aiEditIsRegion ? "region" : "full"])
+        clearAIEditState()
+    }
+
+    /// Discard the preview (or cancel an in-flight generation).
+    func discardAIEdit() {
+        if aiEditPhase == .preview {
+            Analytics.track(.aiEditDiscarded, properties: ["scope": aiEditIsRegion ? "region" : "full"])
+        }
+        clearAIEditState()
+    }
+
+    private func clearAIEditState() {
+        aiEditTask?.cancel()
+        aiEditTask = nil
+        aiEditSourceCG = nil
+        aiEditMaskCG = nil
+        aiEditCommitImage = nil
+        canvasViewModel.setEditPreview(nil)
+        aiEditPhase = .idle
+    }
+
     /// LTX-2.3 video override — square resolution (px). Session-only by design:
     /// not @AppStorage, so each app launch resets to the perf baseline (512).
     /// Step 3.5 benchmark needs deterministic baselines per launch.
@@ -1124,6 +1351,9 @@ final class AppCoordinator {
         // listener. Both are no-ops outside DEBUG simulator builds.
         DevAutomation.injectAuthIfRequested()
         DevAutomation.startReplayListener()
+        #if DEBUG
+        WandSelfTest.runIfRequested()
+        #endif
         DevAutomation.onReplayRequested = { [weak self] fixture in
             self?.devReplayFixture(fixture)
         }
@@ -1198,6 +1428,16 @@ final class AppCoordinator {
         // QuickShape NUX tooltip — observed by DrawingView via @Observable.
         canvasViewModel.onFirstBrushStrokeCommitted = { [weak self] in
             self?.shouldShowQuickShapeTooltip = true
+        }
+        // Magic wand: segment what the user is actually looking at — the
+        // generated image in overlay mode (locked 1:1 over the canvas square),
+        // else the flattened canvas itself.
+        canvasViewModel.wand.sourceImageProvider = { [weak self] in
+            guard let self else { return nil }
+            if self.drawingLayout == .overlay, let generated = self.resultState.displayImage?.cgImage {
+                return generated
+            }
+            return self.canvasViewModel.wandCanvasSnapshot()
         }
     }
 
@@ -1330,6 +1570,12 @@ final class AppCoordinator {
     // MARK: - Actions
 
     func undo() {
+        // Wand active: undo steps back through wand prompts (last point, then
+        // reopening the last committed object) before touching canvas history.
+        if currentTool == .magicWand, canvasViewModel.wand.canUndoStep {
+            canvasViewModel.wand.undoStep()
+            return
+        }
         if canvasViewModel.hasLassoSelection {
             canvasViewModel.cancelLassoSelection()
             return
@@ -1405,18 +1651,25 @@ final class AppCoordinator {
     /// preview/export may be reading the segment files.
     func flushRecording(consolidate: Bool = false) async {
         guard let drawingId = currentDrawingId else {
-            streamLog.info("flushRecording: no current drawing")
+            streamLog.info("REPLAY flushRecording: no current drawing")
             return
         }
+        let started = Date()
         if let recorder, let urls = await recorder.checkpoint() {
             Self.appendSegmentReporting(canvasTemp: urls.canvas, generatedTemp: urls.generated, for: drawingId)
         } else {
-            streamLog.info("flushRecording: no new footage since last checkpoint — relying on stored segments")
+            streamLog.info("REPLAY flushRecording: no new footage since last checkpoint — relying on stored segments")
         }
+        let checkpointMs = Int(Date().timeIntervalSince(started) * 1000)
         if consolidate {
+            let consolidateStart = Date()
             let before = RecordingStore.shared.segmentURLs(for: drawingId).canvas.count
             await Self.consolidateReporting(for: drawingId)
+            let consolidateMs = Int(Date().timeIntervalSince(consolidateStart) * 1000)
+            streamLog.info("REPLAY flush: checkpoint=\(checkpointMs)ms consolidate=\(consolidateMs)ms pairs=\(before)→\(RecordingStore.shared.segmentURLs(for: drawingId).canvas.count)")
             await Self.logReplayDiagnostics(for: drawingId, pairsBeforeConsolidation: before)
+        } else {
+            streamLog.info("REPLAY flush: checkpoint=\(checkpointMs)ms (no consolidate)")
         }
     }
 
@@ -1512,17 +1765,19 @@ final class AppCoordinator {
     /// composition for the replay modal's instant preview (no encode pass —
     /// the player renders layout + speed live).
     /// URL of this drawing's generated animation, when one has been saved.
-    /// Backs the Share menu's "Animation (MP4)" item and the replay modal's
-    /// animation-tail toggle.
+    /// Backs the Share menu's "Animation (MP4)" item.
     var generatedAnimationURL: URL? {
         currentDrawingId.flatMap { RecordingStore.shared.generatedVideoURL(for: $0) }
     }
 
-    func buildReplayComposition(layout: ReplayLayout, speed: ReplaySpeed, animationTail: Bool = true) async -> SideBySideVideoComposer.BuiltReplay? {
-        guard let drawingId = currentDrawingId else { return nil }
+    func buildReplayComposition(layout: ReplayLayout, speed: ReplaySpeed) async -> SideBySideVideoComposer.BuiltReplay? {
+        guard let drawingId = currentDrawingId else {
+            streamLog.error("REPLAY buildReplayComposition: no currentDrawingId")
+            return nil
+        }
         let segments = RecordingStore.shared.segmentURLs(for: drawingId)
         guard !segments.canvas.isEmpty else {
-            streamLog.error("Replay compose: no stored segments for drawing \(drawingId.uuidString)")
+            streamLog.error("REPLAY compose: no stored segments for drawing \(drawingId.uuidString)")
             Log.error("replay.no_segments", attributes: [
                 "event": "replay.no_segments",
                 "drawing_id": drawingId.uuidString,
@@ -1531,14 +1786,14 @@ final class AppCoordinator {
             return nil
         }
         do {
+            let started = Date()
             let built = try await SideBySideVideoComposer.build(
                 canvasSegments: segments.canvas,
                 generatedSegments: segments.generated,
-                generatedVideoURL: RecordingStore.shared.generatedVideoURL(for: drawingId),
                 layout: layout,
-                speed: speed,
-                animationTail: animationTail
+                speed: speed
             )
+            streamLog.info("REPLAY build finished in \(Int(Date().timeIntervalSince(started) * 1000))ms")
             Log.info("replay.built", attributes: [
                 "event": "replay.built",
                 "segments": segments.canvas.count,
@@ -1562,8 +1817,8 @@ final class AppCoordinator {
     /// burned). Writes a fresh file in its own temp dir (so a preview player
     /// never reads a file being overwritten), named "Speed Paint.mp4" for a
     /// clean Save-to-Files name.
-    func composeReplay(layout: ReplayLayout, speed: ReplaySpeed, watermark: Bool, animationTail: Bool = true) async -> URL? {
-        guard let built = await buildReplayComposition(layout: layout, speed: speed, animationTail: animationTail) else { return nil }
+    func composeReplay(layout: ReplayLayout, speed: ReplaySpeed, watermark: Bool) async -> URL? {
+        guard let built = await buildReplayComposition(layout: layout, speed: speed) else { return nil }
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let output = dir.appendingPathComponent("Speed Paint.mp4")
         do {
@@ -1680,15 +1935,86 @@ final class AppCoordinator {
             if currentScreen == .gallery { openMostRecentDrawing() }
         case "statusDetails":
             devShowStatusDetails = true
-        case "animateModal":
-            showAnimateModal = true
+        case "animateModal", "animateScreen":
+            // Legacy dev-action name kept: opens the Animate screen now.
+            if currentScreen == .drawing {
+                openAnimateFromDrawing()
+            } else {
+                openAnimateFromGallery()
+            }
+        case "animateGenerate":
+            animate?.generate()
+        case "animateExtend":
+            if let controller = animate, let latest = controller.fetchClips().first {
+                controller.extendFromLastFrame(of: latest)
+            }
+        case "animateExamples":
+            animate?.showMotionExamples.toggle()
         #if DEBUG && targetEnvironment(simulator)
+        case "replayModal":
+            if currentScreen == .drawing {
+                Task { @MainActor in
+                    // TEMP DEBUG (black-preview bisect): host flag tears the
+                    // stream down first, eliminating capture/decode/idle-video
+                    // activity behind the modal.
+                    if FileManager.default.fileExists(atPath: "/tmp/kiki-debug-stopstream") {
+                        stopStream()
+                        try? await Task.sleep(for: .seconds(1))
+                    }
+                    showReplayModal = true
+                }
+            }
+        case "replayFromGallery":
+            if currentScreen == .gallery {
+                let descriptor = FetchDescriptor<Drawing>(sortBy: [SortDescriptor(\.updatedAt, order: .reverse)])
+                if let drawing = (try? modelContext.fetch(descriptor))?.first(where: { RecordingStore.shared.hasRecording($0.id) }) {
+                    currentDrawingId = drawing.id
+                    devShowReplayFromGallery = true
+                }
+            }
         case "lasso":
             canvasViewModel.devSimulateLasso()
+        case "wandTool":
+            currentTool = .magicWand
+        case "wandNewObject":
+            canvasViewModel.wand.startNewObject()
+        case "wandClear":
+            canvasViewModel.clearWand()
+        case "brushTool":
+            currentTool = .brush
+        // "wandTap:<u>,<v>[,neg]" — inject a wand prompt at normalized canvas
+        // coords (simctl taps can't hit exact canvas UVs deterministically).
+        case let cmd where cmd.hasPrefix("wandTap:"):
+            let parts = cmd.dropFirst("wandTap:".count).split(separator: ",")
+            if parts.count >= 2, let u = Double(parts[0]), let v = Double(parts[1]) {
+                let positive = parts.count < 3 || parts[2] != "neg"
+                currentTool = .magicWand
+                canvasViewModel.devSimulateWandTap(u: u, v: v, positive: positive)
+            }
+        // "wandFake:<u>,<v>,<r>" — synthetic circular mask (the sim's Core ML
+        // can't run SAM's decoder; this exercises mask→path→clip end-to-end).
+        case let cmd where cmd.hasPrefix("wandFake:"):
+            let parts = cmd.dropFirst("wandFake:".count).split(separator: ",")
+            if parts.count >= 3, let u = Double(parts[0]), let v = Double(parts[1]),
+               let r = Double(parts[2]) {
+                currentTool = .magicWand
+                canvasViewModel.devSimulateWandMask(u: u, v: v, radiusFraction: r)
+            }
         #endif
+        // "aiEdit:<prompt>" — kick off an AI Edit with the given prompt
+        // (region-scoped if a selection is active, else whole drawing).
+        case let cmd where cmd.hasPrefix("aiEdit:"):
+            aiEditPrompt = String(cmd.dropFirst("aiEdit:".count))
+            startAIEdit()
+        case "aiEditAccept":
+            acceptAIEdit()
+        case "aiEditRetry":
+            retryAIEdit()
+        case "aiEditDiscard":
+            discardAIEdit()
         case "dismiss":
             devShowStatusDetails = false
-            showAnimateModal = false
+            if currentScreen == .animate { closeAnimate() }
         default:
             streamLog.warning("[dev] unknown UI action: \(action)")
         }
@@ -1775,6 +2101,8 @@ final class AppCoordinator {
     }
 
     func navigateToGallery() {
+        // Leaving the drawing abandons any un-accepted AI Edit preview.
+        discardAIEdit()
         saveCurrentDrawing()
         saveDebounceTask?.cancel()
 
@@ -1836,6 +2164,86 @@ final class AppCoordinator {
         Analytics.track(.galleryOpened, properties: ["drawing_count": drawingCount])
 
         currentScreen = .gallery
+    }
+
+    // MARK: - Animate screen
+
+    /// Lazily create the Animate screen's controller (kept for the app's
+    /// lifetime so its setup survives leaving/re-entering the screen).
+    private func ensureAnimateController() -> AnimateController {
+        if let animate { return animate }
+        let controller = AnimateController(
+            backendURL: backendURL,
+            modelContext: modelContext,
+            tokenProvider: { [authService] in try await authService.currentAccessToken() },
+            onAvailability: { [weak self] video in
+                self?.applyVideoAvailability(video)
+            }
+        )
+        animate = controller
+        return controller
+    }
+
+    /// Enter the Animate screen from the current drawing: its result (or
+    /// canvas, when nothing was generated yet) becomes the start keyframe
+    /// and the drawing's saved animation prompt prefills the motion field.
+    func openAnimateFromDrawing() {
+        noteInteraction()
+        guard currentScreen == .drawing else { return }
+        saveCurrentDrawing()
+        let controller = ensureAnimateController()
+        if let keyframe = lastSuccessfulImage ?? canvasViewModel.generateThumbnail() {
+            controller.startKeyframe = keyframe
+            controller.endKeyframe = nil
+            controller.sourceDrawingID = currentDrawingId
+            // Entering with a fresh keyframe: show it, not an old clip.
+            controller.prompt = animationPromptText
+        }
+        animateReturnScreen = .drawing
+        stopStream()
+        currentScreen = .animate
+    }
+
+    /// Enter the Animate screen from the gallery. Keeps whatever setup the
+    /// controller already has (continuity across visits); the user picks
+    /// keyframes from the library or Photos.
+    func openAnimateFromGallery() {
+        _ = ensureAnimateController()
+        animateReturnScreen = .gallery
+        currentScreen = .animate
+    }
+
+    /// Leave the Animate screen, returning to where the user came from.
+    /// When re-entering the drawing, persist the motion prompt back onto it
+    /// and restart the stream.
+    func closeAnimate() {
+        if animateReturnScreen == .drawing, let drawingId = currentDrawingId {
+            if let controller = animate, controller.sourceDrawingID == currentDrawingId {
+                animationPromptText = controller.prompt
+            }
+            // The drawing screen's Metal canvas was torn down when we left —
+            // re-queue the persisted canvas state (saved on the way in by
+            // openAnimateFromDrawing) so the recreated canvas restores the
+            // strokes instead of coming up blank. Same pending-state pattern
+            // as openDrawing().
+            let id = drawingId
+            var descriptor = FetchDescriptor<Drawing>(predicate: #Predicate { $0.id == id })
+            descriptor.fetchLimit = 1
+            if let drawing = try? modelContext.fetch(descriptor).first {
+                canvasViewModel.setPendingState(CanvasState(
+                    drawingData: drawing.drawingData ?? Data(),
+                    backgroundImageData: drawing.backgroundImageData
+                ))
+            }
+            currentScreen = .drawing
+            startStream()
+            seedResultStateForCurrentDrawing()
+        } else {
+            currentScreen = .gallery
+            let descriptor = FetchDescriptor<Drawing>()
+            let drawingCount = (try? modelContext.fetchCount(descriptor)) ?? 0
+            Analytics.track(.galleryOpened, properties: ["drawing_count": drawingCount])
+        }
     }
 
     func deleteDrawing(_ drawing: Drawing) {
@@ -2044,8 +2452,7 @@ final class AppCoordinator {
     }
 
     /// Records the current drawing's two timelapse tracks (canvas + generated).
-    /// Created per stream session, finalized in `stopStream`. Separate from the
-    /// ephemeral backend idle-animation MP4 (`currentVideoMP4URL`).
+    /// Created per stream session, finalized in `stopStream`.
     private var recorder: DrawingVideoRecorder?
 
     /// Canvas frames captured since this session's recorder started — gates
@@ -2115,13 +2522,6 @@ final class AppCoordinator {
             // via fal's img2img loop → wipe the visual-only fresh-stroke surface so
             // the strokes "hand off" to the generated image. No-op in other layouts.
             self.canvasViewModel.clearOverlayStrokes()
-            // Resuming img2img clobbers any in-flight video state. Drop the
-            // looping MP4 from disk now — otherwise NSTemporaryDirectory
-            // accumulates one file per draw/idle cycle until stopStream.
-            if let prior = self.currentVideoMP4URL {
-                try? FileManager.default.removeItem(at: prior)
-                self.currentVideoMP4URL = nil
-            }
             self.resultState = .streaming(image: image, frameCount: self.streamFrameCount)
 
             let count = self.streamFrameCount
@@ -2305,16 +2705,9 @@ final class AppCoordinator {
         pendingStartupTransaction?.finish(status: .cancelled)
         pendingStartupTransaction = nil
         streamStartupBeganAt = nil
-        // Clean up the looping MP4 temp file (if any) so we don't leave
-        // junk in NSTemporaryDirectory across many sessions.
-        if let url = currentVideoMP4URL {
-            try? FileManager.default.removeItem(at: url)
-            currentVideoMP4URL = nil
-        }
 
-        // Finalize this session's timelapse recording (distinct from the LTX
-        // idle-animation MP4 above). If the recorder was cancelled (empty
-        // drawing) finish() no-ops and stores nothing.
+        // Finalize this session's timelapse recording. If the recorder was
+        // cancelled (empty drawing) finish() no-ops and stores nothing.
         stopRecordingCheckpoints()
         if let recorder, let drawingId = currentDrawingId {
             finalizeRecording(recorder, drawingId: drawingId)
@@ -2331,27 +2724,12 @@ final class AppCoordinator {
         resultState = lastSuccessfulImage.map { .preview(image: $0) } ?? .empty
     }
 
-    /// Direct map from stream readiness to `resultState`. The single rule:
-    /// Manual Animate button tap: optimistically flip to the disabled
-    /// "Animating" state (confirmed by the backend's `video_started`, reset
-    /// by video_complete/video_cancelled) and ask the backend to fire the
-    /// video now instead of waiting for the 3s idle trigger.
-    func requestAnimate() {
-        guard !isAnimating else { return }
-        isAnimating = true
-        streamLog.info("[result] animate fired (prompt len=\(self.animationPromptText.count))")
-        streamSession?.requestAnimate(
-            prompt: animationPromptText.isEmpty ? nil : animationPromptText
-        )
-    }
-
     /// `.ready` shows the bottom-left badge over a preview/streaming image;
     /// every other readiness state shows the corresponding overlay, with
     /// `lastSuccessfulImage` dimmed underneath when one exists.
     private func applyReadinessToResultState(_ readiness: StreamSession.StreamReadiness) {
         switch readiness {
         case .disconnected:
-            isAnimating = false
             resultState = lastSuccessfulImage.map { .preview(image: $0) } ?? .empty
         case .warming(let message):
             resultState = .provisioning(
@@ -2364,7 +2742,6 @@ final class AppCoordinator {
             resultState = lastSuccessfulImage.map { .preview(image: $0) } ?? .empty
         case .failed(let msg):
             streamLog.error("Stream failed: \(msg)")
-            isAnimating = false
             resultState = .error(message: msg, previousImage: lastSuccessfulImage)
         }
     }
@@ -2376,93 +2753,31 @@ final class AppCoordinator {
         applyReadinessToResultState(streamReadiness)
     }
 
-    /// Map a video pod event into ResultState transitions. Overall flow:
-    ///   .streaming → .videoStreaming(latestFrame) → .videoLooping(mp4) → ...
-    /// New img2img frames automatically clobber the video state via
-    /// onImageReceived's `.streaming` set, so cancellation of an in-flight
-    /// video on resume-drawing happens implicitly. The .cancelled event
-    /// here covers the case where the pod aborted before any image
-    /// arrived (e.g. during model warmup).
+    /// Video-family events on the DRAWING stream. Since the Animate screen
+    /// (2026-07-19) owns generation on its own socket, the only event that
+    /// still matters here is the `system_availability` push (drives the
+    /// status badge + whether Animate entry points are shown). Stray
+    /// video_* messages from an old backend are ignored.
     private func handleVideoEvent(_ event: StreamWebSocketClient.VideoEvent) {
-        let prev = String(describing: resultState).prefix(40)
         switch event {
-        case .started(let requestId):
-            // Generation began backend-side (auto idle-trigger or our own
-            // Animate tap). No visual state change yet — frames arrive when
-            // decoding starts — but the toolbar button flips to "Animating".
-            isAnimating = true
-            streamLog.info("[result] video_started req=\(requestId ?? "-")")
-        case .frame(_, let imageData, let index, let total):
-            guard let frame = UIImage(data: imageData),
-                  let fallback = lastSuccessfulImage else {
-                streamLog.warning("[result] video_frame ignored (no fallback or decode failed)")
-                return
-            }
-            resultState = .videoStreaming(latestFrame: frame, fallback: fallback)
-            // Overlay mode: clear the visual-only fresh-stroke surface on each video
-            // frame too, so the idle-state animation shows cleanly in the locked
-            // overlay position. No-op in other layouts.
-            canvasViewModel.clearOverlayStrokes()
-            streamLog.info("[result] \(prev) → videoStreaming index=\(index ?? -1)/\(total ?? -1)")
-            // Phase transition: → animating. Set on every video frame so a
-            // resume-drawing → frame-arrives transition cleanly flips back
-            // to .drawing in onImageReceived.
-            if Phase.current != .animating {
-                Phase.set(.animating)
-            }
-        case .complete(_, let mp4Data, _, let frames):
-            // Generation finished — re-enable the Animate button regardless
-            // of whether the MP4 below decodes/writes cleanly.
-            isAnimating = false
-            guard let fallback = lastSuccessfulImage else { return }
-            // Clean up any prior MP4 we wrote — only one in flight at a time.
-            if let prior = currentVideoMP4URL {
-                try? FileManager.default.removeItem(at: prior)
-            }
-            let url = FileManager.default.temporaryDirectory
-                .appendingPathComponent("kiki-video-\(UUID().uuidString).mp4")
-            do {
-                try mp4Data.write(to: url, options: .atomic)
-                currentVideoMP4URL = url
-                resultState = .videoLooping(mp4URL: url, fallback: fallback)
-                // Persist the animation per drawing so the speed-paint replay can
-                // append it (the temp copy above is cleared on resume/stop).
-                if let drawingId = currentDrawingId {
-                    try? RecordingStore.shared.saveGeneratedVideo(mp4Data, for: drawingId)
-                }
-                streamLog.info("[result] \(prev) → videoLooping bytes=\(mp4Data.count) frames=\(frames ?? -1)")
-            } catch {
-                streamLog.error("[result] mp4 write failed: \(error.localizedDescription)")
-                SentrySDK.capture(error: error) { scope in
-                    scope.setTag(value: "video.mp4_write", key: "op")
-                }
-            }
         case .availability(let image, let video):
-            let videoValue = VideoAvailability(rawValue: video.availability) ?? .off
-            if videoValue != videoAvailability {
-                videoAvailability = videoValue
-                streamLog.info("[result] video availability → \(video.availability)")
-            }
+            applyVideoAvailability(video)
             imageAvailability = VideoAvailability(rawValue: image.availability) ?? .off
             imageSystemStatus = image
-            videoSystemStatus = video
-        case .cancelled(_, let atStep, let error):
-            // Covers user-resumed-drawing cancels, server-side failures, AND
-            // the backend's synthesized "can't animate" replies to the manual
-            // button — all of which must re-enable the Animate button.
-            isAnimating = false
-            // If we're not currently in a video state, nothing to revert
-            // (img2img already drove us out). Otherwise pop back to
-            // .streaming on the last image.
-            if resultState.isVideo, let img = lastSuccessfulImage {
-                resultState = .streaming(image: img, frameCount: streamFrameCount)
-            }
-            if let prior = currentVideoMP4URL {
-                try? FileManager.default.removeItem(at: prior)
-                currentVideoMP4URL = nil
-            }
-            streamLog.info("[result] video_cancelled atStep=\(atStep ?? -1) err=\(error ?? "")")
+        case .started, .frame, .complete, .cancelled:
+            break
         }
+    }
+
+    /// Shared sink for video-system availability from EITHER socket (drawing
+    /// stream or the Animate screen's own connection).
+    func applyVideoAvailability(_ video: StreamWebSocketClient.SystemStatus) {
+        let videoValue = VideoAvailability(rawValue: video.availability) ?? .off
+        if videoValue != videoAvailability {
+            videoAvailability = videoValue
+            streamLog.info("[result] video availability → \(video.availability)")
+        }
+        videoSystemStatus = video
     }
 
     /// Push the current config to the stream session. The capture loop will
@@ -2577,7 +2892,6 @@ final class AppCoordinator {
             videoHeight: videoResolution,
             videoFrames: videoFrames,
             videoPromptSuffix: videoPromptSuffix,
-            animationPrompt: animationPromptText.isEmpty ? nil : animationPromptText,
             enableProfiling: enableProfiling
         )
     }
@@ -2850,6 +3164,8 @@ final class AppCoordinator {
             canvasViewModel.selectEraser(width: toolSize)
         case .lasso:
             canvasViewModel.selectLasso()
+        case .magicWand:
+            canvasViewModel.selectMagicWand()
         }
     }
 }

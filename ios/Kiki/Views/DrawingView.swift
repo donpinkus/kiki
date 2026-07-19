@@ -213,6 +213,40 @@ struct DrawingView: View {
                         .zIndex(3)
                     }
 
+                    // AI Edit: while a preview is showing, swallow canvas
+                    // touches (the opaque preview covers the canvas, so
+                    // strokes would land invisibly underneath) and float the
+                    // Accept / Retry / Discard bar.
+                    if coordinator.aiEditPhase == .preview {
+                        Color.clear
+                            .contentShape(Rectangle())
+                            .gesture(DragGesture(minimumDistance: 0).onChanged { _ in })
+                            .frame(width: canvasPaneWidth, height: geometry.size.height)
+                            .zIndex(8)
+                        aiEditPreviewBar
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                            .padding(.bottom, 28)
+                            .zIndex(12)
+                            .transition(.opacity.combined(with: .move(edge: .bottom)))
+                    }
+
+                    // AI Edit: in-flight indicator (~3-5 s on a warm pool).
+                    if coordinator.aiEditPhase == .generating {
+                        HStack(spacing: 10) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("AI editing…")
+                                .font(.callout.weight(.medium))
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                        .padding(.top, 12)
+                        .transition(.opacity)
+                        .zIndex(10)
+                    }
+
                     // Transient toast ("Kiki's magic AI is still warming up…").
                     if let banner = coordinator.transientBanner {
                         Text(banner)
@@ -243,13 +277,42 @@ struct DrawingView: View {
         // so it always draws above the canvas regardless of top-bar draw order.
         .overlayPreferenceValue(LassoButtonAnchorKey.self) { lassoAnchor in
             GeometryReader { proxy in
-                if coordinator.canvasViewModel.hasLassoSelection, let lassoAnchor {
+                if coordinator.canvasViewModel.hasLassoSelection, let lassoAnchor,
+                   coordinator.aiEditPhase != .preview {
                     let lassoRect = proxy[lassoAnchor]
                     clearLassoButton
                         .position(x: lassoRect.midX, y: lassoRect.maxY + 8 + clearLassoButtonHeight / 2)
                 }
             }
         }
+        // Magic wand contextual panel, anchored beneath the wand tool button.
+        // While the wand is active: add/subtract mode, New Object, Clear Masks,
+        // and a busy line during the one-time image analysis. When another tool
+        // is active but wand masks still clip drawing: just "Clear Masks",
+        // mirroring the lasso's clear button.
+        .overlayPreferenceValue(WandButtonAnchorKey.self) { wandAnchor in
+            GeometryReader { proxy in
+                if let wandAnchor, coordinator.aiEditPhase != .preview {
+                    let wandRect = proxy[wandAnchor]
+                    let wand = coordinator.canvasViewModel.wand
+                    if coordinator.currentTool == .magicWand || wand.hasSelection {
+                        // Top-anchored (offset, not .position) so the panel can
+                        // grow/shrink rows without re-centering math.
+                        ZStack(alignment: .topLeading) {
+                            Color.clear
+                            wandPanel
+                                .frame(width: wandPanelWidth)
+                                .offset(
+                                    x: min(wandRect.midX - wandPanelWidth / 2,
+                                           proxy.size.width - wandPanelWidth - 8),
+                                    y: wandRect.maxY + 8
+                                )
+                        }
+                    }
+                }
+            }
+        }
+        .animation(.easeInOut(duration: 0.25), value: coordinator.aiEditPhase)
         .animation(.easeInOut(duration: 0.3), value: coordinator.generationError != nil)
         .animation(.easeOut(duration: 0.25), value: coordinator.shouldShowQuickShapeTooltip)
         .ignoresSafeArea(.keyboard)
@@ -261,6 +324,10 @@ struct DrawingView: View {
         }
         .onDisappear { coordinator.stopLambdaStatusPolling() }
         .task { coordinator.refreshUsage() }
+        .sheet(isPresented: $coordinator.showAIEditSheet) {
+            AIEditSheet()
+                .environment(coordinator)
+        }
         .fullScreenCover(isPresented: $coordinator.showStylePicker) {
             StylePickerView()
                 .environment(coordinator)
@@ -268,10 +335,6 @@ struct DrawingView: View {
         // THE brush-editing surface (replaced the gear popover + docked dev panel, 2026-07-17).
         .fullScreenCover(isPresented: $coordinator.showBrushStudio) {
             BrushStudioPage()
-                .environment(coordinator)
-        }
-        .sheet(isPresented: $coordinator.showAnimateModal) {
-            AnimateModalView()
                 .environment(coordinator)
         }
     }
@@ -318,6 +381,164 @@ struct DrawingView: View {
         .tint(.secondary)
         .fixedSize()
         .shadow(color: .black.opacity(0.2), radius: 6, y: 2)
+    }
+
+    // MARK: - Magic Wand Panel
+
+    private var wandPanelWidth: CGFloat { 224 }
+
+    /// Contextual wand UI beneath the wand tool button. While the wand tool is
+    /// active: tap-mode toggle (add/subtract), New Object, Clear Masks, and a
+    /// status line during segmentation. With another tool active it collapses to
+    /// just "Clear Masks" (the wand masks keep clipping drawing until cleared).
+    private var wandPanel: some View {
+        let wand = coordinator.canvasViewModel.wand
+        return VStack(spacing: 8) {
+            if coordinator.currentTool == .magicWand {
+                @Bindable var wandBinding = wand
+                Picker("Point mode", selection: $wandBinding.mode) {
+                    Label("Add", systemImage: "plus.circle.fill")
+                        .tag(MagicWandController.PointMode.add)
+                    Label("Remove", systemImage: "minus.circle.fill")
+                        .tag(MagicWandController.PointMode.subtract)
+                }
+                .pickerStyle(.segmented)
+
+                // Selection size — SAM's 3 candidate masks (subpart/part/whole);
+                // the closest analog to a color-wand's "tolerance". Re-derives
+                // instantly from the cached decode, no model re-run.
+                Picker("Selection size", selection: $wandBinding.granularity) {
+                    Text("Small").tag(MagicWandController.Granularity.small)
+                    Text("Auto").tag(MagicWandController.Granularity.auto)
+                    Text("Large").tag(MagicWandController.Granularity.large)
+                }
+                .pickerStyle(.segmented)
+
+                Toggle(isOn: $wandBinding.contiguous) {
+                    Text("Contiguous")
+                        .font(.caption)
+                }
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+
+                HStack(spacing: 6) {
+                    Text("Expand")
+                        .font(.caption)
+                    Slider(
+                        value: Binding(
+                            get: { Double(wandBinding.expansion) },
+                            set: { wandBinding.expansion = Int($0.rounded()) }
+                        ),
+                        in: -20...20, step: 1
+                    )
+                    Text("\(wand.expansion)")
+                        .font(.caption.monospacedDigit())
+                        .frame(width: 26, alignment: .trailing)
+                }
+
+                if wand.isBusy {
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text(wand.isEncoding ? "Analyzing image…" : "Selecting…")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                } else if wand.currentPointCount == 0 && !wand.hasSelection {
+                    Text("Tap an object to select it")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                if let error = wand.lastError {
+                    Text(error)
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                        .lineLimit(2)
+                }
+
+                if wand.currentPointCount > 0 {
+                    Button {
+                        wand.startNewObject()
+                    } label: {
+                        Label("New Object", systemImage: "plus.square.on.square")
+                            .font(.subheadline.weight(.semibold))
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 36)
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
+
+            if wand.hasSelection || wand.currentPointCount > 0 {
+                clearMasksButton
+            }
+        }
+        .padding(10)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .shadow(color: .black.opacity(0.2), radius: 6, y: 2)
+        .animation(.easeInOut(duration: 0.15), value: wand.isBusy)
+    }
+
+    private var clearMasksButton: some View {
+        Button {
+            coordinator.canvasViewModel.clearWand()
+        } label: {
+            Label("Clear Masks", systemImage: "xmark.circle.fill")
+                .font(.subheadline.weight(.semibold))
+                .frame(maxWidth: .infinity)
+                .frame(height: clearLassoButtonHeight - 8)
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(.secondary)
+        .shadow(color: .black.opacity(0.2), radius: 6, y: 2)
+    }
+
+    // MARK: - AI Edit preview bar
+
+    /// Floating Accept / Retry / Discard controls while an AI Edit preview is
+    /// locked over the canvas. Nothing touches the layer stack until Accept.
+    private var aiEditPreviewBar: some View {
+        HStack(spacing: 10) {
+            Button(role: .destructive) {
+                coordinator.discardAIEdit()
+            } label: {
+                Label("Discard", systemImage: "xmark")
+                    .font(.subheadline.weight(.semibold))
+                    .padding(.horizontal, 4)
+            }
+            .buttonStyle(.bordered)
+
+            Button {
+                coordinator.showAIEditSheet = true
+            } label: {
+                Label("Prompt", systemImage: "pencil")
+                    .font(.subheadline.weight(.semibold))
+                    .padding(.horizontal, 4)
+            }
+            .buttonStyle(.bordered)
+
+            Button {
+                coordinator.retryAIEdit()
+            } label: {
+                Label("Retry", systemImage: "arrow.clockwise")
+                    .font(.subheadline.weight(.semibold))
+                    .padding(.horizontal, 4)
+            }
+            .buttonStyle(.bordered)
+
+            Button {
+                coordinator.acceptAIEdit()
+            } label: {
+                Label("Accept", systemImage: "checkmark")
+                    .font(.subheadline.weight(.semibold))
+                    .padding(.horizontal, 8)
+            }
+            .buttonStyle(.borderedProminent)
+        }
+        .padding(10)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+        .shadow(color: .black.opacity(0.25), radius: 10, y: 3)
     }
 
     // MARK: - Split Screen Result Pane
@@ -370,21 +591,18 @@ struct DrawingView: View {
         }
     }
 
-    /// "Animate" → open the animation-prompt modal (which fires the video).
-    /// Disabled + "Animating…" while a generation is in flight (either the
-    /// manual fire or the 3s-idle auto trigger).
+    /// "Animate" → open the Animate screen with this drawing's result
+    /// pre-loaded as the start keyframe.
     private var animateButton: some View {
         Button {
-            coordinator.showAnimateModal = true
+            coordinator.openAnimateFromDrawing()
         } label: {
-            Text(coordinator.isAnimating ? "Animating…" : "Animate")
+            Label("Animate", systemImage: "sparkles")
                 .font(.caption.weight(.semibold))
                 .padding(.horizontal, 12)
                 .padding(.vertical, 5)
                 .background(.ultraThinMaterial, in: Capsule())
-                .opacity(coordinator.isAnimating ? 0.5 : 1)
         }
-        .disabled(coordinator.isAnimating)
     }
 
     /// "Edit" → sketchify the generated image onto the canvas as a new layer.
@@ -540,92 +758,4 @@ private struct PromptTitleBar: View {
 #Preview {
     DrawingView()
         .environment(AppCoordinator(modelContext: try! ModelContainer(for: Drawing.self).mainContext))
-}
-
-
-/// The Animate modal: edit the drawing's animation prompt and fire a video.
-/// The prompt describes MOTION (the video model already sees the image for
-/// content); persisted per drawing and reused by the automatic 3s-idle
-/// animations. Empty prompt = server default (shown as the placeholder).
-private struct AnimateModalView: View {
-    @Environment(AppCoordinator.self) private var coordinator
-    @Environment(\.dismiss) private var dismiss
-    @FocusState private var promptFocused: Bool
-
-    private static let examples = [
-        "wings beat slowly, clouds drift past",
-        "waves ripple, hair sways in the breeze",
-        "rain falls softly, puddles shimmer",
-    ]
-
-    var body: some View {
-        @Bindable var coordinator = coordinator
-        NavigationStack {
-            Form {
-                Section {
-                    TextField(
-                        AppCoordinator.defaultAnimationPrompt,
-                        text: $coordinator.animationPromptText,
-                        axis: .vertical
-                    )
-                    .lineLimit(3...6)
-                    .focused($promptFocused)
-                } header: {
-                    Text("Animation prompt")
-                } footer: {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Describe the **motion**, not the scene — the video already knows what's in your drawing. Short, physical phrases work best; camera moves like \"slow zoom in\" work too. Leave empty for a gentle default.")
-                        if coordinator.videoAvailability == .warming {
-                            Text("Kiki's video AI is still warming up — your prompt is saved, and Animate unlocks in a couple of minutes.")
-                                .foregroundStyle(KikiAIStatusBadge.warmPink)
-                        }
-                    }
-                }
-
-                Section("Examples — tap to use") {
-                    ForEach(Self.examples, id: \.self) { example in
-                        Button {
-                            coordinator.animationPromptText = example
-                        } label: {
-                            Text(example)
-                                .font(.callout)
-                                .foregroundStyle(.primary)
-                        }
-                    }
-                }
-
-            }
-            .navigationTitle("Animate")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                }
-                // The primary action lives in the toolbar so it's ALWAYS
-                // visible — at the medium detent an in-form CTA sat below
-                // the fold (caught in simulator testing 2026-07-18).
-                ToolbarItem(placement: .confirmationAction) {
-                    Button {
-                        coordinator.requestAnimate()
-                        dismiss()
-                    } label: {
-                        Text(animateCTA)
-                            .font(.headline)
-                    }
-                    .disabled(!canFire)
-                }
-            }
-        }
-        .presentationDetents([.medium, .large])
-    }
-
-    private var canFire: Bool {
-        coordinator.videoAvailability == .ready && !coordinator.isAnimating
-    }
-
-    private var animateCTA: String {
-        if coordinator.isAnimating { return "Animating…" }
-        if coordinator.videoAvailability == .warming { return "Warming up…" }
-        return "Animate"
-    }
 }

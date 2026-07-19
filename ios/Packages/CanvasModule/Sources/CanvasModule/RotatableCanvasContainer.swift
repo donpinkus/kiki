@@ -63,6 +63,12 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
     /// above `generatedImageView`. The Metal canvas composites the overlay-stroke
     /// texture into this layer every tick. Non-interactive. Hidden unless active.
     private let overlayStrokeView = MetalOverlayLayerView()
+    /// AI Edit preview: an opaque composited "what Accept would look like"
+    /// image locked over the canvas (inside `transformView`, so it tracks
+    /// pan/zoom/rotate 1:1). Visual-only — layer textures are untouched until
+    /// the user accepts. Independent of overlay drawing mode (which owns
+    /// `generatedImageView`); this sits above both. Hidden unless previewing.
+    private let editPreviewImageView = UIImageView()
     private let cursorView = CursorOverlayView()
     private let ringView = ColorPickerRingView()
     /// Vertical offset applied so the ring sits above the finger instead of being covered.
@@ -169,6 +175,19 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
         overlayStrokeView.isUserInteractionEnabled = false
         overlayStrokeView.isHidden = true
         transformView.addSubview(overlayStrokeView)
+
+        // AI Edit preview — above the overlay-mode views so the preview wins
+        // regardless of layout. scaleToFill: the preview is a document-square
+        // composite, and the canvas view is the same square, so this is an
+        // exact 1:1 alignment (aspectFill would be equivalent; toFill states
+        // the intent that no cropping is expected).
+        editPreviewImageView.frame = transformView.bounds
+        editPreviewImageView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        editPreviewImageView.contentMode = .scaleToFill
+        editPreviewImageView.clipsToBounds = true
+        editPreviewImageView.isUserInteractionEnabled = false
+        editPreviewImageView.isHidden = true
+        transformView.addSubview(editPreviewImageView)
 
         // Cursor overlay — renders on top of canvas, shows brush/eraser size at touch position
         cursorView.frame = CGRect(x: 0, y: 0, width: 5, height: 5)
@@ -574,6 +593,15 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
     /// Wipe the visual-only overlay-stroke surface (called on each generation frame).
     public func clearOverlayStrokes() {
         canvasView.clearOverlayStrokes()
+    }
+
+    /// Show/hide the AI Edit preview image locked over the canvas. `nil` hides.
+    /// Selection chrome (ants/stripes/markers) is suppressed while previewing —
+    /// it would otherwise draw above the opaque preview.
+    public func setEditPreview(_ image: UIImage?) {
+        editPreviewImageView.image = image
+        editPreviewImageView.isHidden = image == nil
+        canvasView.setSelectionChromeSuppressed(image != nil)
     }
 
     // MARK: - Public API

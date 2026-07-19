@@ -88,6 +88,9 @@ public final class MetalCanvasView: UIView {
     /// Fired when a lasso selection is extracted. No UIImage — the selection lives
     /// as an MTLTexture on the renderer, displayed by the Metal compositor.
     public var onLassoSelectionStarted: ((_ closedPath: CGPath, _ selectionBounds: CGRect) -> Void)?
+    /// Magic wand: fired on a completed tap (view-point coords). The wand
+    /// controller turns taps into SAM prompts; the canvas view stays model-free.
+    public var onWandTap: ((CGPoint) -> Void)?
 
     // MARK: - Private State
 
@@ -184,6 +187,23 @@ public final class MetalCanvasView: UIView {
     /// Two shape layers (white + black offset dashes) for visibility on any background.
     private let lassoPreviewWhite = CAShapeLayer()
     private let lassoPreviewBlack = CAShapeLayer()
+    /// While a clip is active (lasso Phase B or wand masks): a subtle diagonal-
+    /// stripe wash over everything OUTSIDE the selectable region, so "where can
+    /// I draw" is readable at a glance (the ants outline alone was easy to
+    /// miss). Pure CALayer — never intercepts touches, so tapping through it
+    /// to add more wand points just works.
+    private let clipDimLayer = CAShapeLayer()
+
+    // MARK: - Magic Wand
+
+    /// Tap-down position for the active wand touch (tap vs. drag discrimination).
+    private var wandTapStart: CGPoint?
+    /// Wand point markers: green (+) / red (−) dots at prompt points. Separate
+    /// fill layers (positive/negative) + one shared white outline layer, hosted
+    /// alongside the lasso preview layers so overlay mode re-parents them too.
+    private let wandMarkerPositive = CAShapeLayer()
+    private let wandMarkerNegative = CAShapeLayer()
+    private let wandMarkerOutline = CAShapeLayer()
 
     // MARK: - QuickShape (v0: line only)
 
@@ -340,6 +360,13 @@ public final class MetalCanvasView: UIView {
         link.add(to: .main, forMode: .common)
         self.displayLink = link
 
+        // Unselected-region stripes — added first so the ants draw above it.
+        clipDimLayer.fillRule = .evenOdd
+        clipDimLayer.fillColor = Self.makeStripePatternColor()
+        clipDimLayer.strokeColor = nil
+        clipDimLayer.isHidden = true
+        layer.addSublayer(clipDimLayer)
+
         // Lasso preview shape layers — marching ants (white + black offset dashes).
         for (shapeLayer, color, phase) in [
             (lassoPreviewWhite, UIColor.white, NSNumber(value: 0)),
@@ -354,6 +381,26 @@ public final class MetalCanvasView: UIView {
             shapeLayer.lineDashPhase = CGFloat(phase.floatValue)
             shapeLayer.isHidden = true
             layer.addSublayer(shapeLayer)
+
+            // March: animate the dash phase by one full dash period (6+4) so the
+            // loop is seamless. Runs on the render server — zero main-thread cost.
+            let march = CABasicAnimation(keyPath: "lineDashPhase")
+            march.fromValue = CGFloat(phase.floatValue)
+            march.toValue = CGFloat(phase.floatValue) + 10
+            march.duration = 0.45
+            march.repeatCount = .infinity
+            shapeLayer.add(march, forKey: "march")
+        }
+
+        // Magic wand point markers — filled dots above the ants layers.
+        wandMarkerPositive.fillColor = UIColor.systemGreen.cgColor
+        wandMarkerNegative.fillColor = UIColor.systemRed.cgColor
+        wandMarkerOutline.fillColor = nil
+        wandMarkerOutline.strokeColor = UIColor.white.cgColor
+        wandMarkerOutline.lineWidth = 1.5
+        for markerLayer in [wandMarkerPositive, wandMarkerNegative, wandMarkerOutline] {
+            markerLayer.isHidden = true
+            layer.addSublayer(markerLayer)
         }
 
         // QuickShape preview ghost — solid 1.5pt outline above the active stroke.
@@ -431,6 +478,11 @@ public final class MetalCanvasView: UIView {
         // configureDocument has set the resolution, allocate it. No-op otherwise.
         if overlayStrokeLayer != nil {
             renderer.ensureOverlayStrokeTexture()
+        }
+
+        // The stripes' outer rect is view-sized — retrace it when layout moves.
+        if lassoClipPath != nil {
+            updateClipDimPath()
         }
 
         // If drawing data was loaded before layout (canvas texture didn't exist
@@ -674,6 +726,11 @@ public final class MetalCanvasView: UIView {
             lassoPath = path
             // Snapshot for undo/cancel before lasso extraction modifies the canvas.
             pushUndoSnapshot()
+
+        case .magicWand:
+            // A wand touch is a prompt tap, not a stroke — just remember where
+            // it started so touchesEnded can reject drags.
+            wandTapStart = point
         }
 
         isDirty = true
@@ -789,6 +846,9 @@ public final class MetalCanvasView: UIView {
             lassoPreviewWhite.isHidden = false
             lassoPreviewBlack.isHidden = false
             CATransaction.commit()
+
+        case .magicWand:
+            break // taps only — movement is judged at touchesEnded
         }
 
         isDirty = true
@@ -898,9 +958,24 @@ public final class MetalCanvasView: UIView {
 
         if case .lasso = currentTool {
             finishLasso()
+        } else if case .magicWand = currentTool {
+            finishWandTap(touch)
         } else {
             finishStroke()
         }
+    }
+
+    /// Complete a magic-wand touch: fire `onWandTap` if it stayed a tap
+    /// (≤12 pt of travel), else ignore it as an accidental drag.
+    private func finishWandTap(_ touch: UITouch) {
+        defer {
+            drawingTouch = nil
+            wandTapStart = nil
+            onInteractionEnded?()
+        }
+        let point = touch.location(in: self)
+        guard let start = wandTapStart, hypot(point.x - start.x, point.y - start.y) <= 12 else { return }
+        onWandTap?(point)
     }
 
     private func fmt(_ v: CGFloat) -> String { String(format: "%.2f", v) }
@@ -967,6 +1042,7 @@ public final class MetalCanvasView: UIView {
         activeStroke = nil
         activeStrokeStamps = []
         drawingTouch = nil
+        wandTapStart = nil
         lastEraserPointIndex = 0
         wetWalker = nil
         stabilizer = nil
@@ -1037,7 +1113,8 @@ public final class MetalCanvasView: UIView {
                 let width = brush.effectiveWidth(force: force, altitude: altitude)
 
                 let pos = CGPoint(x: x, y: y)
-                if clipPath.map({ $0.contains(pos) }) ?? true {
+                // Even-odd to match the dry-stamp clip (wand masks have holes).
+                if clipPath.map({ $0.contains(pos, using: .evenOdd) }) ?? true {
                     newStamps.append(CanvasRenderer.StampInstance(
                         center: SIMD2<Float>(Float(x * scale), Float(y * scale)),
                         radius: Float(width * 0.5 * scale),
@@ -2301,10 +2378,41 @@ public final class MetalCanvasView: UIView {
     public func setLassoPreviewHost(_ host: CALayer?) {
         let target = host ?? layer
         guard lassoPreviewWhite.superlayer !== target else { return }
-        for shapeLayer in [lassoPreviewWhite, lassoPreviewBlack] {
+        // Order matters: stripes first so ants + markers draw above them.
+        for shapeLayer in [clipDimLayer, lassoPreviewWhite, lassoPreviewBlack,
+                           wandMarkerPositive, wandMarkerNegative, wandMarkerOutline] {
             shapeLayer.removeFromSuperlayer()
             target.addSublayer(shapeLayer)
         }
+    }
+
+    // MARK: - Magic Wand Public API
+
+    /// Show/replace the wand prompt-point markers (view-point coords). Empty
+    /// array hides them. Positive points draw green, negative red, both with a
+    /// white outline for visibility on any content.
+    public func setWandMarkers(_ markers: [WandMarker]) {
+        let radius: CGFloat = 5
+        let positivePath = CGMutablePath()
+        let negativePath = CGMutablePath()
+        let outlinePath = CGMutablePath()
+        for marker in markers {
+            let rect = CGRect(
+                x: marker.point.x - radius, y: marker.point.y - radius,
+                width: radius * 2, height: radius * 2)
+            (marker.positive ? positivePath : negativePath).addEllipse(in: rect)
+            outlinePath.addEllipse(in: rect)
+        }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        wandMarkerPositive.path = positivePath
+        wandMarkerNegative.path = negativePath
+        wandMarkerOutline.path = outlinePath
+        let hidden = markers.isEmpty
+        wandMarkerPositive.isHidden = hidden
+        wandMarkerNegative.isHidden = hidden
+        wandMarkerOutline.isHidden = hidden
+        CATransaction.commit()
     }
 
     private func hideLassoPreview() {
@@ -2314,6 +2422,13 @@ public final class MetalCanvasView: UIView {
         lassoPreviewBlack.path = nil
         lassoPreviewWhite.isHidden = true
         lassoPreviewBlack.isHidden = true
+        // The stripes only make sense with an ACTIVE clip. During lasso path
+        // drawing (preview hidden per-stroke) the clip path is nil, so this
+        // also keeps stripes off until a selection actually exists.
+        if lassoClipPath == nil {
+            clipDimLayer.isHidden = true
+            clipDimLayer.path = nil
+        }
         CATransaction.commit()
     }
 
@@ -2328,10 +2443,50 @@ public final class MetalCanvasView: UIView {
             lassoPreviewBlack.path = path
             lassoPreviewWhite.isHidden = false
             lassoPreviewBlack.isHidden = false
+            updateClipDimPath()
             CATransaction.commit()
         } else {
             hideLassoPreview()
         }
+    }
+
+    /// Rebuild the unselected-region stripe path: full canvas rect + the clip
+    /// subpaths under even-odd → only the OUTSIDE region fills.
+    private func updateClipDimPath() {
+        guard let clip = lassoClipPath else {
+            clipDimLayer.isHidden = true
+            return
+        }
+        let dimPath = CGMutablePath()
+        dimPath.addRect(CGRect(origin: .zero, size: bounds.size))
+        dimPath.addPath(clip)
+        clipDimLayer.path = dimPath
+        clipDimLayer.isHidden = false
+    }
+
+    /// 8-pt diagonal stripe tile (very light gray, mostly transparent) as a
+    /// CGColor pattern for the unselected-region wash.
+    private static func makeStripePatternColor() -> CGColor {
+        let tile: CGFloat = 8
+        let format = UIGraphicsImageRendererFormat()
+        format.preferredRange = .standard
+        let image = UIGraphicsImageRenderer(
+            size: CGSize(width: tile, height: tile), format: format
+        ).image { ctx in
+            let c = ctx.cgContext
+            // Faint uniform wash so the region reads "inactive" even between stripes.
+            c.setFillColor(UIColor(white: 0.5, alpha: 0.08).cgColor)
+            c.fill(CGRect(x: 0, y: 0, width: tile, height: tile))
+            c.setStrokeColor(UIColor(white: 0.35, alpha: 0.28).cgColor)
+            c.setLineWidth(1.5)
+            // Main diagonal + the two corner continuations for seamless tiling.
+            for offset in [-tile, 0, tile] {
+                c.move(to: CGPoint(x: -2 + offset, y: tile + 2))
+                c.addLine(to: CGPoint(x: tile + 2 + offset, y: -2))
+            }
+            c.strokePath()
+        }
+        return UIColor(patternImage: image).cgColor
     }
 
     private func finishLasso() {
@@ -2619,6 +2774,75 @@ public final class MetalCanvasView: UIView {
         onDrawingChanged?()
         onStateChanged?()
         return true
+    }
+
+    /// Add an image as a NEW top layer while KEEPING existing layers visible
+    /// (AI Edit → commit the edited result over the current art; contrast with
+    /// `importImageAsNewLayer`, which hides the stack for the "pull generated
+    /// image onto canvas" flow). Same compound-undo contract: one step restores
+    /// the whole prior stack. Returns false if the layer limit is reached.
+    public func addImageAsNewLayer(_ image: UIImage, name: String) -> Bool {
+        guard let cgImage = image.cgImage else { return false }
+        guard renderer.layers.count < CanvasRenderer.maxLayerCount else { return false }
+        if let current = renderer.snapshotLayerStack() {
+            undoSnapshots.append(.canvas(layers: current.layers, activeIndex: current.activeIndex, strokeCount: strokeCount))
+            trimUndoAndClearRedo()
+        }
+        let newIndex = renderer.addLayer(name: name)
+        renderer.setActiveLayer(newIndex)
+        renderer.loadImageIntoCanvas(cgImage)
+        strokeCount += 1
+        isDirty = true
+        onDrawingChanged?()
+        onStateChanged?()
+        return true
+    }
+
+    /// Whether a persistent clip selection is active (lasso Phase B or magic
+    /// wand). Distinct from a Phase-A floating lasso selection.
+    public var hasClipSelection: Bool { lassoClipPath != nil }
+
+    /// AI Edit preview: temporarily hide the selection chrome (marching ants,
+    /// unselected-region stripes, wand markers) while an opaque preview covers
+    /// the canvas — the chrome would otherwise draw on top of the preview (in
+    /// overlay layout the ants are re-hosted on `transformView.layer`, above
+    /// it). Opacity-based so it composes with the isHidden state machine of
+    /// `setClipPath`/`updateClipDimPath` and restores exactly on un-suppress.
+    public func setSelectionChromeSuppressed(_ suppressed: Bool) {
+        let opacity: Float = suppressed ? 0 : 1
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for chromeLayer in [lassoPreviewWhite, lassoPreviewBlack, clipDimLayer,
+                            wandMarkerPositive, wandMarkerNegative, wandMarkerOutline] {
+            chromeLayer.opacity = opacity
+        }
+        CATransaction.commit()
+    }
+
+    /// Rasterize the active clip path into a square grayscale mask image in
+    /// document space — white = selected, black = untouched. `side` sets the
+    /// output resolution (pass the AI-edit snapshot side so the mask aligns
+    /// pixel-for-pixel with `opaqueImageSnapshot`). Even-odd fill matches the
+    /// stamp-clipping rule, so wand masks with holes/disjoint objects come out
+    /// right. Returns nil when no clip is active.
+    public func selectionMaskImage(side: Int) -> CGImage? {
+        guard let clip = lassoClipPath, bounds.width > 0, side > 0 else { return nil }
+        let scale = CGFloat(side) / bounds.width
+        let colorSpace = CGColorSpaceCreateDeviceGray()
+        guard let ctx = CGContext(data: nil, width: side, height: side,
+                                  bitsPerComponent: 8, bytesPerRow: side,
+                                  space: colorSpace,
+                                  bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return nil }
+        ctx.setFillColor(gray: 0, alpha: 1)
+        ctx.fill(CGRect(x: 0, y: 0, width: side, height: side))
+        // Flip Y: CGContext origin is bottom-left; the mask must match the
+        // top-left-origin snapshot image (same rule as extractSelection).
+        ctx.translateBy(x: 0, y: CGFloat(side))
+        ctx.scaleBy(x: scale, y: -scale)
+        ctx.setFillColor(gray: 1, alpha: 1)
+        ctx.addPath(clip)
+        ctx.fillPath(using: .evenOdd)
+        return ctx.makeImage()
     }
 
     /// Load an image onto the canvas (e.g., "Send to Canvas"). Undoable like

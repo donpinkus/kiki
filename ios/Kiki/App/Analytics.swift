@@ -60,9 +60,20 @@ enum AnalyticsEvent: String {
     case subscriptionPurchased = "subscription.purchased"
     case subscriptionRestored = "subscription.restored"
 
+    // AI Edit (inpaint)
+    case aiEditRequested = "canvas.ai_edit_requested"
+    case aiEditAccepted = "canvas.ai_edit_accepted"
+    case aiEditDiscarded = "canvas.ai_edit_discarded"
+
     // Share / export
     case imageShared = "image.shared"
     case videoShared = "video.shared"
+
+    // Animate screen
+    case animateOpened = "animate.opened"
+    case animateRequested = "animate.requested"
+    case animateCompleted = "animate.completed"
+    case animationShared = "animation.shared"
 
     // Speed-paint replay diagnostics — the replay pipeline is device-only
     // (AVFoundation), so its forensics ship as events: store contents on
