@@ -8,12 +8,13 @@ import CanvasModule
 // left rail (sections, blue pill selection), middle controls column, and a large
 // interactive DRAWING PAD on the right (live brush; strokes re-render as knobs change).
 //
-// TAXONOMY (2026-07-17): tabs, group headings, and attribute names mirror Procreate's
+// TAXONOMY (2026-07-19): tabs, group headings, and attribute names mirror Procreate's
 // Brush Studio verbatim (documents/research/krita-brush/14-procreate-brush-studio-
-// inventory.md) so gaps in our engine are VISIBLE, not hidden: every Procreate
-// attribute appears either as a bound control, a "via curves" pointer (capability
-// exists in the sensor-curve engine), or a grayed N/A gap row. Kiki-only knobs live
-// in "Kiki extensions" groups at the bottom of each tab.
+// inventory.md). Only LIVE controls are shown — unsupported Procreate attributes are
+// simply absent (the gap ledger lives in 15-studio-gap-audit.md, not the UI). Simple
+// sliders (Apple Pencil, Dynamics) are shortcuts into the sensor-curve engine; the
+// full curve editors live under Developer → Advanced curves. Kiki-only knobs live in
+// "Kiki extensions" groups at the bottom of each tab.
 
 struct BrushStudioPage: View {
     @Environment(AppCoordinator.self) private var coordinator
@@ -37,6 +38,17 @@ struct BrushStudioPage: View {
         .onAppear {
             snapshot = coordinator.takeBrushSnapshot()
             dyn = coordinator.toolDynamics ?? BrushDynamics()
+            if let preset = coordinator.devStudioSection {
+                section = preset
+                coordinator.devStudioSection = nil
+            }
+        }
+        .onChange(of: coordinator.devStudioSection) { _, new in
+            // Dev seam: switching tabs while the Studio is already open.
+            if let new {
+                section = new
+                coordinator.devStudioSection = nil
+            }
         }
         .onChange(of: dyn) { _, new in
             coordinator.toolDynamics = new.isInert ? nil : new
@@ -119,7 +131,6 @@ struct BrushStudioPage: View {
                 case .colorDynamics: ColorDynamicsSection(dyn: $dyn)
                 case .dynamics: DynamicsSection(dyn: $dyn)
                 case .applePencil: ApplePencilSection(dyn: $dyn)
-                case .properties: PropertiesSection()
                 case .about: AboutSection(onReset: {
                     if let snapshot { coordinator.restoreBrushSnapshot(snapshot) }
                 })
@@ -257,7 +268,6 @@ enum StudioSection: String, CaseIterable, Identifiable {
     case colorDynamics = "Color Dynamics"
     case dynamics = "Dynamics"
     case applePencil = "Apple Pencil"
-    case properties = "Properties"
     case about = "About this brush"
     case developer = "Developer"
 
@@ -283,7 +293,6 @@ enum StudioSection: String, CaseIterable, Identifiable {
         case .colorDynamics: return "paintpalette"
         case .dynamics: return "gauge.with.needle"
         case .applePencil: return "pencil"
-        case .properties: return "list.bullet"
         case .about: return "info.circle"
         case .developer: return "wrench.and.screwdriver"
         }
@@ -380,7 +389,6 @@ private struct StrokePathSection: View {
             BrushSliderRow("Fall Off", value: $coordinator.toolFallOff, range: 0.0...1.0, help: BrushHelpCatalog.help["Fall Off"]!)
         }
         .disabled(wet).opacity(wet ? 0.35 : 1)
-        StudioFootnote("Jitter amounts can also be pressure-driven: Dynamics tab → Scatter ⊥ / Scatter ∥ curves.")
         if wet { WetGateFootnote() }
     }
 }
@@ -398,10 +406,6 @@ private struct StabilizationSection: View {
         }
         StudioGroup("Stabilization") {
             BrushSliderRow("Amount", value: $coordinator.toolStabilization, range: 0.0...1.0, help: BrushHelpCatalog.help["Stabilization Amount"]!)
-        }
-        StudioGroup("Motion Filtering") {
-            GapRow("Amount", note: "Wobble-extremity filtering without averaging — not in Kiki's engine (our Stabilization is a distance-Gaussian).")
-            GapRow("Expression", note: "Counteracts over-smoothing — depends on Motion Filtering.")
         }
     }
 }
@@ -422,17 +426,6 @@ private struct TaperSection: View {
                 BrushSliderRow("Opacity", value: $coordinator.toolTaperOpacity, range: 0.0...1.0, help: BrushHelpCatalog.help["Taper Opacity"]!)
             }
             .disabled(wet).opacity(wet ? 0.35 : 1)
-            GapRow("Link Tip Sizes", note: "Both taper ends share one tip size.")
-            GapRow("Size", note: "Severity of the thick→thin transition — Kiki's taper profile is fixed.")
-            GapRow("Pressure", note: "Toggle taper responding to pencil pressure.")
-            GapRow("Tip", note: "Fine vs chunky taper tip.")
-            GapRow("Tip Animation", note: "Animates the tip while drawing.")
-        }
-        StudioGroup("Touch Taper") {
-            GapRow("Touch Taper", note: "Separate taper for finger strokes — Kiki applies one taper to all input.")
-        }
-        StudioGroup("Properties") {
-            GapRow("Classic Taper", note: "Legacy Procreate taper behavior.")
         }
         if wet { WetGateFootnote() }
     }
@@ -452,7 +445,6 @@ private struct ShapeSection: View {
             Group {
                 BrushShapePicker(selection: $coordinator.toolShapeID)
                 UserAssetPicker(kind: .shape, selection: $coordinator.toolShapeID)
-                StudioFootnote("Imported tips read luminance as coverage (white = paint). They stamp upright by default — steer with Rotation, Azimuth, or Scatter.")
             }
             .disabled(wet).opacity(wet ? 0.35 : 1)
         }
@@ -471,17 +463,14 @@ private struct ShapeSection: View {
                     })) {
                     Text("Azimuth").font(.subheadline.weight(.medium))
                 }
-                StudioFootnote("Azimuth: the pencil's tilt direction orients the tip (overrides stroke-direction rotation).")
             }
             .disabled(wet).opacity(wet ? 0.35 : 1)
-            GapRow("Azimuth and barrel roll", note: "Pencil Pro barrel-roll input isn't read yet.")
         }
         StudioGroup("Properties") {
             Group {
                 BrushSliderRow("Scatter", value: $coordinator.toolRotationJitter, range: 0.0...1.0, help: BrushHelpCatalog.help["Scatter"]!)
                 Toggle("Randomized", isOn: $coordinator.toolRandomizedRotation)
                     .font(.subheadline.weight(.medium))
-                StudioFootnote("Randomized: one random tip rotation per stroke (Scatter above is per stamp).")
                 BrushSliderRow("Count", value: $coordinator.toolStampCount, range: 1...8, help: BrushHelpCatalog.help["Count"]!,
                                format: { "\(Int($0.rounded()))" })
                 if coordinator.toolStampCount.rounded() > 1 {
@@ -503,11 +492,6 @@ private struct ShapeSection: View {
                     }), range: 0.0...1.0, help: BrushHelpCatalog.help["Pressure Roundness"]!)
             }
             .disabled(wet).opacity(wet ? 0.35 : 1)
-            GapRow("Tilt Roundness", note: "Tilt-driven squash — configurable via Dynamics → Roundness curve + TiltElevation sensor.")
-            GapRow("Roundness Jitter (vert/horiz)", note: "Random per-stamp squash.")
-        }
-        StudioGroup("Filtering") {
-            GapRow("No / Classic / Improved Filtering", note: "Tip-texture resampling modes — Kiki uses mipmapped sampling only.")
         }
         StudioGroup("Kiki extensions") {
             BrushSliderRow("Hardness", value: $coordinator.toolHardness, range: 0.0...1.0, help: BrushHelpCatalog.help["Hardness"]!)
@@ -537,7 +521,6 @@ private struct GrainSection: View {
             Group {
                 GrainPicker(selection: $coordinator.toolGrainID)
                 UserAssetPicker(kind: .grain, selection: $coordinator.toolGrainID)
-                StudioFootnote("Imported grains tile at their native pixel size (Scale multiplies). Screenshots of Procreate grains work — the engine reads them grayscale.")
             }
             .disabled(wet).opacity(wet ? 0.35 : 1)
         }
@@ -552,9 +535,6 @@ private struct GrainSection: View {
                             coordinator.toolGrainMoving = false
                         }
                     }
-                    StudioFootnote(coordinator.toolGrainMoving
-                         ? "Moving: the grain rides with the stroke — sized and centered per stroke."
-                         : "Texturized: the grain is anchored to the canvas at a fixed size — overlapping strokes reveal one consistent pattern.")
                     if coordinator.toolGrainMoving {
                         BrushSliderRow("Movement", value: $coordinator.toolGrainMovement, range: 0.0...1.0, help: BrushHelpCatalog.help["Grain Movement"]!,
                                        format: { $0 > 0.97 ? "Rolling" : ($0 < 0.03 ? "Smear" : "\(Int(($0 * 100).rounded()))%") })
@@ -565,7 +545,6 @@ private struct GrainSection: View {
                         BrushSliderRow("Depth Minimum", value: $coordinator.toolGrainDepthMinimum, range: 0.0...1.0, help: BrushHelpCatalog.help["Grain Depth Minimum"]!)
                         Toggle("Offset Jitter", isOn: $coordinator.toolGrainOffsetJitter)
                             .font(.subheadline.weight(.medium))
-                        StudioFootnote("Offset Jitter: each stroke samples the grain from a random offset — repeated strokes don't repeat the same pattern phase.")
                     }
                 }
                 .disabled(wet).opacity(wet ? 0.35 : 1)
@@ -582,7 +561,6 @@ private struct GrainSection: View {
                                    format: { String(format: "%+.0f%%", $0 * 100) })
                 }
                 .disabled(wet).opacity(wet ? 0.35 : 1)
-                GapRow("Blend Mode", note: "Grain blend mode — Kiki grain is multiplicative carve only.")
             }
         }
         if wet { WetGateFootnote() }
@@ -594,53 +572,15 @@ private struct GrainSection: View {
 private struct RenderingSection: View {
     @Environment(AppCoordinator.self) private var coordinator
 
-    private static let modes: [(String, Bool)] = [
-        ("Light Glaze", true),          // ≈ Kiki's flow/opacity split ("Glaze")
-        ("Uniformed Glaze", false),
-        ("Intense Glaze", false),
-        ("Heavy Glaze", false),
-        ("Uniform Blending", false),
-        ("Intense Blending", false),
-    ]
-
     var body: some View {
         @Bindable var coordinator = coordinator
         let wet = coordinator.toolWetEnabled
 
-        StudioGroup("Rendering Mode") {
-            VStack(spacing: 6) {
-                ForEach(Self.modes, id: \.0) { mode in
-                    HStack {
-                        Text(mode.0).font(.body.weight(.medium))
-                            .foregroundStyle(mode.1 ? .white : .white.opacity(0.3))
-                        Spacer()
-                        if mode.1 {
-                            Image(systemName: "checkmark").font(.subheadline.weight(.bold))
-                                .foregroundStyle(StudioTheme.accent)
-                        } else {
-                            Text("N/A").font(.caption2.weight(.semibold))
-                                .foregroundStyle(.white.opacity(0.3))
-                        }
-                    }
-                    .padding(.vertical, 8).padding(.horizontal, 14)
-                    .background(mode.1 ? StudioTheme.chip : .clear)
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-                }
-            }
-            StudioFootnote("Kiki has one rendering mode ≈ Light Glaze (per-dab Flow builds up inside the stroke; Opacity caps the whole stroke). The heavier glazes and the two wet Blending modes are engine gaps — Kiki's wet engine is toggled in Wet Mix instead.")
-        }
         StudioGroup("Blending") {
             Group {
                 BrushSliderRow("Flow", value: $coordinator.toolFlow, range: 0.05...1.0, help: BrushHelpCatalog.help["Flow"]!)
             }
             .disabled(wet).opacity(wet ? 0.35 : 1)
-            GapRow("Wet Edges", note: "Pigment bleeding into the paper at stroke edges (roadmap spike exists).")
-            GapRow("Burnt Edges", note: "Color-burn where strokes overlap (+ blend-mode choice).")
-            GapRow("Blend Mode", note: "Whole-stroke blend mode (multiply, screen, …) — Kiki strokes are source-over only.")
-            GapRow("Luminance Blending", note: "Luminance-weighted stroke blending.")
-            GapRow("Alpha Threshold", note: "Hard-clips low-alpha stroke fringes.")
-        }
-        StudioGroup("Kiki extensions") {
             BrushSliderRow("Opacity", value: $coordinator.toolOpacity, range: 0.05...1.0, help: BrushHelpCatalog.help["Opacity"]!)
         }
         if wet { WetGateFootnote() }
@@ -659,15 +599,11 @@ private struct WetMixSection: View {
             Text("Wet paint").font(.subheadline.weight(.medium))
             + Text("  (experimental)").font(.caption).foregroundColor(.secondary)
         }
-        StudioFootnote("Procreate enables wet paint via the Blending rendering modes; Kiki uses this toggle. Wet paint uses a round tip — Shape, Flow, Taper and Dynamics don't apply; Opacity scales the deposit.")
         if coordinator.toolWetEnabled {
-            GapRow("Dilution", note: "Water-transparency — deliberately folded into Attack + Opacity in Kiki's KM engine (decision 2026-07-16).")
             BrushSliderRow("Charge", value: $coordinator.toolWetCharge, range: 0.05...1.0, help: BrushHelpCatalog.help["Charge"]!)
             BrushSliderRow("Attack", value: $coordinator.toolWetStrength, range: 0.05...1.0, help: BrushHelpCatalog.help["Attack"]!)
             BrushSliderRow("Pull", value: $coordinator.toolWetPickup, range: 0.0...1.0, help: BrushHelpCatalog.help["Pull"]!)
-            GapRow("Grade", note: "Chunkiness/contrast of the wet brush texture.")
             BrushSliderRow("Blur", value: $coordinator.toolWetBlur, range: 0.0...1.0, help: BrushHelpCatalog.help["Blur"]!)
-            GapRow("Blur Jitter", note: "Random per-stamp blur.")
             BrushSliderRow("Wetness Jitter", value: $coordinator.toolWetJitter, range: 0.0...1.0, help: BrushHelpCatalog.help["Wetness Jitter"]!)
             StudioGroup("Kiki extensions") {
                 BrushSliderRow("Refill", value: $coordinator.toolWetRefill, range: 0.0...1.0, help: BrushHelpCatalog.help["Refill"]!)
@@ -677,7 +613,6 @@ private struct WetMixSection: View {
             Toggle("Smudge mode (push canvas color, no new ink)",
                    isOn: $coordinator.toolWetSmudge)
                 .font(.subheadline.weight(.medium))
-            StudioFootnote("Smudge uses the wet engine: Attack and Pull above set its strength and pickup.")
         }
     }
 }
@@ -698,28 +633,18 @@ private struct ColorDynamicsSection: View {
                 get: { coordinator.toolSecondaryColor != nil },
                 set: { coordinator.toolSecondaryColor = $0 ? .yellow : nil }))
                 .font(.subheadline.weight(.medium))
-            StudioFootnote("Procreate picks the secondary color in the color companion; Kiki sets it here. The blends below drive how much of it shows.")
         }
         ColorJitterSection(title: "Stamp Color Jitter", jitter: $dyn.dabColorJitter,
                            defaults: ColorJitter(hue: 0.01, saturation: 0.08, brightness: 0.08))
-        GapRow("Stamp Color Jitter → Secondary Color", note: "Random per-stamp secondary blend — approximate via Dynamics → Secondary blend + Fuzzy (dab) sensor.")
         ColorJitterSection(title: "Stroke Color Jitter", jitter: $dyn.colorJitter)
-        GapRow("Stroke Color Jitter → Secondary Color", note: "Per-stroke random secondary blend.")
         StudioGroup("Color Pressure") {
             CurveAmountSlider(title: "Secondary Color", option: $dyn.secondary,
                               defaultSensors: [.pressure], help: BrushHelpCatalog.help["Color Pressure Secondary"]!)
-            GapRow("Hue", note: "Pressure shifts hue.")
-            GapRow("Saturation", note: "Pressure shifts saturation.")
-            GapRow("Brightness", note: "Pressure shifts brightness — approximate via Dynamics → Darkness curve.")
         }
-        StudioGroup("Color Tilt") {
-            GapRow("Hue / Saturation / Lightness / Secondary", note: "Tilt-driven color — no tilt→color mapping in Kiki yet (tilt sensors exist; color targets don't).")
-        }
-        StudioFootnote("Brightness ≈ Procreate's Lightness (symmetric); Darkness is the one-sided darken jitter.")
     }
 }
 
-// MARK: - Dynamics (Procreate: speed + jitter; Kiki: the full sensor-curve engine)
+// MARK: - Dynamics
 
 private struct DynamicsSection: View {
     @Binding var dyn: BrushDynamics
@@ -739,19 +664,6 @@ private struct DynamicsSection: View {
             SensorAmountSlider(title: "Opacity", option: $dyn.flow, sensor: .fuzzyPerDab, signed: false,
                                help: BrushHelpCatalog.help["Jitter Opacity"]!)
         }
-        StudioGroup("Advanced curves") {
-            StudioFootnote("The full sensor-curve engine — a superset of the sliders above (which are shortcuts into these same curves): any sensor drives any parameter through an editable response curve. Draw in the pad — the red marker rides the live curve.")
-            CurveToggleSection(title: "Size", option: $dyn.size, fold: .sizeLike, defaultSensor: .pressure)
-            CurveToggleSection(title: "Flow", option: $dyn.flow, fold: .sizeLike, defaultSensor: .pressure)
-            CurveToggleSection(title: "Rotation", option: $dyn.rotation, fold: .rotationLike, defaultSensor: .drawingAngle)
-            CurveToggleSection(title: "Scatter", option: $dyn.scatter, fold: .sizeLike, defaultSensor: .pressure)
-            CurveToggleSection(title: "Scatter \u{22A5} (across)", option: $dyn.scatterLateral, fold: .sizeLike, defaultSensor: .pressure)
-            CurveToggleSection(title: "Scatter \u{2225} (along)", option: $dyn.scatterLinear, fold: .sizeLike, defaultSensor: .pressure)
-            CurveToggleSection(title: "Roundness", option: $dyn.ratio, fold: .sizeLike, defaultSensor: .pressure)
-            CurveToggleSection(title: "Spacing", option: $dyn.spacing, fold: .sizeLike, defaultSensor: .speed)
-            CurveToggleSection(title: "Darkness", option: $dyn.darkness, fold: .sizeLike, defaultSensor: .pressure)
-            CurveToggleSection(title: "Grain (moving)", option: $dyn.grain, fold: .sizeLike, defaultSensor: .pressure)
-        }
     }
 }
 
@@ -766,42 +678,12 @@ private struct ApplePencilSection: View {
                                help: BrushHelpCatalog.help["AP Pressure Size"]!)
             SensorAmountSlider(title: "Flow", option: $dyn.flow, sensor: .pressure,
                                help: BrushHelpCatalog.help["AP Pressure Flow"]!)
-            GapRow("Opacity", note: "Stroke opacity is a fixed ceiling in Kiki — pressure shading comes from Flow above.")
-            GapRow("Pressure graph", note: "Freeform pressure response — shape the per-parameter curves in Dynamics → Advanced curves instead.")
-            GapRow("Bleed", note: "Pressure-driven edge bleed.")
         }
         StudioGroup("Tilt") {
             SensorAmountSlider(title: "Size", option: $dyn.size, sensor: .tiltElevation,
                                help: BrushHelpCatalog.help["Tilt Size"]!)
             SensorAmountSlider(title: "Opacity", option: $dyn.flow, sensor: .tiltElevation,
                                help: BrushHelpCatalog.help["Tilt Opacity"]!)
-            GapRow("Tilt graph / trigger angle", note: "Angle threshold where tilt kicks in.")
-            GapRow("Gradation", note: "Shading softness on an angle.")
-            GapRow("Bleed", note: "Tilt-driven edge bleed.")
-            GapRow("Size Compression", note: "Compresses tilt size range.")
-        }
-        StudioGroup("Barrel Roll (Pencil Pro)") {
-            GapRow("Size / Opacity / Bleed / Relative to stroke", note: "Barrel-roll input isn't read yet (UIKit rollAngle, iOS 17.5+).")
-        }
-        StudioGroup("Cursor & Hover") {
-            GapRow("Cursor Outline / Hover preview", note: "Pencil hover UI — not applicable to Kiki yet.")
-        }
-    }
-}
-
-// MARK: - Properties
-
-private struct PropertiesSection: View {
-    var body: some View {
-        StudioGroup("Brush Behavior") {
-            GapRow("Use Stamp Preview", note: "Library thumbnail as a stamp — Kiki's library shows names (thumbnails planned).")
-            GapRow("Orient to Screen", note: "Rotates the brush with the canvas.")
-            GapRow("Preview Size", note: "Library preview scale.")
-            CurvePointerRow("Smudge Pull", note: "Wet Mix tab: Smudge mode + Pull set the smudge strength.")
-        }
-        StudioGroup("Brush Limits") {
-            GapRow("Maximum / Minimum Size", note: "Per-brush bounds for the sidebar size slider — Kiki's slider range is global.")
-            GapRow("Maximum / Minimum Opacity", note: "Per-brush bounds for the opacity slider.")
         }
     }
 }
@@ -863,6 +745,20 @@ private struct DeveloperSection: View {
 
     var body: some View {
         @Bindable var coordinator = coordinator
+
+        StudioGroup("Advanced curves") {
+            StudioFootnote("Any sensor drives any parameter through an editable response curve. The simple sliders in Apple Pencil and Dynamics write these same curves; a hand-edit beyond a straight line shows there as \u{201C}Custom curve\u{201D}. Draw in the pad — the red marker rides the live curve.")
+            CurveToggleSection(title: "Size", option: $dyn.size, fold: .sizeLike, defaultSensor: .pressure)
+            CurveToggleSection(title: "Flow", option: $dyn.flow, fold: .sizeLike, defaultSensor: .pressure)
+            CurveToggleSection(title: "Rotation", option: $dyn.rotation, fold: .rotationLike, defaultSensor: .drawingAngle)
+            CurveToggleSection(title: "Scatter", option: $dyn.scatter, fold: .sizeLike, defaultSensor: .pressure)
+            CurveToggleSection(title: "Scatter \u{22A5} (across)", option: $dyn.scatterLateral, fold: .sizeLike, defaultSensor: .pressure)
+            CurveToggleSection(title: "Scatter \u{2225} (along)", option: $dyn.scatterLinear, fold: .sizeLike, defaultSensor: .pressure)
+            CurveToggleSection(title: "Roundness", option: $dyn.ratio, fold: .sizeLike, defaultSensor: .pressure)
+            CurveToggleSection(title: "Spacing", option: $dyn.spacing, fold: .sizeLike, defaultSensor: .speed)
+            CurveToggleSection(title: "Darkness", option: $dyn.darkness, fold: .sizeLike, defaultSensor: .pressure)
+            CurveToggleSection(title: "Grain (moving)", option: $dyn.grain, fold: .sizeLike, defaultSensor: .pressure)
+        }
 
         StudioGroup("Control-isolation test brushes") {
             ScrollView(.horizontal, showsIndicators: false) {
@@ -1008,64 +904,6 @@ struct StudioFootnote: View {
     }
 }
 
-/// A Procreate attribute Kiki doesn't support yet — a VISIBLE gap (the point of the
-/// Procreate-taxonomy exercise). Grayed, with an "N/A" chip and a why/where note.
-struct GapRow: View {
-    let title: String
-    var note: String?
-
-    init(_ title: String, note: String? = nil) {
-        self.title = title
-        self.note = note
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 6) {
-                Text(title).font(.body.weight(.medium)).foregroundStyle(.white.opacity(0.35))
-                Spacer()
-                Text("N/A")
-                    .font(.caption2.weight(.semibold))
-                    .padding(.horizontal, 10).padding(.vertical, 4)
-                    .background(Color.white.opacity(0.05))
-                    .clipShape(Capsule())
-                    .foregroundStyle(.white.opacity(0.3))
-            }
-            if let note {
-                Text(note).font(.caption2).foregroundStyle(.white.opacity(0.3))
-            }
-        }
-    }
-}
-
-/// A Procreate attribute whose CAPABILITY exists in Kiki, but through the sensor-curve
-/// engine rather than a dedicated slider.
-struct CurvePointerRow: View {
-    let title: String
-    let note: String
-
-    init(_ title: String, note: String) {
-        self.title = title
-        self.note = note
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 6) {
-                Text(title).font(.body.weight(.medium)).foregroundStyle(.white.opacity(0.6))
-                Spacer()
-                Text("via curves")
-                    .font(.caption2.weight(.semibold))
-                    .padding(.horizontal, 10).padding(.vertical, 4)
-                    .background(StudioTheme.accent.opacity(0.18))
-                    .clipShape(Capsule())
-                    .foregroundStyle(StudioTheme.accent)
-            }
-            Text(note).font(.caption2).foregroundStyle(.white.opacity(0.4))
-        }
-    }
-}
-
 /// Procreate-style plain amount slider over a dynamics CurveOption: the slider IS the
 /// option's strength — created (with the given default sensors) on first move, cleared
 /// at zero. The full curve editor (Dynamics tab) remains the power surface; this keeps
@@ -1127,7 +965,7 @@ struct SensorAmountSlider: View {
                         .buttonStyle(.bordered)
                         .controlSize(.mini)
                 }
-                Text("This input is shaped by a hand-edited curve (Advanced curves below). Reset to control it from this slider.")
+                Text("Shaped by a hand-edited curve (Developer \u{2192} Advanced curves). Reset to control it from this slider.")
                     .font(.caption2).foregroundStyle(.white.opacity(0.4))
             }
         } else {
