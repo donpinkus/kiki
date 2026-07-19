@@ -2293,6 +2293,20 @@ public final class MetalCanvasView: UIView {
         return result
     }
 
+    /// Re-host the lasso path-preview dash layers. Overlay mode parks them on a
+    /// layer above the opaque generated image (they'd be invisible on our own
+    /// layer, which sits underneath it); `nil` returns them home. The host must
+    /// share this view's coordinate space (the canvas fills its container, so
+    /// `transformView.layer` qualifies).
+    public func setLassoPreviewHost(_ host: CALayer?) {
+        let target = host ?? layer
+        guard lassoPreviewWhite.superlayer !== target else { return }
+        for shapeLayer in [lassoPreviewWhite, lassoPreviewBlack] {
+            shapeLayer.removeFromSuperlayer()
+            target.addSublayer(shapeLayer)
+        }
+    }
+
     private func hideLassoPreview() {
         CATransaction.begin()
         CATransaction.setDisableActions(true)

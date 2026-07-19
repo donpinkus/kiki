@@ -85,6 +85,7 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
     private var canvasPinchGesture: UIPinchGestureRecognizer!
     private var canvasRotationGesture: UIRotationGestureRecognizer!
     private var undoTapGesture: UITapGestureRecognizer!
+    private var redoTapGesture: UITapGestureRecognizer!
     // Panel transform recognizers — fire only when the two-finger centroid is
     // inside the external region, forwarding deltas via `onExternalTransform`.
     private var panelPanGesture: UIPanGestureRecognizer!
@@ -229,6 +230,7 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
         redoTap.numberOfTouchesRequired = 3
         redoTap.delegate = self
         addGestureRecognizer(redoTap)
+        redoTapGesture = redoTap
 
         let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress(_:)))
         longPress.minimumPressDuration = 0.5
@@ -505,11 +507,14 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
         if gestureRecognizer === canvasPanGesture
             || gestureRecognizer === canvasPinchGesture
             || gestureRecognizer === canvasRotationGesture
-            || gestureRecognizer === undoTapGesture {
+            || gestureRecognizer === undoTapGesture
+            || gestureRecognizer === redoTapGesture {
             // A floating lasso selection owns all two-finger transforms — the
             // LassoSelectionView's own pan/pinch/rotate recognizers move & scale
             // the selected pixels. The canvas underneath must NOT transform too
             // (that's the "resizing the selection resizes the canvas" bug).
+            // Undo/redo taps also stand down: restoring a canvas snapshot out
+            // from under the floating selection texture would corrupt state.
             if hasActiveLassoSelection { return false }
             return !overPanel
         }
@@ -553,6 +558,10 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
         } else {
             canvasView.overlayStrokeLayer = nil
         }
+        // Lasso path-preview dashes live on the canvas's own layer, which the
+        // opaque generated image covers in overlay mode — park them above it
+        // (transformView.layer shares the canvas's coordinate space).
+        canvasView.setLassoPreviewHost(active ? transformView.layer : nil)
     }
 
     /// Push the generated image to display locked over the canvas (overlay mode).
@@ -605,7 +614,11 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
         selectionView.onTransformChanged = { [weak self] translation, scale, rotation in
             self?.onLassoTransformChanged?(translation, scale, rotation)
         }
-        transformView.insertSubview(selectionView, aboveSubview: canvasView)
+        // Top of transformView — above the overlay-mode generated image /
+        // fresh-stroke surfaces, so the marching ants stay visible in overlay
+        // layout (they were invisible when inserted just above canvasView).
+        // Non-overlay layouts are unaffected (those views are hidden).
+        transformView.addSubview(selectionView)
         canvasView.isUserInteractionEnabled = false
         lassoSelectionView = selectionView
     }
