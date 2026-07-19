@@ -64,6 +64,9 @@ struct SpeedPaintReplayView: View {
     /// Mirrors AVPlayerLayer.isReadyForDisplay (via KVO in PlayerLayerView) —
     /// the definitive "is the screen actually getting frames" signal.
     @State private var layerReadyForDisplay = false
+    /// On-screen playback probe (temporary debug — black-preview hunt).
+    /// Rendered over the preview so diagnosis needs no log channel at all.
+    @State private var probeText = ""
 
     var body: some View {
         NavigationStack {
@@ -190,8 +193,40 @@ struct SpeedPaintReplayView: View {
                     .padding(.trailing, layout == .vertical ? 34 : 12)
             }
         }
+        .overlay(alignment: .bottomLeading) {
+            if !probeText.isEmpty {
+                Text(probeText)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.white)
+                    .padding(6)
+                    .background(.black.opacity(0.65), in: RoundedRectangle(cornerRadius: 6))
+                    .padding(8)
+            }
+        }
         .aspectRatio(layout.aspectRatio, contentMode: .fit)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .task {
+            while !Task.isCancelled {
+                updateProbeText()
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+    }
+
+    /// status: unk/rdy/fail · r: rate · t: current/duration · sz: presentation
+    /// size · disp: layer has frames · tc: paused0/waiting1/playing2 · err.
+    private func updateProbeText() {
+        guard let item = player.currentItem else {
+            probeText = "no item"
+            return
+        }
+        let statusName = ["unk", "rdy", "fail"][item.status.rawValue]
+        let time = String(format: "%.2f", item.currentTime().seconds)
+        let duration = String(format: "%.1f", item.duration.seconds)
+        let rate = String(format: "%.2f", player.rate)
+        let size = "\(Int(item.presentationSize.width))x\(Int(item.presentationSize.height))"
+        let err = item.error != nil ? " ERR:\(item.error!.localizedDescription)" : ""
+        probeText = "it=\(statusName) r=\(rate) t=\(time)/\(duration) sz=\(size) disp=\(layerReadyForDisplay ? "Y" : "N") tc=\(player.timeControlStatus.rawValue)\(err)"
     }
 
     private var watermarkBadge: some View {
