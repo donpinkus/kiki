@@ -373,7 +373,9 @@ public enum CuratedPresetCatalog {
             var b = base
             b.shapeID = "stucco"
             b.rotationFollow = 0        // tip stamps upright (Touch only, Rotation 0)
-            b.rotationJitter = 1.0
+            // Device report (attempt 2): full spin ROUNDED the square footprint into
+            // fluff. Procreate stamps upright - their Scatter is only 2%.
+            b.rotationJitter = 0.02
             b.spacing = 0.05
             b.opacity = 1.0
             b.flow = 1.0
@@ -397,7 +399,9 @@ public enum CuratedPresetCatalog {
             b.shapeID = "nightjar"
             b.rotationFollow = 1.0      // Rotation: Follow stroke (max)
             b.flipX = true; b.flipY = true
-            b.spacing = 0.18
+            // Device report (attempt 2): beaded. Tighter spacing + no roundness squash
+            // (the squash shrank each dab along the stroke below the walk gap).
+            b.spacing = 0.10
             b.spacingJitter = 0.10
             b.taperEnd = 0.07
             b.stampCount = 2
@@ -406,8 +410,7 @@ public enum CuratedPresetCatalog {
                 size: CurveOption(sensors: [SensorChannel(sensor: .pressure)], minValue: 0.55),
                 scatter: CurveOption(sensors: [], strength: 0.5),
                 scatterLateral: CurveOption(sensors: [], strength: 0.07),
-                scatterLinear: CurveOption(sensors: [], strength: 0.40),
-                ratio: CurveOption(sensors: [SensorChannel(sensor: .pressure)], minValue: 0.75))
+                scatterLinear: CurveOption(sensors: [], strength: 0.40))
             return b
         },
 
@@ -419,18 +422,22 @@ public enum CuratedPresetCatalog {
             var b = base
             b.shapeID = "oldbeach"
             b.rotationFollow = 0
-            b.rotationJitter = 0.3
-            b.spacing = 0.16
+            // Device report (attempt 2): stamps read individually. The Procreate look
+            // is a smooth wash textured by the CONSTANT texturized grain - so mute the
+            // tip (low lightness, low per-dab flow, tight spacing) and let the grain
+            // carry the texture.
+            b.rotationJitter = 0.1
+            b.spacing = 0.10
             b.opacity = 0.88
-            b.flow = 0.75
+            b.flow = 0.45
             b.grainID = "oldbeachGrain" // the target's own concrete (pane-thumbnail extract)
             b.grainDepth = 0.5
             b.grainScale = 0.2
             b.grainMoving = false       // Texturized
-            b.tipLightness = 0.85
+            b.tipLightness = 0.2
             b.dynamics = BrushDynamics(
                 size: CurveOption(sensors: [SensorChannel(sensor: .pressure)], minValue: 0.74),
-                flow: CurveOption(sensors: [SensorChannel(sensor: .pressure)], minValue: 0.5),
+                flow: CurveOption(sensors: [SensorChannel(sensor: .pressure)], minValue: 0.35),
                 // Azimuth input style: the pencil's tilt direction orients the tip.
                 rotation: CurveOption(sensors: [SensorChannel(sensor: .tiltDirection)], fold: .rotationLike),
                 dabColorJitter: ColorJitter(hue: 0.02, saturation: 0.02, brightness: 0.02, darkness: 0.02))
