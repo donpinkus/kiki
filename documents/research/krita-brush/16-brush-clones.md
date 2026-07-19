@@ -49,7 +49,21 @@ interior) — biggest engine gap this session surfaced; Height grain blend.
    Intense/Uniformed Glaze density correctly.
 3. Wet Edges 0/50/100 sweep — to spec the edge effect before building it.
 
-## Original-shape generation (2026-07-18) — DO NOT ship extracted Procreate tips
+## Shape-tip source — STATUS (2026-07-18)
+
+**Current shipped state:** the 32-tip stock library + the 3 clone tips are Donald's
+Procreate Shape captures used **directly** (the extracted uploads). Owner call after
+reviewing the generated set: the Flux Kontext variations were "either identical or too
+messed up" — close matches were barely changed (still derivative), and the ones that
+changed enough drifted into a different look. So we ship the uploads **"for now."**
+
+**OPEN IP follow-up:** these are direct captures of Procreate's proprietary shapes and
+must be replaced with true originals before any public/App Store release. Options still
+on the table: a better image-editing model / settings, hand/Gemini-authored variations,
+or original hand-drawn tips. The generation pipeline below works and is committed
+(`BrushHarness/gen-shape-kontext.py`) — it's the tuning/quality that wasn't good enough.
+
+## Original-shape generation (2026-07-18) — exploration log
 
 Owner decision: the shipped tips must not be direct pixel copies of Procreate's
 proprietary shapes (IP). Two approaches tried:

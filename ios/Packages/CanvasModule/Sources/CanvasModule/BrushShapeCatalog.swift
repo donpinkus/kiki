@@ -43,14 +43,16 @@ public enum BrushShapeCatalog {
         BrushShapeDescriptor(id: "drybrush", displayName: "Dry Brush", resourceName: "drybrush"),
         BrushShapeDescriptor(id: "pastel", displayName: "Pastel", resourceName: "pastel", rotationJitter: true),
         BrushShapeDescriptor(id: "ink", displayName: "Spray", resourceName: "ink"),
-        // Clone-brush tips (2026-07-18): ORIGINALS generated from Procreate Shape Editor
-        // captures via fal Flux Kontext (structure-preserving variation — NOT pixel copies).
-        // See documents/research/krita-brush/16-brush-clones.md.
+        // Clone-brush tips (2026-07-18). NOTE: these are the Procreate Shape Editor
+        // captures used DIRECTLY (owner call — the Kontext-generated variations came out
+        // either too-identical or over-drifted, so we ship the uploads "for now").
+        // IP follow-up (replace with true originals) is still OPEN — see
+        // documents/research/krita-brush/16-brush-clones.md.
         BrushShapeDescriptor(id: "stucco", displayName: "Stucco", resourceName: "stucco"),
         BrushShapeDescriptor(id: "nightjar", displayName: "Blob", resourceName: "nightjar"),
         BrushShapeDescriptor(id: "oldbeach", displayName: "Knife", resourceName: "oldbeach"),
-        // Stock shape library: originals generated the same way from Donald's Procreate
-        // Shape Library captures (Kontext variation of each). "import all as stock shapes."
+        // Stock shape library: Donald's Procreate Shape Library captures, used directly
+        // (same "for now" call + open IP follow-up as the clone tips above).
         BrushShapeDescriptor(id: "lib_chinese_ink", displayName: "Chinese Ink", resourceName: "lib_chinese_ink"),
         BrushShapeDescriptor(id: "lib_ink_sponge", displayName: "Ink Sponge", resourceName: "lib_ink_sponge"),
         BrushShapeDescriptor(id: "lib_ink_dry", displayName: "Ink Dry", resourceName: "lib_ink_dry"),
