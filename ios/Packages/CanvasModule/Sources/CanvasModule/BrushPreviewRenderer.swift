@@ -155,7 +155,7 @@ public final class BrushPreviewRenderer {
         renderer.commitStampsToCanvas(stamps,
                                       strokeOpacity: Float(stroke.brush.opacity),
                                       shapeTexture: renderer.shapeTexture(for: stroke.brush.shapeID),
-                                      grain: renderer.grainSettings(for: stroke.brush),
+                                      grain: renderer.grainSettings(for: stroke.brush, strokeID: stroke.id),
                                       lightness: renderer.lightnessSettings(for: stroke.brush),
                                       flip: renderer.flipSettings(for: stroke.brush))
     }

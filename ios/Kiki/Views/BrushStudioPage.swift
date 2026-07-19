@@ -560,6 +560,12 @@ private struct GrainSection: View {
                                        format: { $0 > 0.97 ? "Rolling" : ($0 < 0.03 ? "Smear" : "\(Int(($0 * 100).rounded()))%") })
                         BrushSliderRow("Zoom", value: $coordinator.toolGrainZoom, range: 0.0...1.0, help: BrushHelpCatalog.help["Grain Zoom"]!,
                                        format: { $0 < 0.03 ? "Follow size" : ($0 > 0.97 ? "Cropped" : "\(Int(($0 * 100).rounded()))%") })
+                        BrushSliderRow("Rotation", value: $coordinator.toolGrainRotation, range: -1.0...1.0, help: BrushHelpCatalog.help["Grain Rotation"]!,
+                                       format: { "\(Int(($0 * 180).rounded()))\u{00B0}" })
+                        BrushSliderRow("Depth Minimum", value: $coordinator.toolGrainDepthMinimum, range: 0.0...1.0, help: BrushHelpCatalog.help["Grain Depth Minimum"]!)
+                        Toggle("Offset Jitter", isOn: $coordinator.toolGrainOffsetJitter)
+                            .font(.subheadline.weight(.medium))
+                        StudioFootnote("Offset Jitter: each stroke samples the grain from a random offset — repeated strokes don't repeat the same pattern phase.")
                     }
                 }
                 .disabled(wet).opacity(wet ? 0.35 : 1)
@@ -570,13 +576,13 @@ private struct GrainSection: View {
                                    format: { String(format: "%.1f\u{00D7}", $0) })
                     BrushSliderRow("Depth", value: $coordinator.toolGrainDepth, range: 0.0...1.0, help: BrushHelpCatalog.help["Grain Depth"]!)
                     BrushSliderRow("Depth Jitter", value: $coordinator.toolGrainDepthJitter, range: 0.0...1.0, help: BrushHelpCatalog.help["Grain Depth Jitter"]!)
+                    BrushSliderRow("Brightness", value: $coordinator.toolGrainBrightness, range: -1.0...1.0, help: BrushHelpCatalog.help["Grain Brightness"]!,
+                                   format: { String(format: "%+.0f%%", $0 * 100) })
+                    BrushSliderRow("Contrast", value: $coordinator.toolGrainContrast, range: -1.0...1.0, help: BrushHelpCatalog.help["Grain Contrast"]!,
+                                   format: { String(format: "%+.0f%%", $0 * 100) })
                 }
                 .disabled(wet).opacity(wet ? 0.35 : 1)
-                GapRow("Rotation", note: "Grain rotation vs stroke direction.")
-                GapRow("Depth Minimum", note: "Floor for pressure-driven depth (curve Min in Dynamics → Grain).")
-                GapRow("Offset Jitter", note: "Random grain offset per stamp.")
                 GapRow("Blend Mode", note: "Grain blend mode — Kiki grain is multiplicative carve only.")
-                GapRow("Brightness / Contrast", note: "Grain texture pre-adjustment.")
             }
         }
         if wet { WetGateFootnote() }
@@ -1386,6 +1392,18 @@ enum BrushHelpCatalog {
         "Grain Zoom": BrushHelp(summary: "Whether the moving grain scales with the brush.",
             low: "Follow size — grain features grow and shrink with brush size.",
             high: "Cropped — grain stays at its own fixed size regardless of brush size."),
+        "Grain Rotation": BrushHelp(summary: "Turns the moving grain relative to the stroke direction.",
+            low: "\u{2212}180\u{00B0} — fully counter-rotated.",
+            high: "+180\u{00B0} — fully rotated; 0\u{00B0} rides the stroke frame as-is."),
+        "Grain Depth Minimum": BrushHelp(summary: "Floor for modulated grain depth — pressure/jitter can't fade the tooth below this.",
+            low: "Modulation can fade the grain to nothing.",
+            high: "Grain always carves at full Depth."),
+        "Grain Brightness": BrushHelp(summary: "Pre-brightens or darkens the grain texture before it carves.",
+            low: "\u{2212}100%: darker grain — carves less, more paint survives.",
+            high: "+100%: brighter grain — carves more, airier texture."),
+        "Grain Contrast": BrushHelp(summary: "Pushes the grain's mid-tones apart before it carves.",
+            low: "\u{2212}100%: flat gray — even, subtle tooth.",
+            high: "+100%: punchy — pits and peaks separate hard."),
         "Grain Depth Jitter": BrushHelp(summary: "Randomly varies the grain strength per stamp — patchy, organic tooth.",
             low: "Even grain along the stroke.",
             high: "Some stamps carve the full Depth, others barely any."),

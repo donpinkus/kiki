@@ -438,9 +438,20 @@ do {
     let gback = try! JSONDecoder().decode(BrushConfig.self, from: try! JSONEncoder().encode(g))
     check("grainMovement round-trip", Double(gback.grainMovement), 0.8, tol: 1e-9)
     check("grainZoom round-trip", Double(gback.grainZoom), 0.25, tol: 1e-9)
+    var g2 = BrushConfig(color: .black, baseWidth: 20)
+    g2.grainRotation = -0.4; g2.grainDepthMinimum = 0.3; g2.grainOffsetJitter = true
+    g2.grainBrightness = 0.2; g2.grainContrast = -0.5
+    let g2b = try! JSONDecoder().decode(BrushConfig.self, from: try! JSONEncoder().encode(g2))
+    check("grainRotation round-trip", Double(g2b.grainRotation), -0.4, tol: 1e-9)
+    check("grainDepthMinimum round-trip", Double(g2b.grainDepthMinimum), 0.3, tol: 1e-9)
+    checkBool("grainOffsetJitter round-trip", g2b.grainOffsetJitter)
+    check("grainBrightness round-trip", Double(g2b.grainBrightness), 0.2, tol: 1e-9)
+    check("grainContrast round-trip", Double(g2b.grainContrast), -0.5, tol: 1e-9)
     let legacy2 = try! JSONDecoder().decode(BrushConfig.self, from: Data(#"{"color":{"red":0,"green":0,"blue":0,"alpha":1},"baseWidth":10,"pressureGamma":0.7}"#.utf8))
     check("legacy decode: grainMovement=0 (smear)", Double(legacy2.grainMovement), 0)
     check("legacy decode: grainZoom=1 (Cropped)", Double(legacy2.grainZoom), 1)
+    checkBool("legacy decode: offsetJitter off", !legacy2.grainOffsetJitter)
+    check("legacy decode: rotation 0", Double(legacy2.grainRotation), 0)
 }
 
 print("")

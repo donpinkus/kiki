@@ -386,6 +386,7 @@ public enum CuratedPresetCatalog {
             b.grainMoving = true        // Procreate: Moving / Rolling
             b.grainMovement = 1.0       // Rolling (their Movement slider at max)
             b.grainZoom = 0.61          // their Zoom 61% (mostly Cropped)
+            b.grainOffsetJitter = true  // their pane: Offset Jitter ON
             b.dynamics = BrushDynamics(
                 size: CurveOption(sensors: [], strength: 1),   // AP Size 0%: no pressure size
                 flow: CurveOption(sensors: [SensorChannel(sensor: .pressure)], minValue: 0.85))

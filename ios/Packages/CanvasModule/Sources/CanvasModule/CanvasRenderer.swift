@@ -168,10 +168,24 @@ public final class CanvasRenderer {
     /// flatten stamp passes read it to pick the grain PSO + bind the texture/params.
     /// depth [0,1]; invScale multiplies document-space pixel coords into grain UV.
     /// One resolved grain binding: texture + carve depth + UV scale, plus the
-    /// moving-mode frame factors (Procreate Movement: smear anisotropy ↔ rolling
-    /// isotropy) baked into per-axis UV multipliers.
-    typealias GrainSettings = (texture: MTLTexture, depth: Float, invScale: Float,
-                               moving: Bool, alongMul: Float, latMul: Float)
+    /// moving-mode frame factors (Movement smear↔rolling anisotropy, per-stroke
+    /// Offset Jitter, Rotation) and the shared adjustments (Depth Minimum,
+    /// Brightness/Contrast). All precomputed here so the shaders just consume.
+    struct GrainSettings {
+        let texture: MTLTexture
+        let moving: Bool
+        let depth: Float
+        let invScale: Float
+        let alongMul: Float     // moving: along-stroke UV factor (smear 0.45 → rolling 1)
+        let latMul: Float       // moving: lateral UV factor (smear 3.5 → rolling 1)
+        let offU: Float         // moving: per-stroke Offset Jitter, canvas px
+        let offV: Float
+        let cosR: Float         // moving: Rotation vs stroke direction
+        let sinR: Float
+        let brightness: Float   // both modes: grain pre-adjust [-1,1]
+        let contrastMul: Float  // both modes: precomputed multiplier (pow(3, contrast))
+        let depthMin: Float     // moving: floor for modulated (pressure/jitter) depth
+    }
     var activeGrain: GrainSettings?
 
     /// P4a lightness-map uniform for the stroke being drawn/flattened, or nil for the
@@ -1829,10 +1843,12 @@ public final class CanvasRenderer {
     /// the unit quad to document pixels × invScale so grain tiles in DOCUMENT space.
     private func bindGrainCompositor(_ enc: MTLRenderCommandEncoder, _ grain: GrainSettings) {
         enc.setFragmentTexture(grain.texture, index: 1)
-        var params = SIMD4<Float>(grain.depth,
-                                  Float(canvasWidth) * grain.invScale,
-                                  Float(canvasHeight) * grain.invScale, 0)
-        enc.setFragmentBytes(&params, length: MemoryLayout<SIMD4<Float>>.size, index: 1)
+        // t0 = (depth, sx, sy, 0); t1 = (brightness, contrastMul, 0, 0).
+        var params = [SIMD4<Float>(grain.depth,
+                                   Float(canvasWidth) * grain.invScale,
+                                   Float(canvasHeight) * grain.invScale, 0),
+                      SIMD4<Float>(grain.brightness, grain.contrastMul, 0, 0)]
+        enc.setFragmentBytes(&params, length: MemoryLayout<SIMD4<Float>>.size * 2, index: 1)
     }
 
     /// Generate the procedural grain library: 256² R8, TILEABLE (periodic value-noise
@@ -1991,7 +2007,8 @@ public final class CanvasRenderer {
     /// `widthPx` is the brush's nominal stamp diameter in CANVAS pixels (baseWidth ×
     /// canvasScale on the live path; harness/persistence widths are already canvas px,
     /// so the default falls back to baseWidth). Only the moving-mode Zoom uses it.
-    func grainSettings(for brush: BrushConfig, widthPx: CGFloat = 0) -> GrainSettings? {
+    /// `strokeID` seeds the per-stroke Offset Jitter (nil → no offset).
+    func grainSettings(for brush: BrushConfig, widthPx: CGFloat = 0, strokeID: UUID? = nil) -> GrainSettings? {
         guard brush.grainDepth > 0.005, let grainID = brush.grainID else { return nil }
         let depth = Float(min(max(brush.grainDepth, 0), 1))
         let tex: MTLTexture
@@ -2024,7 +2041,31 @@ public final class CanvasRenderer {
         let movement = Float(min(max(brush.grainMovement, 0), 1))
         let alongMul = 0.45 + (1.0 - 0.45) * movement
         let latMul = 3.5 + (1.0 - 3.5) * movement
-        return (tex, depth, Float(1.0 / tilePx), brush.grainMoving, alongMul, latMul)
+        // Offset Jitter (moving-only): one random tile offset per stroke, so repeated
+        // strokes don't sample the same grain phase. Deterministic per stroke id.
+        var offU: Float = 0, offV: Float = 0
+        if brush.grainMoving, brush.grainOffsetJitter, let id = strokeID {
+            let seed = StrokeStampGenerator.strokeSeed(id)
+            offU = Float(brushHash01(seed, 0, 0x6F01) * tilePx)
+            offV = Float(brushHash01(seed, 0, 0x6F02) * tilePx)
+        }
+        // Rotation (moving-only): grain angle vs the stroke direction, ±100% ≙ ±180°.
+        let theta = Float(min(max(brush.grainRotation, -1), 1)) * .pi
+        // Brightness/Contrast (both modes): shader applies src' = (src−.5)·mul + .5 + b.
+        let contrastMul = Float(pow(3.0, Double(min(max(brush.grainContrast, -1), 1))))
+        return GrainSettings(texture: tex,
+                             moving: brush.grainMoving,
+                             depth: depth,
+                             invScale: Float(1.0 / tilePx),
+                             alongMul: alongMul,
+                             latMul: latMul,
+                             offU: offU,
+                             offV: offV,
+                             cosR: cos(theta),
+                             sinR: sin(theta),
+                             brightness: Float(min(max(brush.grainBrightness, -1), 1)),
+                             contrastMul: contrastMul,
+                             depthMin: Float(min(max(brush.grainDepthMinimum, 0), 1)))
     }
 
     /// Bind the moving-grain slot (texture(1) + fragment buffer(3)) for a dry stamp
@@ -2032,17 +2073,20 @@ public final class CanvasRenderer {
     /// fragment declares the slot, so it must always be bound.
     private func bindMovingGrain(_ enc: MTLRenderCommandEncoder,
                                  _ grain: GrainSettings?) {
-        // Packing: (depth, invScale, latMul, alongMul). depth == 0 disables the carve
-        // in the shader, so the dummy binding needs no separate enabled flag.
-        var params: SIMD4<Float>
+        // Packing (3×float4): g0 = (depth, invScale, latMul, alongMul);
+        // g1 = (offU, offV, cosR, sinR); g2 = (brightness, contrastMul, depthMin, 0).
+        // depth == 0 disables the carve, so the dummy binding needs no enabled flag.
+        var params: [SIMD4<Float>]
         if let grain, grain.moving {
             enc.setFragmentTexture(grain.texture, index: 1)
-            params = SIMD4<Float>(grain.depth, grain.invScale, grain.latMul, grain.alongMul)
+            params = [SIMD4<Float>(grain.depth, grain.invScale, grain.latMul, grain.alongMul),
+                      SIMD4<Float>(grain.offU, grain.offV, grain.cosR, grain.sinR),
+                      SIMD4<Float>(grain.brightness, grain.contrastMul, grain.depthMin, 0)]
         } else {
             enc.setFragmentTexture(blackDummyTexture, index: 1)
-            params = SIMD4<Float>(0, 0, 1, 1)
+            params = [SIMD4<Float>(0, 0, 1, 1), SIMD4<Float>(0, 0, 1, 0), SIMD4<Float>(0, 1, 0, 0)]
         }
-        enc.setFragmentBytes(&params, length: MemoryLayout<SIMD4<Float>>.size, index: 3)
+        enc.setFragmentBytes(&params, length: MemoryLayout<SIMD4<Float>>.size * 3, index: 3)
     }
 
     /// `MetalCanvasView` resolves this when a stroke starts and assigns `activeShapeTexture`.
@@ -2285,20 +2329,31 @@ public final class CanvasRenderer {
     // compositor. gp = (depth, invScale, latMul, alongMul); depth = 0 (dummy binding)
     // makes it an exact identity when off.
     static inline float movingGrainCarve(float cov, StampVaryings in,
-                                         texture2d<float> grainTex, float4 gp) {
+                                         texture2d<float> grainTex,
+                                         float4 gp, float4 g1, float4 g2) {
         if (gp.x <= 0.0) { return cov; }
         constexpr sampler g(filter::linear, mip_filter::linear, address::repeat);
         // Stroke-frame UV with per-axis Movement factors (gp.z = lateral, gp.w = along).
         // Movement 0 (smear): lateral ×3.5 / along ×0.45 — features stretch into streaks
-        // running WITH the stroke (the crayon/lead look; isotropic read as fish-scale
-        // scumble in dry-18 iterations 2–3). Movement 1 (Rolling): ×1/×1 — the texture
-        // rolls under the brush undistorted (grids stay square). The smoothstep sharpens
-        // coarse value-noise into distinct lines; harmless for near-binary image grains.
+        // running WITH the stroke (the crayon/lead look). Movement 1 (Rolling): ×1/×1 —
+        // the texture rolls under the brush undistorted (grids stay square). Then the
+        // Rotation matrix (g1.zw) turns the frame vs the stroke direction, and the
+        // per-stroke Offset Jitter (g1.xy, canvas px) dephases repeated strokes.
         // Coordinates are the POINT's stroke-frame position (see brushStampVertex) —
         // dab-size-independent, so overlapping dabs agree and the interior is seamless.
-        float2 guv = float2(in.strokeLat * gp.z, in.strokeAlong * gp.w) * gp.y;
-        float src = smoothstep(0.25, 0.85, grainTex.sample(g, guv).r);
-        float d = clamp(gp.x * in.grainMul, 0.0, 1.0);
+        float2 p = float2(in.strokeLat * gp.z, in.strokeAlong * gp.w);
+        p = float2(p.x * g1.z - p.y * g1.w, p.x * g1.w + p.y * g1.z);
+        float2 guv = (p + g1.xy) * gp.y;
+        // Brightness/Contrast pre-adjust (branched: (x−.5)·1+.5 costs float LSBs vs x,
+        // and battery byte-diffs must stay exact at identity), then the smoothstep.
+        float raw = grainTex.sample(g, guv).r;
+        if (g2.y != 1.0 || g2.x != 0.0) {
+            raw = clamp((raw - 0.5) * g2.y + 0.5 + g2.x, 0.0, 1.0);
+        }
+        float src = smoothstep(0.25, 0.85, raw);
+        // Depth Minimum: floor for the MODULATED depth (dynamics grain curve + Depth
+        // Jitter ride in grainMul) — full modulation still reaches Depth.
+        float d = clamp(g2.z + (gp.x - g2.z) * in.grainMul, 0.0, 1.0);
         // MULTIPLICATIVE tooth, no compensation boost: the boost form (used once at
         // composite time by the document-grain path) inflates when applied per dab and
         // the stacking drowned the texture entirely (first dry-18 render — solid dark
@@ -2320,7 +2375,7 @@ public final class CanvasRenderer {
     fragment float4 brushStampFragment(
         StampVaryings in [[stage_in]],
         texture2d<float> movingGrainTex [[texture(1)]],
-        constant float4& movingGrainParams [[buffer(3)]]
+        constant float4* movingGrainParams [[buffer(3)]]
     ) {
         // Distance metric: circle for visible/cap dabs; stroke-aligned SUPERELLIPSE
         // (x⁴+y⁴)^¼ for smooth-intent interior dabs — flat sides slide into a
@@ -2339,7 +2394,7 @@ public final class CanvasRenderer {
         float soft = 1.0 - in.hardness;
         float start = min(in.hardness, 1.0 - aa) - soft * soft * 0.85;
         float alpha = 1.0 - smoothstep(start, 1.0, d);
-        alpha = movingGrainCarve(alpha, in, movingGrainTex, movingGrainParams);
+        alpha = movingGrainCarve(alpha, in, movingGrainTex, movingGrainParams[0], movingGrainParams[1], movingGrainParams[2]);
         return in.color * alpha;
     }
 
@@ -2403,7 +2458,7 @@ public final class CanvasRenderer {
         constant float4& lm [[buffer(0)]],  // (h, s, z, strength) — h/s/z now a FALLBACK; see below
         constant float4& rc [[buffer(1)]],  // (meanLuma, gain, 0, 0) — coverage-art recentering
         texture2d<float> movingGrainTex [[texture(1)]],
-        constant float4& movingGrainParams [[buffer(3)]]
+        constant float4* movingGrainParams [[buffer(3)]]
     ) {
         constexpr sampler shapeSampler(filter::linear, mip_filter::linear, address::clamp_to_zero);
         float m = shapeTex.sample(shapeSampler, in.texCoord).r;
@@ -2432,7 +2487,7 @@ public final class CanvasRenderer {
         float f = clamp((2.0 - 4.0 * z) * mc * mc + (4.0 * z - 1.0) * mc, 0.0, 1.0);
         float L = z + (f - z) * lm.w;
         float3 lin = lmS2L(lmHSL2RGB(hsl.x, hsl.y, L));
-        cov = movingGrainCarve(cov, in, movingGrainTex, movingGrainParams);
+        cov = movingGrainCarve(cov, in, movingGrainTex, movingGrainParams[0], movingGrainParams[1], movingGrainParams[2]);
         float a = in.color.a * cov;   // flow × coverage, premultiplied out
         return float4(lin * a, a);
     }
@@ -2448,13 +2503,13 @@ public final class CanvasRenderer {
         StampVaryings in [[stage_in]],
         texture2d<float> shapeTex [[texture(0)]],
         texture2d<float> movingGrainTex [[texture(1)]],
-        constant float4& movingGrainParams [[buffer(3)]]
+        constant float4* movingGrainParams [[buffer(3)]]
     ) {
         constexpr sampler shapeSampler(filter::linear, mip_filter::linear, address::clamp_to_zero);
         float m = shapeTex.sample(shapeSampler, in.texCoord).r;
         float gamma = mix(1.8, 0.55, clamp(in.hardness, 0.0, 1.0));
         float cov = pow(max(m, 0.0), gamma);
-        cov = movingGrainCarve(cov, in, movingGrainTex, movingGrainParams);
+        cov = movingGrainCarve(cov, in, movingGrainTex, movingGrainParams[0], movingGrainParams[1], movingGrainParams[2]);
         return in.color * cov;
     }
 
@@ -2692,12 +2747,17 @@ public final class CanvasRenderer {
         texture2d<float> layerTexture [[texture(0)]],
         texture2d<float> grainTex [[texture(1)]],
         constant float& opacity [[buffer(0)]],
-        constant float4& gp [[buffer(1)]]
+        constant float4* gpArr [[buffer(1)]]
     ) {
         constexpr sampler texSampler(filter::linear, address::clamp_to_zero);
         constexpr sampler grainSampler(filter::linear, mip_filter::linear, address::repeat);
+        float4 gp = gpArr[0];   // (depth, sx, sy, 0)
+        float4 t1 = gpArr[1];   // (brightness, contrastMul, 0, 0)
         float4 color = layerTexture.sample(texSampler, in.texCoord);
         float src = grainTex.sample(grainSampler, in.texCoord * gp.yz).r;
+        if (t1.y != 1.0 || t1.x != 0.0) {
+            src = clamp((src - 0.5) * t1.y + 0.5 + t1.x, 0.0, 1.0);
+        }
         float a = color.a;
         float carved = clamp(a - src * gp.x, 0.0, 1.0);
         // Premultiplied: scale rgb with the same factor so straight color is preserved.

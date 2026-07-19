@@ -219,6 +219,20 @@ public struct BrushConfig: Codable, Sendable {
     /// brush size; 1 = Cropped — fixed tile from the texture's own resolution.
     /// Texturized mode always uses the fixed document-anchored tile.
     public var grainZoom: CGFloat
+    /// Moving-grain "Rotation" [-1,1] (Procreate): grain angle vs the stroke
+    /// direction, ±1 ≙ ±180°. 0 = aligned with the stroke frame.
+    public var grainRotation: CGFloat
+    /// Moving-grain "Depth Minimum" [0,1] (Procreate): floor for MODULATED depth —
+    /// when the dynamics grain curve / Depth Jitter pull depth down, it bottoms out
+    /// here instead of 0. Inert when nothing modulates.
+    public var grainDepthMinimum: CGFloat
+    /// Moving-grain "Offset Jitter" (Procreate): one random tile offset per stroke,
+    /// so repeated strokes don't repeat the same grain phase.
+    public var grainOffsetJitter: Bool
+    /// Grain "Brightness" [-1,1] (both modes): pre-adjusts the grain texture.
+    public var grainBrightness: CGFloat
+    /// Grain "Contrast" [-1,1] (both modes): pre-adjusts the grain texture.
+    public var grainContrast: CGFloat
     /// P4a lightness-map strength [0,1]: reinterpret the shaped tip's grayscale as a VALUE
     /// map (Krita PreserveLightness / Schatz quadratic) — dark tip pixels darken the ink,
     /// light ones lighten it, mid-gray = exact brush color. 0 = off (flat ink, today's
@@ -309,6 +323,11 @@ public struct BrushConfig: Codable, Sendable {
         grainMoving: Bool = false,
         grainMovement: CGFloat = 0.0,
         grainZoom: CGFloat = 1.0,
+        grainRotation: CGFloat = 0.0,
+        grainDepthMinimum: CGFloat = 0.0,
+        grainOffsetJitter: Bool = false,
+        grainBrightness: CGFloat = 0.0,
+        grainContrast: CGFloat = 0.0,
         tipLightness: CGFloat = 0.0,
         tipAngle: CGFloat = 0.0,
         fallOff: CGFloat = 0.0,
@@ -355,6 +374,11 @@ public struct BrushConfig: Codable, Sendable {
         self.grainMoving = grainMoving
         self.grainMovement = grainMovement
         self.grainZoom = grainZoom
+        self.grainRotation = grainRotation
+        self.grainDepthMinimum = grainDepthMinimum
+        self.grainOffsetJitter = grainOffsetJitter
+        self.grainBrightness = grainBrightness
+        self.grainContrast = grainContrast
         self.tipLightness = tipLightness
         self.tipAngle = tipAngle
         self.fallOff = fallOff
@@ -414,6 +438,7 @@ public struct BrushConfig: Codable, Sendable {
         case taperStart, taperEnd, taperOpacity, grainMoving, rotationJitter
         case randomizedRotation, grainDepthJitter
         case grainMovement, grainZoom
+        case grainRotation, grainDepthMinimum, grainOffsetJitter, grainBrightness, grainContrast
     }
 
     public init(from decoder: Decoder) throws {
@@ -470,6 +495,11 @@ public struct BrushConfig: Codable, Sendable {
         grainDepthJitter = try container.decodeIfPresent(CGFloat.self, forKey: .grainDepthJitter) ?? 0.0
         grainMovement = try container.decodeIfPresent(CGFloat.self, forKey: .grainMovement) ?? 0.0
         grainZoom = try container.decodeIfPresent(CGFloat.self, forKey: .grainZoom) ?? 1.0
+        grainRotation = try container.decodeIfPresent(CGFloat.self, forKey: .grainRotation) ?? 0.0
+        grainDepthMinimum = try container.decodeIfPresent(CGFloat.self, forKey: .grainDepthMinimum) ?? 0.0
+        grainOffsetJitter = try container.decodeIfPresent(Bool.self, forKey: .grainOffsetJitter) ?? false
+        grainBrightness = try container.decodeIfPresent(CGFloat.self, forKey: .grainBrightness) ?? 0.0
+        grainContrast = try container.decodeIfPresent(CGFloat.self, forKey: .grainContrast) ?? 0.0
         flipX = try container.decodeIfPresent(Bool.self, forKey: .flipX) ?? false
         flipY = try container.decodeIfPresent(Bool.self, forKey: .flipY) ?? false
         secondaryColor = try container.decodeIfPresent(CodableColor.self, forKey: .secondaryColor)
@@ -528,6 +558,11 @@ public struct BrushConfig: Codable, Sendable {
         try container.encode(grainDepthJitter, forKey: .grainDepthJitter)
         try container.encode(grainMovement, forKey: .grainMovement)
         try container.encode(grainZoom, forKey: .grainZoom)
+        try container.encode(grainRotation, forKey: .grainRotation)
+        try container.encode(grainDepthMinimum, forKey: .grainDepthMinimum)
+        try container.encode(grainOffsetJitter, forKey: .grainOffsetJitter)
+        try container.encode(grainBrightness, forKey: .grainBrightness)
+        try container.encode(grainContrast, forKey: .grainContrast)
         try container.encode(flipX, forKey: .flipX)
         try container.encode(flipY, forKey: .flipY)
         try container.encodeIfPresent(dynamics, forKey: .dynamics)

@@ -165,6 +165,41 @@ final class AppCoordinator {
             applyTool()
         }
     }
+    /// Moving-grain "Rotation" (±100% ≙ ±180° vs stroke direction).
+    var toolGrainRotation: CGFloat = 0.0 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    /// Moving-grain "Depth Minimum" (floor for modulated depth).
+    var toolGrainDepthMinimum: CGFloat = 0.0 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    /// Moving-grain "Offset Jitter" (random tile offset per stroke).
+    var toolGrainOffsetJitter: Bool = false {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    /// Grain "Brightness" pre-adjust (both modes).
+    var toolGrainBrightness: CGFloat = 0.0 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    /// Grain "Contrast" pre-adjust (both modes).
+    var toolGrainContrast: CGFloat = 0.0 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
     /// Gaussian arc-length smoothing ("Smoothing", P3). 0 = off; higher = steadier
     /// curvature with more trailing lag (catch-up-on-lift covers the tail).
     var toolStabilization: CGFloat = 0.0 {
@@ -2567,6 +2602,11 @@ final class AppCoordinator {
         toolGrainDepthJitter = c.grainDepthJitter
         toolGrainMovement = c.grainMovement
         toolGrainZoom = c.grainZoom
+        toolGrainRotation = c.grainRotation
+        toolGrainDepthMinimum = c.grainDepthMinimum
+        toolGrainOffsetJitter = c.grainOffsetJitter
+        toolGrainBrightness = c.grainBrightness
+        toolGrainContrast = c.grainContrast
         toolShapeID = c.shapeID
         toolAspect = c.aspectRatio
         toolGrainID = c.grainID
@@ -2618,6 +2658,11 @@ final class AppCoordinator {
         toolGrainDepthJitter = 0
         toolGrainMovement = 0
         toolGrainZoom = 1
+        toolGrainRotation = 0
+        toolGrainDepthMinimum = 0
+        toolGrainOffsetJitter = false
+        toolGrainBrightness = 0
+        toolGrainContrast = 0
         toolShapeID = nil
         toolAspect = d.aspectRatio
         toolGrainID = nil
@@ -2697,6 +2742,11 @@ final class AppCoordinator {
                 grainMoving: toolGrainMoving,
                 grainMovement: toolGrainMovement,
                 grainZoom: toolGrainZoom,
+                grainRotation: toolGrainRotation,
+                grainDepthMinimum: toolGrainDepthMinimum,
+                grainOffsetJitter: toolGrainOffsetJitter,
+                grainBrightness: toolGrainBrightness,
+                grainContrast: toolGrainContrast,
                 tipLightness: toolTipLightness,
                 tipAngle: toolTipAngle,
                 fallOff: toolFallOff,

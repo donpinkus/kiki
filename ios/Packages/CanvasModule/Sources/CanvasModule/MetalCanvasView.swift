@@ -1349,7 +1349,7 @@ public final class MetalCanvasView: UIView {
         renderer.commitStampsToCanvas(stamps,
                                       strokeOpacity: Float(brush.opacity),
                                       shapeTexture: renderer.shapeTexture(for: brush.shapeID),
-                                      grain: renderer.grainSettings(for: brush, widthPx: brush.baseWidth * canvasScale),
+                                      grain: renderer.grainSettings(for: brush, widthPx: brush.baseWidth * canvasScale, strokeID: stroke.id),
                                       lightness: renderer.lightnessSettings(for: brush),
                                       flip: renderer.flipSettings(for: brush))
     }
@@ -2710,7 +2710,8 @@ public final class MetalCanvasView: UIView {
                         strokeOpacity: Float(stroke.brush.opacity),
                         shapeTexture: renderer.shapeTexture(for: stroke.brush.shapeID),
                         grain: renderer.grainSettings(for: stroke.brush,
-                                                      widthPx: stroke.brush.baseWidth * scale),
+                                                      widthPx: stroke.brush.baseWidth * scale,
+                                                      strokeID: stroke.id),
                         lightness: renderer.lightnessSettings(for: stroke.brush),
                         flip: renderer.flipSettings(for: stroke.brush)
                     )
@@ -2865,7 +2866,9 @@ public final class MetalCanvasView: UIView {
     private func currentGrain() -> CanvasRenderer.GrainSettings? {
         guard let brush = currentBrushConfig(), !brush.wetEnabled else { return nil }
         // widthPx: nominal stamp diameter in canvas px (moving-grain Zoom "Follow size").
-        return renderer.grainSettings(for: brush, widthPx: brush.baseWidth * canvasScale)
+        // strokeID seeds the per-stroke Offset Jitter for the in-flight stroke.
+        return renderer.grainSettings(for: brush, widthPx: brush.baseWidth * canvasScale,
+                                      strokeID: activeStroke?.id)
     }
 
     /// The brush-tip stamp texture for the active/current brush, or nil for the procedural
