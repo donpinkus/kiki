@@ -107,10 +107,6 @@ export interface AppConfig {
    * (default 8 — a video "stream" generates only during idle pauses, so one
    * GPU serves far more sessions than the image pool's target of 4). */
   readonly LAMBDA_VIDEO_POOL_TARGET_STREAMS: number;
-  /** Idle window: a video_request fires this many ms after the user's LAST
-   * sketch frame (provided a generated image newer than that sketch exists).
-   * Default 3000 (product decision 2026-07-18). */
-  readonly VIDEO_IDLE_TRIGGER_MS: number;
   /** Flat charge per DELIVERED video into monthly_usage (the unified free
    * tier). Raw cost ≈ $0.024/video (~20s H100 @ $4.29/hr); charged higher to
    * absorb video-pool idle overhead. Exempt users (test accounts, active
@@ -295,7 +291,6 @@ const lambdaVideoUrl = process.env['LAMBDA_VIDEO_URL'] ?? '';
     LAMBDA_VIDEO_POOL_MIN: Number(process.env['LAMBDA_VIDEO_POOL_MIN'] ?? 0),
     LAMBDA_VIDEO_POOL_MAX: Number(process.env['LAMBDA_VIDEO_POOL_MAX'] ?? 1),
     LAMBDA_VIDEO_POOL_TARGET_STREAMS: Number(process.env['LAMBDA_VIDEO_POOL_TARGET_STREAMS'] ?? 8),
-    VIDEO_IDLE_TRIGGER_MS: Number(process.env['VIDEO_IDLE_TRIGGER_MS'] ?? 3000),
     VIDEO_USD_PER_GENERATION: Number(process.env['VIDEO_USD_PER_GENERATION'] ?? 0.05),
     FAL_KEY: falKey,
     FAL_IDLE_CLOSE_MS: Number(process.env['FAL_IDLE_CLOSE_MS'] ?? 0),

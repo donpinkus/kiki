@@ -24,6 +24,28 @@
  *
  * Test seams: `createClient`, `probeHealth`, and the timing dials are
  * injectable via the spec; production instantiations omit them.
+ *
+ * ── WHY IS AN INSTANCE ALIVE? (decision table — read this before diagnosing)
+ * The tick reaps an instance only when EVERY row below says "reapable".
+ * Each instance's current verdict is COMPUTED and exposed as
+ * `holdReason` in getState() (→ /v1/dev/lambda/status) and logged on
+ * change (`event:lambda_pool_instance_hold`) — query it, don't derive it.
+ *
+ * | Condition (checked in order)              | Verdict            |
+ * |-------------------------------------------|--------------------|
+ * | status is launching/booting               | held: booting      |
+ * | activeStreams > 0                         | held: active streams (a LEAKED slot also pins — check clients) |
+ * | pool size ≤ need, where need ≥ 1 because  |                    |
+ * |   interest < 10 min ago (see interest log)| held: interest — getState().interest says WHO and WHEN |
+ * |   or LAMBDA_*POOL_MIN floor               | held: floor        |
+ * |   or stream pressure                      | held: pressure     |
+ * | idle < 30 min (lastActivityMs)            | held: idle countdown (reaps in ~N min) |
+ * | none of the above                         | reaped this tick   |
+ *
+ * "Interest" = a user-facing reason to keep one instance warm: stream opens
+ * / ensure (image), animation fires (video — NOT stream opens, changed
+ * 2026-07-19). Every interest touch records its SOURCE (with the client
+ * fingerprint), kept in a ring buffer on getState().interest.recent.
  */
 
 import { createHmac } from 'node:crypto';
@@ -47,6 +69,9 @@ export interface PoolInstanceSummary {
   ip?: string;
   activeStreams: number;
   ageMs: number;
+  /** WHY the tick kept this instance (computed, human-readable — the
+   * anti-misdiagnosis field). */
+  holdReason: string;
 }
 
 export interface PoolState {
@@ -70,6 +95,13 @@ export interface PoolState {
   bootEstimateSeconds: number;
   /** Per-instance summary for ops visibility. */
   instances: PoolInstanceSummary[];
+  /** Interest attribution: who last kept this pool warm (see the decision
+   * table in the module header). */
+  interest: {
+    ageMs: number | null;
+    lastSource: string | null;
+    recent: Array<{ at: number; source: string }>;
+  };
 }
 
 export interface InstancePoolSpec {
@@ -117,14 +149,16 @@ export interface InstancePoolSpec {
 }
 
 export interface InstancePool {
-  touch(): void;
+  /** Register user-facing interest; `source` (e.g. 'stream_open
+   * client=simulator:…') lands in getState().interest for attribution. */
+  touch(source?: string): void;
   hasReady(): boolean;
   reportFailure(name: string): void;
-  acquireStream(): { name: string; url: string } | null;
+  acquireStream(source?: string): { name: string; url: string } | null;
   releaseStream(name: string): void;
   touchInstance(name: string): void;
   wsUrl(): string | null;
-  ensure(): PoolState;
+  ensure(source?: string): PoolState;
   getState(): PoolState;
   start(logger: FastifyBaseLogger): void;
   stop(): void;
@@ -144,6 +178,8 @@ interface PoolInstance {
   /** Re-registered at backend redeploy — launchedAtMs is adoption time, not a
    * real boot start, so waterfall 'ready' timings must exclude it. */
   adopted?: boolean;
+  /** Last computed hold verdict (see holdReasonFor); logged on change. */
+  holdReason?: string;
 }
 
 /** Default /health probe: https with the pinned fleet cert when TLS is
@@ -227,6 +263,21 @@ export function createInstancePool(spec: InstancePoolSpec): InstancePool {
   /** Last time anyone expressed interest (ensure/acquire) — keeps the floor-0
    * pool from launching for nobody. */
   let lastInterestMs = 0;
+  /** WHO last expressed interest, ring-buffered (newest first, cap 20) so
+   * "why is this pool warm" is a lookup. Throttled: identical consecutive
+   * sources within 60s collapse into one entry (frame activity would
+   * otherwise flood it). */
+  const interestLog: Array<{ at: number; source: string }> = [];
+  function recordInterest(source: string): void {
+    lastInterestMs = Date.now();
+    const head = interestLog[0];
+    if (head && head.source === source && Date.now() - head.at < 60_000) {
+      head.at = Date.now();
+      return;
+    }
+    interestLog.unshift({ at: Date.now(), source });
+    if (interestLog.length > 20) interestLog.pop();
+  }
 
   function enabled(): boolean {
     return spec.enabled();
@@ -279,8 +330,8 @@ runcmd:
 
   // ── public API ──────────────────────────────────────────────────────────
 
-  function touch(): void {
-    lastInterestMs = Date.now();
+  function touch(source = 'unattributed'): void {
+    recordInterest(source);
   }
 
   function hasReady(): boolean {
@@ -312,8 +363,8 @@ runcmd:
   }
 
   /** Assign a stream to the least-loaded ready instance. Null when none. */
-  function acquireStream(): { name: string; url: string } | null {
-    lastInterestMs = Date.now();
+  function acquireStream(source = 'acquire'): { name: string; url: string } | null {
+    recordInterest(source);
     const inst = leastLoadedReady();
     if (!inst) return null;
     inst.activeStreams += 1;
@@ -331,7 +382,7 @@ runcmd:
   function touchInstance(name: string): void {
     const inst = instances.get(name);
     if (inst) inst.lastActivityMs = Date.now();
-    lastInterestMs = Date.now();
+    recordInterest(`frames:${name}`);
   }
 
   /** One-shot URL (sketchify): least-loaded ready instance, no slot held. */
@@ -343,8 +394,8 @@ runcmd:
   }
 
   /** User interest: make sure at least one instance exists/is coming. */
-  function ensure(): PoolState {
-    lastInterestMs = Date.now();
+  function ensure(source = 'ensure'): PoolState {
+    recordInterest(source);
     if (enabled() && instances.size === 0 && launchesInFlight === 0) {
       lastError = undefined;
       void inBackgroundScope(scopeName, () => launchOne());
@@ -407,7 +458,13 @@ runcmd:
         ip: i.ip,
         activeStreams: i.activeStreams,
         ageMs: Date.now() - i.launchedAtMs,
+        holdReason: i.holdReason ?? 'pending first tick',
       })),
+      interest: {
+        ageMs: lastInterestMs > 0 ? Date.now() - lastInterestMs : null,
+        lastSource: interestLog[0]?.source ?? null,
+        recent: interestLog.slice(0, 10),
+      },
     };
   }
 
@@ -581,6 +638,34 @@ runcmd:
     if (!inst.adopted) recordPoolEvent('ready', name, inst.region, inst.readyAtMs - inst.launchedAtMs);
   }
 
+  /** The decision-table verdict for one instance (module header). `need`
+   * and `needReason` come from the tick's own computation so the verdict
+   * can never drift from the actual reap logic. */
+  function holdReasonFor(inst: PoolInstance, need: number, needReason: string): string {
+    if (inst.status !== 'ready') return `booting (${Math.round((Date.now() - inst.launchedAtMs) / 1000)}s)`;
+    if (inst.activeStreams > 0) return `active: ${inst.activeStreams} stream(s)`;
+    if (instances.size <= Math.max(spec.poolMin(), need)) return `within need (${needReason})`;
+    const idleMs = Date.now() - inst.lastActivityMs;
+    if (idleMs <= IDLE_TERMINATE_MS) {
+      return `idle ${Math.round(idleMs / 60_000)}m of ${Math.round(IDLE_TERMINATE_MS / 60_000)}m — reaps in ~${Math.max(1, Math.round((IDLE_TERMINATE_MS - idleMs) / 60_000))}m`;
+    }
+    return 'reapable this tick';
+  }
+
+  /** Refresh every instance's holdReason; log only transitions. */
+  function updateHoldReasons(need: number, needReason: string): void {
+    for (const inst of instances.values()) {
+      const verdict = holdReasonFor(inst, need, needReason);
+      if (verdict !== inst.holdReason) {
+        inst.holdReason = verdict;
+        log.info(
+          { name: inst.name, pool: spec.kind, holdReason: verdict, event: 'lambda_pool_instance_hold' },
+          `instance hold: ${verdict}`,
+        );
+      }
+    }
+  }
+
   // ── periodic tick: autoscale + idle scale-down + health ─────────────────
 
   async function tick(): Promise<void> {
@@ -640,6 +725,16 @@ runcmd:
       spec.poolMax(),
       Math.max(spec.poolMin(), pressureNeed, interested && totalStreams === 0 ? 1 : 0),
     );
+    // Attribution for the hold verdicts: which term of `need` is in charge.
+    const needReason =
+      pressureNeed >= Math.max(spec.poolMin(), 1) && totalStreams > 0
+        ? `pressure: ${totalStreams} streams`
+        : interested
+          ? `interest ${Math.round((Date.now() - lastInterestMs) / 1000)}s ago (${interestLog[0]?.source ?? 'unattributed'})`
+          : spec.poolMin() > 0
+            ? `floor: poolMin=${spec.poolMin()}`
+            : 'no demand';
+    updateHoldReasons(need, needReason);
 
     if (upOrComing() < need) {
       void inBackgroundScope(scopeName, () => launchOne());

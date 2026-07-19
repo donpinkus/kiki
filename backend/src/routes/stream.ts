@@ -2,8 +2,7 @@ import { randomBytes } from 'crypto';
 import type { FastifyPluginAsync } from 'fastify';
 
 import { config } from '../config/index.js';
-import { extractBearer } from '../modules/auth/index.js';
-import { verifyAccess } from '../modules/auth/jwt.js';
+import { resolveWsIdentity, extractQueryParam } from '../modules/auth/wsIdentity.js';
 import { withPhase } from '../modules/observability/phase.js';
 import { StreamRelay, WireRelayError, type WireRelayPhaseTimings, type RelevantHttpHeaders } from '../modules/relay/streamRelay.js';
 import { FalImageRelay, type ImageRelay } from '../modules/fal/falImageRelay.js';
@@ -20,16 +19,10 @@ import {
   getState as poolGetState,
   reportFailure as poolReportFailure,
 } from '../modules/lambda/devPool.js';
-import { trackSessionClosed, trackProviderSession, trackVideoGeneration } from '../modules/analytics/index.js';
-import { VideoSession } from '../modules/video/videoSession.js';
+import { trackSessionClosed, trackProviderSession } from '../modules/analytics/index.js';
 import {
   poolEnabled as videoPoolEnabled,
   getState as videoPoolGetState,
-  touch as touchVideoPool,
-  acquireStream as videoPoolAcquire,
-  releaseStream as videoPoolRelease,
-  touchInstance as videoPoolTouchInstance,
-  reportFailure as videoPoolReportFailure,
 } from '../modules/lambda/videoPool.js';
 
 /**
@@ -48,54 +41,11 @@ import {
  * cross-connection session registry — every state transition happens within
  * the lifetime of the WS connection that observes it).
  */
-function extractQueryParam(rawUrl: string | undefined, name: string): string | null {
-  if (!rawUrl) return null;
-  try {
-    const url = new URL(rawUrl, 'http://placeholder');
-    return url.searchParams.get(name);
-  } catch {
-    return null;
-  }
-}
-
 /** Nearest-rank percentile of an unsorted sample; null when empty. */
 function percentile(samples: number[], p: number): number | null {
   if (samples.length === 0) return null;
   const sorted = [...samples].sort((a, b) => a - b);
   return sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))] ?? null;
-}
-
-interface Identity {
-  userId: string;
-  source: 'jwt' | 'legacy_session';
-}
-
-async function resolveIdentity(
-  request: { url?: string; headers: { authorization?: string } },
-): Promise<Identity | { error: string; code: number }> {
-  // Try Bearer first.
-  const token = extractBearer(request.headers.authorization);
-  if (token) {
-    try {
-      const claims = await verifyAccess(token);
-      return { userId: claims.sub, source: 'jwt' };
-    } catch {
-      return { error: 'invalid_token', code: 1008 };
-    }
-  }
-
-  // Fallback to legacy ?session= if auth is not required yet.
-  if (!config.AUTH_REQUIRED) {
-    const sessionId = extractQueryParam(request.url, 'session');
-    if (sessionId) {
-      return { userId: sessionId, source: 'legacy_session' };
-    }
-  }
-
-  return {
-    error: config.AUTH_REQUIRED ? 'authentication_required' : 'missing_identity',
-    code: 1008,
-  };
 }
 
 export const streamRoute: FastifyPluginAsync = async (fastify) => {
@@ -128,29 +78,6 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       // per 4-step frame (590ms @ $4.29/hr H100), charged at $0.001 to absorb
       // pool idle overhead. Batched writes every 25 frames; fail-open like fal.
       let lambdaMeteringEnabled = false;
-      // Video metering: flat per-DELIVERED-video charge into the same ledger
-      // (stale/cancelled renders never bill — the hook fires post-guard).
-      let videoMeteringEnabled = false;
-      const billVideoGeneration = (): void => {
-        if (!videoMeteringEnabled) return;
-        const uidNow = userId;
-        if (!uidNow) return;
-        void addMonthlySpendUsd(uidNow, config.VIDEO_USD_PER_GENERATION)
-          .then((total) => {
-            if (clientDisconnected || socket.readyState !== socket.OPEN) return;
-            socket.send(JSON.stringify({ type: 'usage', spendUsd: total, capUsd: config.FREE_TIER_FAL_USD }));
-            if (total >= config.FREE_TIER_FAL_USD) {
-              request.log.info(
-                { userId: uidNow, connId, streamId, spendUsd: total, event: 'free_limit_reached' },
-                'AI spend cap reached mid-session (video) — cutting stream',
-              );
-              sendLimitReachedAndClose();
-            }
-          })
-          .catch(() => {
-            // Fail-open: a dropped ~$0.05 write is preferable to blocking video.
-          });
-      };
       let lambdaUnbilledFrames = 0;
       let lambdaBillInFlight = false;
       const LAMBDA_USD_PER_FRAME = 0.001;
@@ -224,12 +151,6 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
        * (early client disconnect) without a TDZ throw. */
       let videoAvailTimer: NodeJS.Timeout | null = null;
       const sessionStartMs = Date.now();
-      // Video idle-state animation (LTX-2.3 on a dedicated Lambda H100).
-      // Best-effort side-channel: created only when LAMBDA_VIDEO_URL is set;
-      // fed sketch/generated/config events and fires a video_request 3s
-      // after the last sketch frame. Never touches the image relay — the
-      // video model runs on its own GPU (see modules/video/videoSession.ts).
-      let videoSession: VideoSession | null = null;
       // Which provider serves this session. Hoisted (with the default) so the
       // close handler can read it even if the client disconnects before the
       // per-session override below resolves — a mid-handler `let` would be in
@@ -369,8 +290,6 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         if (didCleanup) return;
         didCleanup = true;
         clientDisconnected = true;
-        videoSession?.close();
-        videoSession = null;
         // Final fal spend flush: persist the last partial open span BEFORE
         // closing the relay (close() would finalize it out of reach). Read the
         // delta synchronously; fire-and-forget the DB write (low-stakes ~cents).
@@ -416,7 +335,6 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             everReachedReady,
             lastEmittedState,
             lastStateAgeMs,
-            video: videoSession?.getStats(),
             event: 'session_close',
           },
           'session_close',
@@ -446,7 +364,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             lambdaFirstFrameMs,
             lambdaDowngraded,
             everReachedReady,
-            videoStats: videoSession?.getStats() ?? null,
+            videoStats: null,
             clientTag,
             sketchesSent,
             imageGenMsP50: percentile(imageGenMsSamples, 0.5),
@@ -465,9 +383,6 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         const buf = Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data as ArrayBuffer);
         if (isBinary) {
           sketchesSent += 1;
-          // The user is drawing: reset the video idle window and cancel any
-          // in-flight video (a new sketch supersedes it).
-          videoSession?.noteSketchFrame();
           if (relay) {
             relay.sendFrame(buf);
             captureFrame('sketch', buf);
@@ -481,7 +396,6 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             const parsed = JSON.parse(text) as Record<string, unknown>;
             if (parsed.type === 'config') {
               lastConfig = parsed;
-              videoSession?.noteConfig(parsed);
               // Replay: record prompt changes (deduped in FrameCapture) so
               // the Gallery player can show which prompt drove each frame.
               if (typeof parsed['prompt'] === 'string') {
@@ -492,13 +406,10 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
               }
               // else: nothing to buffer — wireRelay sends lastConfig on connect.
             } else if (parsed.type === 'animate') {
-              // Manual Animate button. When video is disabled for this
-              // session (no video pool / wiring failed), answer with a
-              // synthesized video_cancelled so the iPad's optimistically-
-              // disabled button resets instead of hanging on "Animating".
-              if (videoSession) {
-                videoSession.requestAnimate();
-              } else if (socket.readyState === socket.OPEN) {
+              // Legacy in-drawing Animate button (pre-Animate-screen builds).
+              // The drawing stream no longer runs videos — reset the old
+              // client's button so it never hangs on "Animating".
+              if (socket.readyState === socket.OPEN) {
                 socket.send(
                   JSON.stringify({ type: 'video_cancelled', requestId: null, error: 'video_disabled' }),
                 );
@@ -511,7 +422,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       });
 
       // ─── Now the slow path: identity → entitlement → wire ─────────────
-      const identity = await resolveIdentity({
+      const identity = await resolveWsIdentity({
         url: request.url,
         headers: { authorization: request.headers.authorization },
       });
@@ -563,7 +474,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       // ready instance, else fal — nobody waits on a boot. Interest is
       // recorded either way so the pool warms while fal serves.
       if (imageProvider === 'auto') {
-        touchDevPool();
+        touchDevPool(`stream_open ${clientTag}`);
         providerResolvedFromAuto = true;
         // Waterfall stage attribution: the pool's state RIGHT NOW is what this
         // session experienced ('booting' = H100 found but not yet warm).
@@ -602,7 +513,6 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
           }
           falMeteringEnabled = imageProvider === 'fal' && !budget.exempt;
           lambdaMeteringEnabled = imageProvider === 'lambda' && !budget.exempt;
-          videoMeteringEnabled = !budget.exempt;
         } catch (err) {
           // Fail-open: if the budget DB is unreachable, let the user draw rather
           // than hang or hard-deny. Enable metering so spend resumes capping
@@ -613,7 +523,6 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
           );
           falMeteringEnabled = imageProvider === 'fal';
           lambdaMeteringEnabled = imageProvider === 'lambda';
-          videoMeteringEnabled = true;
         }
       }
 
@@ -674,66 +583,13 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       videoAvailTimer = setInterval(pushVideoAvailability, 15_000);
       videoAvailTimer.unref?.();
 
-      // Video idle-state animation: connect to a dedicated Lambda video
-      // instance in parallel with image wiring. Best-effort — start() never
-      // throws; with no instance assignable the session stays image-only and
-      // lazily upgrades when the pool warms. Sources, in precedence order:
-      //   1. LAMBDA_VIDEO_URL — static manually-launched instance (dev).
-      //   2. The video pool (LAMBDA_VIDEO_POOL_ENABLED) — production:
-      //      interest-launched on app open / stream start, idle-reaped,
-      //      redeploy-adopted (modules/lambda/videoPool.ts).
-      if (config.LAMBDA_VIDEO_URL || videoPoolEnabled()) {
-        const staticUrl = config.LAMBDA_VIDEO_URL;
-        if (!staticUrl) touchVideoPool(); // interest → next tick launches if none
-        videoSession = new VideoSession({
-          acquire: staticUrl ? () => ({ url: staticUrl }) : videoPoolAcquire,
-          release: staticUrl ? undefined : videoPoolRelease,
-          reportFailure: staticUrl ? undefined : videoPoolReportFailure,
-          touchInstance: staticUrl ? undefined : videoPoolTouchInstance,
-          tlsCa: config.LAMBDA_TLS_CA || null,
-          idleMs: config.VIDEO_IDLE_TRIGGER_MS,
-          sendToClient: (text) => {
-            if (!clientDisconnected && socket.readyState === socket.OPEN) socket.send(text);
-          },
-          isClientOpen: () => !clientDisconnected && socket.readyState === socket.OPEN,
-          onVideoDelivered: (mp4, meta, info) => {
-            billVideoGeneration();
-            ensureFrameCapture()?.captureVideo(mp4);
-            const genMs = typeof meta['genMs'] === 'number' ? meta['genMs'] : null;
-            if (userId) {
-              trackVideoGeneration({
-                userId,
-                streamId,
-                source: info.source,
-                waitMs: info.waitMs,
-                genMs,
-                bytes: mp4.length,
-              });
-            }
-            request.log.info(
-              {
-                userId,
-                connId,
-                streamId,
-                bytes: mp4.length,
-                genMs: genMs ?? undefined,
-                waitMs: info.waitMs,
-                source: info.source,
-                event: 'video_delivered',
-              },
-              'video_delivered',
-            );
-          },
-          log: request.log,
-          ctx: { userId, connId, streamId },
-        });
-        // Feed state that arrived before creation (iOS sends config — and
-        // possibly a first frame — immediately at WS open, ahead of the
-        // identity/budget slow path that gates creation).
-        if (lastConfig) videoSession.noteConfig(lastConfig);
-        if (pendingFrame) videoSession.noteSketchFrame();
-        void videoSession.start();
-      }
+      // Video pool warm-up interest: generation itself moved to the Animate
+      // screen's own /v1/animate socket (routes/animate.ts). Deliberately NOT
+      // touched here (narrowed 2026-07-19): drawing sessions kept a $4.29/hr
+      // video H100 warm for hours of simulator/dev traffic with zero
+      // animations. Video interest now means video INTENT — the Animate
+      // screen's socket-open touch prewarms it, and that screen shows
+      // warming progress for the cold-pool case.
 
       // Wire a fresh relay to the upstream: install message/close/error
       // handlers, connect, resend lastConfig. On success, `relay` and
@@ -778,7 +634,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
           // Keep the Lambda dev-pool idle reaper honest while frames flow.
           if (imageProvider === 'lambda') {
             if (poolInstanceName) poolTouchInstance(poolInstanceName);
-            else touchDevPool();
+            else touchDevPool('frames_static_url');
           }
           if (isBinary) {
             const buf = data as Buffer;
@@ -794,10 +650,6 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
               if (lambdaUnbilledFrames >= 25) billLambdaFrames();
             }
             captureFrame('generated', buf);
-            // Feed the video idle-trigger: this is the image a fired
-            // video_request would animate (also un-blocks a trigger that
-            // was waiting for the final generation to land).
-            videoSession?.noteGeneratedFrame(buf);
           } else {
             // Forward text frames (frame_meta, status, error) to the iPad
             // unchanged — sampling lambda frame_meta.genMs on the way past
@@ -1004,7 +856,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
               poolReportFailure(failedInstance);
               poolReleaseStream(failedInstance);
               poolInstanceName = null;
-              const slot = poolAcquireStream();
+              const slot = poolAcquireStream(`stream ${clientTag}`);
               if (slot && slot.name !== failedInstance && !clientDisconnected && socket.readyState === socket.OPEN) {
                 poolInstanceName = slot.name;
                 request.log.info(
@@ -1087,7 +939,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
           // kiki-serve instance (modules/lambda/devPool.ts).
           let lambdaUrl = config.LAMBDA_IMAGE_URL || null;
           if (!lambdaUrl) {
-            const slot = poolAcquireStream();
+            const slot = poolAcquireStream(`stream ${clientTag}`);
             if (slot) {
               poolInstanceName = slot.name;
               lambdaUrl = slot.url;
@@ -1103,7 +955,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
               // explicitly. Serving fal silently here would corrupt the A/B
               // comparison; an explicit bounce lets Donald retry once the
               // pool reports ready.
-              const poolState = ensureDevPool();
+              const poolState = ensureDevPool(`lambda_override ${clientTag}`);
               request.log.info(
                 { userId, connId, streamId, poolStatus: poolState.status, event: 'lambda_not_ready' },
                 'imageProvider=lambda but no instance ready — bouncing client',

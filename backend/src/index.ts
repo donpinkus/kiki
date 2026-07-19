@@ -34,6 +34,7 @@ import { config } from './config/index.js';
 import { AppError } from './errors.js';
 import { healthRoute } from './routes/health.js';
 import { streamRoute } from './routes/stream.js';
+import { animateRoute } from './routes/animate.js';
 import { authRoute } from './routes/auth.js';
 import { subscriptionRoute } from './routes/subscription.js';
 import { appStoreNotifyRoute } from './routes/appStoreNotify.js';
@@ -70,7 +71,11 @@ await app.register(cors, {
   origin: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
 });
-await app.register(websocket);
+// maxPayload raised from the 1 MiB default for /v1/animate: an
+// animate_request carries up to 4 base64 keyframe images in one JSON text
+// frame (~350 KB each after the iPad's ≤1024px JPEG downscale, 8 MB/frame
+// hard cap server-side).
+await app.register(websocket, { options: { maxPayload: 64 * 1024 * 1024 } });
 
 // --- Application modules ---
 // Global, fail-closed auth gate on the root app (see modules/auth/index.ts).
@@ -84,6 +89,7 @@ await app.register(subscriptionRoute);
 await app.register(appStoreNotifyRoute);
 await app.register(usageRoute);
 await app.register(streamRoute);
+await app.register(animateRoute);
 await app.register(lambdaDevRoute);
 await app.register(sketchifyRoute);
 

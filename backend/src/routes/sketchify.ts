@@ -100,7 +100,7 @@ export const sketchifyRoute: FastifyPluginAsync = async (fastify) => {
       if (!url) {
         // Kick the pool so the instance starts booting if it wasn't already,
         // and tell the client how long to expect.
-        const state = ensureDevPool();
+        const state = ensureDevPool('sketchify');
         request.log.info(
           { userId: request.userId, poolStatus: state.status, etaSeconds: state.etaSeconds, event: 'sketchify_not_ready' },
           'sketchify requested while lambda pool not ready',
@@ -116,7 +116,7 @@ export const sketchifyRoute: FastifyPluginAsync = async (fastify) => {
       const t0 = Date.now();
       try {
         const sketch = await runSketchify(url, jpeg, prompt);
-        touchDevPool();
+        touchDevPool('sketchify');
         request.log.info(
           { userId: request.userId, mode, elapsedMs: Date.now() - t0, bytes: sketch.length, event: 'sketchify_ok' },
           'sketchify_ok',

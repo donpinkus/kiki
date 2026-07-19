@@ -293,6 +293,29 @@ describe('instancePool', { timeout: 30_000 }, () => {
     }
   });
 
+  it('exposes WHY: interest attribution + per-instance hold verdicts in getState', async () => {
+    const cloud = makeFakeCloud();
+    const pool = makePool(cloud, { interestWindowMs: 60_000 });
+    try {
+      pool.start(testLog);
+      pool.ensure('app_open client=simulator:test');
+      await until(() => pool.hasReady());
+      // Verdicts refresh on the tick; wait for one.
+      await until(() => pool.getState().instances[0]?.holdReason !== 'pending first tick');
+      const state = pool.getState();
+      expect(state.interest.lastSource).toBe('app_open client=simulator:test');
+      expect(state.interest.ageMs).not.toBeNull();
+      expect(state.instances[0]?.holdReason).toContain('within need');
+      expect(state.instances[0]?.holdReason).toContain('app_open client=simulator:test');
+      // Acquire flips the verdict to active-streams on the next tick.
+      pool.acquireStream('stream client=device:test');
+      await until(() => pool.getState().instances[0]?.holdReason?.includes('active') ?? false);
+      expect(state.interest.recent.length).toBeGreaterThan(0);
+    } finally {
+      pool.stop();
+    }
+  });
+
   it('adopts existing prefix-matching instances at start (redeploy survival), ignoring other names', async () => {
     const cloud = makeFakeCloud();
     cloud.seed({ id: 'inst-adopt', name: 'kiki-test-1700000000001', ip: '10.0.0.9' });
