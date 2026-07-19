@@ -1657,34 +1657,39 @@ final class AppCoordinator {
     var canCopySelection: Bool { canvasViewModel.hasSelectionForEdit }
     var canPasteSelection: Bool { selectionClipboard != nil && !canvasViewModel.isPasting }
 
-    /// Copy the selection's content (visible strokes only, transparent
-    /// elsewhere) into the clipboard + system pasteboard.
-    func copySelection() {
+    /// The selection's content as a transparent cutout: visible strokes ×
+    /// selection mask, cropped to the selection bounds. Returns the image and
+    /// its rect in 2048² document space (position independent of snapshot
+    /// resolution). Shared by Copy, Save-to-Objects.
+    private func selectionCutout() -> (image: CGImage, rectInDocPixels: CGRect)? {
         guard let source = canvasViewModel.transparentSnapshot(),
               let mask = canvasViewModel.selectionMaskForEdit(side: source.width),
-              let bbox = Self.maskBoundingBox(mask) else { return }
+              let bbox = Self.maskBoundingBox(mask) else { return nil }
         let extent = CGRect(x: 0, y: 0, width: source.width, height: source.height)
         let blend = CIFilter.blendWithMask()
         blend.inputImage = CIImage(cgImage: source)
         blend.backgroundImage = CIImage(color: .clear).cropped(to: extent)
         blend.maskImage = CIImage(cgImage: mask).cropped(to: extent)
-        guard let out = blend.outputImage else { return }
+        guard let out = blend.outputImage else { return nil }
         let maskH = CGFloat(mask.height)
         let cropCI = CGRect(x: bbox.minX, y: maskH - bbox.maxY, width: bbox.width, height: bbox.height)
         guard let cg = Self.aiEditCIContext.createCGImage(
             out, from: cropCI, format: .RGBA8, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!
-        ) else { return }
-        // bbox is in snapshot pixels — rescale to the 2048 document space so
-        // paste position is independent of the snapshot resolution.
+        ) else { return nil }
         let docScale = CGFloat(2048) / CGFloat(source.width)
-        selectionClipboard = SelectionClipboard(
-            image: cg,
-            rectInDocPixels: CGRect(
-                x: bbox.minX * docScale, y: bbox.minY * docScale,
-                width: bbox.width * docScale, height: bbox.height * docScale
-            )
+        let rect = CGRect(
+            x: bbox.minX * docScale, y: bbox.minY * docScale,
+            width: bbox.width * docScale, height: bbox.height * docScale
         )
-        UIPasteboard.general.image = UIImage(cgImage: cg)
+        return (cg, rect)
+    }
+
+    /// Copy the selection's content (visible strokes only, transparent
+    /// elsewhere) into the clipboard + system pasteboard.
+    func copySelection() {
+        guard let cut = selectionCutout() else { return }
+        selectionClipboard = SelectionClipboard(image: cut.image, rectInDocPixels: cut.rectInDocPixels)
+        UIPasteboard.general.image = UIImage(cgImage: cut.image)
         Analytics.track(.selectionCopied)
         showTransientBanner("Copied — paste from the left sidebar.")
     }
@@ -1698,6 +1703,46 @@ final class AppCoordinator {
         if canvasViewModel.beginPaste(image: clip.image, rectInDocPixels: rect) {
             Analytics.track(.selectionPasted)
         }
+    }
+
+    // MARK: - Object library (grab → reuse across drawings)
+
+    /// Presents the objects drawer (toolbar shippingbox button).
+    var showObjectsDrawer = false
+
+    /// Cut the current selection (same masked cutout as Copy) and persist it
+    /// as a reusable object in the library.
+    func saveSelectionToObjects() {
+        guard let cut = selectionCutout(),
+              let png = UIImage(cgImage: cut.image).pngData() else { return }
+        let object = SavedObject(
+            name: "Object \(((try? modelContext.fetchCount(FetchDescriptor<SavedObject>())) ?? 0) + 1)",
+            imageData: png,
+            docWidth: cut.rectInDocPixels.width,
+            docHeight: cut.rectInDocPixels.height
+        )
+        modelContext.insert(object)
+        try? modelContext.save()
+        Analytics.track(.objectSaved)
+        showTransientBanner("Saved to your Objects — find them in the toolbar.")
+    }
+
+    /// Drop a saved object into the current drawing as a paste float
+    /// (centered at its original size; drag/pinch to place, then Place).
+    func insertObject(_ object: SavedObject) {
+        guard let cg = object.image?.cgImage else { return }
+        showObjectsDrawer = false
+        let w = object.docWidth
+        let h = object.docHeight
+        let rect = CGRect(x: (2048 - w) / 2, y: (2048 - h) / 2, width: w, height: h)
+        if canvasViewModel.beginPaste(image: cg, rectInDocPixels: rect) {
+            Analytics.track(.objectInserted)
+        }
+    }
+
+    func deleteObject(_ object: SavedObject) {
+        modelContext.delete(object)
+        try? modelContext.save()
     }
 
     // MARK: - Sticker sharing
@@ -2173,6 +2218,13 @@ final class AppCoordinator {
             pasteSelection()
         case "pastePlace":
             canvasViewModel.commitPaste()
+        case "saveObj":
+            saveSelectionToObjects()
+        case "insertObj":
+            let d = FetchDescriptor<SavedObject>(sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
+            if let obj = (try? modelContext.fetch(d))?.first { insertObject(obj) }
+        case "objectsDrawer":
+            showObjectsDrawer = true
         case "forkStartFrame":
             if currentScreen == .animate, let img = animate?.startKeyframe {
                 forkFrameIntoDrawing(img, returnSlot: .start)

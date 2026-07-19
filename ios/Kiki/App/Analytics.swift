@@ -64,6 +64,10 @@ enum AnalyticsEvent: String {
     case selectionCopied = "canvas.selection_copied"
     case selectionPasted = "canvas.selection_pasted"
 
+    // Object library
+    case objectSaved = "objects.saved"
+    case objectInserted = "objects.inserted"
+
     // AI Edit (inpaint)
     case aiEditRequested = "canvas.ai_edit_requested"
     case aiEditAccepted = "canvas.ai_edit_accepted"

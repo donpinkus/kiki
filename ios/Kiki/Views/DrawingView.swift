@@ -507,6 +507,18 @@ struct DrawingView: View {
                         }
                         .buttonStyle(.bordered)
                     }
+
+                    // Persist the cutout to the object library (toolbar
+                    // shippingbox) for reuse across drawings.
+                    Button {
+                        coordinator.saveSelectionToObjects()
+                    } label: {
+                        Label("Save Object", systemImage: "shippingbox")
+                            .font(.subheadline.weight(.semibold))
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 36)
+                    }
+                    .buttonStyle(.bordered)
                 }
             }
 

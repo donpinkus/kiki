@@ -64,7 +64,7 @@ struct KikiApp: App {
             "build_number": buildNumber ?? "unknown",
         ])
 
-        let container = try! ModelContainer(for: Drawing.self, AnimationClip.self)
+        let container = try! ModelContainer(for: Drawing.self, AnimationClip.self, SavedObject.self)
         self.container = container
         _coordinator = State(initialValue: AppCoordinator(modelContext: container.mainContext))
     }

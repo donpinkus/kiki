@@ -122,6 +122,18 @@ struct DrawingTopBar: View {
             toolButton(icon: "wand.and.stars", tool: .select)
                 .anchorPreference(key: SelectButtonAnchorKey.self, value: .bounds) { $0 }
 
+            // Object library: reusable cutouts saved from selections; tap a
+            // tile to drop it into this drawing as a movable float.
+            Button {
+                coordinator.showObjectsDrawer.toggle()
+            } label: {
+                chromeIcon("shippingbox")
+            }
+            .popover(isPresented: $coordinator.showObjectsDrawer) {
+                ObjectsDrawer()
+                    .frame(width: 360, height: 420)
+            }
+
             // AI Edit (inpaint): edits the active selection if one exists,
             // else the whole drawing. Highlighted while a preview is live.
             Button {
