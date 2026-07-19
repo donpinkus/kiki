@@ -15,8 +15,9 @@ private let streamLog = Logger(subsystem: "com.kiki.app", category: "StreamCoord
 enum DrawingTool: String, CaseIterable, Hashable {
     case brush
     case eraser
-    case lasso
-    case magicWand
+    /// The unified Select tool — SAM taps or freehand loops, per
+    /// `SelectionController.authorMode` (documents/plans/unified-selection.md).
+    case select
 }
 
 enum AppScreen: Equatable {
@@ -65,27 +66,11 @@ final class AppCoordinator {
 
     var currentTool: DrawingTool = .brush {
         didSet {
-            if canvasViewModel.hasLassoSelection {
-                if oldValue == .lasso && currentTool != .lasso {
-                    // Phase A → Phase B: commit floating selection, keep clip mask
-                    // visible. Brush/eraser strokes are now clipped to the lasso region.
-                    canvasViewModel.transitionToClipMode()
-                }
-                // Switching back to lasso or between pen/eraser: clip mask persists.
-                // User must explicitly clear it via "Clear Lasso" button.
-            }
-            // Lasso and wand are mutually exclusive clip sources — activating
-            // one clears the other's selection (a single clip path exists).
-            if currentTool == .magicWand, canvasViewModel.hasLassoSelection {
-                canvasViewModel.clearLasso()
-            }
-            if currentTool == .lasso, canvasViewModel.hasWandSelection {
-                canvasViewModel.clearWand()
-            }
-            // Leaving the wand freezes the in-progress object; its mask stays
-            // active as the clip (brush/eraser draw only inside), like lasso.
-            if oldValue == .magicWand, currentTool != .magicWand {
-                canvasViewModel.wand.toolDeactivated()
+            // Leaving Select commits any floating Move + freezes the open
+            // object. The selection itself PERSISTS across all tool switches
+            // (unified-selection.md) — only "Clear Selection" removes it.
+            if oldValue == .select, currentTool != .select {
+                canvasViewModel.selection.toolDeactivated()
             }
             // Stash the outgoing tool's size/opacity and load the incoming tool's.
             swapToolValues(from: oldValue, to: currentTool)
@@ -504,38 +489,32 @@ final class AppCoordinator {
     private var storedToolSizes: [DrawingTool: CGFloat] = [
         .brush: 15,
         .eraser: 25,
-        .lasso: 5,
-        .magicWand: 5
+        .select: 5
     ]
     private var storedToolOpacities: [DrawingTool: CGFloat] = [
         .brush: 1.0,
         .eraser: 1.0,
-        .lasso: 1.0,
-        .magicWand: 1.0
+        .select: 1.0
     ]
     private var storedToolFlows: [DrawingTool: CGFloat] = [
         .brush: 1.0,
         .eraser: 1.0,
-        .lasso: 1.0,
-        .magicWand: 1.0
+        .select: 1.0
     ]
     private var storedToolStreamlines: [DrawingTool: CGFloat] = [
         .brush: 0.35,
         .eraser: 0.0,
-        .lasso: 0.0,
-        .magicWand: 0.0
+        .select: 0.0
     ]
     private var storedToolHardnesses: [DrawingTool: CGFloat] = [
         .brush: 0.5,
         .eraser: 1.0,
-        .lasso: 1.0,
-        .magicWand: 1.0
+        .select: 1.0
     ]
     private var storedToolSpacings: [DrawingTool: CGFloat] = [
         .brush: 0.3,
         .eraser: 0.3,
-        .lasso: 0.3,
-        .magicWand: 0.3
+        .select: 0.3
     ]
     /// Per-tool brush shape. Absent = procedural round; only the brush meaningfully uses it.
     private var storedToolShapes: [DrawingTool: String] = [:]
@@ -924,6 +903,12 @@ final class AppCoordinator {
     /// Lower = more uniform denoising / tighter adherence to the sketch; fal's
     /// own default is 2.3 (looser/more restyling). Default 1.2 (more adherence).
     var streamScheduleMu: Double = 1.2 { didSet { syncStreamConfig() } }
+
+    /// Sketch-adherence dial (Lambda KV pipeline: reference-token K/V scaling).
+    /// >1 follows the sketch harder, <1 frees the prompt; 1.0 = stock. Only
+    /// honored on the lambda path — the fal relay ignores the key, so pin
+    /// imageProvider=lambda when tuning.
+    var streamReferenceScale: Double = 1.0 { didSet { syncStreamConfig() } }
 
     /// Which backend image path serves this device's stream: "auto" (what
     /// real users get — H100 pool when assignable, else fal; the backend
@@ -1459,15 +1444,15 @@ final class AppCoordinator {
         canvasViewModel.onFirstBrushStrokeCommitted = { [weak self] in
             self?.shouldShowQuickShapeTooltip = true
         }
-        // Magic wand: segment what the user is actually looking at — the
+        // Selection: segment what the user is actually looking at — the
         // generated image in overlay mode (locked 1:1 over the canvas square),
         // else the flattened canvas itself.
-        canvasViewModel.wand.sourceImageProvider = { [weak self] in
+        canvasViewModel.selection.sourceImageProvider = { [weak self] in
             guard let self else { return nil }
             if self.drawingLayout == .overlay, let generated = self.resultState.displayImage?.cgImage {
                 return generated
             }
-            return self.canvasViewModel.wandCanvasSnapshot()
+            return self.canvasViewModel.selectionCanvasSnapshot()
         }
     }
 
@@ -1600,14 +1585,10 @@ final class AppCoordinator {
     // MARK: - Actions
 
     func undo() {
-        // Wand active: undo steps back through wand prompts (last point, then
-        // reopening the last committed object) before touching canvas history.
-        if currentTool == .magicWand, canvasViewModel.wand.canUndoStep {
-            canvasViewModel.wand.undoStep()
-            return
-        }
-        if canvasViewModel.hasLassoSelection {
-            canvasViewModel.cancelLassoSelection()
+        // Select active: undo steps back through selection edits (cancels an
+        // in-flight Move first) before touching canvas history.
+        if currentTool == .select, canvasViewModel.selection.canUndoStep {
+            canvasViewModel.selection.undoStep()
             return
         }
         canvasViewModel.undo()
@@ -1658,6 +1639,85 @@ final class AppCoordinator {
             SentrySDK.capture(error: error)
             return nil
         }
+    }
+
+    // MARK: - Sticker sharing
+
+    /// Whether a sticker can be cut: needs an active selection to mask with.
+    var canShareSticker: Bool { canvasViewModel.hasSelectionForEdit }
+
+    /// Cut the current selection out of what the user sees (generated image in
+    /// overlay layout, else the flattened canvas) as a transparent PNG sticker,
+    /// cropped to the selection's bounding box. Returns a temp-file URL for the
+    /// native share sheet; nil when there's no selection or the cut fails.
+    func makeStickerFile() -> URL? {
+        guard canvasViewModel.hasSelectionForEdit else { return nil }
+        let sourceCG: CGImage? = if drawingLayout == .overlay, let gen = resultState.displayImage {
+            gen.cgImage
+        } else {
+            canvasViewModel.editSourceSnapshot(side: Self.aiEditSide)
+        }
+        guard let source = sourceCG,
+              let mask = canvasViewModel.selectionMaskForEdit(side: source.width),
+              let bbox = Self.maskBoundingBox(mask) else { return nil }
+
+        // Document and mask are the same square space (mask side = source
+        // width); the generated image and canvas snapshots are both square.
+        guard source.width == source.height, mask.width == source.width else { return nil }
+        let extent = CGRect(x: 0, y: 0, width: source.width, height: source.height)
+        // Tiny feather so the cut edge doesn't alias.
+        let maskCI = CIImage(cgImage: mask)
+            .applyingGaussianBlur(sigma: 1)
+            .cropped(to: extent)
+        let sourceCI = CIImage(cgImage: source)
+        let blend = CIFilter.blendWithMask()
+        blend.inputImage = sourceCI
+        blend.backgroundImage = CIImage(color: .clear).cropped(to: extent)
+        blend.maskImage = maskCI
+        guard let out = blend.outputImage else { return nil }
+        // bbox is in top-left image coords; CI is bottom-left — flip Y.
+        let maskH = CGFloat(mask.height)
+        let cropCI = CGRect(x: bbox.minX, y: maskH - bbox.maxY, width: bbox.width, height: bbox.height)
+        guard let cg = Self.aiEditCIContext.createCGImage(
+            out, from: cropCI, format: .RGBA8, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!
+        ), let png = UIImage(cgImage: cg).pngData() else { return nil }
+
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("KikiSticker.png")
+        do {
+            try png.write(to: url, options: .atomic)
+            Analytics.track(.imageShared, properties: ["format": "sticker"])
+            return url
+        } catch {
+            streamLog.error("Sticker export failed: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    /// Bounding box (top-left pixel coords, slightly padded) of non-black
+    /// pixels in a grayscale mask image.
+    private static func maskBoundingBox(_ mask: CGImage) -> CGRect? {
+        guard let data = mask.dataProvider?.data as Data? else { return nil }
+        let w = mask.width, h = mask.height, stride = mask.bytesPerRow
+        var minX = w, minY = h, maxX = -1, maxY = -1
+        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            guard let base = raw.baseAddress else { return }
+            for y in 0..<h {
+                let row = base + y * stride
+                for x in 0..<w where row.load(fromByteOffset: x, as: UInt8.self) > 8 {
+                    if x < minX { minX = x }
+                    if x > maxX { maxX = x }
+                    if y < minY { minY = y }
+                    if y > maxY { maxY = y }
+                }
+            }
+        }
+        guard maxX >= minX, maxY >= minY else { return nil }
+        let pad = 4
+        return CGRect(
+            x: max(0, minX - pad), y: max(0, minY - pad),
+            width: min(w, maxX + pad) - max(0, minX - pad),
+            height: min(h, maxY + pad) - max(0, minY - pad)
+        )
     }
 
     // MARK: - Video sharing
@@ -2002,33 +2062,60 @@ final class AppCoordinator {
                     devShowReplayFromGallery = true
                 }
             }
+        // Freehand rect through the REAL loop path (Select tool, current
+        // add/remove mode applies).
         case "lasso":
+            currentTool = .select
+            canvasViewModel.selection.authorMode = .freehand
             canvasViewModel.devSimulateLasso()
-        case "wandTool":
-            currentTool = .magicWand
-        case "wandNewObject":
-            canvasViewModel.wand.startNewObject()
-        case "wandClear":
-            canvasViewModel.clearWand()
+        case "selectTool", "wandTool":
+            currentTool = .select
+        case "selectModeAuto":
+            canvasViewModel.selection.authorMode = .auto
+        case "selectModeFreehand":
+            canvasViewModel.selection.authorMode = .freehand
+        case "selectRemove":
+            canvasViewModel.selection.mode = .subtract
+        case "selectAdd":
+            canvasViewModel.selection.mode = .add
+        case "selectMove":
+            canvasViewModel.selection.beginMove()
+        case "selectCommitMove":
+            canvasViewModel.selection.commitMove()
+        case "wandClear", "selectClear":
+            canvasViewModel.clearSelection()
+        case "selectUndo":
+            canvasViewModel.selection.undoStep()
         case "brushTool":
             currentTool = .brush
-        // "wandTap:<u>,<v>[,neg]" — inject a wand prompt at normalized canvas
-        // coords (simctl taps can't hit exact canvas UVs deterministically).
+        // "wandTap:<u>,<v>[,neg]" — inject a selection prompt at normalized
+        // canvas coords (simctl taps can't hit exact canvas UVs).
         case let cmd where cmd.hasPrefix("wandTap:"):
             let parts = cmd.dropFirst("wandTap:".count).split(separator: ",")
             if parts.count >= 2, let u = Double(parts[0]), let v = Double(parts[1]) {
                 let positive = parts.count < 3 || parts[2] != "neg"
-                currentTool = .magicWand
+                currentTool = .select
                 canvasViewModel.devSimulateWandTap(u: u, v: v, positive: positive)
             }
-        // "wandFake:<u>,<v>,<r>" — synthetic circular mask (the sim's Core ML
-        // can't run SAM's decoder; this exercises mask→path→clip end-to-end).
+        // "wandFake:<u>,<v>,<r>" — synthetic circular mask object (the sim's
+        // Core ML can't run SAM's decoder; exercises mask→path→clip).
         case let cmd where cmd.hasPrefix("wandFake:"):
             let parts = cmd.dropFirst("wandFake:".count).split(separator: ",")
             if parts.count >= 3, let u = Double(parts[0]), let v = Double(parts[1]),
                let r = Double(parts[2]) {
-                currentTool = .magicWand
+                currentTool = .select
                 canvasViewModel.devSimulateWandMask(u: u, v: v, radiusFraction: r)
+            }
+        #endif
+        #if DEBUG && targetEnvironment(simulator)
+        case "aiEditSheet":
+            showAIEditSheet = true
+        case "stickerFile":
+            // Export the selection sticker to a host-visible path for the
+            // sim harness to inspect.
+            if let url = makeStickerFile() {
+                try? FileManager.default.removeItem(atPath: "/tmp/kiki-sticker.png")
+                try? FileManager.default.copyItem(at: url, to: URL(fileURLWithPath: "/tmp/kiki-sticker.png"))
             }
         #endif
         // "aiEdit:<prompt>" — kick off an AI Edit with the given prompt
@@ -2918,6 +3005,7 @@ final class AppCoordinator {
             seed: streamSeed,
             imageSize: streamResolution >= 1024 ? "square_hd" : "square",
             scheduleMu: streamScheduleMu,
+            referenceScale: streamReferenceScale,
             videoWidth: videoResolution,
             videoHeight: videoResolution,
             videoFrames: videoFrames,
@@ -3192,10 +3280,8 @@ final class AppCoordinator {
             canvasViewModel.selectBrush(currentBrushConfig())
         case .eraser:
             canvasViewModel.selectEraser(width: toolSize)
-        case .lasso:
-            canvasViewModel.selectLasso()
-        case .magicWand:
-            canvasViewModel.selectMagicWand()
+        case .select:
+            canvasViewModel.selectSelectionTool()
         }
     }
 }

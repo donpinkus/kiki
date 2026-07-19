@@ -52,6 +52,16 @@ struct DrawingTopBar: View {
                             shareItem = ShareItem(url: animationURL)
                         }
                     }
+                    // Cut the active selection as a transparent-PNG sticker.
+                    if coordinator.canShareSticker {
+                        Button {
+                            if let url = coordinator.makeStickerFile() {
+                                shareItem = ShareItem(url: url)
+                            }
+                        } label: {
+                            Label("Sticker (PNG)", systemImage: "scissors")
+                        }
+                    }
                 }
                 if coordinator.canShareVideo {
                     Section("Share video") {
@@ -69,7 +79,7 @@ struct DrawingTopBar: View {
                     .foregroundStyle(KikiTheme.icon)
             }
             .tint(KikiTheme.icon)
-            .disabled(!(coordinator.canShare || coordinator.canShareVideo))
+            .disabled(!(coordinator.canShare || coordinator.canShareVideo || coordinator.canShareSticker))
 
             UsageMeterView()
 
@@ -107,12 +117,10 @@ struct DrawingTopBar: View {
             toolButton(icon: "eraser", tool: .eraser)
             // Lasso publishes its on-screen frame so DrawingView can float the
             // "Clear Lasso" button directly beneath it (clearly associated).
-            toolButton(icon: "lasso", tool: .lasso)
-                .anchorPreference(key: LassoButtonAnchorKey.self, value: .bounds) { $0 }
-            // Magic wand (SAM tap-to-select) publishes its frame the same way so
-            // DrawingView can hang the wand panel / "Clear Masks" beneath it.
-            toolButton(icon: "wand.and.stars", tool: .magicWand)
-                .anchorPreference(key: WandButtonAnchorKey.self, value: .bounds) { $0 }
+            // The unified Select tool (SAM taps + freehand loops). Publishes
+            // its frame so DrawingView can hang the selection panel beneath it.
+            toolButton(icon: "wand.and.stars", tool: .select)
+                .anchorPreference(key: SelectButtonAnchorKey.self, value: .bounds) { $0 }
 
             // AI Edit (inpaint): edits the active selection if one exists,
             // else the whole drawing. Highlighted while a preview is live.
@@ -217,17 +225,9 @@ private struct ShareItem: Identifiable {
     let url: URL
 }
 
-/// Reports the lasso tool button's on-screen bounds up the view tree so
-/// `DrawingView` can anchor the floating "Clear Lasso" button beneath it.
-struct LassoButtonAnchorKey: PreferenceKey {
-    static let defaultValue: Anchor<CGRect>? = nil
-    static func reduce(value: inout Anchor<CGRect>?, nextValue: () -> Anchor<CGRect>?) {
-        value = nextValue() ?? value
-    }
-}
-
-/// Same for the magic wand button (wand panel + "Clear Masks").
-struct WandButtonAnchorKey: PreferenceKey {
+/// Reports the Select tool button's on-screen bounds up the view tree so
+/// `DrawingView` can anchor the selection panel beneath it.
+struct SelectButtonAnchorKey: PreferenceKey {
     static let defaultValue: Anchor<CGRect>? = nil
     static func reduce(value: inout Anchor<CGRect>?, nextValue: () -> Anchor<CGRect>?) {
         value = nextValue() ?? value
