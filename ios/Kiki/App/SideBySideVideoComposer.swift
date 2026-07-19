@@ -173,19 +173,33 @@ enum SideBySideVideoComposer {
                 }
 
                 var appendedAnimation = false
-                if useAnimationTail, let generatedVideoURL {
-                    let animAsset = AVURLAsset(url: generatedVideoURL)
+                if useAnimationTail, let generatedVideoURL,
+                   let safeAnimationURL = try? await normalizedAnimation(from: generatedVideoURL) {
+                    let animAsset = AVURLAsset(url: safeAnimationURL)
                     let animTrack = try? await animAsset.loadTracks(withMediaType: .video).first
                     // Use the TRACK's own range — the asset duration can exceed it,
                     // which would make insertTimeRange throw.
                     let animRange = try? await animTrack?.load(.timeRange)
                     if let animTrack, let animRange, animRange.duration.isValid, animRange.duration > .zero {
-                        try generatedComp.insertTimeRange(animRange, of: animTrack, at: baseDuration)
-                        _ = try await insertHoldClip(on: canvasComp, lastFrameOf: lastCanvasURL, seconds: animRange.duration.seconds, name: "canvas")
+                        // EXACT-equal tails: both tracks must end at the same
+                        // time. The animation's native duration is not a whole
+                        // number of 12 fps hold-clip frames, so the canvas
+                        // hold ends ~tens of ms before the animation — a
+                        // per-track gap inside the instruction range, which
+                        // makes the REAL-TIME compositor render nothing at
+                        // all (the black preview; reproduced in the sim
+                        // harness — exports are unaffected). Trim the
+                        // animation to whole 12 fps frames so both tails are
+                        // identical by construction.
+                        let tailFrames = max(Int((animRange.duration.seconds * 12).rounded(.down)), 2)
+                        let exactTail = CMTime(value: CMTimeValue(tailFrames), timescale: 12)
+                        let trimmedAnimation = CMTimeRange(start: animRange.start, duration: exactTail)
+                        try generatedComp.insertTimeRange(trimmedAnimation, of: animTrack, at: baseDuration)
+                        _ = try await insertHoldClip(on: canvasComp, lastFrameOf: lastCanvasURL, seconds: exactTail.seconds, name: "canvas")
                         // The animation isn't 768²; fit it into the generated pane.
                         let animSize = (try? await animTrack.load(.naturalSize)) ?? CGSize(width: side, height: side)
                         tailGeneratedTransform = fitTransform(sourceSize: animSize, into: generatedPaneRect(for: layout, render: renderSize))
-                        tailDuration = animRange.duration
+                        tailDuration = exactTail
                         appendedAnimation = true
                     }
                 }
@@ -274,6 +288,71 @@ enum SideBySideVideoComposer {
         guard export.status == .completed else {
             throw ComposeError.exportFailed(export.error)
         }
+    }
+
+    /// Re-encode the animate-feature MP4 into a composition-safe clip.
+    ///
+    /// The server-encoded animation (H.264 High profile with B-frames, AAC
+    /// audio, 24 fps) stalls AVFoundation's REAL-TIME videoComposition
+    /// renderer when inserted into a composition: the item reports ready and
+    /// the clock advances, but the player layer never receives a frame —
+    /// the whole preview renders black (reproduced in isolation in the sim
+    /// harness; the offline export renderer is unaffected). Decoding and
+    /// re-encoding through our own writer (video-only, default profile, no
+    /// audio) produces a clip the RT renderer accepts. Cached per source
+    /// file (size+mtime key) so repeated builds don't re-encode.
+    private static func normalizedAnimation(from url: URL) async throws -> URL {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+        let bytes = (attrs?[.size] as? NSNumber)?.intValue ?? 0
+        let mtime = Int(((attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0))
+        let output = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kiki-norm-anim-\(bytes)-\(mtime).mp4")
+        if FileManager.default.fileExists(atPath: output.path) { return output }
+
+        let asset = AVURLAsset(url: url)
+        guard let track = try await asset.loadTracks(withMediaType: .video).first else {
+            throw ComposeError.missingTrack
+        }
+        let natural = try await track.load(.naturalSize)
+        let reader = try AVAssetReader(asset: asset)
+        let readerOutput = AVAssetReaderTrackOutput(track: track, outputSettings: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+        ])
+        guard reader.canAdd(readerOutput) else { throw ComposeError.exportSetupFailed }
+        reader.add(readerOutput)
+
+        let tmp = output.appendingPathExtension("tmp.mp4")
+        try? FileManager.default.removeItem(at: tmp)
+        let writer = try AVAssetWriter(outputURL: tmp, fileType: .mp4)
+        let settings: [String: Any] = [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: Int(natural.width.rounded()),
+            AVVideoHeightKey: Int(natural.height.rounded()),
+        ]
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
+        input.expectsMediaDataInRealTime = false
+        guard writer.canAdd(input) else { throw ComposeError.exportSetupFailed }
+        writer.add(input)
+        guard writer.startWriting() else { throw ComposeError.exportFailed(writer.error) }
+        writer.startSession(atSourceTime: .zero)
+        reader.startReading()
+        while let sample = readerOutput.copyNextSampleBuffer() {
+            while !input.isReadyForMoreMediaData {
+                try await Task.sleep(nanoseconds: 2_000_000)
+            }
+            input.append(sample)
+        }
+        input.markAsFinished()
+        await withCheckedContinuation { continuation in
+            writer.finishWriting { continuation.resume() }
+        }
+        guard reader.status == .completed, writer.status == .completed else {
+            try? FileManager.default.removeItem(at: tmp)
+            throw ComposeError.exportFailed(writer.error ?? reader.error)
+        }
+        try? FileManager.default.removeItem(at: output)
+        try FileManager.default.moveItem(at: tmp, to: output)
+        return output
     }
 
     /// The last decodable frame of a video file.

@@ -262,8 +262,24 @@ struct SpeedPaintReplayView: View {
             }
             return
         }
-        let item = AVPlayerItem(asset: built.composition)
-        item.videoComposition = built.videoComposition
+        // TEMP DEBUG (sim bisect for the black preview): host /tmp flag files
+        // switch the preview source. Remove once the bug is closed.
+        var debugPlainFile = false
+        var debugNoVideoComp = false
+        #if DEBUG && targetEnvironment(simulator)
+        debugPlainFile = FileManager.default.fileExists(atPath: "/tmp/kiki-debug-plainfile")
+        debugNoVideoComp = FileManager.default.fileExists(atPath: "/tmp/kiki-debug-novideocomp")
+        #endif
+        let item: AVPlayerItem
+        if debugPlainFile, let drawingId = coordinator.currentDrawingId,
+           let firstSegment = RecordingStore.shared.segmentURLs(for: drawingId).canvas.first {
+            item = AVPlayerItem(url: firstSegment)
+        } else {
+            item = AVPlayerItem(asset: built.composition)
+            if !debugNoVideoComp {
+                item.videoComposition = built.videoComposition
+            }
+        }
         // Fresh player per item: reusing one AVPlayer across item swaps is
         // the one factor common to every black-preview incarnation (both the
         // old VideoPlayer file path and the composition path), and stale-
