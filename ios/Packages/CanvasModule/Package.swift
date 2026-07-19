@@ -20,6 +20,8 @@ let package = Package(
                 // Folder-referenced grayscale brush-stamp PNGs (luminance = coverage).
                 // Drop a PNG in here + add a BrushShapeCatalog entry to expose a new shape.
                 .copy("Resources/BrushShapes"),
+                // Image-based grain tiles (cloned Procreate grains) — see GrainCatalog.
+                .copy("Resources/BrushGrains"),
             ]
         ),
     ]

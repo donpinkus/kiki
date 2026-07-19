@@ -375,12 +375,12 @@ public enum CuratedPresetCatalog {
             b.rotationFollow = 0        // tip stamps upright (Touch only, Rotation 0)
             b.rotationJitter = 1.0
             b.spacing = 0.05
-            b.opacity = 0.95
+            b.opacity = 1.0
             b.flow = 1.0
             b.taperStart = 0.15; b.taperEnd = 0.15; b.taperOpacity = 1.0
-            b.grainID = "speckle"
-            b.grainDepth = 0.5
-            b.grainScale = 0.6
+            b.grainID = "stuccoGrain"   // the target's own plaster (pane-thumbnail extract)
+            b.grainDepth = 0.9
+            b.grainScale = 0.18
             b.grainMoving = true        // Procreate: Moving / Rolling
             b.dynamics = BrushDynamics(
                 size: CurveOption(sensors: [], strength: 1),   // AP Size 0%: no pressure size
@@ -421,16 +421,16 @@ public enum CuratedPresetCatalog {
             b.rotationFollow = 0
             b.rotationJitter = 0.3
             b.spacing = 0.16
-            b.opacity = 0.75
-            b.flow = 0.55
-            b.grainID = "paper"
-            b.grainDepth = 0.7
-            b.grainScale = 0.7
+            b.opacity = 0.88
+            b.flow = 0.75
+            b.grainID = "oldbeachGrain" // the target's own concrete (pane-thumbnail extract)
+            b.grainDepth = 0.5
+            b.grainScale = 0.2
             b.grainMoving = false       // Texturized
             b.tipLightness = 0.85
             b.dynamics = BrushDynamics(
                 size: CurveOption(sensors: [SensorChannel(sensor: .pressure)], minValue: 0.74),
-                flow: CurveOption(sensors: [SensorChannel(sensor: .pressure)], minValue: 0.35),
+                flow: CurveOption(sensors: [SensorChannel(sensor: .pressure)], minValue: 0.5),
                 // Azimuth input style: the pencil's tilt direction orients the tip.
                 rotation: CurveOption(sensors: [SensorChannel(sensor: .tiltDirection)], fold: .rotationLike),
                 dabColorJitter: ColorJitter(hue: 0.02, saturation: 0.02, brightness: 0.02, darkness: 0.02))

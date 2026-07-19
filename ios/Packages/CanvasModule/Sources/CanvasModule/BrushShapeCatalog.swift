@@ -141,6 +141,12 @@ public enum GrainCatalog {
         GrainDescriptor(id: "paper", displayName: "Paper", nativeScale: 1.0),
         GrainDescriptor(id: "canvasWeave", displayName: "Canvas", nativeScale: 1.2),
         GrainDescriptor(id: "speckle", displayName: "Speckle", nativeScale: 1.6),
+        // Cloned Procreate grains (2026-07-18): extracted from the targets' Grain Source
+        // pane thumbnails, INVERTED (their Multiply/Height blends hole-punch where the
+        // grain is dark; our carve removes paint where src is bright). Same "direct
+        // capture, IP follow-up open" status as the shape tips.
+        GrainDescriptor(id: "stuccoGrain", displayName: "Plaster", nativeScale: 1.0, resourceName: "stuccoGrain"),
+        GrainDescriptor(id: "oldbeachGrain", displayName: "Concrete", nativeScale: 1.0, resourceName: "oldbeachGrain"),
     ]
     public static func descriptor(for id: String?) -> GrainDescriptor? {
         guard let id else { return nil }
