@@ -1104,6 +1104,11 @@ final class AppCoordinator {
     /// source + mask even if the selection changes meanwhile.
     private var aiEditSourceCG: CGImage?
     private var aiEditMaskCG: CGImage?
+    /// Dashed-red marker overlay drawn onto the uploaded image for region
+    /// edits, so the model can SEE the target ("fit the new content inside the
+    /// marked area"). Without it, content sprawls past the selection and the
+    /// masked composite amputates it at the boundary (the "seam" bug).
+    private var aiEditMarkerCG: CGImage?
     /// What Accept commits: full result (full scope) or masked region with
     /// transparency outside the selection (region scope).
     private var aiEditCommitImage: UIImage?
@@ -1111,9 +1116,11 @@ final class AppCoordinator {
 
     /// Source/mask resolution sent to the model (klein edit caps ~1 MP).
     private static let aiEditSide = 1024
-    /// Slight mask feather (px at aiEditSide) so the committed region doesn't
-    /// leave a razor seam against untouched strokes.
-    private static let aiEditMaskFeather = 1.5
+    /// Wide mask feather (gaussian sigma, px at aiEditSide): the region result
+    /// blends into the untouched drawing over a ~2·sigma band instead of a
+    /// razor cut. Safe to be generous because the marker prompt keeps the
+    /// model's new content away from the boundary (measured 2026-07-19).
+    private static let aiEditMaskFeather = 20.0
     private static let aiEditCIContext = CIContext(
         options: [.workingColorSpace: CGColorSpace(name: CGColorSpace.sRGB)!]
     )
@@ -1133,6 +1140,7 @@ final class AppCoordinator {
         let mask = isRegion ? canvasViewModel.selectionMaskForEdit(side: source.width) : nil
         aiEditSourceCG = source
         aiEditMaskCG = mask
+        aiEditMarkerCG = isRegion ? canvasViewModel.selectionMarkerForEdit(side: source.width) : nil
         aiEditIsRegion = mask != nil
         Analytics.track(.aiEditRequested, properties: [
             "scope": aiEditIsRegion ? "region" : "full",
@@ -1148,10 +1156,31 @@ final class AppCoordinator {
     }
 
     private func runAIEdit() {
-        guard let source = aiEditSourceCG,
-              let jpeg = UIImage(cgImage: source).jpegData(compressionQuality: 0.92) else { return }
+        guard let source = aiEditSourceCG else { return }
+        // Region edits upload the source WITH the dashed-red marker composited
+        // on, and wrap the user's instruction in a containment template. The
+        // model reliably places content inside the marker and removes it; the
+        // feathered masked composite then guarantees the outside anyway.
+        var uploadCG = source
+        let userPrompt = aiEditPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        var prompt = userPrompt
+        if aiEditIsRegion, let marker = aiEditMarkerCG {
+            let sourceCI = CIImage(cgImage: source)
+            let markedCI = CIImage(cgImage: marker).composited(over: sourceCI)
+            if let cg = Self.aiEditCIContext.createCGImage(
+                markedCI, from: sourceCI.extent, format: .RGBA8,
+                colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!
+            ) {
+                uploadCG = cg
+            }
+            prompt = "Inside the area marked with the dashed red outline: \(userPrompt). "
+                + "Draw the new content so it fits entirely inside the marked area and "
+                + "matches the style of the rest of the image. Completely remove the "
+                + "dashed red outline marker and the red tint. Keep everything outside "
+                + "the marked area exactly the same."
+        }
+        guard let jpeg = UIImage(cgImage: uploadCG).jpegData(compressionQuality: 0.92) else { return }
         aiEditPhase = .generating
-        let prompt = aiEditPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         let seed = Int(aiEditSeedText.trimmingCharacters(in: .whitespaces))
         let steps = aiEditSteps
         let scope = aiEditIsRegion ? "region" : "full"
@@ -1268,6 +1297,7 @@ final class AppCoordinator {
         aiEditTask = nil
         aiEditSourceCG = nil
         aiEditMaskCG = nil
+        aiEditMarkerCG = nil
         aiEditCommitImage = nil
         canvasViewModel.setEditPreview(nil)
         aiEditPhase = .idle

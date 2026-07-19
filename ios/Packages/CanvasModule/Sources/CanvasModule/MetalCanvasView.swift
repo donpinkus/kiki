@@ -2845,6 +2845,39 @@ public final class MetalCanvasView: UIView {
         return ctx.makeImage()
     }
 
+    /// AI Edit region marker: the clip path rendered as a dashed red outline +
+    /// faint red tint on a transparent RGBA image (same document space / side
+    /// as `selectionMaskImage`). Drawn over the source snapshot before sending
+    /// to the edit model so it can SEE where the edit belongs ("fit the new
+    /// content inside the marked area") — measured 2026-07-19: klein follows
+    /// the marker and removes it on request (red reliably; magenta was kept as
+    /// drawn content, so the hue is load-bearing). Any un-removed remnant on
+    /// the stroke's outer half is wiped by the masked composite anyway.
+    public func selectionMarkerOverlayImage(side: Int) -> CGImage? {
+        guard let clip = lassoClipPath, bounds.width > 0, side > 0 else { return nil }
+        let scale = CGFloat(side) / bounds.width
+        let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
+        guard let ctx = CGContext(data: nil, width: side, height: side,
+                                  bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: colorSpace,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        ctx.translateBy(x: 0, y: CGFloat(side))
+        ctx.scaleBy(x: scale, y: -scale)
+        ctx.setFillColor(CGColor(srgbRed: 1, green: 0, blue: 0, alpha: 0.12))
+        ctx.addPath(clip)
+        ctx.fillPath(using: .evenOdd)
+        // Sizes are in mask pixels; the transform is in view points, so divide
+        // back out. ~6 px stroke with an 18/12 dash reads as a marker, not art.
+        ctx.setStrokeColor(CGColor(srgbRed: 1, green: 0, blue: 0, alpha: 1))
+        ctx.setLineWidth(6 / scale)
+        ctx.setLineDash(phase: 0, lengths: [18 / scale, 12 / scale])
+        ctx.setLineJoin(.round)
+        ctx.setLineCap(.round)
+        ctx.addPath(clip)
+        ctx.strokePath()
+        return ctx.makeImage()
+    }
+
     /// Load an image onto the canvas (e.g., "Send to Canvas"). Undoable like
     /// any stroke — the bake lands on the active layer.
     public func bakeImage(_ image: UIImage) {

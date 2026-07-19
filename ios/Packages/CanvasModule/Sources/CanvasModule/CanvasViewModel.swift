@@ -414,6 +414,17 @@ public final class CanvasViewModel {
         return canvasView.selectionMaskImage(side: side)
     }
 
+    /// Dashed-red marker overlay for the same selection (drawn over the source
+    /// snapshot so the edit model can see the target region). Same side/space
+    /// as `selectionMaskForEdit`.
+    public func selectionMarkerForEdit(side: Int) -> CGImage? {
+        guard let canvasView else { return nil }
+        if !canvasView.hasClipSelection, hasLassoSelection {
+            transitionToClipMode()
+        }
+        return canvasView.selectionMarkerOverlayImage(side: side)
+    }
+
     /// Flattened "what you see" composite for the AI Edit source image: all
     /// visible layers over the background image, on white, capped at `side`.
     public func editSourceSnapshot(side: Int) -> CGImage? {
