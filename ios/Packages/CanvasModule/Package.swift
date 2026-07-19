@@ -22,6 +22,10 @@ let package = Package(
                 .copy("Resources/BrushShapes"),
                 // Image-based grain tiles (cloned Procreate grains) — see GrainCatalog.
                 .copy("Resources/BrushGrains"),
+                // Magic wand: pre-compiled SAM 2.1-small Core ML models
+                // (apple/coreml-sam2.1-small, Apache 2.0; ~90 MB). Re-fetch with
+                // ios/scripts/fetch-sam-models.sh if ever missing.
+                .copy("Resources/SAM2"),
             ]
         ),
     ]

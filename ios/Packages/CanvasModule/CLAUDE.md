@@ -164,9 +164,19 @@ MetalCanvasView (UIView, CAMetalLayer)
 ### Lasso flow (entirely Metal — no CG color pipeline)
 - Path preview: two `CAShapeLayer`s (white + black offset dashes)
 - Extraction: rasterize CGPath → R8 mask texture, then Metal maskedCopy + maskedClear passes
-- Clip mask: `setClipPath()` persists the path across tool switches. Stamps outside the path are discarded (CPU-side via `CGPath.contains()`)
+- Clip mask: `setClipPath()` persists the path across tool switches. Stamps outside the path are discarded (CPU-side via `CGPath.contains(_:using: .evenOdd)` — even-odd since 2026-07-19 so magic-wand masks with holes/disjoint subpaths clip correctly; identical to winding for simple lasso loops)
 - Commit: Metal render pass composites selection texture onto active layer (source-over)
 - Cancel: discard selection texture + undo to pre-lasso snapshot
+
+### Magic wand flow (`MagicWand/`, 2026-07-19)
+- **No Metal selection extraction** — the wand is Phase-B-only: it produces a clip path (`setClipPath`) + ants + point markers; nothing floats/moves.
+- Tap (`MetalCanvasView` `.magicWand` touch case, ≤12 pt travel) → `onWandTap` → `MagicWandController.handleTap` → SAM point prompt over the accumulated object points → best-score 256² logits → bilinear upsample to 1024² (`vImageScale_PlanarF`), threshold >0 → union with committed object bitmaps → marching squares + Douglas-Peucker (`MaskContour.path`, normalized [0,1]² coords, even-odd) → scaled to view points → `setClipPath`.
+- `SAM2Segmenter` (actor): Apple's coreml-sam2.1-small 3-model split — ImageEncoder (once per image), PromptEncoder + MaskDecoder (per tap). `.cpuAndGPU` on device; **`.cpuOnly` + fake-mask dev injection on the simulator — the sim's Core ML zeroes `low_res_masks` (scores fine) on every runtime/compute-unit combination tested (18.3.1, 26.5 × CPU, GPU) while the identical .mlmodelc is correct on macOS. Read masks via MLMultiArray subscripts, not `withUnsafeBufferPointer` (CPU backend can hand back a strided/lazy buffer that reads as zeros).**
+- Wand markers (green/red dots + white outline) are CAShapeLayers re-hosted together with the lasso preview layers by `setLassoPreviewHost` (overlay mode parks them above the generated image).
+- Object model: current object refined live (pos/neg points), `startNewObject()` freezes its bitmap (embedding can then re-encode if the canvas changed — committed bitmaps stay valid). Undo while wand active steps back points, then reopens the last committed object.
+- **Params (post-processing on the cached decode — no model re-run):** `granularity` (Small/Auto/Large — picks among SAM's 3 candidate masks; the "tolerance" analog), `contiguous` (keep only the 4-connected component at the first positive point, `MaskContour.connectedComponent`), `expansion` (±20 mask-px morphological grow/shrink, `MaskContour.expand`, separable 1-D passes). All apply to the CURRENT object only; committed objects keep their frozen bitmaps. `SAM2Segmenter.maskCandidates` returns all 3 logit grids + scores + areas; `mask()` is the argmax convenience.
+- **Unselected-region stripes:** while any clip is active (wand or lasso Phase B), `clipDimLayer` (CAShapeLayer, even-odd full-rect+clip path, diagonal-stripe `UIColor(patternImage:)` fill) washes everything OUTSIDE the selectable region; ants layers animate `lineDashPhase` ("march"). CALayers never hit-test, so wand taps pass through. Rebuilt in `setClipPath`/`layoutSubviews` (`updateClipDimPath`).
+- Offline harness pattern (SAM + contour + clip-chain, macOS): see scratchpad `wandharness`/`cliptest` mains from the 2026-07-19 session — compile `MagicWand/*.swift` (UIKit-free) with the BrushHarness file list.
 
 ## Files
 
@@ -182,4 +192,8 @@ MetalCanvasView (UIView, CAMetalLayer)
 | `CanvasView.swift` | UIViewRepresentable wrapper, callback wiring |
 | `RotatableCanvasContainer.swift` | Gesture handling (zoom/rotate/pan), cursor overlay, background image, lasso selection view. Also hosts app-overlay hooks: `externalTransformRegionProvider`/`onExternalTransform` (forward a two-finger gesture that starts over a registered rect — e.g. the fullscreen result panel — instead of transforming the canvas) and `onContactPointChanged` (reports the live single-touch contact point + brush diameter in pane space for the panel transparency-hole effect). |
 | `LassoSelectionView.swift` | Gesture-only view for lasso transform (pan/pinch/rotate), marching ants |
+| `MagicWand/SAM2Segmenter.swift` | On-device SAM 2.1 Core ML wrapper (actor; encode-once / decode-per-tap). UIKit-free |
+| `MagicWand/MaskContour.swift` | Logits→binary upsample, mask union, marching-squares→CGPath, RDP simplify. UIKit-free |
+| `MagicWand/MagicWandController.swift` | Wand session state (objects/points/masks, add-subtract mode), publishes clip path + markers |
+| `MagicWand/SAM2Bundle.swift` | `Bundle.module` loader for the committed `Resources/SAM2/*.mlmodelc` |
 | `DrawingEngine.swift` | Stroke/StrokePoint/BrushConfig/ToolState/LayerInfo/LayeredDrawing types |

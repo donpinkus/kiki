@@ -109,7 +109,8 @@ struct WetStrokeWalker {
         // the load's ALPHA also tracks the sampled alpha — including alpha ≈ 0 over blank
         // canvas, which is what makes a drag-off tail deplete and die.
         func emit(_ pos: CGPoint, _ width: CGFloat) {
-            guard clipPath.map({ $0.contains(pos) }) ?? true else { return }
+            // Even-odd to match the dry-stamp clip (wand masks have holes).
+            guard clipPath.map({ $0.contains(pos, using: .evenOdd) }) ?? true else { return }
             let cx = Int(pos.x * scale), cy = Int(pos.y * scale)
             // Charge: the reservoir level rides in wetTargetAlpha for INK stamps — the
             // scratch fragment scales its deposited alpha by it (the KM weight in

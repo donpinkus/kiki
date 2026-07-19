@@ -434,7 +434,10 @@ enum StrokeStampGenerator {
                     }
                 }
                 let pos = CGPoint(x: x + off.x, y: y + off.y)
-                guard clipPath.map({ $0.contains(pos) }) ?? true else { continue }
+                // Even-odd so magic-wand masks work: holes (negative-point
+                // refinement) are inner subpaths, disjoint objects separate
+                // subpaths. Identical to winding for simple lasso loops.
+                guard clipPath.map({ $0.contains(pos, using: .evenOdd) }) ?? true else { continue }
                 stamps.append(CanvasRenderer.StampInstance(
                     center: SIMD2<Float>(Float(pos.x * scale), Float(pos.y * scale)),
                     radius: Float(attr.width * 0.5 * scale),

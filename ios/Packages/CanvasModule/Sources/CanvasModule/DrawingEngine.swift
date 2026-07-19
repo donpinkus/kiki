@@ -591,6 +591,8 @@ public enum ToolState: Sendable {
     case brush(BrushConfig)
     case eraser(width: CGFloat)
     case lasso
+    /// Magic wand: taps are SAM segmentation prompts, not strokes.
+    case magicWand
 }
 
 // MARK: - Layered Drawing Persistence
