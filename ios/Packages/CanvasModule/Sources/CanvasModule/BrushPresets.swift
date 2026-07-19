@@ -418,6 +418,47 @@ public enum CuratedPresetCatalog {
             return b
         },
 
+        // "Eddystone" (Brush D): rake / parallel-lines — a 10-dot comb tip follows the
+        // stroke (tip saved pre-rotated for our along-travel convention), fusing into
+        // ~10 continuous parallel lines at 4% spacing. Pressure drives OPACITY (their
+        // AP: Size 0%, Opacity Max), width stays fixed.
+        CuratedPreset(id: "eddystone", displayName: "Eddystone") { base in
+            var b = base
+            b.shapeID = "eddystone"
+            b.rotationFollow = 1.0      // Rotation: Follow stroke (max)
+            b.spacing = 0.04
+            b.stampCount = 2            // their Count 2 (no jitter/scatter — pure density)
+            b.streamline = 0.31
+            b.stabilization = 0.15
+            b.opacity = 1.0
+            b.flow = 0.6
+            b.taperStart = 0.2
+            b.taperOpacity = 0.7        // their fade-in start (Pressure-taper, Tip Sharp)
+            b.dynamics = BrushDynamics(
+                size: CurveOption(sensors: [], strength: 1),   // AP Size 0%: fixed width
+                flow: CurveOption(sensors: [SensorChannel(sensor: .pressure)], minValue: 0.05))
+            return b
+        },
+
+        // Brush E (grid paper; Preview pane missing — Procreate name unknown): a soft
+        // round tip whose look comes ENTIRELY from the texturized graph-paper grain
+        // (Depth Max, Multiply → paint only along the grid lines).
+        CuratedPreset(id: "gridpaper", displayName: "Grid Paper") { base in
+            var b = base
+            b.hardness = 0.35           // soft round; hard enough to saturate coverage
+            b.spacing = 0.06
+            b.opacity = 1.0
+            b.flow = 1.0                // carve needs near-solid base or lines break up
+            b.grainID = "gridpaper"
+            b.grainDepth = 1.0          // Depth Max: field fully carved, lines keep paint
+            b.grainScale = 1.0          // tile baked at display size (160px) — pre-rasterized crisp
+            b.grainMoving = false       // Texturized (paper-anchored — grid stays put)
+            b.dynamics = BrushDynamics(
+                size: CurveOption(sensors: [SensorChannel(sensor: .pressure)], minValue: 0.15),
+                flow: CurveOption(sensors: [SensorChannel(sensor: .pressure)], minValue: 0.5))
+            return b
+        },
+
         // "Old Beach": chalky textured paint — palette-knife smear tip, low flow
         // build-up, texturized grain, tip-lightness for the striation dimensionality.
         // (Procreate's bright ragged edge comes from Wet Edges Max + Burnt Edges —

@@ -51,6 +51,10 @@ public enum BrushShapeCatalog {
         BrushShapeDescriptor(id: "stucco", displayName: "Stucco", resourceName: "stucco"),
         BrushShapeDescriptor(id: "nightjar", displayName: "Blob", resourceName: "nightjar"),
         BrushShapeDescriptor(id: "oldbeach", displayName: "Knife", resourceName: "oldbeach"),
+        // Rake comb tip (Brush D "Eddystone"): saved pre-rotated 90° — our follow-stroke
+        // convention aligns tip-PNG vertical with TRAVEL, Procreate keeps the comb
+        // perpendicular; a horizontal row in tip space lands perpendicular after follow.
+        BrushShapeDescriptor(id: "eddystone", displayName: "Rake", resourceName: "eddystone"),
         // Stock shape library: Donald's Procreate Shape Library captures, used directly
         // (same "for now" call + open IP follow-up as the clone tips above).
         BrushShapeDescriptor(id: "lib_chinese_ink", displayName: "Chinese Ink", resourceName: "lib_chinese_ink"),
@@ -147,6 +151,8 @@ public enum GrainCatalog {
         // capture, IP follow-up open" status as the shape tips.
         GrainDescriptor(id: "stuccoGrain", displayName: "Plaster", nativeScale: 1.0, resourceName: "stuccoGrain"),
         GrainDescriptor(id: "oldbeachGrain", displayName: "Concrete", nativeScale: 1.0, resourceName: "oldbeachGrain"),
+        // Graph-paper grid (Brush E): binary grid — plain invert, NO adaptive gamma.
+        GrainDescriptor(id: "gridpaper", displayName: "Grid Paper", nativeScale: 1.0, resourceName: "gridpaper"),
         // Stock grain library (2026-07-19): Donald's Procreate Grain Editor captures,
         // used directly (same "for now" + open IP follow-up as the shape library).
         // Extraction: card crop → INVERT (Procreate bright = paint; our carve bright =
