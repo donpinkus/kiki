@@ -60,7 +60,11 @@ struct CanvasSidebar: View {
             actionButton(
                 icon: "arrow.uturn.backward",
                 action: coordinator.undo,
+                // Wand-active undo steps back through wand prompts even when
+                // the canvas itself has no undo history yet.
                 disabled: !coordinator.canvasViewModel.canUndo
+                    && !(coordinator.currentTool == .magicWand
+                         && coordinator.canvasViewModel.wand.canUndoStep)
             )
             actionButton(
                 icon: "arrow.uturn.forward",

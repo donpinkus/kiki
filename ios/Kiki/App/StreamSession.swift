@@ -222,21 +222,6 @@ final class StreamSession {
         ])
     }
 
-    /// Manual "Animate" button: one-shot {type:'animate'} to the backend,
-    /// which fires a video_request immediately (bypassing its 3s idle
-    /// window) using the latest generated image. Best-effort fire-and-forget
-    /// — when the backend can't animate it replies `video_cancelled` (with
-    /// an error reason), which resets the button via the video event path.
-    func requestAnimate(prompt: String?) {
-        struct AnimateMessage: Encodable, Sendable {
-            var type = "animate"
-            var prompt: String?
-        }
-        Task { [client] in
-            try? await client.sendConfig(AnimateMessage(prompt: prompt))
-        }
-    }
-
     /// Send one preview frame and await its generated image. The
     /// `requestId` (passed inside `config`) is echoed back by the pod so
     /// responses pair deterministically regardless of arrival order.

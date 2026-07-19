@@ -50,6 +50,19 @@ struct GalleryView: View {
 
                 UsageMeterView()
 
+                if !drawings.isEmpty && coordinator.videoAvailability != .off {
+                    Button {
+                        isDeleteMode = false
+                        coordinator.openAnimateFromGallery()
+                    } label: {
+                        Label("Animate", systemImage: "sparkles")
+                            .font(.subheadline.weight(.medium))
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(.ultraThinMaterial, in: Capsule())
+                    }
+                }
+
                 Button {
                     isDeleteMode = false
                     coordinator.newDrawing()

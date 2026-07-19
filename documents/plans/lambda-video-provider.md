@@ -201,3 +201,31 @@ launches skip the populate.
   use ≥ $10M revenue) — verify before App Store submission. Unchanged.
 - Prompt shaping for animation (the image prompt is reused verbatim; the
   RunPod era had a `videoPromptSuffix` passthrough, still supported).
+
+
+## 2026-07-19 addendum — Animate screen + multi-keyframe conditioning
+
+The idle-trigger design above is **retired**. Video generation now runs through
+the dedicated `/v1/animate` WS (`routes/animate.ts` + `modules/video/animateSession.ts`)
+driven by the iPad's Animate screen; `videoSession.ts` (idle timer, sketch
+coupling, `VIDEO_IDLE_TRIGGER_MS`) was deleted. See
+`documents/decisions.md` (2026-07-19) for the full decision.
+
+Server-side, `video_request` now accepts multi-keyframe conditioning:
+
+```json
+{ "type": "video_request", "requestId": "…", "prompt": "…",
+  "keyframes": [
+    { "image_b64": "…", "position": 0.0, "strength": 1.0 },
+    { "image_b64": "…", "position": 1.0, "strength": 1.0 }
+  ] }
+```
+
+`position` (0..1) resolves to a latent-grid-snapped `frame_idx` (multiples of
+8; 1.0 lands exactly on the final frame because (num_frames-1) % 8 == 0), each
+entry becoming one `ImageConditioningInput` in `combined_image_conditionings`.
+Legacy single `image_b64` still works (= one keyframe at position 0).
+
+E2E harness: `backend/scripts/lambda/validate-animate.mts` (replaces
+`validate-video.mts`) — single-keyframe, start+end-keyframe, and
+cancel-mid-flight phases against the deployed backend.

@@ -87,3 +87,29 @@ Last updated: 2026-07-18 (rewritten for the fal + Lambda H100 provider architect
 29. **Two-finger move/scale.** Two fingers starting on the panel move it; pinch scales it (aspect-locked, no rotation). Two fingers on the canvas still pan/zoom/rotate the canvas as usual.
 
 30. **Transparency hole.** While drawing, the panel becomes see-through in a soft circle around the pencil so the canvas is visible underneath; the hole follows the pencil and fades closed shortly after lifting. (Hover-driven hole requires M2+ iPad Pro hardware and is not currently shipped.)
+
+## Animate screen (2026-07-19)
+
+31. **Enter from a drawing.** In a drawing with a generated result, tap the floating "Animate" button — the Animate screen opens with the result pre-loaded as the Start keyframe and the drawing's saved motion prompt prefilled. Back returns to the same drawing and the image stream resumes.
+
+32. **Enter from the gallery.** With at least one drawing, the gallery shows an "Animate" button (hidden when the video system is off). The screen opens with the previous visit's setup (or empty on first visit); Back returns to the gallery.
+
+33. **Keyframe picking.** Tapping the Start or End slot opens a picker showing every non-empty drawing (generated image preferred, else canvas) plus a Photos option. End is optional and removable via its ✕; the helper text explains single-keyframe vs morph behavior.
+
+34. **Generate + progress.** With a Start keyframe and the availability chip "Ready", tapping Animate disables the controls, shows a live progress overlay (elapsed seconds, then rendered-frame count as frames stream), and Cancel aborts it. On completion the preview switches to a seamlessly looping video with audio.
+
+35. **History + export.** Every completed generation appears at the front of the bottom history strip (thumbnail + duration badge). Tapping a clip plays it; its context menu offers Reuse setup / Share / Delete; the preview's share button exports the selected clip's MP4 via the system share sheet.
+
+36. **Warming / unavailable states.** With the video pool cold, the chip shows "Warming up" and the CTA is disabled but the whole setup (keyframes, prompt, duration) remains editable; when the pool becomes ready the button enables without leaving the screen. When the feature flag is off, entry points are hidden and the screen (if open) shows "Unavailable".
+
+37. **No auto-animation.** Going idle on the drawing screen never triggers a video — animation only ever runs from the Animate screen.
+
+38. **Extend a clip.** With a clip selected, "Extend" (preview button or context menu) loads the clip's final frame into the Start slot, carries its prompt over, and clears End — generating then continues the motion from where the clip stopped.
+
+39. **Swap & mute.** With both keyframes set, the arrow between them becomes a swap button that reverses the morph. The preview's speaker button mutes/unmutes clip audio and the choice persists across launches.
+
+40. **Warming clarity.** With the video pool cold, the Animate button reads "Animate" but is disabled, and an info box below it shows: a determinate progress bar with a live countdown while the GPU boots ("About X min left" → "Almost ready…"), an indeterminate "Finding an available GPU" while capacity-hunting, and a note that Animate unlocks automatically. The button enables in place when ready.
+
+41. **Motion ideas panel.** Tapping into the Motion field the first time opens a narrow (264pt) closable panel on the preview's left edge with categorized example prompts (Camera / Light / Atmosphere / Creative). Tapping an example fills the prompt and keeps the panel open. After closing it once, it only reopens via "See examples". The panel never covers more than the left strip of the image.
+
+42. **Back restores the drawing.** Entering Animate from a drawing and tapping Back returns to that drawing with the canvas strokes intact (not a blank canvas) and the stream restarted.

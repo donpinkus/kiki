@@ -155,6 +155,13 @@ export const animateRoute: FastifyPluginAsync = async (fastify) => {
         }
       });
 
+      // Handshake hello, sent BEFORE anything else: the iOS
+      // StreamWebSocketClient consumes the FIRST message as a connection
+      // status — if that first message were the system_availability push,
+      // it would be swallowed by the handshake path and (being deduped
+      // server-side) never re-sent, leaving the screen stuck on "warming".
+      socket.send(JSON.stringify({ type: 'state', state: 'ready' }));
+
       // ── Slow path: identity → budget → session ────────────────────────
       const identity = await resolveWsIdentity({
         url: request.url,
@@ -166,6 +173,7 @@ export const animateRoute: FastifyPluginAsync = async (fastify) => {
         return;
       }
       userId = identity.userId;
+      if (clientDisconnected) return; // closed during identity resolution
       request.log.info(
         { userId, connId, source: identity.source, event: 'animate_ws_open' },
         'Animate client connected',
@@ -252,6 +260,11 @@ export const animateRoute: FastifyPluginAsync = async (fastify) => {
         socket.send(payload);
       };
 
+      // The budget check awaited above — if the client disconnected while it
+      // ran, cleanup() has already fired and anything created below (session,
+      // avail timer) would leak with nothing left to tear it down.
+      if (clientDisconnected) return;
+
       const videoEnabled = Boolean(config.LAMBDA_VIDEO_URL) || videoPoolEnabled();
       if (videoEnabled) {
         const staticUrl = config.LAMBDA_VIDEO_URL;
@@ -297,6 +310,19 @@ export const animateRoute: FastifyPluginAsync = async (fastify) => {
         // floor-0 pool doesn't wind down under a user who is mid-visit.
         if (videoEnabled && !config.LAMBDA_VIDEO_URL) touchVideoPool('animate_screen_open');
         pushAvailability();
+        // Keepalive: unlike the drawing stream (constant frame traffic),
+        // this socket goes silent once the deduped availability push
+        // settles — and Railway's edge kills idle WebSockets after ~60s
+        // (observed as 1006 closes every 60s, masked by the client's
+        // reconnect). A ping every tick keeps bytes flowing; iOS's
+        // URLSessionWebSocketTask auto-pongs.
+        if (!clientDisconnected && socket.readyState === socket.OPEN) {
+          try {
+            socket.ping();
+          } catch {
+            // Best-effort — a failed ping just means the close is imminent.
+          }
+        }
       }, 15_000);
       availTimer.unref?.();
     })();

@@ -14,6 +14,18 @@ Record implementation decisions here as they are made. Newest first. This preven
 
 ---
 
+### 2026-07-19 — Animate becomes its own screen; drawing-stream auto-animate removed; multi-keyframe LTX conditioning
+
+**Context:** Owner decision: the 3s-idle auto-animation on the drawing page was "too confusing / shocking to users," and the Animate modal was too thin a surface for real control (prompt only, no keyframes, no history, no export).
+
+**Decision:** A dedicated **Animate screen** (`AppScreen.animate`) replaces the entire in-drawing video UX. Entry: from a drawing (floating Animate button — result/canvas becomes the start keyframe) or from the gallery (≥1 drawing). The screen owns its own JWT-authed WS **`/v1/animate`** (`routes/animate.ts` + `modules/video/animateSession.ts` — on-demand `animate_request`/`animate_cancel`, no idle machinery); the drawing stream keeps only the `system_availability` push. The LTX server + pipeline accept **`keyframes[]`** (`{image_b64, position 0..1, strength}`, up to 4, positions snapped to the latent temporal grid via multi-image `ImageConditioningInput`) with `image_b64` back-compat, enabling start→end-frame morphs. iOS: `AnimateController` (own WS session, reconnect, generation state) + `AnimateView` (keyframe slots, motion prompt + example chips, 2s/4s/6s duration presets, streamed-frame progress preview, cancel) + SwiftData **`AnimationClip`** (every delivered MP4 saved with its inputs; history strip, replay, reuse-setup, ShareSheet export). Clips generated from a drawing also mirror into `RecordingStore` so the per-drawing "Animation (MP4)" share and speed-paint replay tail keep working. Removed: `VideoSession` (idle trigger) + `VIDEO_IDLE_TRIGGER_MS` + `{type:'animate'}` handling (legacy clients get a synthesized `video_cancelled(video_disabled)` so their button resets) + iOS `AnimateModalView`/`isAnimating`/result-pane video states. Metering moved to the animate route ($0.05/delivered video, same ledger). `resolveIdentity` extracted to `modules/auth/wsIdentity.ts` (shared by both WS routes); WS `maxPayload` raised to 64 MiB for keyframe uploads (client downscales to ≤1024px JPEG; 8 MB/keyframe server cap).
+
+**Alternatives considered:** Keeping the idle auto-trigger behind a setting (rejected — owner explicitly killed the behavior); riding animate requests over the existing stream WS (rejected — the gallery entry point has no stream, and the screen's lifecycle is independent of drawing); keyframes at arbitrary mid positions in the UI (deferred — protocol supports up to 4, UI ships start+end).
+
+**Consequences:** `validate-video.mts` → `validate-animate.mts` (single-keyframe, multi-keyframe, cancel-mid-flight). The video pool's interest signals are now animate-WS open + drawing-stream open. iOS gains a second SwiftData model (`AnimationClip`) in the container. `Drawing.animationPrompt` persists as the per-drawing motion-prompt prefill for the screen.
+
+---
+
 ### 2026-07-18 — Video fleet gets production scaling via a shared pool factory (launch-blocking)
 
 **Context:** The video POC ran one manually-launched static instance. Owner: production scaling is necessary for launch, and the image/video systems are near-identical in orchestration — "just the node being spun up is different."

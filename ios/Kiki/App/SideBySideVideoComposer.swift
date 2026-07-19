@@ -1,6 +1,9 @@
 import AVFoundation
 import CoreGraphics
+import os
 import UIKit
+
+private let composerLog = Logger(subsystem: "com.kiki.app", category: "ReplayComposer")
 
 /// How the two recorded panes are arranged in the exported replay, sized to
 /// fit common Instagram aspect ratios.
@@ -67,16 +70,20 @@ enum SideBySideVideoComposer {
 
     /// Stitch the recorded segments into a playable composition. `side` is the
     /// per-track source edge (matches the recorder).
+    ///
+    /// (The animation-tail option was removed 2026-07-19 while stabilizing the
+    /// preview — the tail is always the 3s freeze-hold. Re-adding it must keep
+    /// both tracks EXACTLY equal length; see the tail comment below.)
     static func build(
         canvasSegments: [URL],
         generatedSegments: [URL],
-        generatedVideoURL: URL? = nil,
         layout: ReplayLayout = .horizontal,
         speed: ReplaySpeed = .multiplier(1),
-        side: Int = 768,
-        animationTail: Bool = true
+        side: Int = 768
     ) async throws -> BuiltReplay {
+        composerLog.info("REPLAY build start: composer=v3-no-anim segments=\(canvasSegments.count, privacy: .public) layout=\(layout.rawValue, privacy: .public)")
         guard !canvasSegments.isEmpty, canvasSegments.count == generatedSegments.count else {
+            composerLog.error("REPLAY build: missing/unbalanced segments canvas=\(canvasSegments.count) generated=\(generatedSegments.count)")
             throw ComposeError.missingTrack
         }
 
@@ -108,48 +115,47 @@ enum SideBySideVideoComposer {
             lastCanvasTrack = canvasTrack
             lastGeneratedTrack = generatedTrack
             lastSegmentDuration = dur
+            composerLog.info("REPLAY build: inserted \(canvasURL.lastPathComponent, privacy: .public) dur=\(dur.seconds, privacy: .public)s cursor=\(cursor.seconds, privacy: .public)s")
         }
-        guard cursor > .zero else { throw ComposeError.missingTrack }
+        guard cursor > .zero else {
+            composerLog.error("REPLAY build: zero usable content after stitch")
+            throw ComposeError.missingTrack
+        }
         let baseDuration = cursor
         let baseRange = CMTimeRange(start: .zero, duration: baseDuration)
 
-        // How long the final frame holds at the end (freeze or animation floor).
+        // How long the final frame holds at the end.
         let holdSeconds = 3.0
 
         // Resolve the effective multiplier. `fitTotal` sizes content so
         // content + hold hits the target; clamped to ≥1 so short recordings
         // play at real speed instead of slow motion.
-        // The animation tail is a user OPTION (replay modal toggle): replaces
-        // the 3s freeze-hold with the drawing's generated animation. In
-        // fitTotal mode an appended animation makes the export run past the
-        // target by the animation's length — the user opted into that.
         let effectiveMultiplier: Double
-        let useAnimationTail: Bool
         switch speed {
         case .multiplier(let m):
             effectiveMultiplier = max(m, 0.01)
-            useAnimationTail = animationTail
         case .fitTotal(let totalSeconds):
             let contentTarget = max(totalSeconds - holdSeconds, 0.5)
             effectiveMultiplier = max(baseDuration.seconds / contentTarget, 1.0)
-            useAnimationTail = animationTail
         }
 
         let renderSize = layout.renderSize
 
-        // Tail FIRST, at the unscaled content end: the generated animation
-        // (canvas frozen on the final drawing | animation in the generated
-        // pane), or — with no animation (or when the mode wants an exact
-        // total) — a freeze-frame hold. The hold is rendered as a REAL
-        // multi-second H.264 clip on disk and inserted as one ordinary
-        // segment: every composition-trick variant (single stretched sample,
-        // repeated single-frame inserts, pre/post-scale ordering) was
-        // silently truncated by AVAssetExportSession in some parameter
-        // regions (mapped empirically in the Mac harness sweep) — only
-        // real file segments, like the content itself, export reliably.
+        // Tail FIRST, at the unscaled content end: a 3s freeze-frame hold on
+        // BOTH tracks. Two hard-won invariants (mapped empirically in the
+        // sim/Mac harnesses — violating either blanks the preview or
+        // truncates exports):
+        // 1. The hold must be a REAL multi-second clip file inserted as one
+        //    ordinary segment — every composition-trick variant (stretched
+        //    sample, repeated single-frame inserts) was silently truncated
+        //    by AVAssetExportSession in some parameter regions.
+        // 2. Both tracks must end at EXACTLY the same time — a per-track gap
+        //    inside the instruction range makes the REAL-TIME compositor
+        //    render nothing at all (item ready, clock advancing, no frames).
+        //    Both hold clips are written by the same writer at the same
+        //    frame count, so they are equal by construction.
         let oneFrame = CMTime(value: 1, timescale: 12)
         var tailDuration = CMTime.zero
-        var tailGeneratedTransform: CGAffineTransform?
         // Best-effort: a tail failure must NEVER blank the whole replay. On
         // any error we zero the tail; the instruction below is clamped to
         // `finalDuration`, so partial inserts past it aren't rendered.
@@ -169,49 +175,18 @@ enum SideBySideVideoComposer {
                     }
                     let clipRange = try await clipTrack.load(.timeRange)
                     try track.insertTimeRange(clipRange, of: clipTrack, at: baseDuration)
+                    composerLog.info("REPLAY build: hold-\(name, privacy: .public) inserted dur=\(clipRange.duration.seconds, privacy: .public)s at=\(baseDuration.seconds, privacy: .public)s")
                     return clipRange.duration
                 }
 
-                var appendedAnimation = false
-                if useAnimationTail, let generatedVideoURL,
-                   let safeAnimationURL = try? await normalizedAnimation(from: generatedVideoURL) {
-                    let animAsset = AVURLAsset(url: safeAnimationURL)
-                    let animTrack = try? await animAsset.loadTracks(withMediaType: .video).first
-                    // Use the TRACK's own range — the asset duration can exceed it,
-                    // which would make insertTimeRange throw.
-                    let animRange = try? await animTrack?.load(.timeRange)
-                    if let animTrack, let animRange, animRange.duration.isValid, animRange.duration > .zero {
-                        // EXACT-equal tails: both tracks must end at the same
-                        // time. The animation's native duration is not a whole
-                        // number of 12 fps hold-clip frames, so the canvas
-                        // hold ends ~tens of ms before the animation — a
-                        // per-track gap inside the instruction range, which
-                        // makes the REAL-TIME compositor render nothing at
-                        // all (the black preview; reproduced in the sim
-                        // harness — exports are unaffected). Trim the
-                        // animation to whole 12 fps frames so both tails are
-                        // identical by construction.
-                        let tailFrames = max(Int((animRange.duration.seconds * 12).rounded(.down)), 2)
-                        let exactTail = CMTime(value: CMTimeValue(tailFrames), timescale: 12)
-                        let trimmedAnimation = CMTimeRange(start: animRange.start, duration: exactTail)
-                        try generatedComp.insertTimeRange(trimmedAnimation, of: animTrack, at: baseDuration)
-                        _ = try await insertHoldClip(on: canvasComp, lastFrameOf: lastCanvasURL, seconds: exactTail.seconds, name: "canvas")
-                        // The animation isn't 768²; fit it into the generated pane.
-                        let animSize = (try? await animTrack.load(.naturalSize)) ?? CGSize(width: side, height: side)
-                        tailGeneratedTransform = fitTransform(sourceSize: animSize, into: generatedPaneRect(for: layout, render: renderSize))
-                        tailDuration = exactTail
-                        appendedAnimation = true
-                    }
-                }
-
-                if !appendedAnimation {
-                    tailDuration = try await insertHoldClip(on: canvasComp, lastFrameOf: lastCanvasURL, seconds: holdSeconds, name: "canvas")
-                    _ = try await insertHoldClip(on: generatedComp, lastFrameOf: lastGeneratedURL, seconds: holdSeconds, name: "generated")
+                tailDuration = try await insertHoldClip(on: canvasComp, lastFrameOf: lastCanvasURL, seconds: holdSeconds, name: "canvas")
+                let generatedTail = try await insertHoldClip(on: generatedComp, lastFrameOf: lastGeneratedURL, seconds: holdSeconds, name: "generated")
+                if generatedTail != tailDuration {
+                    composerLog.error("REPLAY build: TAIL MISMATCH canvas=\(tailDuration.seconds) generated=\(generatedTail.seconds)")
                 }
             } catch {
-                // Drop the tail, keep the main replay.
+                composerLog.error("REPLAY build: tail failed, dropping tail: \(String(describing: error), privacy: .public)")
                 tailDuration = .zero
-                tailGeneratedTransform = nil
             }
         }
 
@@ -240,11 +215,6 @@ enum SideBySideVideoComposer {
         canvasInstruction.setTransform(canvasTransform, at: .zero)
         let generatedInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: generatedComp)
         generatedInstruction.setTransform(generatedTransform, at: .zero)
-        // The appended animation has its own size, so re-fit the generated pane
-        // from the tail onward.
-        if let tailGeneratedTransform {
-            generatedInstruction.setTransform(tailGeneratedTransform, at: tailStart)
-        }
 
         let instruction = AVMutableVideoCompositionInstruction()
         instruction.timeRange = CMTimeRange(start: .zero, duration: finalDuration)
@@ -254,6 +224,13 @@ enum SideBySideVideoComposer {
         videoComposition.renderSize = renderSize
         videoComposition.frameDuration = CMTime(value: 1, timescale: 30)
         videoComposition.instructions = [instruction]
+
+        let canvasEnd = canvasComp.timeRange.end.seconds
+        let generatedEnd = generatedComp.timeRange.end.seconds
+        composerLog.info("REPLAY build done: content=\(contentDuration.seconds, privacy: .public)s tail=\(tailDuration.seconds, privacy: .public)s final=\(finalDuration.seconds, privacy: .public)s compDur=\(composition.duration.seconds, privacy: .public)s canvasTrackEnd=\(canvasEnd, privacy: .public)s generatedTrackEnd=\(generatedEnd, privacy: .public)s")
+        if abs(canvasEnd - generatedEnd) > 0.001 || abs(canvasEnd - finalDuration.seconds) > 0.001 {
+            composerLog.error("REPLAY build: TRACK/INSTRUCTION LENGTH MISMATCH — RT compositor will render black")
+        }
 
         return BuiltReplay(composition: composition, videoComposition: videoComposition, layout: layout)
     }
@@ -288,71 +265,6 @@ enum SideBySideVideoComposer {
         guard export.status == .completed else {
             throw ComposeError.exportFailed(export.error)
         }
-    }
-
-    /// Re-encode the animate-feature MP4 into a composition-safe clip.
-    ///
-    /// The server-encoded animation (H.264 High profile with B-frames, AAC
-    /// audio, 24 fps) stalls AVFoundation's REAL-TIME videoComposition
-    /// renderer when inserted into a composition: the item reports ready and
-    /// the clock advances, but the player layer never receives a frame —
-    /// the whole preview renders black (reproduced in isolation in the sim
-    /// harness; the offline export renderer is unaffected). Decoding and
-    /// re-encoding through our own writer (video-only, default profile, no
-    /// audio) produces a clip the RT renderer accepts. Cached per source
-    /// file (size+mtime key) so repeated builds don't re-encode.
-    private static func normalizedAnimation(from url: URL) async throws -> URL {
-        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
-        let bytes = (attrs?[.size] as? NSNumber)?.intValue ?? 0
-        let mtime = Int(((attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0))
-        let output = FileManager.default.temporaryDirectory
-            .appendingPathComponent("kiki-norm-anim-\(bytes)-\(mtime).mp4")
-        if FileManager.default.fileExists(atPath: output.path) { return output }
-
-        let asset = AVURLAsset(url: url)
-        guard let track = try await asset.loadTracks(withMediaType: .video).first else {
-            throw ComposeError.missingTrack
-        }
-        let natural = try await track.load(.naturalSize)
-        let reader = try AVAssetReader(asset: asset)
-        let readerOutput = AVAssetReaderTrackOutput(track: track, outputSettings: [
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
-        ])
-        guard reader.canAdd(readerOutput) else { throw ComposeError.exportSetupFailed }
-        reader.add(readerOutput)
-
-        let tmp = output.appendingPathExtension("tmp.mp4")
-        try? FileManager.default.removeItem(at: tmp)
-        let writer = try AVAssetWriter(outputURL: tmp, fileType: .mp4)
-        let settings: [String: Any] = [
-            AVVideoCodecKey: AVVideoCodecType.h264,
-            AVVideoWidthKey: Int(natural.width.rounded()),
-            AVVideoHeightKey: Int(natural.height.rounded()),
-        ]
-        let input = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
-        input.expectsMediaDataInRealTime = false
-        guard writer.canAdd(input) else { throw ComposeError.exportSetupFailed }
-        writer.add(input)
-        guard writer.startWriting() else { throw ComposeError.exportFailed(writer.error) }
-        writer.startSession(atSourceTime: .zero)
-        reader.startReading()
-        while let sample = readerOutput.copyNextSampleBuffer() {
-            while !input.isReadyForMoreMediaData {
-                try await Task.sleep(nanoseconds: 2_000_000)
-            }
-            input.append(sample)
-        }
-        input.markAsFinished()
-        await withCheckedContinuation { continuation in
-            writer.finishWriting { continuation.resume() }
-        }
-        guard reader.status == .completed, writer.status == .completed else {
-            try? FileManager.default.removeItem(at: tmp)
-            throw ComposeError.exportFailed(writer.error ?? reader.error)
-        }
-        try? FileManager.default.removeItem(at: output)
-        try FileManager.default.moveItem(at: tmp, to: output)
-        return output
     }
 
     /// The last decodable frame of a video file.
@@ -455,32 +367,6 @@ enum SideBySideVideoComposer {
         t.tx = tx
         t.ty = ty
         return t
-    }
-
-    /// The destination rect of the generated (right/bottom) pane in the render
-    /// canvas — used to fit the appended animation, which may not be square.
-    private static func generatedPaneRect(for layout: ReplayLayout, render: CGSize) -> CGRect {
-        switch layout {
-        case .horizontal:
-            let pane = render.width / 2
-            return CGRect(x: pane, y: 0, width: pane, height: pane)
-        case .vertical:
-            let pane = render.height / 2
-            return CGRect(x: (render.width - pane) / 2, y: pane, width: pane, height: pane)
-        }
-    }
-
-    /// Aspect-fit a source of `sourceSize` centered within `rect`.
-    private static func fitTransform(sourceSize: CGSize, into rect: CGRect) -> CGAffineTransform {
-        guard sourceSize.width > 0, sourceSize.height > 0 else { return .identity }
-        let scale = min(rect.width / sourceSize.width, rect.height / sourceSize.height)
-        let drawW = sourceSize.width * scale
-        let drawH = sourceSize.height * scale
-        return place(
-            scale: scale,
-            tx: rect.minX + (rect.width - drawW) / 2,
-            ty: rect.minY + (rect.height - drawH) / 2
-        )
     }
 
     // MARK: - Watermark

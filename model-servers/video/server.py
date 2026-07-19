@@ -15,7 +15,13 @@ Protocol (backend -> pod):
     - Text frame (JSON):
         { "type": "video_request",
           "requestId": "...",
-          "image_b64": "<JPEG, base64>",
+          "image_b64": "<JPEG, base64>",          # legacy single keyframe at t=0
+          "keyframes": [                            # OR multi-keyframe (Animate screen)
+              { "image_b64": "<JPEG/PNG, base64>",
+                "position": <0.0-1.0>,             # fraction of video duration
+                "strength": <0.0-1.0, default 1> },
+              ...
+          ],
           "prompt": "...",
           "seed": <int|null> }
     - Text frame (JSON):
@@ -57,7 +63,7 @@ from PIL import Image
 from shared import config
 from shared import preparing_heartbeat
 from shared import sentry_init
-from video.pipeline import GeneratedAudio, Ltx23VideoPipeline
+from video.pipeline import GeneratedAudio, Keyframe, Ltx23VideoPipeline
 
 logging.basicConfig(
     level=logging.INFO,
@@ -240,7 +246,7 @@ async def websocket_video(ws: WebSocket):
         current_task = None
         current_cancel = None
 
-    async def run_video(request_id: str, image: Image.Image, prompt: str, seed: int | None,
+    async def run_video(request_id: str, keyframes: list[Keyframe], prompt: str, seed: int | None,
                         cancel: Event,
                         *,
                         req_width: int | None = None,
@@ -263,7 +269,8 @@ async def websocket_video(ws: WebSocket):
 
         try:
             result = await asyncio.to_thread(
-                video_pipeline.generate, image, prompt, seed, _is_cancelled,
+                video_pipeline.generate, None, prompt, seed, _is_cancelled,
+                keyframes=keyframes,
                 width=req_width, height=req_height, num_frames=req_frames,
                 profile=req_profile, prompt_suffix=prompt_suffix,
             )
@@ -475,13 +482,37 @@ async def websocket_video(ws: WebSocket):
                 if req_prompt_suffix is not None and not isinstance(req_prompt_suffix, str):
                     req_prompt_suffix = None
 
-                image_b64 = data.get("image_b64") or ""
+                # Conditioning images: either the multi-keyframe list (Animate
+                # screen) or the legacy single image_b64 (= one keyframe at
+                # t=0). Cap at 4 keyframes — each adds VAE-encode cost and the
+                # UI never sends more.
+                raw_keyframes = data.get("keyframes")
+                keyframes: list[Keyframe] = []
                 try:
-                    image_bytes = base64.b64decode(image_b64)
-                    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+                    if isinstance(raw_keyframes, list) and raw_keyframes:
+                        for entry in raw_keyframes[:4]:
+                            if not isinstance(entry, dict):
+                                raise ValueError("keyframe entry not an object")
+                            kf_bytes = base64.b64decode(entry.get("image_b64") or "")
+                            kf_image = Image.open(io.BytesIO(kf_bytes)).convert("RGB")
+                            try:
+                                position = float(entry.get("position", 0.0))
+                            except (TypeError, ValueError):
+                                position = 0.0
+                            try:
+                                strength = float(entry.get("strength", 1.0))
+                            except (TypeError, ValueError):
+                                strength = 1.0
+                            keyframes.append(Keyframe(
+                                image=kf_image, position=position, strength=strength,
+                            ))
+                    else:
+                        image_bytes = base64.b64decode(data.get("image_b64") or "")
+                        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+                        keyframes.append(Keyframe(image=image, position=0.0, strength=1.0))
                 except Exception as e:  # noqa: BLE001
                     logger.error(
-                        f"invalid image_b64: req={request_id} err={e}",
+                        f"invalid conditioning image(s): req={request_id} err={e}",
                         extra={"req": request_id},
                     )
                     await ws.send_text(json.dumps({
@@ -493,17 +524,21 @@ async def websocket_video(ws: WebSocket):
 
                 prompt_preview = prompt[:60]
                 suffix_preview = (req_prompt_suffix or "")[:60]
+                kf_summary = " ".join(
+                    f"{kf.image.width}x{kf.image.height}@{kf.position:.2f}s{kf.strength:.2f}"
+                    for kf in keyframes
+                )
                 logger.info(
                     f"video_request: req={request_id} prompt='{prompt_preview}' "
-                    f"suffix='{suffix_preview}' image={image.width}x{image.height} "
+                    f"suffix='{suffix_preview}' keyframes=[{kf_summary}] "
                     f"seed={seed} videoWidth={req_width} videoHeight={req_height} "
                     f"videoFrames={req_frames} profile={req_profile}",
                     extra={
                         "req": request_id,
                         "prompt": prompt_preview,
                         "suffix": suffix_preview,
-                        "image_width": image.width,
-                        "image_height": image.height,
+                        "keyframe_count": len(keyframes),
+                        "keyframe_summary": kf_summary,
                         "seed": seed,
                         "video_width": req_width,
                         "video_height": req_height,
@@ -521,7 +556,7 @@ async def websocket_video(ws: WebSocket):
                 with sentry_init.phase("animating"):
                     current_task = asyncio.create_task(
                         run_video(
-                            request_id, image, prompt, seed, cancel,
+                            request_id, keyframes, prompt, seed, cancel,
                             req_width=req_width, req_height=req_height, req_frames=req_frames,
                             req_profile=req_profile, prompt_suffix=req_prompt_suffix,
                         )

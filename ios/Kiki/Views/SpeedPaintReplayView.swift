@@ -1,6 +1,11 @@
 import AVKit
+import os
 import Sentry
 import SwiftUI
+
+/// Debug channel for the black-preview hunt — every line is prefixed REPLAY
+/// and marked public so it reads verbatim in the Xcode console / Console.app.
+private let replayLog = Logger(subsystem: "com.kiki.app", category: "Replay")
 
 /// Modal that previews the speed-paint replay in an autoplaying, looping player
 /// and lets the user pick a layout (side-by-side / stacked) and speed
@@ -43,10 +48,11 @@ struct SpeedPaintReplayView: View {
 
     @State private var layout: ReplayLayout = .vertical
     @State private var speed: SpeedChoice = .fit12
-    /// End the replay with the drawing's generated animation instead of the
-    /// 3s freeze frame (only offered when an animation exists).
-    @State private var animationTail = true
     @State private var watermark = true
+    /// The flush/consolidate pass runs once per modal open, inside the first
+    /// rebuild (behind the spinner) — never again while previews may be
+    /// reading segment files.
+    @State private var hasFlushed = false
     @State private var isComposing = false
     @State private var hasPreview = false
     @State private var isExporting = false
@@ -85,12 +91,6 @@ struct SpeedPaintReplayView: View {
 
                 Toggle(isOn: $watermark) {
                     Label("“Drawn with Kiki” watermark", systemImage: "sparkles")
-                }
-
-                if coordinator.generatedAnimationURL != nil {
-                    Toggle(isOn: $animationTail) {
-                        Label("End with the animation", systemImage: "film")
-                    }
                 }
 
                 VStack(spacing: 12) {
@@ -172,6 +172,7 @@ struct SpeedPaintReplayView: View {
             PlayerLayerView(player: player, onReadyForDisplay: { ready in
                 guard ready != layerReadyForDisplay else { return }
                 layerReadyForDisplay = ready
+                replayLog.info("REPLAY layer: isReadyForDisplay=\(ready, privacy: .public)")
                 Analytics.track(.replayPreviewFailed, properties: [
                     "status": "layer_display",
                     "ready_for_display": ready,
@@ -227,6 +228,7 @@ struct SpeedPaintReplayView: View {
         let size = "\(Int(item.presentationSize.width))x\(Int(item.presentationSize.height))"
         let err = item.error != nil ? " ERR:\(item.error!.localizedDescription)" : ""
         probeText = "it=\(statusName) r=\(rate) t=\(time)/\(duration) sz=\(size) disp=\(layerReadyForDisplay ? "Y" : "N") tc=\(player.timeControlStatus.rawValue)\(err)"
+        replayLog.info("REPLAY probe: \(probeText, privacy: .public)")
     }
 
     private var watermarkBadge: some View {
@@ -254,7 +256,16 @@ struct SpeedPaintReplayView: View {
     private func rebuildPreview() async {
         isComposing = true
         defer { isComposing = false }
-        guard let built = await coordinator.buildReplayComposition(layout: layout, speed: speed.composerSpeed, animationTail: animationTail) else {
+        replayLog.info("REPLAY ui: rebuildPreview start layout=\(layout.rawValue, privacy: .public) speed=\(speed.rawValue, privacy: .public) flushed=\(hasFlushed, privacy: .public)")
+        if !hasFlushed {
+            let flushStart = Date()
+            await coordinator.flushRecording(consolidate: true)
+            hasFlushed = true
+            replayLog.info("REPLAY ui: first-open flush+consolidate took \(Int(Date().timeIntervalSince(flushStart) * 1000), privacy: .public)ms")
+        }
+        let buildStart = Date()
+        guard let built = await coordinator.buildReplayComposition(layout: layout, speed: speed.composerSpeed) else {
+            replayLog.error("REPLAY ui: build returned nil")
             // Only alert if we never managed to compose anything — a re-compose
             // failure (layout/speed change) keeps showing the previous video.
             if !hasPreview {
@@ -270,14 +281,18 @@ struct SpeedPaintReplayView: View {
         debugPlainFile = FileManager.default.fileExists(atPath: "/tmp/kiki-debug-plainfile")
         debugNoVideoComp = FileManager.default.fileExists(atPath: "/tmp/kiki-debug-novideocomp")
         #endif
+        replayLog.info("REPLAY ui: build took \(Int(Date().timeIntervalSince(buildStart) * 1000), privacy: .public)ms duration=\(built.composition.duration.seconds, privacy: .public)s")
         let item: AVPlayerItem
         if debugPlainFile, let drawingId = coordinator.currentDrawingId,
            let firstSegment = RecordingStore.shared.segmentURLs(for: drawingId).canvas.first {
+            replayLog.info("REPLAY ui: DEBUG plain-file preview \(firstSegment.lastPathComponent, privacy: .public)")
             item = AVPlayerItem(url: firstSegment)
         } else {
             item = AVPlayerItem(asset: built.composition)
             if !debugNoVideoComp {
                 item.videoComposition = built.videoComposition
+            } else {
+                replayLog.info("REPLAY ui: DEBUG videoComposition disabled")
             }
         }
         // Fresh player per item: reusing one AVPlayer across item swaps is
@@ -293,6 +308,7 @@ struct SpeedPaintReplayView: View {
         installLoopObserver()
         player.play()
         hasPreview = true
+        replayLog.info("REPLAY ui: player swapped, playing")
         watchItemStatus(item)
     }
 
@@ -352,6 +368,7 @@ struct SpeedPaintReplayView: View {
                 ]
                 Analytics.track(.replayPreviewFailed, properties: probe)
                 Log.info("replay.preview_probe", attributes: probe.merging(["event": "replay.preview_probe"]) { a, _ in a })
+                replayLog.info("REPLAY deep-probe: \(String(describing: probe), privacy: .public)")
             }
         }
     }
@@ -387,7 +404,7 @@ struct SpeedPaintReplayView: View {
         exportTask?.cancel()
         exportTaskKey = key
         exportTask = Task { @MainActor in
-            let url = await coordinator.composeReplay(layout: layout, speed: speed.composerSpeed, watermark: watermark, animationTail: animationTail)
+            let url = await coordinator.composeReplay(layout: layout, speed: speed.composerSpeed, watermark: watermark)
             if let url, !Task.isCancelled {
                 exportedURL = url
                 exportedKey = key
@@ -419,7 +436,7 @@ struct SpeedPaintReplayView: View {
                 url = await task.value
             } else {
                 exportTask?.cancel()
-                url = await coordinator.composeReplay(layout: layout, speed: speed.composerSpeed, watermark: watermark, animationTail: animationTail)
+                url = await coordinator.composeReplay(layout: layout, speed: speed.composerSpeed, watermark: watermark)
             }
             guard let url else {
                 statusMessage = "Couldn't export the replay — try again."

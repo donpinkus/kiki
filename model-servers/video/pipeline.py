@@ -65,6 +65,22 @@ CancelState = Literal["ok", "before_start", "during_inference", "after_complete"
 
 
 @dataclass
+class Keyframe:
+    """A conditioning image pinned to a position in the output video.
+
+    ``position`` is a 0.0–1.0 fraction of the video duration; it is resolved
+    to a concrete frame index at generate() time (after num_frames is known)
+    and snapped to the latent temporal grid (multiples of 8 — the same rule
+    behind the (num_frames - 1) % 8 == 0 constraint, so position 1.0 lands
+    exactly on the final frame).
+    """
+
+    image: Image.Image
+    position: float = 0.0
+    strength: float = 1.0
+
+
+@dataclass
 class GeneratedAudio:
     """PCM audio decoded from LTX's audio latent."""
 
@@ -544,7 +560,7 @@ class Ltx23VideoPipeline:
             with self._lock:
                 # _run_inference already wraps in torch.inference_mode().
                 _ = self._run_inference(
-                    image_path=warmup_path,
+                    conditioning_paths=[(warmup_path, 0, 1.0)],
                     prompt="warmup",
                     seed=0,
                     width=config.LTX_WIDTH,
@@ -568,11 +584,12 @@ class Ltx23VideoPipeline:
 
     def generate(
         self,
-        image: Image.Image,
+        image: Image.Image | None,
         prompt: str,
         seed: int | None,
         is_cancelled: Callable[[], bool],
         *,
+        keyframes: list[Keyframe] | None = None,
         width: int | None = None,
         height: int | None = None,
         num_frames: int | None = None,
@@ -603,6 +620,12 @@ class Ltx23VideoPipeline:
         NOTE on cancellation: today's DistilledPipeline still doesn't expose
         mid-inference callbacks, so `during_inference` won't appear yet.
         Step 5 forks `euler_denoising_loop` to add it.
+
+        Keyframes (Animate screen, 2026-07-19): pass `keyframes` to condition
+        the video on multiple images pinned at fractional positions (0.0 =
+        first frame, 1.0 = last). `image` remains as the legacy single-image
+        path (equivalent to one keyframe at position 0.0). Exactly one of
+        `image` / `keyframes` must be provided.
         """
         # Resolve per-call shape parameters. Defaults to config so existing
         # WebSocket callers (which don't pass shape args) keep working.
@@ -624,6 +647,26 @@ class Ltx23VideoPipeline:
                 f"num_frames must satisfy (n-1) %% 8 == 0 (got {num_frames})"
             )
 
+        # Normalize the two input shapes into one keyframe list. Positions
+        # resolve to frame indices snapped to the latent temporal grid
+        # (multiples of 8); (num_frames - 1) % 8 == 0 guarantees position 1.0
+        # lands exactly on the final frame. Duplicate indices keep the last.
+        if keyframes is None:
+            if image is None:
+                raise ValueError("either image or keyframes must be provided")
+            keyframes = [Keyframe(image=image, position=0.0, strength=1.0)]
+        elif not keyframes:
+            raise ValueError("keyframes must be non-empty when provided")
+
+        by_idx: dict[int, tuple[Image.Image, float]] = {}
+        for kf in keyframes:
+            pos = min(max(float(kf.position), 0.0), 1.0)
+            idx = round(pos * (num_frames - 1) / 8) * 8
+            idx = min(idx, num_frames - 1)
+            strength = min(max(float(kf.strength), 0.0), 1.0)
+            by_idx[idx] = (kf.image, strength)
+        resolved = sorted(by_idx.items())
+
         if is_cancelled():
             logger.info("LTX-2.3 generate skipped — cancelled before start")
             return GenerateResult(
@@ -640,15 +683,18 @@ class Ltx23VideoPipeline:
         if seed is None:
             seed = int.from_bytes(os.urandom(4), byteorder="little") & 0x7FFFFFFF
 
-        # Image conditioning is path-based in ltx-pipelines. Write the
-        # incoming PIL image to a tempfile, pass the path, clean up after.
-        # PNG (lossless) instead of JPEG: upstream's preprocessing pass
-        # re-encodes the image at crf=33 unless the caller explicitly passes
-        # crf=0 (see _run_inference). For sparse line drawings from the iPad,
-        # JPEG-then-crf=33 cumulative loss visibly damages thin strokes.
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-            image_path = f.name
-            image.save(image_path, format="PNG")
+        # Image conditioning is path-based in ltx-pipelines. Write each
+        # keyframe image to a tempfile, pass (path, frame_idx, strength),
+        # clean up after. PNG (lossless) instead of JPEG: upstream's
+        # preprocessing pass re-encodes the image at crf=33 unless the caller
+        # explicitly passes crf=0 (see _run_inference). For sparse line
+        # drawings from the iPad, JPEG-then-crf=33 cumulative loss visibly
+        # damages thin strokes.
+        conditioning_paths: list[tuple[str, int, float]] = []
+        for idx, (kf_image, strength) in resolved:
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+                kf_image.save(f.name, format="PNG")
+                conditioning_paths.append((f.name, idx, strength))
         # `lock_wait_ms` separates queue/lock-contention time from
         # `pipe_total`. Important once Step 5 lands and short-cancelled jobs
         # release the lock fast — without it, queue effects look like
@@ -697,7 +743,7 @@ class Ltx23VideoPipeline:
                     },
                 )
                 frames, audio = self._run_inference(
-                    image_path=image_path,
+                    conditioning_paths=conditioning_paths,
                     prompt=final_prompt,
                     seed=seed,
                     width=width,
@@ -708,10 +754,11 @@ class Ltx23VideoPipeline:
                 )
                 pipe_total_ms = self._inference_timings["pipe_total"][-1]
         finally:
-            try:
-                os.unlink(image_path)
-            except OSError:
-                pass
+            for path, _idx, _strength in conditioning_paths:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
 
         # Late cancel check: caller may have set the flag while inference was
         # running. Today this is the dominant wasted-GPU pattern (~21s per
@@ -742,7 +789,7 @@ class Ltx23VideoPipeline:
 
     def _run_inference(
         self,
-        image_path: str,
+        conditioning_paths: list[tuple[str, int, float]],
         prompt: str,
         seed: int,
         *,
@@ -791,14 +838,16 @@ class Ltx23VideoPipeline:
 
         # crf=0 disables upstream's preprocessing re-encode of the conditioning
         # image (default crf=33 introduces visible compression artifacts on
-        # sparse drawn linework, weakening conditioning).
+        # sparse drawn linework, weakening conditioning). One entry per
+        # keyframe; frame_idx is pre-snapped to the latent grid by generate().
         images = [
             ImageConditioningInput(
-                path=image_path,
-                frame_idx=0,
-                strength=1.0,
+                path=path,
+                frame_idx=frame_idx,
+                strength=strength,
                 crf=0,
             )
+            for path, frame_idx, strength in conditioning_paths
         ]
         # Step 2 fail-fast: if the persistent transformer wasn't built (load
         # failed, or shutdown was called), don't silently fall back to a

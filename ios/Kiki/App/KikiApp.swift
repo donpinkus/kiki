@@ -8,6 +8,10 @@ struct KikiApp: App {
     @State private var coordinator: AppCoordinator
 
     init() {
+        // TEMP DEBUG (sim bisect for the black replay preview): launch with
+        // -KikiDisableSentry to boot without Sentry. Remove when closed.
+        let disableSentry = ProcessInfo.processInfo.arguments.contains("-KikiDisableSentry")
+        if !disableSentry {
         SentrySDK.start { options in
             options.dsn = "https://ea583825f3a2331b0f211a94db5ab2f2@o4511242315169792.ingest.us.sentry.io/4511243617042432"
             options.tracesSampleRate = 1.0
@@ -46,6 +50,7 @@ struct KikiApp: App {
                 return log
             }
         }
+        }
 
         // First user-journey log of every cold launch. Carries `app_version`
         // so we can correlate "user reports app got stuck on X" with the
@@ -59,7 +64,7 @@ struct KikiApp: App {
             "build_number": buildNumber ?? "unknown",
         ])
 
-        let container = try! ModelContainer(for: Drawing.self)
+        let container = try! ModelContainer(for: Drawing.self, AnimationClip.self)
         self.container = container
         _coordinator = State(initialValue: AppCoordinator(modelContext: container.mainContext))
     }
