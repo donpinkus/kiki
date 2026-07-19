@@ -1641,6 +1641,65 @@ final class AppCoordinator {
         }
     }
 
+    // MARK: - Selection copy/paste
+
+    /// App-level clipboard for selection content: the masked cutout (with
+    /// alpha, cropped to the selection bounds) plus its document-space rect so
+    /// paste lands where the copy came from. Survives selection clearing and
+    /// drawing switches; also mirrored to the system pasteboard as PNG.
+    struct SelectionClipboard {
+        let image: CGImage
+        let rectInDocPixels: CGRect
+    }
+
+    private(set) var selectionClipboard: SelectionClipboard?
+
+    var canCopySelection: Bool { canvasViewModel.hasSelectionForEdit }
+    var canPasteSelection: Bool { selectionClipboard != nil && !canvasViewModel.isPasting }
+
+    /// Copy the selection's content (visible strokes only, transparent
+    /// elsewhere) into the clipboard + system pasteboard.
+    func copySelection() {
+        guard let source = canvasViewModel.transparentSnapshot(),
+              let mask = canvasViewModel.selectionMaskForEdit(side: source.width),
+              let bbox = Self.maskBoundingBox(mask) else { return }
+        let extent = CGRect(x: 0, y: 0, width: source.width, height: source.height)
+        let blend = CIFilter.blendWithMask()
+        blend.inputImage = CIImage(cgImage: source)
+        blend.backgroundImage = CIImage(color: .clear).cropped(to: extent)
+        blend.maskImage = CIImage(cgImage: mask).cropped(to: extent)
+        guard let out = blend.outputImage else { return }
+        let maskH = CGFloat(mask.height)
+        let cropCI = CGRect(x: bbox.minX, y: maskH - bbox.maxY, width: bbox.width, height: bbox.height)
+        guard let cg = Self.aiEditCIContext.createCGImage(
+            out, from: cropCI, format: .RGBA8, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!
+        ) else { return }
+        // bbox is in snapshot pixels — rescale to the 2048 document space so
+        // paste position is independent of the snapshot resolution.
+        let docScale = CGFloat(2048) / CGFloat(source.width)
+        selectionClipboard = SelectionClipboard(
+            image: cg,
+            rectInDocPixels: CGRect(
+                x: bbox.minX * docScale, y: bbox.minY * docScale,
+                width: bbox.width * docScale, height: bbox.height * docScale
+            )
+        )
+        UIPasteboard.general.image = UIImage(cgImage: cg)
+        Analytics.track(.selectionCopied)
+        showTransientBanner("Copied — paste from the left sidebar.")
+    }
+
+    /// Paste the clipboard as a floating, movable overlay (offset slightly so
+    /// pasting over the source is visible). Commit/cancel via the paste bar.
+    func pasteSelection() {
+        guard let clip = selectionClipboard else { return }
+        let offset: CGFloat = 48
+        let rect = clip.rectInDocPixels.offsetBy(dx: offset, dy: offset)
+        if canvasViewModel.beginPaste(image: clip.image, rectInDocPixels: rect) {
+            Analytics.track(.selectionPasted)
+        }
+    }
+
     // MARK: - Sticker sharing
 
     /// Whether a sticker can be cut: needs an active selection to mask with.
@@ -2108,6 +2167,12 @@ final class AppCoordinator {
             }
         #endif
         #if DEBUG && targetEnvironment(simulator)
+        case "copySel":
+            copySelection()
+        case "pasteSel":
+            pasteSelection()
+        case "pastePlace":
+            canvasViewModel.commitPaste()
         case "aiEditSheet":
             showAIEditSheet = true
         case "stickerFile":

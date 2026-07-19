@@ -91,6 +91,10 @@ public final class MetalCanvasView: UIView {
     /// Magic wand: fired on a completed tap (view-point coords). The wand
     /// controller turns taps into SAM prompts; the canvas view stays model-free.
     public var onWandTap: ((CGPoint) -> Void)?
+    /// Unified selection: when set, a completed lasso loop becomes a freehand
+    /// MASK author (routed here as a closed view-space path) instead of the
+    /// legacy immediate float-extraction — no undo snapshot, no pixel changes.
+    public var onFreehandLoopClosed: ((CGPath) -> Void)?
 
     // MARK: - Private State
 
@@ -724,8 +728,11 @@ public final class MetalCanvasView: UIView {
             let path = CGMutablePath()
             path.move(to: point)
             lassoPath = path
-            // Snapshot for undo/cancel before lasso extraction modifies the canvas.
-            pushUndoSnapshot()
+            // Legacy extraction mutates the canvas → snapshot. Freehand-mask
+            // mode (unified selection) doesn't touch pixels — no snapshot.
+            if onFreehandLoopClosed == nil {
+                pushUndoSnapshot()
+            }
 
         case .magicWand:
             // A wand touch is a prompt tap, not a stroke — just remember where
@@ -2490,6 +2497,7 @@ public final class MetalCanvasView: UIView {
     }
 
     private func finishLasso() {
+        let freehandMode = onFreehandLoopClosed != nil
         defer {
             drawingTouch = nil
             lassoPoints.removeAll()
@@ -2499,7 +2507,7 @@ public final class MetalCanvasView: UIView {
         }
 
         guard lassoPoints.count >= 3 else {
-            if !undoSnapshots.isEmpty { undoSnapshots.removeLast() }
+            if !freehandMode, !undoSnapshots.isEmpty { undoSnapshots.removeLast() }
             isDirty = true
             return
         }
@@ -2516,19 +2524,82 @@ public final class MetalCanvasView: UIView {
         let fullRect = CGRect(origin: .zero, size: bounds.size)
         let cropRect = pathBounds.intersection(fullRect)
         guard cropRect.width >= 4, cropRect.height >= 4 else {
-            if !undoSnapshots.isEmpty { undoSnapshots.removeLast() }
+            if !freehandMode, !undoSnapshots.isEmpty { undoSnapshots.removeLast() }
             isDirty = true
             return
         }
 
-        // Metal-native extraction: rasterize path → mask, copy masked pixels → selection
-        // texture, clear masked pixels from canvas. No CG color pipeline.
+        // Unified selection: the loop is a mask author, not a float — hand the
+        // closed path to the SelectionController and touch nothing else.
+        if freehandMode {
+            isDirty = true
+            onFreehandLoopClosed?(closedPath)
+            return
+        }
+
+        // Legacy: Metal-native extraction (rasterize path → mask, copy masked
+        // pixels → selection texture, clear them from canvas).
         renderer.extractSelection(canvasPath: closedPath, bounds: cropRect, canvasScale: canvasScale)
 
         isDirty = true
 
         // Signal that a selection is active. No UIImage — the texture lives on the renderer.
         onLassoSelectionStarted?(closedPath, cropRect)
+    }
+
+    // MARK: - Unified-selection Move (float the selected content)
+
+    /// Extract the selection-path region into the floating selection texture
+    /// (the Move flow's entry). Pushes a canvas undo snapshot first — cancel
+    /// restores it. The caller shows the gesture view via the container.
+    /// Returns the clamped extraction bounds (view points), or nil if too small.
+    @discardableResult
+    public func beginMoveExtraction(path: CGPath) -> CGRect? {
+        let cropRect = path.boundingBox.intersection(CGRect(origin: .zero, size: bounds.size))
+        guard cropRect.width >= 4, cropRect.height >= 4 else { return nil }
+        pushUndoSnapshot()
+        renderer.extractSelection(canvasPath: path, bounds: cropRect, canvasScale: canvasScale)
+        isDirty = true
+        return cropRect
+    }
+
+    /// Begin a paste float: load an image (with alpha) as the floating
+    /// selection at `rectInView` (view points). No undo snapshot and nothing
+    /// is cut from any layer — the float is pure new content; commit
+    /// composites it (with its own undo), and `discardPasteFloat` cancels
+    /// without touching undo history.
+    @discardableResult
+    public func beginPasteFloat(image: CGImage, rectInView: CGRect) -> CGRect? {
+        let clamped = rectInView.intersection(CGRect(origin: .zero, size: bounds.size))
+        guard clamped.width >= 4, clamped.height >= 4 else { return nil }
+        let px = CGRect(
+            x: clamped.origin.x * canvasScale, y: clamped.origin.y * canvasScale,
+            width: clamped.width * canvasScale, height: clamped.height * canvasScale
+        )
+        guard renderer.setSelectionFromImage(image, rect: px) else { return nil }
+        isDirty = true
+        return clamped
+    }
+
+    /// Discard a paste float. Unlike `cancelSelection` this performs NO undo —
+    /// a paste float never modified any layer.
+    public func discardPasteFloat() {
+        renderer.discardSelection()
+        isDirty = true
+    }
+
+    /// `beginPasteFloat` variant taking the rect in DOCUMENT pixels (the
+    /// clipboard's native space, view-size-independent).
+    @discardableResult
+    public func beginPasteFloat(image: CGImage, rectInDocPixels: CGRect) -> CGRect? {
+        guard canvasScale > 0 else { return nil }
+        let viewRect = CGRect(
+            x: rectInDocPixels.origin.x / canvasScale,
+            y: rectInDocPixels.origin.y / canvasScale,
+            width: rectInDocPixels.width / canvasScale,
+            height: rectInDocPixels.height / canvasScale
+        )
+        return beginPasteFloat(image: image, rectInView: viewRect)
     }
 
     // MARK: - Lasso Public API
@@ -2540,7 +2611,7 @@ public final class MetalCanvasView: UIView {
     /// tooling exercise the lasso UI deterministically.
     public func devSimulateLassoRect() {
         let r = bounds.insetBy(dx: bounds.width * 0.25, dy: bounds.height * 0.25)
-        pushUndoSnapshot()
+        if onFreehandLoopClosed == nil { pushUndoSnapshot() }
         lassoPoints = [
             CGPoint(x: r.minX, y: r.minY),
             CGPoint(x: r.maxX, y: r.minY),

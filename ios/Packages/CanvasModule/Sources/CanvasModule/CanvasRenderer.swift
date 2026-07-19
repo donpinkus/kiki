@@ -1338,7 +1338,10 @@ public final class CanvasRenderer {
             ctx.scaleBy(x: canvasScale, y: -canvasScale)
             ctx.setFillColor(gray: 1, alpha: 1)
             ctx.addPath(canvasPath)
-            ctx.fillPath()
+            // Even-odd so multi-subpath selection paths (unified selection:
+            // disjoint objects + negative-refinement holes) extract correctly.
+            // Identical to winding for simple lasso loops.
+            ctx.fillPath(using: .evenOdd)
         }
 
         let maskDesc = MTLTextureDescriptor.texture2DDescriptor(
@@ -1507,6 +1510,28 @@ public final class CanvasRenderer {
         selectionTexture = nil
         selectionBounds = .zero
         selectionVertexBuffer = nil
+    }
+
+    /// Load an image (with alpha) as the floating selection — the paste flow's
+    /// entry. `rect` is in canvas pixels. Unlike `extractSelection`, nothing is
+    /// cut from any layer; the float is pure new content until committed.
+    /// Returns false when a texture can't be created.
+    @discardableResult
+    func setSelectionFromImage(_ image: CGImage, rect: CGRect) -> Bool {
+        let w = max(1, Int(rect.width.rounded()))
+        let h = max(1, Int(rect.height.rounded()))
+        let desc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm_srgb, width: w, height: h, mipmapped: false)
+        desc.usage = [.shaderRead, .renderTarget]
+        desc.storageMode = .shared
+        guard let tex = device.makeTexture(descriptor: desc) else { return false }
+        // Same CI path as layer loads: sRGB-tagged input, linear at the Metal
+        // boundary, Y-flip + scale-to-fill handled inside renderCIImage.
+        renderCIImage(CIImage(cgImage: image, options: [.colorSpace: sRGBColorSpace]), to: tex)
+        selectionTexture = tex
+        selectionBounds = rect
+        updateSelectionVertices(translation: .zero, scale: 1, rotation: 0)
+        return true
     }
 
     // MARK: - Private Render Passes

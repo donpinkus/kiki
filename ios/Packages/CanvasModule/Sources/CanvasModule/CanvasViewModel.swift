@@ -37,15 +37,14 @@ public final class CanvasViewModel {
 
     public var hasBackgroundContent: Bool { container?.backgroundImage != nil }
     public private(set) var isInteracting = false
-    public private(set) var hasLassoSelection = false
 
-    /// Magic wand session (SAM tap-to-select). Its published clip path rides the
-    /// same `setClipPath` machinery as the lasso; `wand.hasSelection` gates the
-    /// "Clear Masks" contextual UI.
-    public let wand = MagicWandController()
-    public var hasWandSelection: Bool { wand.hasSelection }
+    /// THE unified selection (documents/plans/unified-selection.md): one mask,
+    /// authored by SAM taps and/or freehand loops, persistent across tool
+    /// switches; consumed as the paint clip, movable via `selection.beginMove`.
+    public let selection = SelectionController()
+    public var hasSelection: Bool { selection.hasSelection }
     /// Monotonic content version — bumps on every committed canvas change. The
-    /// wand re-encodes its SAM embedding when this moves between objects.
+    /// selection re-encodes its SAM embedding when this moves between objects.
     public private(set) var contentVersion = 0
 
     // MARK: - Layer State
@@ -57,7 +56,6 @@ public final class CanvasViewModel {
     private weak var container: RotatableCanvasContainer?
     private var pendingState: CanvasState?
     private var selectedTool: ToolState = .brush(.defaultPen)
-    private var lassoClosedPath: CGPath?
 
     public let canvasChanges: AsyncStream<SketchSnapshot>
     private let changesContinuation: AsyncStream<SketchSnapshot>.Continuation
@@ -105,7 +103,7 @@ public final class CanvasViewModel {
         let (stream, continuation) = AsyncStream.makeStream(of: SketchSnapshot.self)
         canvasChanges = stream
         changesContinuation = continuation
-        wand.segmenterFactory = { try SAM2Segmenter.bundled() }
+        selection.segmenterFactory = { try SAM2Segmenter.bundled() }
     }
 
     deinit {
@@ -134,16 +132,43 @@ public final class CanvasViewModel {
 
         applySelectedToolToAttachedViews()
 
-        // Magic wand wiring. The tap source and selection sink both live on the
-        // canvas view; the AppCoordinator supplies the image + segmenter factory.
+        // Unified-selection wiring. The tap/loop sources and the clip sink live
+        // on the canvas view; AppCoordinator supplies the image provider.
         canvasView.onWandTap = { [weak self] point in
-            self?.handleWandTap(at: point)
+            guard let self, let canvasView = self.canvasView else { return }
+            self.selection.handleTap(at: point, viewSize: canvasView.bounds.size)
         }
-        wand.contentVersionProvider = { [weak self] in self?.contentVersion ?? 0 }
-        wand.onSelectionChanged = { [weak self] path, markers in
+        canvasView.onFreehandLoopClosed = { [weak self] path in
+            guard let self, let canvasView = self.canvasView else { return }
+            self.selection.addFreehandPath(path, viewSize: canvasView.bounds.size)
+        }
+        selection.contentVersionProvider = { [weak self] in self?.contentVersion ?? 0 }
+        selection.onSelectionChanged = { [weak self] path, markers in
             guard let self, let canvasView = self.canvasView else { return }
             canvasView.setClipPath(path)
             canvasView.setWandMarkers(markers)
+        }
+        selection.onAuthorModeChanged = { [weak self] in
+            // Remap tap-capture ↔ loop-capture when the panel mode flips.
+            guard let self, self.isSelectionToolActive else { return }
+            self.selectSelectionTool()
+        }
+        selection.onBeginMove = { [weak self] path in
+            guard let self, let canvasView = self.canvasView, let container = self.container,
+                  let rect = canvasView.beginMoveExtraction(path: path) else { return false }
+            container.showLassoSelection(bounds: rect, path: path)
+            return true
+        }
+        selection.onCommitMove = { [weak self] in
+            guard let self else { return }
+            self.canvasView?.commitSelection()
+            self.container?.commitLassoSelection()
+            self.handleDrawingChanged() // content moved → autosave + version bump
+        }
+        selection.onCancelMove = { [weak self] in
+            guard let self else { return }
+            self.container?.clearLassoSelection()
+            self.canvasView?.cancelSelection() // discard float + restore snapshot
         }
 
         // Re-apply overlay drawing-mode state (the container may be freshly created).
@@ -163,14 +188,18 @@ public final class CanvasViewModel {
         applySelectedToolToAttachedViews()
     }
 
-    public func selectLasso() {
-        selectedTool = .lasso
+    /// The unified Select tool. Input capture (SAM taps vs freehand loops)
+    /// follows `selection.authorMode`.
+    public func selectSelectionTool() {
+        selectedTool = selection.authorMode == .freehand ? .lasso : .magicWand
         applySelectedToolToAttachedViews()
     }
 
-    public func selectMagicWand() {
-        selectedTool = .magicWand
-        applySelectedToolToAttachedViews()
+    /// Whether the Select tool is the active tool (either capture mode).
+    public var isSelectionToolActive: Bool {
+        if case .lasso = selectedTool { return true }
+        if case .magicWand = selectedTool { return true }
+        return false
     }
 
     // MARK: - Overlay Drawing Mode
@@ -231,83 +260,19 @@ public final class CanvasViewModel {
         canvasView?.replayStrokes(fixture.strokes, canvasSide: fixture.canvasSide)
     }
 
-    // MARK: - Lasso Selection
+    // MARK: - Unified Selection
 
-    #if DEBUG && targetEnvironment(simulator)
-    /// Sim-only: drive a synthetic lasso selection (host tooling can't inject
-    /// the freeform drag gesture). Reuses the real extraction path.
-    public func devSimulateLasso() {
-        canvasView?.devSimulateLassoRect()
-    }
-    #endif
-
-    func handleLassoSelectionStarted(path: CGPath, bounds: CGRect) {
-        lassoClosedPath = path
-        container?.showLassoSelection(bounds: bounds, path: path)
-        hasLassoSelection = true
+    /// Clear the whole selection (objects, markers, clip path). Undoable via
+    /// the selection's own undo stack.
+    public func clearSelection() {
+        selection.clearAll()
     }
 
-    /// Transition from Phase A (floating selection) to Phase B (clip mask).
-    /// Called when switching from lasso tool to pen/eraser. Commits the floating
-    /// selection, sets the clip path, and shows marching ants outline.
-    public func transitionToClipMode() {
-        guard let container, let canvasView else { return }
-        canvasView.commitSelection()
-        container.commitLassoSelection()
-        if let path = lassoClosedPath {
-            canvasView.setClipPath(path)
-        }
-    }
-
-    /// Clear the lasso entirely. Commits floating selection if active, removes clip mask.
-    public func clearLasso() {
-        guard let container, let canvasView else { return }
-        if container.hasActiveLassoSelection {
-            canvasView.commitSelection()
-            container.commitLassoSelection()
-        }
-        canvasView.setClipPath(nil)
-        lassoClosedPath = nil
-        hasLassoSelection = false
-        handleDrawingChanged()
-    }
-
-    /// Cancel the lasso selection, restoring the original persistent bitmap.
-    public func cancelLassoSelection() {
-        guard let container, let canvasView else { return }
-        if container.hasActiveLassoSelection {
-            container.clearLassoSelection()
-        }
-        canvasView.cancelSelection()
-        canvasView.setClipPath(nil)
-        lassoClosedPath = nil
-        hasLassoSelection = false
-    }
-
-    /// Clear only the clip path (not the floating selection).
-    public func clearLassoClipOnly() {
-        canvasView?.setClipPath(nil)
-        lassoClosedPath = nil
-        hasLassoSelection = false
-    }
-
-    // MARK: - Magic Wand
-
-    private func handleWandTap(at point: CGPoint) {
-        guard let canvasView else { return }
-        wand.handleTap(at: point, viewSize: canvasView.bounds.size)
-    }
-
-    /// Clear the whole wand selection (masks, markers, clip path).
-    public func clearWand() {
-        wand.clearAll()
-    }
-
-    /// Wand-session snapshot of what the user sees on the canvas square:
-    /// all layers over the lineart background, on white, capped at SAM's input
+    /// Selection snapshot of what the user sees on the canvas square: all
+    /// layers over the lineart background, on white, capped at SAM's input
     /// resolution. Overlay mode substitutes the generated image at the
-    /// AppCoordinator level (see its `wandSourceImage`).
-    public func wandCanvasSnapshot() -> CGImage? {
+    /// AppCoordinator level (see its source-image provider).
+    public func selectionCanvasSnapshot() -> CGImage? {
         guard let canvasView else { return nil }
         return canvasView.opaqueImageSnapshot(
             backgroundImage: container?.backgroundImage,
@@ -316,22 +281,27 @@ public final class CanvasViewModel {
     }
 
     #if DEBUG && targetEnvironment(simulator)
-    /// Sim-only: inject a wand tap at a normalized canvas position (host tooling
-    /// drives the wand deterministically; simctl taps can't hit exact canvas UVs).
+    /// Sim-only: drive a synthetic freehand rectangle through the REAL loop
+    /// path (simctl can't inject the freeform drag).
+    public func devSimulateLasso() {
+        canvasView?.devSimulateLassoRect()
+    }
+
+    /// Sim-only: inject a selection tap at a normalized canvas position.
     public func devSimulateWandTap(u: CGFloat, v: CGFloat, positive: Bool) {
         guard let canvasView else { return }
         let size = canvasView.bounds.size
-        let previousMode = wand.mode
-        wand.mode = positive ? .add : .subtract
-        wand.handleTap(at: CGPoint(x: u * size.width, y: v * size.height), viewSize: size)
-        wand.mode = previousMode
+        let previousMode = selection.mode
+        selection.mode = positive ? .add : .subtract
+        selection.handleTap(at: CGPoint(x: u * size.width, y: v * size.height), viewSize: size)
+        selection.mode = previousMode
     }
 
-    /// Sim-only: inject a synthetic circular wand mask (see
-    /// `MagicWandController.devInjectCircleMask` for why SAM can't run in the sim).
+    /// Sim-only: inject a synthetic circular mask object (the sim's Core ML
+    /// can't run SAM's decoder — see CanvasModule CLAUDE.md).
     public func devSimulateWandMask(u: CGFloat, v: CGFloat, radiusFraction: CGFloat) {
         guard let canvasView else { return }
-        wand.devInjectCircleMask(
+        selection.devInjectCircleMask(
             centerU: u, centerV: v, radiusFraction: radiusFraction,
             viewSize: canvasView.bounds.size)
     }
@@ -398,31 +368,24 @@ public final class CanvasViewModel {
 
     // MARK: - AI Edit
 
-    /// Whether the user has an active region selection (lasso or wand) that an
-    /// AI Edit should scope to.
-    public var hasSelectionForEdit: Bool { hasLassoSelection || hasWandSelection }
+    /// Whether the user has an active region selection that an AI Edit should
+    /// scope to. (Unified selection: the clip path is live whenever a selection
+    /// exists — no Phase-A commit step anymore. A selection mid-Move has its
+    /// clip hidden, so edits fall back to full-canvas until the move commits.)
+    public var hasSelectionForEdit: Bool { selection.hasSelection && !selection.isMoving }
 
     /// Document-space grayscale selection mask (white = selected), aligned
-    /// pixel-for-pixel with `editSourceSnapshot()` at the same side. A Phase-A
-    /// floating lasso is first committed to clip mode so its path is
-    /// rasterizable. Returns nil when there is no selection.
+    /// pixel-for-pixel with `editSourceSnapshot()` at the same side.
+    /// Returns nil when there is no selection.
     public func selectionMaskForEdit(side: Int) -> CGImage? {
-        guard let canvasView else { return nil }
-        if !canvasView.hasClipSelection, hasLassoSelection {
-            transitionToClipMode()
-        }
-        return canvasView.selectionMaskImage(side: side)
+        canvasView?.selectionMaskImage(side: side)
     }
 
     /// Dashed-red marker overlay for the same selection (drawn over the source
     /// snapshot so the edit model can see the target region). Same side/space
     /// as `selectionMaskForEdit`.
     public func selectionMarkerForEdit(side: Int) -> CGImage? {
-        guard let canvasView else { return nil }
-        if !canvasView.hasClipSelection, hasLassoSelection {
-            transitionToClipMode()
-        }
-        return canvasView.selectionMarkerOverlayImage(side: side)
+        canvasView?.selectionMarkerOverlayImage(side: side)
     }
 
     /// Flattened "what you see" composite for the AI Edit source image: all
@@ -448,6 +411,50 @@ public final class CanvasViewModel {
     /// Show/hide the visual-only AI Edit preview locked over the canvas.
     public func setEditPreview(_ image: UIImage?) {
         container?.setEditPreview(image)
+    }
+
+    // MARK: - Paste float
+
+    /// True while pasted content is floating (drag/pinch to place, then
+    /// `commitPaste` or `cancelPaste`).
+    public private(set) var isPasting = false
+
+    /// Flattened visible-layer composite with transparency preserved (no white
+    /// backing, no background image) — the copy source, so pasted content
+    /// carries only actual strokes.
+    public func transparentSnapshot() -> CGImage? {
+        canvasView?.persistentImageSnapshot
+    }
+
+    /// Float `image` (with alpha) over the canvas at `rectInDocPixels`
+    /// (document space, 2048²), hooked into the existing selection-move
+    /// gestures. Nothing touches layers until `commitPaste`.
+    @discardableResult
+    public func beginPaste(image: CGImage, rectInDocPixels: CGRect) -> Bool {
+        guard !isPasting, let canvasView, let container else { return false }
+        guard let viewRect = canvasView.beginPasteFloat(image: image, rectInDocPixels: rectInDocPixels) else {
+            return false
+        }
+        container.showLassoSelection(bounds: viewRect, path: CGPath(rect: viewRect, transform: nil))
+        isPasting = true
+        return true
+    }
+
+    /// Composite the paste float onto the active layer (one undo step).
+    public func commitPaste() {
+        guard isPasting, let canvasView, let container else { return }
+        canvasView.commitSelection()
+        container.commitLassoSelection()
+        isPasting = false
+        handleDrawingChanged()
+    }
+
+    /// Drop the paste float without touching any layer or undo history.
+    public func cancelPaste() {
+        guard isPasting, let canvasView, let container else { return }
+        container.clearLassoSelection()
+        canvasView.discardPasteFloat()
+        isPasting = false
     }
 
     public func resetViewTransform() {

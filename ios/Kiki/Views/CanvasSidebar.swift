@@ -60,17 +60,28 @@ struct CanvasSidebar: View {
             actionButton(
                 icon: "arrow.uturn.backward",
                 action: coordinator.undo,
-                // Wand-active undo steps back through wand prompts even when
-                // the canvas itself has no undo history yet.
+                // Select-active undo steps back through selection edits even
+                // when the canvas itself has no undo history yet.
                 disabled: !coordinator.canvasViewModel.canUndo
-                    && !(coordinator.currentTool == .magicWand
-                         && coordinator.canvasViewModel.wand.canUndoStep)
+                    && !(coordinator.currentTool == .select
+                         && coordinator.canvasViewModel.selection.canUndoStep)
             )
             actionButton(
                 icon: "arrow.uturn.forward",
                 action: coordinator.redo,
                 disabled: !coordinator.canvasViewModel.canRedo
             )
+
+            // Paste the copied selection (appears once something was copied).
+            // Pasted content floats for placement; the paste bar commits it.
+            if coordinator.canPasteSelection {
+                Divider().frame(width: 24)
+                actionButton(
+                    icon: "doc.on.clipboard",
+                    action: coordinator.pasteSelection,
+                    disabled: false
+                )
+            }
         }
         .padding(.vertical, 16)
         .padding(.horizontal, 10)

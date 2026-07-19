@@ -60,6 +60,10 @@ enum AnalyticsEvent: String {
     case subscriptionPurchased = "subscription.purchased"
     case subscriptionRestored = "subscription.restored"
 
+    // Selection copy/paste
+    case selectionCopied = "canvas.selection_copied"
+    case selectionPasted = "canvas.selection_pasted"
+
     // AI Edit (inpaint)
     case aiEditRequested = "canvas.ai_edit_requested"
     case aiEditAccepted = "canvas.ai_edit_accepted"

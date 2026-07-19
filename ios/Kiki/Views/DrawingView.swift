@@ -230,6 +230,38 @@ struct DrawingView: View {
                             .transition(.opacity.combined(with: .move(edge: .bottom)))
                     }
 
+                    // Paste float: placement bar (drag/pinch handled by the
+                    // float's own gestures; this bar commits or cancels).
+                    if coordinator.canvasViewModel.isPasting {
+                        HStack(spacing: 10) {
+                            Text("Drag to place · pinch to scale")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Button(role: .destructive) {
+                                coordinator.canvasViewModel.cancelPaste()
+                            } label: {
+                                Label("Cancel", systemImage: "xmark")
+                                    .font(.subheadline.weight(.semibold))
+                            }
+                            .buttonStyle(.bordered)
+                            Button {
+                                coordinator.canvasViewModel.commitPaste()
+                            } label: {
+                                Label("Place", systemImage: "checkmark")
+                                    .font(.subheadline.weight(.semibold))
+                                    .padding(.horizontal, 6)
+                            }
+                            .buttonStyle(.borderedProminent)
+                        }
+                        .padding(10)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+                        .shadow(color: .black.opacity(0.25), radius: 10, y: 3)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                        .padding(.bottom, 28)
+                        .zIndex(12)
+                        .transition(.opacity.combined(with: .move(edge: .bottom)))
+                    }
+
                     // AI Edit: in-flight indicator (~3-5 s on a warm pool).
                     if coordinator.aiEditPhase == .generating {
                         HStack(spacing: 10) {
@@ -271,41 +303,27 @@ struct DrawingView: View {
             // from the centered canvas square's own bounds, not the pane height.
             .ignoresSafeArea(edges: .bottom)
         }
-        // Floating "Clear Lasso" button, anchored directly below the lasso tool
-        // button in the top bar (so it's clearly associated with it) and given a
-        // generous tap target. Lives here — as an overlay on the whole screen —
-        // so it always draws above the canvas regardless of top-bar draw order.
-        .overlayPreferenceValue(LassoButtonAnchorKey.self) { lassoAnchor in
+        // Selection panel, anchored beneath the Select tool button. While the
+        // Select tool is active: author mode (Auto/Freehand), Add/Remove,
+        // auto-mode params, selection-wide Expand, Move, Clear Selection. With
+        // another tool active but a selection still clipping drawing, it
+        // collapses to just "Clear Selection".
+        .overlayPreferenceValue(SelectButtonAnchorKey.self) { selectAnchor in
             GeometryReader { proxy in
-                if coordinator.canvasViewModel.hasLassoSelection, let lassoAnchor,
-                   coordinator.aiEditPhase != .preview {
-                    let lassoRect = proxy[lassoAnchor]
-                    clearLassoButton
-                        .position(x: lassoRect.midX, y: lassoRect.maxY + 8 + clearLassoButtonHeight / 2)
-                }
-            }
-        }
-        // Magic wand contextual panel, anchored beneath the wand tool button.
-        // While the wand is active: add/subtract mode, New Object, Clear Masks,
-        // and a busy line during the one-time image analysis. When another tool
-        // is active but wand masks still clip drawing: just "Clear Masks",
-        // mirroring the lasso's clear button.
-        .overlayPreferenceValue(WandButtonAnchorKey.self) { wandAnchor in
-            GeometryReader { proxy in
-                if let wandAnchor, coordinator.aiEditPhase != .preview {
-                    let wandRect = proxy[wandAnchor]
-                    let wand = coordinator.canvasViewModel.wand
-                    if coordinator.currentTool == .magicWand || wand.hasSelection {
+                if let selectAnchor, coordinator.aiEditPhase != .preview {
+                    let selectRect = proxy[selectAnchor]
+                    let selection = coordinator.canvasViewModel.selection
+                    if coordinator.currentTool == .select || selection.hasSelection || selection.isMoving {
                         // Top-anchored (offset, not .position) so the panel can
                         // grow/shrink rows without re-centering math.
                         ZStack(alignment: .topLeading) {
                             Color.clear
-                            wandPanel
-                                .frame(width: wandPanelWidth)
+                            selectionPanel
+                                .frame(width: selectionPanelWidth)
                                 .offset(
-                                    x: min(wandRect.midX - wandPanelWidth / 2,
-                                           proxy.size.width - wandPanelWidth - 8),
-                                    y: wandRect.maxY + 8
+                                    x: min(selectRect.midX - selectionPanelWidth / 2,
+                                           proxy.size.width - selectionPanelWidth - 8),
+                                    y: selectRect.maxY + 8
                                 )
                         }
                     }
@@ -362,132 +380,155 @@ struct DrawingView: View {
         }
     }
 
-    // MARK: - Clear Lasso
+    // MARK: - Selection Panel
 
-    /// Fixed height so the overlay can place the button a precise gap below the
-    /// lasso tool button via `.position` (which centers on its point).
-    private let clearLassoButtonHeight: CGFloat = 44
+    private var selectionPanelWidth: CGFloat { 224 }
 
-    private var clearLassoButton: some View {
-        Button {
-            coordinator.canvasViewModel.clearLasso()
-        } label: {
-            Label("Clear Lasso", systemImage: "xmark.circle.fill")
-                .font(.subheadline.weight(.semibold))
-                .padding(.horizontal, 18)
-                .frame(height: clearLassoButtonHeight)
-        }
-        .buttonStyle(.borderedProminent)
-        .tint(.secondary)
-        .fixedSize()
-        .shadow(color: .black.opacity(0.2), radius: 6, y: 2)
-    }
-
-    // MARK: - Magic Wand Panel
-
-    private var wandPanelWidth: CGFloat { 224 }
-
-    /// Contextual wand UI beneath the wand tool button. While the wand tool is
-    /// active: tap-mode toggle (add/subtract), New Object, Clear Masks, and a
-    /// status line during segmentation. With another tool active it collapses to
-    /// just "Clear Masks" (the wand masks keep clipping drawing until cleared).
-    private var wandPanel: some View {
-        let wand = coordinator.canvasViewModel.wand
+    /// Contextual selection UI beneath the Select tool button.
+    /// - Select tool active, not moving: author mode (Auto/Freehand),
+    ///   Add/Remove, auto-mode params, selection-wide Expand, Move, Clear.
+    /// - Moving: just "Done" (+ hint) — the float owns the gestures.
+    /// - Another tool active with a live selection: just "Clear Selection".
+    private var selectionPanel: some View {
+        let selection = coordinator.canvasViewModel.selection
         return VStack(spacing: 8) {
-            if coordinator.currentTool == .magicWand {
-                @Bindable var wandBinding = wand
-                Picker("Point mode", selection: $wandBinding.mode) {
+            if selection.isMoving {
+                Text("Drag to move · pinch to scale · two-finger twist to rotate")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                Button {
+                    selection.commitMove()
+                } label: {
+                    Label("Done Moving", systemImage: "checkmark.circle.fill")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 36)
+                }
+                .buttonStyle(.borderedProminent)
+            } else if coordinator.currentTool == .select {
+                @Bindable var selectionBinding = selection
+
+                // Two authors, one selection: SAM taps or freehand loops.
+                Picker("Author", selection: $selectionBinding.authorMode) {
+                    Label("Auto", systemImage: "wand.and.stars")
+                        .tag(SelectionController.AuthorMode.auto)
+                    Label("Freehand", systemImage: "lasso")
+                        .tag(SelectionController.AuthorMode.freehand)
+                }
+                .pickerStyle(.segmented)
+
+                Picker("Point mode", selection: $selectionBinding.mode) {
                     Label("Add", systemImage: "plus.circle.fill")
-                        .tag(MagicWandController.PointMode.add)
+                        .tag(SelectionController.PointMode.add)
                     Label("Remove", systemImage: "minus.circle.fill")
-                        .tag(MagicWandController.PointMode.subtract)
+                        .tag(SelectionController.PointMode.subtract)
                 }
                 .pickerStyle(.segmented)
 
-                // Selection size — SAM's 3 candidate masks (subpart/part/whole);
-                // the closest analog to a color-wand's "tolerance". Re-derives
-                // instantly from the cached decode, no model re-run.
-                Picker("Selection size", selection: $wandBinding.granularity) {
-                    Text("Small").tag(MagicWandController.Granularity.small)
-                    Text("Auto").tag(MagicWandController.Granularity.auto)
-                    Text("Large").tag(MagicWandController.Granularity.large)
-                }
-                .pickerStyle(.segmented)
+                if selection.authorMode == .auto {
+                    // SAM's 3 candidate masks — the "tolerance" analog.
+                    Picker("Selection size", selection: $selectionBinding.granularity) {
+                        Text("Small").tag(SelectionController.Granularity.small)
+                        Text("Auto").tag(SelectionController.Granularity.auto)
+                        Text("Large").tag(SelectionController.Granularity.large)
+                    }
+                    .pickerStyle(.segmented)
 
-                Toggle(isOn: $wandBinding.contiguous) {
-                    Text("Contiguous")
-                        .font(.caption)
+                    Toggle(isOn: $selectionBinding.contiguous) {
+                        Text("Contiguous")
+                            .font(.caption)
+                    }
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
                 }
-                .toggleStyle(.switch)
-                .controlSize(.mini)
 
+                // Selection-wide grow/shrink (freehand regions included).
                 HStack(spacing: 6) {
                     Text("Expand")
                         .font(.caption)
                     Slider(
                         value: Binding(
-                            get: { Double(wandBinding.expansion) },
-                            set: { wandBinding.expansion = Int($0.rounded()) }
+                            get: { Double(selectionBinding.expansion) },
+                            set: { selectionBinding.expansion = Int($0.rounded()) }
                         ),
                         in: -20...20, step: 1
                     )
-                    Text("\(wand.expansion)")
+                    Text("\(selection.expansion)")
                         .font(.caption.monospacedDigit())
                         .frame(width: 26, alignment: .trailing)
                 }
 
-                if wand.isBusy {
+                if selection.isBusy {
                     HStack(spacing: 6) {
                         ProgressView()
                             .controlSize(.small)
-                        Text(wand.isEncoding ? "Analyzing image…" : "Selecting…")
+                        Text(selection.isEncoding ? "Analyzing image…" : "Selecting…")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                } else if wand.currentPointCount == 0 && !wand.hasSelection {
-                    Text("Tap an object to select it")
+                } else if !selection.hasSelection && selection.currentPointCount == 0 {
+                    Text(selection.authorMode == .auto
+                         ? "Tap an object to select it"
+                         : "Draw a loop to select a region")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
 
-                if let error = wand.lastError {
+                if let error = selection.lastError {
                     Text(error)
                         .font(.caption2)
                         .foregroundStyle(.red)
                         .lineLimit(2)
                 }
 
-                if wand.currentPointCount > 0 {
-                    Button {
-                        wand.startNewObject()
-                    } label: {
-                        Label("New Object", systemImage: "plus.square.on.square")
-                            .font(.subheadline.weight(.semibold))
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 36)
+                if selection.hasSelection {
+                    HStack(spacing: 8) {
+                        Button {
+                            selection.beginMove()
+                        } label: {
+                            Label("Move", systemImage: "arrow.up.and.down.and.arrow.left.and.right")
+                                .font(.subheadline.weight(.semibold))
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 36)
+                        }
+                        .buttonStyle(.bordered)
+
+                        // Copy the selection's content (strokes only, alpha
+                        // outside) to the app clipboard + system pasteboard.
+                        // Paste lives in the left sidebar.
+                        Button {
+                            coordinator.copySelection()
+                        } label: {
+                            Label("Copy", systemImage: "doc.on.doc")
+                                .font(.subheadline.weight(.semibold))
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 36)
+                        }
+                        .buttonStyle(.bordered)
                     }
-                    .buttonStyle(.bordered)
                 }
             }
 
-            if wand.hasSelection || wand.currentPointCount > 0 {
-                clearMasksButton
+            if !selection.isMoving, selection.hasSelection || selection.currentPointCount > 0 {
+                clearSelectionButton
             }
         }
         .padding(10)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
         .shadow(color: .black.opacity(0.2), radius: 6, y: 2)
-        .animation(.easeInOut(duration: 0.15), value: wand.isBusy)
+        .animation(.easeInOut(duration: 0.15), value: selection.isBusy)
+        .animation(.easeInOut(duration: 0.15), value: selection.isMoving)
     }
 
-    private var clearMasksButton: some View {
+    private var clearSelectionButton: some View {
         Button {
-            coordinator.canvasViewModel.clearWand()
+            coordinator.canvasViewModel.clearSelection()
         } label: {
-            Label("Clear Masks", systemImage: "xmark.circle.fill")
+            Label("Clear Selection", systemImage: "xmark.circle.fill")
                 .font(.subheadline.weight(.semibold))
                 .frame(maxWidth: .infinity)
-                .frame(height: clearLassoButtonHeight - 8)
+                .frame(height: 36)
         }
         .buttonStyle(.borderedProminent)
         .tint(.secondary)
