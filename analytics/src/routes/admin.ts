@@ -1140,6 +1140,24 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
     // (modules/video/videoFlag.ts): off → the video pool DRAINS its H100s
     // (billing stops) and the iPad hides all animation UX; on → restored
     // within one poll+tick cycle. No backend redeploy needed.
+    // ─── Live pods: the backend's in-memory pool state (hold verdicts +
+    // interest attribution), proxied over the shared ingest key. This data
+    // exists only in the backend process — Postgres has lifecycle EVENTS,
+    // not current verdicts. 502s degrade to backendReachable:false rather
+    // than failing the whole Fleet page.
+    gated.get('/admin/api/pods', async () => {
+      try {
+        const res = await fetch(`${config.BACKEND_URL}/v1/internal/pools`, {
+          headers: { 'x-internal-key': config.INSIGHTS_INGEST_KEY },
+          signal: AbortSignal.timeout(5000),
+        });
+        if (!res.ok) return { backendReachable: false, status: res.status };
+        return { backendReachable: true, ...(await res.json() as Record<string, unknown>) };
+      } catch (err) {
+        return { backendReachable: false, error: (err as Error).message };
+      }
+    });
+
     // ─── GPU Capacity (dedicated tab): Lambda ADVERTISED availability over
     // time, from the backend's free /instance-types heartbeat. NOT a
     // reservation — capacity flag has no depth, can be stale by seconds; the

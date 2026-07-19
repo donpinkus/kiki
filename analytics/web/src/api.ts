@@ -285,6 +285,24 @@ export interface CapacityData {
 export const getCapacity = (days: number) =>
   api<CapacityData>(`/admin/api/capacity?days=${days}`);
 
+export interface LivePodInstance {
+  name: string; status: string; ip?: string; region: string;
+  activeStreams: number; ageMs: number; holdReason: string;
+}
+export interface LivePoolState {
+  status: string; message: string;
+  instances: LivePodInstance[];
+  interest: { ageMs: number | null; lastSource: string | null; recent: Array<{ at: number; source: string }> };
+  enabled?: boolean;
+}
+export interface LivePodsData {
+  backendReachable: boolean;
+  image?: LivePoolState;
+  video?: LivePoolState;
+}
+
+export const getLivePods = () => api<LivePodsData>('/admin/api/pods');
+
 export const getFleet = (excludeTest: boolean) =>
   api<FleetData>(`/admin/api/fleet${excludeTest ? '?excludeTest=1' : ''}`);
 

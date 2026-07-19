@@ -20,6 +20,9 @@ export interface InsightsConfig {
   readonly JWT_ACCESS_SECRET: string;
   /** Service key the backend presents (x-insights-key) for server-side events. */
   readonly INSIGHTS_INGEST_KEY: string;
+  /** Backend base URL for the reverse (read-only) internal calls — the
+   * Live-pods proxy. Defaults to the production backend. */
+  readonly BACKEND_URL: string;
 
   /** Admin dashboard password (single internal user). */
   readonly ADMIN_PASSWORD: string;
@@ -65,6 +68,7 @@ function loadConfig(): InsightsConfig {
     DATABASE_URL: required('DATABASE_URL'),
     JWT_ACCESS_SECRET: required('JWT_ACCESS_SECRET', { minLen: 16 }),
     INSIGHTS_INGEST_KEY: required('INSIGHTS_INGEST_KEY', { minLen: 16 }),
+    BACKEND_URL: process.env['BACKEND_URL'] ?? 'https://kiki-backend-production-eb81.up.railway.app',
     ADMIN_PASSWORD: required('ADMIN_PASSWORD'),
     ADMIN_SESSION_SECRET: required('ADMIN_SESSION_SECRET', { minLen: 32 }),
     BLOB_DIR: env['BLOB_DIR'] ?? './blobs',

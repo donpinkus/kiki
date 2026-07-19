@@ -67,6 +67,7 @@ export interface PoolInstanceSummary {
   name: string;
   status: string;
   ip?: string;
+  region: string;
   activeStreams: number;
   ageMs: number;
   /** WHY the tick kept this instance (computed, human-readable — the
@@ -456,6 +457,7 @@ runcmd:
         name: i.name,
         status: i.status,
         ip: i.ip,
+        region: i.region,
         activeStreams: i.activeStreams,
         ageMs: Date.now() - i.launchedAtMs,
         holdReason: i.holdReason ?? 'pending first tick',

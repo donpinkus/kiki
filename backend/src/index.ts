@@ -40,6 +40,7 @@ import { subscriptionRoute } from './routes/subscription.js';
 import { appStoreNotifyRoute } from './routes/appStoreNotify.js';
 import { usageRoute } from './routes/usage.js';
 import { lambdaDevRoute } from './routes/lambdaDev.js';
+import { internalPoolsRoute } from './routes/internalPools.js';
 import { sketchifyRoute } from './routes/sketchify.js';
 import { start as startLambdaDevPool, stop as stopLambdaDevPool } from './modules/lambda/devPool.js';
 import { start as startLambdaVideoPool, stop as stopLambdaVideoPool } from './modules/lambda/videoPool.js';
@@ -91,6 +92,7 @@ await app.register(usageRoute);
 await app.register(streamRoute);
 await app.register(animateRoute);
 await app.register(lambdaDevRoute);
+await app.register(internalPoolsRoute);
 await app.register(sketchifyRoute);
 
 // --- Sentry error handler (must be before custom error handler) ---

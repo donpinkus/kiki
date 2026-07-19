@@ -14,7 +14,7 @@
  * event strip keeps the raw truth one glance away from the aggregates.
  */
 import { useEffect, useState } from 'react';
-import { getFleet, type FleetData } from '../api';
+import { getFleet, getLivePods, type FleetData, type LivePodsData, type LivePoolState } from '../api';
 
 const fmtMs = (v: number | null | undefined): string =>
   v == null ? '—' : v >= 10_000 ? `${Math.round(v / 1000)}s` : v >= 1000 ? `${(v / 1000).toFixed(1)}s` : `${v}ms`;
@@ -37,6 +37,7 @@ const EVENT_CLS: Record<string, string> = {
 
 export function Fleet() {
   const [data, setData] = useState<FleetData | null>(null);
+  const [pods, setPods] = useState<LivePodsData | null>(null);
   const [excludeTest, setExcludeTest] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -49,6 +50,13 @@ export function Fleet() {
     const t = setInterval(load, 30_000);
     return () => clearInterval(t);
   }, [excludeTest]);
+
+  useEffect(() => {
+    const loadPods = () => getLivePods().then(setPods).catch(() => setPods({ backendReachable: false }));
+    loadPods();
+    const t = setInterval(loadPods, 15_000);
+    return () => clearInterval(t);
+  }, []);
 
   if (error) return <div className="container"><div className="card fail">{error}</div></div>;
   if (!data) return <div className="container muted">Loading…</div>;
@@ -67,6 +75,16 @@ export function Fleet() {
           Exclude test accounts
         </label>
       </div>
+
+      {/* ── 0: live pods — what's running RIGHT NOW and why ── */}
+      <div className="section-title">Live pods — why is each one up?</div>
+      {!pods ? (
+        <div className="card muted">Loading…</div>
+      ) : !pods.backendReachable ? (
+        <div className="card muted">Backend unreachable for live state (deploy in flight?) — historical sections below are unaffected.</div>
+      ) : (
+        <LivePoolCards image={pods.image} video={pods.video} />
+      )}
 
       {/* ── 1+2: acquisition + waits, one card per system ── */}
       <div className="section-title">Do users get a GPU — and how long do they wait?</div>
@@ -312,6 +330,60 @@ export function Fleet() {
           </tbody>
         </table>
       </div>
+    </div>
+  );
+}
+
+
+/** The live answer to "why is this pod up" — verdicts + interest straight
+ * from the backend's pool memory (15s refresh). Empty pools still show
+ * their interest trail, which is usually the interesting part. */
+function LivePoolCards({ image, video }: { image?: LivePoolState; video?: LivePoolState }) {
+  const fmtAge = (ms: number): string =>
+    ms >= 3_600_000 ? `${(ms / 3_600_000).toFixed(1)}h` : ms >= 60_000 ? `${Math.round(ms / 60_000)}m` : `${Math.round(ms / 1000)}s`;
+  const pool = (label: string, p?: LivePoolState) => (
+    <div className="card" style={{ flex: 1, minWidth: 380 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+        <strong>{label}</strong>
+        <span className={`pill ${p?.status === 'ready' ? 'warm' : p?.status === 'disabled' ? 'fail' : 'cold'}`}>
+          {p?.status ?? '?'}{p?.enabled === false ? ' (flag off)' : ''}
+        </span>
+      </div>
+      {(p?.instances ?? []).length === 0 && (
+        <div className="muted" style={{ fontSize: 13 }}>No instances running.</div>
+      )}
+      {(p?.instances ?? []).map((i) => (
+        <div key={i.name} style={{ padding: '6px 0', borderTop: '1px solid var(--border, #333)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
+            <span className="monospace">{i.name.replace(/^kiki-(serve|video)-/, '…')} · {i.region}</span>
+            <span className="muted">{i.status} · up {fmtAge(i.ageMs)} · {i.activeStreams} stream{i.activeStreams === 1 ? '' : 's'}</span>
+          </div>
+          <div style={{ fontSize: 13, marginTop: 2 }}>
+            <strong>why up:</strong> {i.holdReason}
+          </div>
+        </div>
+      ))}
+      <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
+        interest: {p?.interest?.lastSource
+          ? `${p.interest.lastSource} (${p.interest.ageMs != null ? fmtAge(p.interest.ageMs) : '?'} ago)`
+          : 'none recorded'}
+        {(p?.interest?.recent ?? []).length > 1 && (
+          <details style={{ marginTop: 2 }}>
+            <summary style={{ cursor: 'pointer' }}>recent interest</summary>
+            {(p?.interest?.recent ?? []).map((r, idx) => (
+              <div key={idx} className="monospace" style={{ fontSize: 11 }}>
+                {new Date(r.at).toLocaleTimeString()} — {r.source}
+              </div>
+            ))}
+          </details>
+        )}
+      </div>
+    </div>
+  );
+  return (
+    <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+      {pool('Image pool', image)}
+      {pool('Video pool', video)}
     </div>
   );
 }
