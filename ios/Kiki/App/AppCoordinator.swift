@@ -543,6 +543,7 @@ final class AppCoordinator {
     }
     var promptText = "" {
         didSet {
+            noteInteraction()
             if !isSuppressingObservation {
                 scheduleSave()
                 if promptText != oldValue {
@@ -554,6 +555,7 @@ final class AppCoordinator {
     }
     var selectedStyle: PromptStyle = .default {
         didSet {
+            noteInteraction()
             if !isSuppressingObservation {
                 scheduleSave()
                 if selectedStyle.id != oldValue.id {
@@ -611,6 +613,7 @@ final class AppCoordinator {
     /// config push so auto (3s-idle) animations use it too.
     var animationPromptText = "" {
         didSet {
+            noteInteraction()
             if !isSuppressingObservation {
                 scheduleSave()
             }
@@ -794,6 +797,71 @@ final class AppCoordinator {
     private var appForegroundedAt: Date?
 
     private(set) var streamReadiness: StreamSession.StreamReadiness = .disconnected
+
+    // ── Idle stream guard ────────────────────────────────────────────────
+    // An open drawing with no interaction reconnects forever (the proxy
+    // drops idle sockets ~75s; each reconnect sends a frame) — an abandoned
+    // client (simulator, iPad on a couch) can pin a warm GPU indefinitely
+    // (10h simulator incident, 2026-07-19). After idlePauseSeconds without a
+    // stroke/prompt/style/animate interaction the stream DELIBERATELY stops
+    // (no auto-reconnect) and the badge reads "resting"; the next
+    // interaction resumes it within ~1s. Drawing itself never depends on
+    // the stream, so a resting canvas stays fully usable.
+    // Dev seam: `-KikiIdlePauseSeconds 45` launch arg shortens the window so
+    // the pause/resume cycle is testable without a 10-minute wait.
+    private static let idlePauseSeconds: TimeInterval = {
+        let override = UserDefaults.standard.double(forKey: "KikiIdlePauseSeconds")
+        return override > 0 ? override : 10 * 60
+    }()
+    private(set) var isStreamIdlePaused = false
+    private var lastInteractionAt = Date()
+    private var idleGuardTask: Task<Void, Never>?
+
+    /// Record a generation-relevant interaction; wakes a resting stream.
+    func noteInteraction() {
+        lastInteractionAt = Date()
+        if isStreamIdlePaused {
+            isStreamIdlePaused = false
+            streamLog.info("[idle-guard] interaction — resuming stream")
+            Log.info("stream.idle_resume", attributes: ["event": "stream.idle_resume"])
+            startStream()
+        }
+    }
+
+    private func startIdleGuard() {
+        idleGuardTask?.cancel()
+        lastInteractionAt = Date()
+        idleGuardTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(30))
+                guard let self, !Task.isCancelled else { return }
+                if self.streamSession != nil,
+                   !self.isStreamIdlePaused,
+                   Date().timeIntervalSince(self.lastInteractionAt) > Self.idlePauseSeconds {
+                    self.pauseStreamForIdle()
+                }
+            }
+        }
+    }
+
+    private func pauseStreamForIdle() {
+        guard streamSession != nil else { return }
+        streamLog.info("[idle-guard] no interaction for \(Int(Self.idlePauseSeconds))s — resting stream")
+        Log.info("stream.idle_pause", attributes: [
+            "event": "stream.idle_pause",
+            "idle_seconds": Int(Date().timeIntervalSince(lastInteractionAt)),
+        ])
+        streamSession?.stop()
+        streamSession = nil
+        // Keep the recording footage captured so far (same policy as
+        // resumeStream's teardown).
+        stopRecordingCheckpoints()
+        if let recorder, let drawingId = currentDrawingId {
+            finalizeRecording(recorder, drawingId: drawingId)
+        }
+        recorder = nil
+        isStreamIdlePaused = true
+    }
 
     /// Currently-playing video MP4 temp path. Tracked so we can delete it
     /// when the user resumes drawing (state leaves video) and avoid
@@ -1113,6 +1181,11 @@ final class AppCoordinator {
             self.sessionStrokeCount += 1
             guard self.isRecordingStrokes else { return }
             self.recordedStrokes.append(stroke)
+        }
+        // Idle stream guard: any canvas mutation (stroke, eraser, undo, fixture
+        // replay) counts as activity and wakes a resting stream.
+        canvasViewModel.onContentChanged = { [weak self] in
+            self?.noteInteraction()
         }
         // Supply the current brush color to the canvas ring preview
         canvasViewModel.currentBrushColorProvider = { [weak self] in
@@ -1963,7 +2036,8 @@ final class AppCoordinator {
         Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(5))
             guard let self else { return }
-            guard self.currentScreen == .drawing, self.streamSession == nil else { return }
+            guard self.currentScreen == .drawing, self.streamSession == nil,
+                  !self.isStreamIdlePaused else { return }
             streamLog.info("Retrying stream start after transient auth failure")
             self.startStream()
         }
@@ -2003,6 +2077,8 @@ final class AppCoordinator {
 
     @MainActor
     private func startStreamSession(request: URLRequest, backendWsURL: URL) {
+        isStreamIdlePaused = false
+        startIdleGuard()
         let session = StreamSession(
             request: request,
             canvasViewModel: canvasViewModel,
@@ -2194,6 +2270,9 @@ final class AppCoordinator {
     }
 
     private func stopStream() {
+        idleGuardTask?.cancel()
+        idleGuardTask = nil
+        isStreamIdlePaused = false
         let hadSession = streamSession != nil
         let finalFrameCount = streamFrameCount
         streamLog.info("Stopping stream")

@@ -237,6 +237,7 @@ struct KikiAIStatusBadge: View {
     static let warmPink = Color(red: 1.0, green: 0.71, blue: 0.82)
 
     private var dotColor: Color {
+        if coordinator.isStreamIdlePaused { return .gray }
         // The WS push reaches every user; the polled state (test accounts
         // only — the REST endpoint 403s otherwise) refines it when present.
         if let pushed = coordinator.imageAvailability, coordinator.lambdaPoolState == nil {
@@ -255,6 +256,7 @@ struct KikiAIStatusBadge: View {
     }
 
     private var label: String {
+        if coordinator.isStreamIdlePaused { return "Kiki's AI · resting" }
         switch coordinator.lambdaPoolState?.status {
         case "ready": return "Kiki's AI"
         case "launching", "booting": return "Kiki's AI · warming up"
@@ -268,6 +270,7 @@ struct KikiAIStatusBadge: View {
     /// is off (availability == .off) so the badge is unchanged for
     /// image-only operation.
     private var videoDotColor: Color? {
+        if coordinator.isStreamIdlePaused { return nil }
         switch coordinator.videoAvailability {
         case .off: return nil
         case .warming: return Self.warmPink
@@ -329,6 +332,11 @@ private struct KikiAIStatusDetails: View {
                 // ── IMAGE system ─────────────────────────────────────────
                 Text("Kiki's AI")
                     .font(.headline)
+                if coordinator.isStreamIdlePaused {
+                    Text("Resting — no activity for a while, so the connection is paused. Draw anything to wake it back up.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 SystemStageView(
                     status: coordinator.imageSystemStatus,
                     readyText: "Ready — sketch magic is available.",

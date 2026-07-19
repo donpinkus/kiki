@@ -81,6 +81,11 @@ public final class CanvasViewModel {
     /// (Brush Studio → "Record strokes" → BrushHarness fixture).
     public var onStrokeCompleted: ((Stroke) -> Void)?
 
+    /// Fires on ANY canvas content mutation — stroke, eraser, undo/redo, fixture
+    /// replay. Broader than `onStrokeCompleted`; the app's idle stream guard uses
+    /// it as the "user is actively working" signal.
+    public var onContentChanged: (() -> Void)?
+
     func handleStrokeCompleted(_ stroke: Stroke) {
         onStrokeCompleted?(stroke)
     }
@@ -394,6 +399,7 @@ public final class CanvasViewModel {
     // MARK: - Internal
 
     func handleDrawingChanged() {
+        onContentChanged?()
         updateState()
         changesContinuation.yield(SketchSnapshot(
             image: UIImage(),
