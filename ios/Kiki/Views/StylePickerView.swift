@@ -24,32 +24,39 @@ struct StylePickerView: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 28) {
-                    ForEach(sections, id: \.title) { section in
-                        VStack(alignment: .leading, spacing: 14) {
-                            Text(section.title)
-                                .font(.title3.weight(.semibold))
-                                .foregroundStyle(.primary)
-                            LazyVGrid(columns: columns, spacing: 20) {
-                                ForEach(section.styles) { style in
-                                    StyleTile(
-                                        style: style,
-                                        preview: coordinator.stylePreviewController.previews[style.id],
-                                        isSelected: coordinator.selectedStyle == style
-                                    ) {
-                                        coordinator.selectedStyle = style
-                                        dismiss()
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 28) {
+                        ForEach(sections, id: \.title) { section in
+                            VStack(alignment: .leading, spacing: 14) {
+                                Text(section.title)
+                                    .font(.title3.weight(.semibold))
+                                    .foregroundStyle(.primary)
+                                LazyVGrid(columns: columns, spacing: 16) {
+                                    ForEach(section.styles) { style in
+                                        StyleTile(
+                                            style: style,
+                                            preview: coordinator.stylePreviewController.previews[style.id],
+                                            isSelected: coordinator.selectedStyle == style
+                                        ) {
+                                            coordinator.selectedStyle = style
+                                            dismiss()
+                                        }
                                     }
                                 }
                             }
+                            // Anchor the section for the TOC to scroll to.
+                            .id(section.title)
                         }
                     }
+                    .padding(24)
                 }
-                .padding(24)
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    sectionTOC(proxy: proxy)
+                }
             }
             .navigationTitle("Choose Style")
-            .navigationBarTitleDisplayMode(.large)
+            .navigationBarTitleDisplayMode(.inline)
             // Match RootView's hidden status bar. Without this, presenting the
             // fullScreenCover hands status-bar-appearance ownership to the modal,
             // toggling the presenting view's top safe-area inset (~32 pt). That
@@ -69,6 +76,33 @@ struct StylePickerView: View {
             }
         }
     }
+
+    /// Sticky section navigation. Tapping a chip scrolls its section to the top.
+    private func sectionTOC(proxy: ScrollViewProxy) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(sections, id: \.title) { section in
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.3)) {
+                            proxy.scrollTo(section.title, anchor: .top)
+                        }
+                    } label: {
+                        Text(section.title)
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(.primary)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(.thinMaterial, in: Capsule())
+                            .overlay(Capsule().stroke(.secondary.opacity(0.25), lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 12)
+        }
+        .background(.bar)
+    }
 }
 
 // MARK: - Tile
@@ -81,17 +115,15 @@ private struct StyleTile: View {
 
     var body: some View {
         Button(action: onSelect) {
-            VStack(alignment: .leading, spacing: 8) {
-                header
-                previewCard
-                    .aspectRatio(1, contentMode: .fit)
-                    .frame(maxWidth: .infinity)
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12)
-                            .stroke(isSelected ? Color.accentColor : .clear, lineWidth: 3)
-                    )
-            }
+            previewCard
+                .aspectRatio(1, contentMode: .fit)
+                .frame(maxWidth: .infinity)
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .overlay(alignment: .topLeading) { nameBadge }
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(isSelected ? Color.accentColor : .clear, lineWidth: 3)
+                )
         }
         .buttonStyle(.plain)
     }
@@ -105,36 +137,26 @@ private struct StyleTile: View {
         generatedPreview != nil
     }
 
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: 6) {
-                Text(style.name)
-                    .font(.headline)
-                    .foregroundStyle(.primary)
-                if isSelected {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(Color.accentColor)
-                }
-                Spacer(minLength: 0)
+    /// Style name as a legible pill overlaid on the thumbnail's top-left,
+    /// with a selection check. Material background keeps it readable over
+    /// any preview image.
+    private var nameBadge: some View {
+        HStack(spacing: 4) {
+            if isSelected {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.caption2)
+                    .foregroundStyle(Color.accentColor)
             }
-            suffixText
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .lineLimit(2, reservesSpace: true)
-                .truncationMode(.tail)
-                .multilineTextAlignment(.leading)
+            Text(style.name)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    // Always reserves two lines so every tile's image starts at the same
-    // y-offset. Empty suffix falls back to an italic placeholder.
-    private var suffixText: Text {
-        let trimmed = style.promptSuffix.trimmingCharacters(in: .whitespaces)
-        if trimmed.isEmpty {
-            return Text("no extra text").italic()
-        }
-        return Text(trimmed)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 5)
+        .background(.regularMaterial, in: Capsule())
+        .overlay(Capsule().stroke(.white.opacity(0.18), lineWidth: 0.5))
+        .padding(8)
     }
 
     private var previewCard: some View {
