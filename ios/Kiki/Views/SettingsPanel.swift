@@ -129,6 +129,24 @@ struct SettingsPanel: View {
                     .foregroundStyle(.secondary)
             }
 
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("reference_scale")
+                        .font(.subheadline)
+                    Spacer()
+                    Text(String(format: "%.2f", coordinator.streamReferenceScale))
+                        .font(.subheadline.monospacedDigit())
+                }
+                Slider(
+                    value: $coordinator.streamReferenceScale,
+                    in: 0.0...2.0,
+                    step: 0.05
+                )
+                Text("Sketch adherence (Kiki's AI only): >1 follows your sketch harder, <1 frees the prompt. 1.0 = default.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             HStack {
                 Text("Seed")
                     .font(.subheadline)

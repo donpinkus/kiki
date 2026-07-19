@@ -18,6 +18,7 @@ import argparse
 import asyncio
 import io
 import json
+import ssl
 import time
 
 import websockets
@@ -27,7 +28,15 @@ from PIL import Image
 async def run_test(args):
     print(f"Connecting to {args.url}...")
 
-    async with websockets.connect(args.url, max_size=10 * 1024 * 1024) as ws:
+    ssl_ctx = None
+    if args.url.startswith("wss"):
+        # Lambda fleet instances serve a self-signed cert (backend pins it;
+        # this dev client just trusts it).
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
+
+    async with websockets.connect(args.url, max_size=10 * 1024 * 1024, ssl=ssl_ctx) as ws:
         msg = await ws.recv()
         status = json.loads(msg)
         print(f"Server status: {status}")
@@ -46,10 +55,14 @@ async def run_test(args):
             "prompt": args.prompt,
             "steps": args.steps,
             "seed": args.seed,
+            "reference_scale": args.reference_scale,
         }
 
         await ws.send(json.dumps(config))
-        print(f"Config sent: prompt='{args.prompt}', steps={args.steps}")
+        print(
+            f"Config sent: prompt='{args.prompt}', steps={args.steps}, "
+            f"reference_scale={args.reference_scale}"
+        )
 
         image = Image.open(args.image).convert("RGB").resize((768, 768))
         buffer = io.BytesIO()
@@ -89,7 +102,7 @@ async def run_test(args):
                 fps = results_received / elapsed if elapsed > 0 else 0
 
                 if num_frames == 1:
-                    output_path = "output.jpg"
+                    output_path = args.output
                     with open(output_path, "wb") as f:
                         f.write(response)
                     print(
@@ -133,6 +146,11 @@ def main():
     parser.add_argument("--steps", type=int, default=4, help="Number of inference steps")
     parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility")
     parser.add_argument("--burst", type=int, default=0, help="Number of frames to send (0=single)")
+    parser.add_argument("--output", default="output.jpg", help="Output path (single-frame mode)")
+    parser.add_argument(
+        "--reference-scale", type=float, default=1.0,
+        help="Sketch-adherence dial (KV pipeline): >1 tighter, <1 looser, 1.0 stock",
+    )
     args = parser.parse_args()
 
     asyncio.run(run_test(args))

@@ -178,6 +178,9 @@ async def websocket_stream(ws: WebSocket):
         "steps": config.STEPS,
         "seed": session_seed,
         "requestId": None,
+        # Sketch-adherence dial (KV pipeline): >1 follow the sketch harder,
+        # <1 free the prompt. 1.0 = stock behavior.
+        "reference_scale": 1.0,
     }
 
     # Single-slot frame buffer: only the latest frame is kept.
@@ -223,6 +226,13 @@ async def websocket_stream(ws: WebSocket):
                                 current_config["steps"] = max(1, min(50, int(data["steps"])))
                             if "seed" in data and data["seed"] is not None:
                                 current_config["seed"] = int(data["seed"])
+                            if "reference_scale" in data and data["reference_scale"] is not None:
+                                try:
+                                    rs = float(data["reference_scale"])
+                                    if rs == rs:  # NaN-reject
+                                        current_config["reference_scale"] = max(0.0, min(3.0, rs))
+                                except (TypeError, ValueError):
+                                    pass
                             # Snapshotted with cfg in process_loop so the
                             # outgoing frame_meta matches the frame the client
                             # will pair it with, even if a new config arrives
@@ -389,6 +399,7 @@ def _process_frame(jpeg_data: bytes, cfg: dict) -> bytes:
         prompt=cfg.get("prompt", ""),
         steps=cfg.get("steps", config.STEPS),
         seed=cfg.get("seed"),
+        reference_scale=cfg.get("reference_scale", 1.0),
     )
 
     buffer = io.BytesIO()

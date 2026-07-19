@@ -179,6 +179,17 @@ class FluxKleinPipeline:
             },
         )
 
+        # Sketch-adherence hook (KV variant only): swap in attention processors
+        # that scale the reference-token K/V by a runtime factor. Must happen
+        # BEFORE torch.compile so the multiply is inside the compiled graph
+        # (the factor lives in a persistent CUDA tensor, so slider changes
+        # never recompile). See kv_ref_scale.py.
+        if config.PIPELINE_VARIANT == "kv":
+            from image.kv_ref_scale import install as install_ref_scale
+
+            install_ref_scale(self.pipe.transformer)
+            logger.info("Installed reference-scale attention processors (sketch adherence)")
+
         # Optional torch.compile of the transformer (FLUX_COMPILE=1; measured
         # 1.2-1.25x per-frame on H100 BF16 with pixel-identical output). The
         # compile itself is lazy — its cost lands in the warmup calls below.
@@ -241,6 +252,7 @@ class FluxKleinPipeline:
         prompt: str,
         steps: int = config.STEPS,
         seed: int | None = None,
+        reference_scale: float = 1.0,
     ) -> Image.Image:
         """Run reference-mode img2img generation.
 
@@ -248,10 +260,19 @@ class FluxKleinPipeline:
         ``image`` parameter. Internally the model VAE-encodes it, patchifies
         the latents, and concatenates them with generation latents so the
         transformer attends to both.
+
+        ``reference_scale`` is the sketch-adherence dial (KV variant only):
+        >1 follows the sketch harder, <1 frees the prompt, 1.0 = stock
+        behavior (numerically a no-op). Applied under the lock so a config
+        update can't tear a mid-flight generation.
         """
         generator = self._make_generator(seed)
 
         with self._lock:
+            if config.PIPELINE_VARIANT == "kv":
+                from image.kv_ref_scale import set_scale
+
+                set_scale(reference_scale)
             result = self.pipe(
                 prompt=prompt,
                 image=image,

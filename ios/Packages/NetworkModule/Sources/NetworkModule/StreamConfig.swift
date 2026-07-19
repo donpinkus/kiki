@@ -29,6 +29,10 @@ public struct StreamConfig: Codable, Sendable, Equatable {
     public let requestId: String?
     public let imageSize: String
     public let scheduleMu: Double
+    /// Sketch-adherence dial for the Lambda KV pipeline (reference-token K/V
+    /// scaling): >1 follows the sketch harder, <1 frees the prompt, 1.0 =
+    /// stock. Wire key `reference_scale`; ignored by the fal relay.
+    public let referenceScale: Double
     public let videoWidth: Int
     public let videoHeight: Int
     public let videoFrames: Int
@@ -47,6 +51,7 @@ public struct StreamConfig: Codable, Sendable, Equatable {
         case requestId
         case imageSize = "image_size"
         case scheduleMu = "schedule_mu"
+        case referenceScale = "reference_scale"
         case videoWidth
         case videoHeight
         case videoFrames
@@ -62,6 +67,7 @@ public struct StreamConfig: Codable, Sendable, Equatable {
         requestId: String? = nil,
         imageSize: String = "square_hd",
         scheduleMu: Double = 1.2,
+        referenceScale: Double = 1.0,
         videoWidth: Int = 512,
         videoHeight: Int = 512,
         videoFrames: Int = 145,
@@ -76,6 +82,7 @@ public struct StreamConfig: Codable, Sendable, Equatable {
         self.requestId = requestId
         self.imageSize = imageSize
         self.scheduleMu = scheduleMu
+        self.referenceScale = referenceScale
         self.videoWidth = videoWidth
         self.videoHeight = videoHeight
         self.videoFrames = videoFrames

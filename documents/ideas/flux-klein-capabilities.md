@@ -45,7 +45,7 @@ These are the structural facts the capability ideas lean on. Verified against th
 - Per-block indexing ranges in the repo assume 9B block counts — verify 4B layout.
 - Untested on the NVFP4 checkpoint. Quantized attention may interact oddly with k/v scaling.
 
-**Status:** Not started. Highest-leverage short-term experiment.
+**Status:** SHIPPED 2026-07-19 (adapted for the 9B-KV pipeline): `model-servers/image/kv_ref_scale.py` subclasses the two KV attention processors and scales the reference-token K/V slices at cache-extract (step 0) — the cache stores scaled tensors so steps 1+ inherit it for free. Wire key `reference_scale` (iOS Settings → `reference_scale` slider, lambda path only; fal ignores it). Measured on H100 (seed-fixed sweep, smiley sketch + cottage prompt): 0.0 = sketch fully ignored, 1.0 = stock, 1.2 = sketch structure integrated into prompt scene, ≥1.5 = sketch dominates. ~548 ms/frame flat across scale changes (persistent CUDA scalar → no torch.compile recompiles).
 
 ---
 
