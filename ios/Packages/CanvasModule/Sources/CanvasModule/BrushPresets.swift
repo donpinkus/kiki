@@ -403,7 +403,11 @@ public enum CuratedPresetCatalog {
             // (the squash shrank each dab along the stroke below the walk gap).
             b.spacing = 0.10
             b.spacingJitter = 0.10
-            b.taperEnd = 0.07
+            // Device report (attempt 3): the source ribbon tapers cleanly at BOTH ends
+            // (the taper pane under-stated it) — long sharp entries and exits.
+            b.taperStart = 0.5
+            b.taperEnd = 0.5
+            b.taperOpacity = 0.3
             b.stampCount = 2
             b.stampCountJitter = 0.7
             b.dynamics = BrushDynamics(
