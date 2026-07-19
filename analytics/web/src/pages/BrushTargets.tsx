@@ -15,7 +15,11 @@ import {
 
 const KINDS: BrushTargetImage['kind'][] = ['reference', 'settings', 'attempt'];
 const STATUSES = ['todo', 'in_progress', 'matched'] as const;
-const fmtWhen = (iso: string) => new Date(iso).toLocaleString();
+const STATUS_LABEL: Record<BrushTarget['status'], string> = {
+  todo: 'To do', in_progress: 'In progress', matched: 'Matched',
+};
+const fmtWhen = (iso: string) =>
+  new Date(iso).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 
 const NOTES_PLACEHOLDER = `Brush brief — anything the screenshots don't say:
 • Procreate name + brush set (e.g. "Peppermint — Sketching")
@@ -29,7 +33,7 @@ function CaptureChecklist() {
   return (
     <details className="capture-guide">
       <summary>📸 What to capture (priority order)</summary>
-      <ol style={{ margin: '8px 0 4px 18px', fontSize: 13, lineHeight: 1.6 }}>
+      <ol>
         <li><strong>Shape + Grain source images</strong> — open Shape Source → Edit and Grain
           Source → Edit and screenshot the texture FULLSCREEN. These import into Kiki directly,
           so they're worth more than every settings pane combined.</li>
@@ -41,7 +45,7 @@ function CaptureChecklist() {
           a wet/blending brush).</li>
         <li>Skip unless unusual: Stabilization, Dynamics, Properties, Materials, About.</li>
       </ol>
-      <p className="muted" style={{ fontSize: 12, margin: '6px 0 2px' }}>
+      <p>
         Screenshots beat video — each pane arrives sharp and complete. A screen recording works
         as a fallback (frames get extracted), but pause ~1s on each pane if you go that route.
       </p>
@@ -54,6 +58,7 @@ function UploadZone({ targetId, kind, title, hint, onDone }: {
   targetId: string; kind: string; title: string; hint: string; onDone: () => void;
 }) {
   const [busy, setBusy] = useState(false);
+  const [drag, setDrag] = useState(false);
   const [flash, setFlash] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -96,23 +101,24 @@ function UploadZone({ targetId, kind, title, hint, onDone }: {
 
   return (
     <div
-      className="upload-zone"
+      className={drag ? 'upload-zone dragging' : 'upload-zone'}
       tabIndex={0}
       onPaste={(e) => {
         const files = Array.from(e.clipboardData.files);
         if (files.length > 0) { e.preventDefault(); void doUpload(files); }
       }}
-      onDragOver={(e) => e.preventDefault()}
-      onDrop={(e) => { e.preventDefault(); void doUpload(Array.from(e.dataTransfer.files)); }}
+      onDragOver={(e) => { e.preventDefault(); setDrag(true); }}
+      onDragLeave={() => setDrag(false)}
+      onDrop={(e) => { e.preventDefault(); setDrag(false); void doUpload(Array.from(e.dataTransfer.files)); }}
     >
-      <div style={{ display: 'flex', gap: 10, alignItems: 'baseline', flexWrap: 'wrap' }}>
-        <strong style={{ fontSize: 13 }}>{title}</strong>
-        <span className="muted" style={{ fontSize: 12 }}>{hint}</span>
+      <div className="upload-zone-head">
+        <strong>{title}</strong>
+        <span className="muted">{hint}</span>
       </div>
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 8, flexWrap: 'wrap' }}>
-        <button onClick={() => fileRef.current?.click()} disabled={busy}>Choose files…</button>
-        <button onClick={() => void pasteFromClipboard()} disabled={busy}>Paste screenshot</button>
-        <span className="muted" style={{ fontSize: 12 }}>
+      <div className="upload-zone-actions">
+        <button className="ghost" onClick={() => fileRef.current?.click()} disabled={busy}>Choose files…</button>
+        <button className="ghost" onClick={() => void pasteFromClipboard()} disabled={busy}>Paste screenshot</button>
+        <span className="muted">
           {busy ? 'Uploading…' : flash ?? 'or drop images here / focus + ⌘V'}
         </span>
       </div>
@@ -129,32 +135,33 @@ function ImageCard({ img, onChanged }: { img: BrushTargetImage; onChanged: () =>
   const [note, setNote] = useState(img.note ?? '');
   const dirty = label !== (img.label ?? '') || note !== (img.note ?? '');
   return (
-    <div className="scene-card" style={{ width: 260 }}>
-      <a href={`/blobs/${img.blob_key}`} target="_blank" rel="noreferrer">
-        <img src={`/blobs/${img.blob_key}`} style={{ width: '100%', borderRadius: 6, display: 'block' }} loading="lazy" />
+    <div className="brush-img-card">
+      <a className="brush-img-link" href={`/blobs/${img.blob_key}`} target="_blank" rel="noreferrer">
+        <img src={`/blobs/${img.blob_key}`} loading="lazy" />
       </a>
-      <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 6 }}>
-        <select value={img.kind} onChange={async (e) => { await updateBrushTargetImage(img.id, { kind: e.target.value }); onChanged(); }}>
-          {KINDS.map((k) => <option key={k} value={k}>{k}</option>)}
-        </select>
-        <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="label (e.g. Shape pane)" style={{ flex: 1, minWidth: 0 }} />
-      </div>
-      <textarea
-        value={note}
-        onChange={(e) => setNote(e.target.value)}
-        placeholder="notes for this screenshot (settings values, what to look at…)"
-        rows={2}
-        style={{ width: '100%', marginTop: 6, fontSize: 12 }}
-      />
-      <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
-        {dirty && (
-          <button onClick={async () => { await updateBrushTargetImage(img.id, { label, note }); onChanged(); }}>Save</button>
-        )}
-        <span className="spacer" />
-        <button
-          className="danger"
-          onClick={async () => { if (confirm('Delete this image?')) { await deleteBrushTargetImage(img.id); onChanged(); } }}
-        >Delete</button>
+      <div className="brush-img-meta">
+        <div className="brush-img-row">
+          <select value={img.kind} onChange={async (e) => { await updateBrushTargetImage(img.id, { kind: e.target.value }); onChanged(); }}>
+            {KINDS.map((k) => <option key={k} value={k}>{k}</option>)}
+          </select>
+          <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="label (e.g. Shape pane)" />
+        </div>
+        <textarea
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+          placeholder="notes (settings values, what to look at…)"
+          rows={2}
+        />
+        <div className="brush-img-row">
+          {dirty && (
+            <button onClick={async () => { await updateBrushTargetImage(img.id, { label, note }); onChanged(); }}>Save</button>
+          )}
+          <span className="spacer" />
+          <button
+            className="danger"
+            onClick={async () => { if (confirm('Delete this image?')) { await deleteBrushTargetImage(img.id); onChanged(); } }}
+          >Delete</button>
+        </div>
       </div>
     </div>
   );
@@ -163,36 +170,53 @@ function ImageCard({ img, onChanged }: { img: BrushTargetImage; onChanged: () =>
 function TargetPanel({ target, onChanged }: { target: BrushTarget; onChanged: () => void }) {
   const [note, setNote] = useState(target.note ?? '');
   const [editingNote, setEditingNote] = useState(false);
-  useEffect(() => { setNote(target.note ?? ''); setEditingNote(false); }, [target.id]);
+  const [nameDraft, setNameDraft] = useState<string | null>(null); // null = not renaming
+  useEffect(() => { setNote(target.note ?? ''); setEditingNote(false); setNameDraft(null); }, [target.id]);
 
-  const rename = async () => {
-    const name = prompt('Rename target', target.name)?.trim();
+  const saveName = async () => {
+    const name = nameDraft?.trim();
+    setNameDraft(null);
     if (name && name !== target.name) {
       await updateBrushTarget(target.id, { name });
       onChanged();
     }
   };
 
-  const groups: { title: string; kind: BrushTargetImage['kind'] }[] = [
-    { title: 'Reference strokes', kind: 'reference' },
-    { title: 'Procreate settings', kind: 'settings' },
-    { title: 'Recreation attempts (Claude)', kind: 'attempt' },
+  const groups: { title: string; kind: BrushTargetImage['kind']; hint: string }[] = [
+    { title: 'Reference strokes', kind: 'reference', hint: 'real strokes drawn with the target brush' },
+    { title: 'Procreate settings', kind: 'settings', hint: 'Brush Studio panes + shape/grain sources' },
+    { title: 'Recreation attempts', kind: 'attempt', hint: 'renders posted back by Claude' },
   ];
 
   return (
-    <div>
-      <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-        <h2 style={{ margin: 0, cursor: 'pointer' }} onClick={rename} title="Click to rename">
-          {target.name} <span className="muted" style={{ fontSize: 14 }}>✎</span>
-        </h2>
-        <select
-          value={target.status}
-          onChange={async (e) => { await updateBrushTarget(target.id, { status: e.target.value }); onChanged(); }}
-        >
-          {STATUSES.map((st) => <option key={st} value={st}>{st.replace('_', ' ')}</option>)}
-        </select>
-        <span className="muted" style={{ fontSize: 12 }}>updated {fmtWhen(target.updated_at)}</span>
+    <div className="brush-detail">
+      <div className="brush-detail-head">
+        {nameDraft === null ? (
+          <h2 onClick={() => setNameDraft(target.name)} title="Click to rename">
+            {target.name} <span className="rename-hint">✎</span>
+          </h2>
+        ) : (
+          <input
+            className="rename-input" autoFocus value={nameDraft}
+            onChange={(e) => setNameDraft(e.target.value)}
+            onBlur={() => void saveName()}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') void saveName();
+              if (e.key === 'Escape') setNameDraft(null);
+            }}
+          />
+        )}
+        <div className="seg">
+          {STATUSES.map((st) => (
+            <button
+              key={st}
+              className={st === target.status ? `seg-btn active st-${st}` : 'seg-btn'}
+              onClick={async () => { await updateBrushTarget(target.id, { status: st }); onChanged(); }}
+            >{STATUS_LABEL[st]}</button>
+          ))}
+        </div>
         <span className="spacer" />
+        <span className="muted brush-updated">updated {fmtWhen(target.updated_at)}</span>
         <button
           className="danger"
           onClick={async () => {
@@ -201,9 +225,28 @@ function TargetPanel({ target, onChanged }: { target: BrushTarget; onChanged: ()
         >Delete target</button>
       </div>
 
+      <div className="brush-brief">
+        {editingNote ? (
+          <div>
+            <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={8}
+              placeholder={NOTES_PLACEHOLDER} />
+            <div className="brush-brief-actions">
+              <button onClick={async () => { await updateBrushTarget(target.id, { note }); setEditingNote(false); onChanged(); }}>Save notes</button>
+              <button className="ghost" onClick={() => { setNote(target.note ?? ''); setEditingNote(false); }}>Cancel</button>
+            </div>
+          </div>
+        ) : (
+          <div className="brush-brief-body" onClick={() => setEditingNote(true)} title="Click to edit">
+            {target.note
+              ? <Markdown>{target.note}</Markdown>
+              : <span className="muted">No notes yet — click to add the brush brief (Procreate name/set, size used, feel, feedback).</span>}
+          </div>
+        )}
+      </div>
+
       <CaptureChecklist />
 
-      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 12 }}>
+      <div className="upload-row">
         <UploadZone
           targetId={target.id} kind="reference" onDone={onChanged}
           title="Stroke samples"
@@ -216,41 +259,35 @@ function TargetPanel({ target, onChanged }: { target: BrushTarget; onChanged: ()
         />
       </div>
 
-      <div style={{ marginTop: 12 }}>
-        {editingNote ? (
-          <div>
-            <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={8} style={{ width: '100%' }}
-              placeholder={NOTES_PLACEHOLDER} />
-            <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
-              <button onClick={async () => { await updateBrushTarget(target.id, { note }); setEditingNote(false); onChanged(); }}>Save notes</button>
-              <button onClick={() => { setNote(target.note ?? ''); setEditingNote(false); }}>Cancel</button>
-            </div>
-          </div>
-        ) : (
-          <div onClick={() => setEditingNote(true)} style={{ cursor: 'text' }} title="Click to edit">
-            {target.note
-              ? <div className="lightbox-desc" style={{ maxWidth: 900 }}><Markdown>{target.note}</Markdown></div>
-              : <span className="muted">No notes yet — click to add the brush brief (Procreate name/set, size used, feel, feedback).</span>}
-          </div>
-        )}
-      </div>
-
-      {groups.map(({ title, kind }) => {
+      {groups.map(({ title, kind, hint }) => {
         const imgs = target.images.filter((i) => i.kind === kind);
         if (imgs.length === 0 && kind === 'attempt') return null;
         return (
-          <div key={kind} style={{ marginTop: 18 }}>
-            <h3 style={{ marginBottom: 8 }}>{title} {imgs.length > 0 && <span className="muted" style={{ fontWeight: 400 }}>({imgs.length})</span>}</h3>
+          <section key={kind} className={`brush-group ${kind === 'attempt' ? 'attempt-group' : ''}`}>
+            <div className="brush-group-head">
+              <h3>{title}</h3>
+              {imgs.length > 0 && <span className="count-badge">{imgs.length}</span>}
+              <span className="muted">{hint}</span>
+            </div>
             {imgs.length === 0
-              ? <span className="muted" style={{ fontSize: 13 }}>None yet.</span>
-              : <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+              ? <p className="muted brush-group-empty">None yet.</p>
+              : <div className="brush-img-grid">
                   {imgs.map((img) => <ImageCard key={img.id} img={img} onChanged={onChanged} />)}
                 </div>}
-          </div>
+          </section>
         );
       })}
     </div>
   );
+}
+
+function kindCounts(t: BrushTarget) {
+  const parts: string[] = [];
+  for (const [kind, noun] of [['reference', 'ref'], ['settings', 'settings'], ['attempt', 'attempt']] as const) {
+    const n = t.images.filter((i) => i.kind === kind).length;
+    if (n > 0) parts.push(`${n} ${noun}${noun !== 'settings' && n !== 1 ? 's' : ''}`);
+  }
+  return parts.length > 0 ? parts.join(' · ') : 'no images yet';
 }
 
 export function BrushTargets() {
@@ -283,31 +320,37 @@ export function BrushTargets() {
   const current = targets.find((t) => t.id === selected) ?? null;
 
   return (
-    <div className="page">
-      <h1>Brush targets</h1>
-      <p className="muted" style={{ maxWidth: 820 }}>
+    <div className="container wide">
+      <h1 className="brush-title">Brushes</h1>
+      <p className="muted brush-intro">
         One entry per brush to clone. Upload stroke-sample screenshots and Procreate Brush Studio
         settings panes, and write the brief in the notes. Claude pulls targets with
         <code> BrushHarness/fetch-targets.sh</code>, builds a preset, and posts recreation renders
         back as <em>attempts</em> for side-by-side review here.
       </p>
       {err && <p className="error">{err}</p>}
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', margin: '12px 0' }}>
-        <input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="New target name (e.g. Procreate 6B Pencil)"
-          onKeyDown={(e) => { if (e.key === 'Enter') void create(); }} style={{ width: 320 }} />
-        <button onClick={create} disabled={!newName.trim()}>Create target</button>
+      <div className="brush-layout">
+        <aside className="brush-sidebar">
+          <div className="brush-create">
+            <input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="New target name…"
+              onKeyDown={(e) => { if (e.key === 'Enter') void create(); }} />
+            <button onClick={create} disabled={!newName.trim()}>Create</button>
+          </div>
+          {targets.length === 0
+            ? <p className="muted brush-sidebar-empty">No targets yet — name one above (e.g. “Procreate 6B Pencil”).</p>
+            : targets.map((t) => (
+              <button key={t.id} onClick={() => setSelected(t.id)}
+                className={t.id === selected ? 'target-item active' : 'target-item'}>
+                <span className={`status-dot st-${t.status}`} title={STATUS_LABEL[t.status]} />
+                <span className="target-item-body">
+                  <span className="target-item-name">{t.name}</span>
+                  <span className="target-item-meta muted">{kindCounts(t)}</span>
+                </span>
+              </button>
+            ))}
+        </aside>
+        {current && <TargetPanel target={current} onChanged={refresh} />}
       </div>
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
-        {targets.map((t) => (
-          <button key={t.id} onClick={() => setSelected(t.id)}
-            className={t.id === selected ? 'chip chip-active' : 'chip'}>
-            {t.name}
-            <span className="muted" style={{ marginLeft: 6, fontSize: 11 }}>{t.status.replace('_', ' ')}</span>
-          </button>
-        ))}
-        {targets.length === 0 && <span className="muted">No targets yet.</span>}
-      </div>
-      {current && <TargetPanel target={current} onChanged={refresh} />}
     </div>
   );
 }
