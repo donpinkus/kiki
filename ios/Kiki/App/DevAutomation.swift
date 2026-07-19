@@ -127,6 +127,7 @@ enum DevAutomation {
     #else
 
     @MainActor static var onReplayRequested: ((BrushFixture) -> Void)?
+    @MainActor static var onUIActionRequested: ((String) -> Void)?
     static func injectAuthIfRequested() {}
     static func startReplayListener() {}
 
