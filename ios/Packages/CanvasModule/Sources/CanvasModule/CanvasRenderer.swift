@@ -167,7 +167,12 @@ public final class CanvasRenderer {
     /// no grain. `MetalCanvasView` resolves from the brush at stroke start; the live +
     /// flatten stamp passes read it to pick the grain PSO + bind the texture/params.
     /// depth [0,1]; invScale multiplies document-space pixel coords into grain UV.
-    var activeGrain: (texture: MTLTexture, depth: Float, invScale: Float, moving: Bool)?
+    /// One resolved grain binding: texture + carve depth + UV scale, plus the
+    /// moving-mode frame factors (Procreate Movement: smear anisotropy ↔ rolling
+    /// isotropy) baked into per-axis UV multipliers.
+    typealias GrainSettings = (texture: MTLTexture, depth: Float, invScale: Float,
+                               moving: Bool, alongMul: Float, latMul: Float)
+    var activeGrain: GrainSettings?
 
     /// P4a lightness-map uniform for the stroke being drawn/flattened, or nil for the
     /// flat-ink path: (hue, saturation, lightness z of the brush sRGB color, strength).
@@ -298,7 +303,7 @@ public final class CanvasRenderer {
         self.shapedBrushStampPSO = Self.makeShapedBrushStampPSO(device: device, library: lib)
         self.grainCompositorPSO = Self.makeGrainStampPSO(device: device, library: lib, fragment: "grainCompositorFragment", vertex: "compositorVertex")
         self.lightnessShapedStampPSO = Self.makeGrainStampPSO(device: device, library: lib, fragment: "lightnessShapedStampFragment")
-        self.grainTextures = Self.makeGrainTextures(device: device)
+        self.grainTextures = Self.makeGrainTextures(device: device, queue: commandQueue)
         // Wet PSO uses framebuffer fetch — unsupported on the Simulator, so this may
         // be nil there; the wet tool guards on it and no-ops if unavailable.
         self.wetStampPSO = Self.makeWetStampPSO(device: device, library: lib)
@@ -570,7 +575,7 @@ public final class CanvasRenderer {
     /// plain compositor. Restores the plain compositor PSO afterwards so surrounding
     /// draws in the same encoder are unaffected. (P8: grain carves at composite time.)
     private func drawScratch(_ enc: MTLRenderCommandEncoder, scratch: MTLTexture, opacity: Float,
-                             grain: (texture: MTLTexture, depth: Float, invScale: Float, moving: Bool)?) {
+                             grain: GrainSettings?) {
         var op = opacity
         // Moving grain carves per DAB in the stamp fragments — at composite time it must
         // be a plain draw or the tooth would be applied twice.
@@ -919,7 +924,7 @@ public final class CanvasRenderer {
     /// regenerated as stamps and committed in one pass. `strokeOpacity` is the
     /// per-stroke ceiling applied at flatten (stamp alpha carries the brush's flow).
     func commitStampsToCanvas(_ stamps: [StampInstance], strokeOpacity: Float = 1.0, shapeTexture: MTLTexture? = nil,
-                              grain: (texture: MTLTexture, depth: Float, invScale: Float, moving: Bool)? = nil,
+                              grain: GrainSettings? = nil,
                               lightness: (params: SIMD4<Float>, recenter: SIMD4<Float>)? = nil,
                               flip: SIMD2<Float> = .zero,
                               wetInk: Bool = false) {
@@ -1822,7 +1827,7 @@ public final class CanvasRenderer {
     /// texture(1) (the scratch keeps 0); params (depth, uvScaleX, uvScaleY, 0) at
     /// fragment buffer(1) — buffer(0) stays the compositor's opacity. The UV scale maps
     /// the unit quad to document pixels × invScale so grain tiles in DOCUMENT space.
-    private func bindGrainCompositor(_ enc: MTLRenderCommandEncoder, _ grain: (texture: MTLTexture, depth: Float, invScale: Float, moving: Bool)) {
+    private func bindGrainCompositor(_ enc: MTLRenderCommandEncoder, _ grain: GrainSettings) {
         enc.setFragmentTexture(grain.texture, index: 1)
         var params = SIMD4<Float>(grain.depth,
                                   Float(canvasWidth) * grain.invScale,
@@ -1833,7 +1838,7 @@ public final class CanvasRenderer {
     /// Generate the procedural grain library: 256² R8, TILEABLE (periodic value-noise
     /// lattice), deterministic (fixed seeds — replay/harness identical). Kept in the
     /// COARSE value-grain band per the P8 plan (fine tooth is resynthesized by klein).
-    private static func makeGrainTextures(device: MTLDevice) -> [String: MTLTexture] {
+    private static func makeGrainTextures(device: MTLDevice, queue: MTLCommandQueue) -> [String: MTLTexture] {
         let size = 256
         func hash(_ x: Int, _ y: Int, _ seed: UInt64) -> Double {
             var h = seed &+ 0x9E37_79B9_7F4A_7C15
@@ -1909,14 +1914,23 @@ public final class CanvasRenderer {
                                       bytesPerRow: w, space: CGColorSpaceCreateDeviceGray(),
                                       bitmapInfo: CGImageAlphaInfo.none.rawValue) else { continue }
             ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: w, height: h))
+            // MIPMAPPED: fine geometric grains (grid/hatching) alias away under
+            // minification without mips — thin lines fall between samples (the Grid
+            // Paper clone surfaced this; the grain samplers are trilinear now).
             let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r8Unorm,
-                                                                width: w, height: h, mipmapped: false)
+                                                                width: w, height: h, mipmapped: true)
             desc.usage = [.shaderRead]
             desc.storageMode = .shared
             guard let tex = device.makeTexture(descriptor: desc) else { continue }
             bytes.withUnsafeBytes { ptr in
                 tex.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0,
                             withBytes: ptr.baseAddress!, bytesPerRow: w)
+            }
+            if tex.mipmapLevelCount > 1, let cmdBuf = queue.makeCommandBuffer(),
+               let blit = cmdBuf.makeBlitCommandEncoder() {
+                blit.generateMipmaps(for: tex)
+                blit.endEncoding()
+                cmdBuf.commit()
             }
             out[descriptor.id] = tex
         }
@@ -1974,33 +1988,59 @@ public final class CanvasRenderer {
 
     /// Resolve a brush's grain settings (P8): texture + depth + document-space UV scale.
     /// nil when the brush has no grain, depth ≈ 0, or the id is unknown.
-    func grainSettings(for brush: BrushConfig) -> (texture: MTLTexture, depth: Float, invScale: Float, moving: Bool)? {
+    /// `widthPx` is the brush's nominal stamp diameter in CANVAS pixels (baseWidth ×
+    /// canvasScale on the live path; harness/persistence widths are already canvas px,
+    /// so the default falls back to baseWidth). Only the moving-mode Zoom uses it.
+    func grainSettings(for brush: BrushConfig, widthPx: CGFloat = 0) -> GrainSettings? {
         guard brush.grainDepth > 0.005, let grainID = brush.grainID else { return nil }
         let depth = Float(min(max(brush.grainDepth, 0), 1))
-        if let desc = GrainCatalog.descriptor(for: grainID), let tex = grainTextures[desc.id] {
-            // Tile at the texture's own pixel size (256 for procedural; image grains
-            // bring their native resolution) × the descriptor + brush scales.
-            let tilePx = Double(tex.width) * Double(desc.nativeScale) * Double(max(brush.grainScale, 0.05))
-            return (tex, depth, Float(1.0 / tilePx), brush.grainMoving)
+        let tex: MTLTexture
+        var nativeScale = 1.0
+        if let desc = GrainCatalog.descriptor(for: grainID), let t = grainTextures[desc.id] {
+            tex = t
+            nativeScale = Double(desc.nativeScale)
+        } else if let user = userGrain(for: grainID) {
+            tex = user.texture
+        } else {
+            return nil
         }
-        // User-imported grain: tile at the image's native pixel size × grainScale.
-        guard let user = userGrain(for: grainID) else { return nil }
-        let tilePx = user.tilePx * Double(max(brush.grainScale, 0.05))
-        return (user.texture, depth, Float(1.0 / tilePx), brush.grainMoving)
+        let gscale = Double(max(brush.grainScale, 0.05))
+        // Cropped tile: the texture's own pixel size × scales (texturized always uses
+        // this — document-anchored, brush-size-invariant).
+        let fixedTile = Double(tex.width) * nativeScale * gscale
+        var tilePx = fixedTile
+        if brush.grainMoving {
+            // Procreate Grain "Zoom": Follow size (0) → tile ∝ brush size, so the grain
+            // grows/shrinks with the brush; Cropped (1) → fixed tile. K = 2: at
+            // Scale 100% the tile spans ~2× the brush width.
+            let w = Double(widthPx > 0 ? widthPx : brush.baseWidth)
+            let followTile = max(8.0, w * gscale * 2.0)
+            let zoom = Double(min(max(brush.grainZoom, 0), 1))
+            tilePx = followTile + (fixedTile - followTile) * zoom
+        }
+        // Procreate Grain "Movement" (moving mode): 0 = smear/drag (the legacy streak
+        // anisotropy — lateral ×3.5, along ×0.45), 1 = Rolling (isotropic — the texture
+        // rolls under the brush undistorted).
+        let movement = Float(min(max(brush.grainMovement, 0), 1))
+        let alongMul = 0.45 + (1.0 - 0.45) * movement
+        let latMul = 3.5 + (1.0 - 3.5) * movement
+        return (tex, depth, Float(1.0 / tilePx), brush.grainMoving, alongMul, latMul)
     }
 
     /// Bind the moving-grain slot (texture(1) + fragment buffer(3)) for a dry stamp
     /// pass: the grain when it's MOVING mode, else the disabled dummy. Every dry stamp
     /// fragment declares the slot, so it must always be bound.
     private func bindMovingGrain(_ enc: MTLRenderCommandEncoder,
-                                 _ grain: (texture: MTLTexture, depth: Float, invScale: Float, moving: Bool)?) {
+                                 _ grain: GrainSettings?) {
+        // Packing: (depth, invScale, latMul, alongMul). depth == 0 disables the carve
+        // in the shader, so the dummy binding needs no separate enabled flag.
         var params: SIMD4<Float>
         if let grain, grain.moving {
             enc.setFragmentTexture(grain.texture, index: 1)
-            params = SIMD4<Float>(grain.depth, grain.invScale, 1, 0)
+            params = SIMD4<Float>(grain.depth, grain.invScale, grain.latMul, grain.alongMul)
         } else {
             enc.setFragmentTexture(blackDummyTexture, index: 1)
-            params = SIMD4<Float>(0, 0, 0, 0)
+            params = SIMD4<Float>(0, 0, 1, 1)
         }
         enc.setFragmentBytes(&params, length: MemoryLayout<SIMD4<Float>>.size, index: 3)
     }
@@ -2242,20 +2282,21 @@ public final class CanvasRenderer {
     // — so the tooth travels with the stroke (streaky dry media). The quad is oriented
     // to the travel direction whenever moving grain is on (round tips are symmetric, so
     // forcing orientation costs nothing). Same soft-HEIGHT carve as the document-space
-    // compositor. gp = (depth, invScale, enabled, 0); a black dummy texture + enabled=0
-    // make it an exact identity when off.
+    // compositor. gp = (depth, invScale, latMul, alongMul); depth = 0 (dummy binding)
+    // makes it an exact identity when off.
     static inline float movingGrainCarve(float cov, StampVaryings in,
                                          texture2d<float> grainTex, float4 gp) {
-        if (gp.z < 0.5 || gp.x <= 0.0) { return cov; }
-        constexpr sampler g(filter::linear, address::repeat);
-        // Anisotropic stroke frame: LATERAL frequency boosted 3.5×, ALONG compressed
-        // 0.45× — grain features become thin lines running WITH the stroke (crayon/lead
-        // streaks). Isotropic sampling read as fish-scale scumble; mild along-only
-        // compression was featureless at dab scale (dry-18 iterations 2–3). The extra
-        // smoothstep sharpens the coarse value-noise into distinct streak lines.
+        if (gp.x <= 0.0) { return cov; }
+        constexpr sampler g(filter::linear, mip_filter::linear, address::repeat);
+        // Stroke-frame UV with per-axis Movement factors (gp.z = lateral, gp.w = along).
+        // Movement 0 (smear): lateral ×3.5 / along ×0.45 — features stretch into streaks
+        // running WITH the stroke (the crayon/lead look; isotropic read as fish-scale
+        // scumble in dry-18 iterations 2–3). Movement 1 (Rolling): ×1/×1 — the texture
+        // rolls under the brush undistorted (grids stay square). The smoothstep sharpens
+        // coarse value-noise into distinct lines; harmless for near-binary image grains.
         // Coordinates are the POINT's stroke-frame position (see brushStampVertex) —
         // dab-size-independent, so overlapping dabs agree and the interior is seamless.
-        float2 guv = float2(in.strokeLat * 3.5, in.strokeAlong * 0.45) * gp.y;
+        float2 guv = float2(in.strokeLat * gp.z, in.strokeAlong * gp.w) * gp.y;
         float src = smoothstep(0.25, 0.85, grainTex.sample(g, guv).r);
         float d = clamp(gp.x * in.grainMul, 0.0, 1.0);
         // MULTIPLICATIVE tooth, no compensation boost: the boost form (used once at
@@ -2654,7 +2695,7 @@ public final class CanvasRenderer {
         constant float4& gp [[buffer(1)]]
     ) {
         constexpr sampler texSampler(filter::linear, address::clamp_to_zero);
-        constexpr sampler grainSampler(filter::linear, address::repeat);
+        constexpr sampler grainSampler(filter::linear, mip_filter::linear, address::repeat);
         float4 color = layerTexture.sample(texSampler, in.texCoord);
         float src = grainTex.sample(grainSampler, in.texCoord * gp.yz).r;
         float a = color.a;

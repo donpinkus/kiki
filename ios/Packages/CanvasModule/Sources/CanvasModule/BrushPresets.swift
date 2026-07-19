@@ -384,6 +384,8 @@ public enum CuratedPresetCatalog {
             b.grainDepth = 0.9
             b.grainScale = 0.18
             b.grainMoving = true        // Procreate: Moving / Rolling
+            b.grainMovement = 1.0       // Rolling (their Movement slider at max)
+            b.grainZoom = 0.61          // their Zoom 61% (mostly Cropped)
             b.dynamics = BrushDynamics(
                 size: CurveOption(sensors: [], strength: 1),   // AP Size 0%: no pressure size
                 flow: CurveOption(sensors: [SensorChannel(sensor: .pressure)], minValue: 0.85))
@@ -451,7 +453,7 @@ public enum CuratedPresetCatalog {
             b.flow = 1.0                // carve needs near-solid base or lines break up
             b.grainID = "gridpaper"
             b.grainDepth = 1.0          // Depth Max: field fully carved, lines keep paint
-            b.grainScale = 1.0          // tile baked at display size (160px) — pre-rasterized crisp
+            b.grainScale = 0.31         // 512² source → ~160px tile; mips keep the lines crisp
             b.grainMoving = false       // Texturized (paper-anchored — grid stays put)
             b.dynamics = BrushDynamics(
                 size: CurveOption(sensors: [SensorChannel(sensor: .pressure)], minValue: 0.15),

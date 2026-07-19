@@ -151,6 +151,20 @@ final class AppCoordinator {
             applyTool()
         }
     }
+    /// Moving-grain "Movement" (smear 0 ↔ Rolling 1).
+    var toolGrainMovement: CGFloat = 0.0 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
+    /// Moving-grain "Zoom" (Follow size 0 ↔ Cropped 1).
+    var toolGrainZoom: CGFloat = 1.0 {
+        didSet {
+            guard !isSwappingToolValues else { return }
+            applyTool()
+        }
+    }
     /// Gaussian arc-length smoothing ("Smoothing", P3). 0 = off; higher = steadier
     /// curvature with more trailing lag (catch-up-on-lift covers the tail).
     var toolStabilization: CGFloat = 0.0 {
@@ -2551,6 +2565,8 @@ final class AppCoordinator {
         toolRotationJitter = c.rotationJitter
         toolRandomizedRotation = c.randomizedRotation
         toolGrainDepthJitter = c.grainDepthJitter
+        toolGrainMovement = c.grainMovement
+        toolGrainZoom = c.grainZoom
         toolShapeID = c.shapeID
         toolAspect = c.aspectRatio
         toolGrainID = c.grainID
@@ -2600,6 +2616,8 @@ final class AppCoordinator {
         toolRotationJitter = 0
         toolRandomizedRotation = false
         toolGrainDepthJitter = 0
+        toolGrainMovement = 0
+        toolGrainZoom = 1
         toolShapeID = nil
         toolAspect = d.aspectRatio
         toolGrainID = nil
@@ -2677,6 +2695,8 @@ final class AppCoordinator {
                 grainDepth: toolGrainDepth,
                 grainScale: toolGrainScale,
                 grainMoving: toolGrainMoving,
+                grainMovement: toolGrainMovement,
+                grainZoom: toolGrainZoom,
                 tipLightness: toolTipLightness,
                 tipAngle: toolTipAngle,
                 fallOff: toolFallOff,

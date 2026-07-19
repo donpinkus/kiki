@@ -553,11 +553,16 @@ private struct GrainSection: View {
                         }
                     }
                     StudioFootnote(coordinator.toolGrainMoving
-                         ? "Moving: tooth rides with the stroke — streaky crayon/lead."
-                         : "Texturized: tooth stays on the paper, stencil-like — overlapping strokes share it.")
+                         ? "Moving: the grain rides with the stroke — sized and centered per stroke."
+                         : "Texturized: the grain is anchored to the canvas at a fixed size — overlapping strokes reveal one consistent pattern.")
+                    if coordinator.toolGrainMoving {
+                        BrushSliderRow("Movement", value: $coordinator.toolGrainMovement, range: 0.0...1.0, help: BrushHelpCatalog.help["Grain Movement"]!,
+                                       format: { $0 > 0.97 ? "Rolling" : ($0 < 0.03 ? "Smear" : "\(Int(($0 * 100).rounded()))%") })
+                        BrushSliderRow("Zoom", value: $coordinator.toolGrainZoom, range: 0.0...1.0, help: BrushHelpCatalog.help["Grain Zoom"]!,
+                                       format: { $0 < 0.03 ? "Follow size" : ($0 > 0.97 ? "Cropped" : "\(Int(($0 * 100).rounded()))%") })
+                    }
                 }
                 .disabled(wet).opacity(wet ? 0.35 : 1)
-                GapRow("Movement", note: "Drag/smear vs paint-roller grain travel.")
             }
             StudioGroup("Settings") {
                 Group {
@@ -567,7 +572,6 @@ private struct GrainSection: View {
                     BrushSliderRow("Depth Jitter", value: $coordinator.toolGrainDepthJitter, range: 0.0...1.0, help: BrushHelpCatalog.help["Grain Depth Jitter"]!)
                 }
                 .disabled(wet).opacity(wet ? 0.35 : 1)
-                GapRow("Zoom", note: "Cropped vs Follow Size grain scaling.")
                 GapRow("Rotation", note: "Grain rotation vs stroke direction.")
                 GapRow("Depth Minimum", note: "Floor for pressure-driven depth (curve Min in Dynamics → Grain).")
                 GapRow("Offset Jitter", note: "Random grain offset per stamp.")
@@ -1376,6 +1380,12 @@ enum BrushHelpCatalog {
         "Tip lightness": BrushHelp(summary: "Lets the tip's texture lighten and darken the ink (embossed, dimensional strokes).",
             low: "Flat ink — the tip texture only shapes coverage.",
             high: "Full value mapping — dark tip areas darken, light areas lighten; mid-gray = your color."),
+        "Grain Movement": BrushHelp(summary: "How the moving grain travels with the stroke.",
+            low: "Smear — the texture drags and stretches into streaks along the stroke (crayon/lead).",
+            high: "Rolling — the texture rolls under the brush undistorted (patterns stay true)."),
+        "Grain Zoom": BrushHelp(summary: "Whether the moving grain scales with the brush.",
+            low: "Follow size — grain features grow and shrink with brush size.",
+            high: "Cropped — grain stays at its own fixed size regardless of brush size."),
         "Grain Depth Jitter": BrushHelp(summary: "Randomly varies the grain strength per stamp — patchy, organic tooth.",
             low: "Even grain along the stroke.",
             high: "Some stamps carve the full Depth, others barely any."),

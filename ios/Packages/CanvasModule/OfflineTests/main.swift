@@ -432,6 +432,15 @@ do {
     check("rotationJitter round-trip", Double(back.rotationJitter), 0.4, tol: 1e-9)
     checkBool("randomizedRotation round-trip", back.randomizedRotation)
     check("grainDepthJitter round-trip", Double(back.grainDepthJitter), 0.6, tol: 1e-9)
+    // Grain Movement/Zoom (2026-07-19): round-trip + legacy defaults (smear + Cropped).
+    var g = BrushConfig(color: .black, baseWidth: 20)
+    g.grainMovement = 0.8; g.grainZoom = 0.25
+    let gback = try! JSONDecoder().decode(BrushConfig.self, from: try! JSONEncoder().encode(g))
+    check("grainMovement round-trip", Double(gback.grainMovement), 0.8, tol: 1e-9)
+    check("grainZoom round-trip", Double(gback.grainZoom), 0.25, tol: 1e-9)
+    let legacy2 = try! JSONDecoder().decode(BrushConfig.self, from: Data(#"{"color":{"red":0,"green":0,"blue":0,"alpha":1},"baseWidth":10,"pressureGamma":0.7}"#.utf8))
+    check("legacy decode: grainMovement=0 (smear)", Double(legacy2.grainMovement), 0)
+    check("legacy decode: grainZoom=1 (Cropped)", Double(legacy2.grainZoom), 1)
 }
 
 print("")

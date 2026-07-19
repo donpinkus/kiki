@@ -1349,7 +1349,7 @@ public final class MetalCanvasView: UIView {
         renderer.commitStampsToCanvas(stamps,
                                       strokeOpacity: Float(brush.opacity),
                                       shapeTexture: renderer.shapeTexture(for: brush.shapeID),
-                                      grain: renderer.grainSettings(for: brush),
+                                      grain: renderer.grainSettings(for: brush, widthPx: brush.baseWidth * canvasScale),
                                       lightness: renderer.lightnessSettings(for: brush),
                                       flip: renderer.flipSettings(for: brush))
     }
@@ -2709,7 +2709,8 @@ public final class MetalCanvasView: UIView {
                         stamps,
                         strokeOpacity: Float(stroke.brush.opacity),
                         shapeTexture: renderer.shapeTexture(for: stroke.brush.shapeID),
-                        grain: renderer.grainSettings(for: stroke.brush),
+                        grain: renderer.grainSettings(for: stroke.brush,
+                                                      widthPx: stroke.brush.baseWidth * scale),
                         lightness: renderer.lightnessSettings(for: stroke.brush),
                         flip: renderer.flipSettings(for: stroke.brush)
                     )
@@ -2861,9 +2862,10 @@ public final class MetalCanvasView: UIView {
 
     /// Grain settings (P8) for the active/current brush, or nil. Resolved per frame
     /// alongside the shape texture; the wet path ignores grain (v1).
-    private func currentGrain() -> (texture: MTLTexture, depth: Float, invScale: Float, moving: Bool)? {
+    private func currentGrain() -> CanvasRenderer.GrainSettings? {
         guard let brush = currentBrushConfig(), !brush.wetEnabled else { return nil }
-        return renderer.grainSettings(for: brush)
+        // widthPx: nominal stamp diameter in canvas px (moving-grain Zoom "Follow size").
+        return renderer.grainSettings(for: brush, widthPx: brush.baseWidth * canvasScale)
     }
 
     /// The brush-tip stamp texture for the active/current brush, or nil for the procedural

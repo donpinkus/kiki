@@ -211,6 +211,14 @@ public struct BrushConfig: Codable, Sendable {
     /// streaky crayon/lead). Moving grain carves per dab in the stamp fragments;
     /// document grain carves once at scratch-composite time.
     public var grainMoving: Bool
+    /// Moving-grain "Movement" [0,1] (Procreate): 0 = smear/drag — the streak
+    /// anisotropy (lateral ×3.5, along ×0.45; the crayon/lead look); 1 = Rolling —
+    /// isotropic, the texture rolls under the brush undistorted (grids stay square).
+    public var grainMovement: CGFloat
+    /// Moving-grain "Zoom" [0,1] (Procreate): 0 = Follow size — the tile scales with
+    /// brush size; 1 = Cropped — fixed tile from the texture's own resolution.
+    /// Texturized mode always uses the fixed document-anchored tile.
+    public var grainZoom: CGFloat
     /// P4a lightness-map strength [0,1]: reinterpret the shaped tip's grayscale as a VALUE
     /// map (Krita PreserveLightness / Schatz quadratic) — dark tip pixels darken the ink,
     /// light ones lighten it, mid-gray = exact brush color. 0 = off (flat ink, today's
@@ -299,6 +307,8 @@ public struct BrushConfig: Codable, Sendable {
         grainDepth: CGFloat = 0.5,
         grainScale: CGFloat = 1.0,
         grainMoving: Bool = false,
+        grainMovement: CGFloat = 0.0,
+        grainZoom: CGFloat = 1.0,
         tipLightness: CGFloat = 0.0,
         tipAngle: CGFloat = 0.0,
         fallOff: CGFloat = 0.0,
@@ -343,6 +353,8 @@ public struct BrushConfig: Codable, Sendable {
         self.grainDepth = grainDepth
         self.grainScale = grainScale
         self.grainMoving = grainMoving
+        self.grainMovement = grainMovement
+        self.grainZoom = grainZoom
         self.tipLightness = tipLightness
         self.tipAngle = tipAngle
         self.fallOff = fallOff
@@ -401,6 +413,7 @@ public struct BrushConfig: Codable, Sendable {
         case wetCharge, wetRefill, wetJitter, wetBlur, secondaryColor
         case taperStart, taperEnd, taperOpacity, grainMoving, rotationJitter
         case randomizedRotation, grainDepthJitter
+        case grainMovement, grainZoom
     }
 
     public init(from decoder: Decoder) throws {
@@ -455,6 +468,8 @@ public struct BrushConfig: Codable, Sendable {
         rotationJitter = try container.decodeIfPresent(CGFloat.self, forKey: .rotationJitter) ?? 0.0
         randomizedRotation = try container.decodeIfPresent(Bool.self, forKey: .randomizedRotation) ?? false
         grainDepthJitter = try container.decodeIfPresent(CGFloat.self, forKey: .grainDepthJitter) ?? 0.0
+        grainMovement = try container.decodeIfPresent(CGFloat.self, forKey: .grainMovement) ?? 0.0
+        grainZoom = try container.decodeIfPresent(CGFloat.self, forKey: .grainZoom) ?? 1.0
         flipX = try container.decodeIfPresent(Bool.self, forKey: .flipX) ?? false
         flipY = try container.decodeIfPresent(Bool.self, forKey: .flipY) ?? false
         secondaryColor = try container.decodeIfPresent(CodableColor.self, forKey: .secondaryColor)
@@ -511,6 +526,8 @@ public struct BrushConfig: Codable, Sendable {
         try container.encode(rotationJitter, forKey: .rotationJitter)
         try container.encode(randomizedRotation, forKey: .randomizedRotation)
         try container.encode(grainDepthJitter, forKey: .grainDepthJitter)
+        try container.encode(grainMovement, forKey: .grainMovement)
+        try container.encode(grainZoom, forKey: .grainZoom)
         try container.encode(flipX, forKey: .flipX)
         try container.encode(flipY, forKey: .flipY)
         try container.encodeIfPresent(dynamics, forKey: .dynamics)
