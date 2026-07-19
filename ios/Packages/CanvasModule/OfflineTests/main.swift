@@ -454,5 +454,43 @@ do {
     check("legacy decode: rotation 0", Double(legacy2.grainRotation), 0)
 }
 
+// --- Simple-slider ⇄ curve bridge (Studio amount rows, 2026-07-19) ---
+do {
+    func amt(_ s: SensorAmount) -> Double {
+        if case .amount(let a) = s { return a }
+        return .nan
+    }
+    // pressure-anchored round trip, positive + negative
+    var o = CurveOption(sensors: [], fold: .sizeLike)
+    o.setSensorAmount(0.7, for: .pressure, anchorHigh: true)
+    check("bridge: pressure +0.7 round-trip", amt(o.sensorAmount(for: .pressure, anchorHigh: true)), 0.7, tol: 1e-6)
+    o.setSensorAmount(-0.4, for: .pressure, anchorHigh: true)
+    check("bridge: pressure -0.4 round-trip", amt(o.sensorAmount(for: .pressure, anchorHigh: true)), -0.4, tol: 1e-6)
+    // speed-anchored, coexisting with pressure — channels stay independent
+    o.setSensorAmount(0.7, for: .pressure, anchorHigh: true)
+    o.setSensorAmount(0.5, for: .speed, anchorHigh: false)
+    check("bridge: speed +0.5 alongside pressure", amt(o.sensorAmount(for: .speed, anchorHigh: false)), 0.5, tol: 1e-6)
+    check("bridge: pressure survives speed write", amt(o.sensorAmount(for: .pressure, anchorHigh: true)), 0.7, tol: 1e-6)
+    // zero removes the channel
+    o.setSensorAmount(0, for: .speed, anchorHigh: false)
+    checkBool("bridge: zero removes channel", o.sensorAmount(for: .speed, anchorHigh: false) == .off)
+    // functional check: pressure +0.7 → light touch multiplies to ~0.3, full to 1
+    var st = StrokeDynamicsState(seed: 7)
+    let lo = st.advance(x: 0, y: 0, force: 0.0, altitude: .pi/2, azimuth: 0, dx: 1, dy: 0, dt: 0.008)
+    check("bridge: value at zero pressure", o.value(lo), 0.3, tol: 0.02)
+    // custom detection: bent curve / tweaked min both read custom
+    var c = CurveOption(sensors: [SensorChannel(sensor: .pressure,
+        curve: ResponseCurve(points: [ResponseCurve.Point(0, 0), ResponseCurve.Point(0.5, 0.9), ResponseCurve.Point(1, 1)]))],
+        fold: .sizeLike, useSameCurve: false)
+    checkBool("bridge: bent curve reads custom", c.sensorAmount(for: .pressure, anchorHigh: true) == .custom)
+    var m = CurveOption(sensors: [], fold: .sizeLike, minValue: 0.35)
+    m.sensors = [SensorChannel(sensor: .pressure)]
+    checkBool("bridge: tweaked min reads custom", m.sensorAmount(for: .pressure, anchorHigh: true) == .custom)
+    // centered (spacing) round trip with maxValue 2
+    var sp = CurveOption(sensors: [], fold: .sizeLike, maxValue: 2)
+    sp.setSensorAmount(0.6, for: .speed, anchorHigh: false, centered: true)
+    check("bridge: spacing +0.6 round-trip", amt(sp.sensorAmount(for: .speed, anchorHigh: false, centered: true)), 0.6, tol: 1e-6)
+}
+
 print("")
 if failures == 0 { print("ALL PASSED") } else { print("\(failures) FAILED"); exit(1) }

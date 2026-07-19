@@ -253,6 +253,94 @@ public enum BrushSensor: String, Codable, CaseIterable, Sendable {
 
 /// One sensor paired with its response curve (Krita's per-sensor curve, used when
 /// `useSameCurve == false`; otherwise the option's common curve is shared).
+// MARK: - Simple-slider ⇄ curve bridge (Brush Studio "amount" rows)
+//
+// The Studio shows Procreate-style plain amount sliders (Apple Pencil → Pressure Size,
+// Dynamics → Speed Size, …). Each slider owns ONE sensor channel on the target
+// parameter's CurveOption, encoded as a 2-point LINE so it round-trips exactly:
+//   anchorHigh (pressure/tilt/fuzzy): amount a → curve (0, 1−a)…(1, 1); a<0 flips ends.
+//   anchorLow (speed):                amount a → curve (0, 1)…(1, 1−a); a<0 flips ends.
+//   centered (spacing, ×0.5 domain with maxValue 2): y = 0.5 ⇒ multiplier 1.
+// Anything the slider can't represent (edited curve, tweaked strength/min/max,
+// shared-curve override) reads back as `.custom`, and the Studio shows a
+// "Custom curve — Reset" state instead of silently lying.
+
+/// What a simple amount slider finds on a CurveOption for its sensor.
+public enum SensorAmount: Equatable, Sendable {
+    case off               // no channel for this sensor
+    case amount(Double)    // slider-representable, signed
+    case custom            // channel exists but isn't a plain amount line
+}
+
+public extension CurveOption {
+    /// True when the option's non-channel knobs are still at the values the simple
+    /// sliders author (they never touch strength/min/max/commonCurve).
+    private func sliderCompatible(centered: Bool) -> Bool {
+        guard abs(strength - 1) < 1e-6, abs(minValue) < 1e-6,
+              abs(maxValue - (centered ? 2.0 : 1.0)) < 1e-6 else { return false }
+        if useSameCurve && !commonCurve.isIdentity { return false }
+        return true
+    }
+
+    private static func line(_ y0: Double, _ y1: Double) -> ResponseCurve {
+        ResponseCurve(points: [ResponseCurve.Point(0, y0), ResponseCurve.Point(1, y1)])
+    }
+
+    /// Endpoint read with a midpoint linearity check.
+    private static func lineEnds(_ c: ResponseCurve) -> (y0: Double, y1: Double)? {
+        let y0 = c.value(0), y1 = c.value(1)
+        guard abs(c.value(0.5) - (y0 + y1) / 2) < 0.02 else { return nil }
+        return (y0, y1)
+    }
+
+    func sensorAmount(for sensor: BrushSensor, anchorHigh: Bool, centered: Bool = false) -> SensorAmount {
+        guard let ch = sensors.first(where: { $0.sensor == sensor }) else { return .off }
+        guard sliderCompatible(centered: centered), let ends = Self.lineEnds(ch.curve) else { return .custom }
+        if centered {
+            // y encodes multiplier/2; the anchor end must sit at 0.5 (multiplier 1).
+            let anchorY = anchorHigh ? ends.y1 : ends.y0
+            let farY = anchorHigh ? ends.y0 : ends.y1
+            guard abs(anchorY - 0.5) < 0.02 else { return .custom }
+            return .amount(max(-1, min(1, (farY - 0.5) * 2)))
+        }
+        guard max(ends.y0, ends.y1) > 0.98 else { return .custom }
+        let a = anchorHigh ? (ends.y1 - ends.y0) : (ends.y0 - ends.y1)
+        return .amount(max(-1, min(1, a)))
+    }
+
+    /// Write an amount for the sensor (removing the channel at 0). Only mutates the
+    /// channel list + per-channel curve; never the shared knobs — but if the option
+    /// isn't slider-compatible it resets those knobs to the slider baseline, which is
+    /// exactly what the Studio's "Reset" affordance promises.
+    mutating func setSensorAmount(_ amount: Double, for sensor: BrushSensor, anchorHigh: Bool, centered: Bool = false) {
+        if !sliderCompatible(centered: centered) {
+            strength = 1; minValue = 0; maxValue = centered ? 2 : 1
+            useSameCurve = false
+            commonCurve = .identity
+        }
+        useSameCurve = false
+        let a = max(-1, min(1, amount))
+        if abs(a) < 0.005 {
+            sensors.removeAll { $0.sensor == sensor }
+            return
+        }
+        let curve: ResponseCurve
+        if centered {
+            let far = 0.5 + a / 2
+            curve = anchorHigh ? Self.line(far, 0.5) : Self.line(0.5, far)
+        } else if a > 0 {
+            curve = anchorHigh ? Self.line(1 - a, 1) : Self.line(1, 1 - a)
+        } else {
+            curve = anchorHigh ? Self.line(1, 1 + a) : Self.line(1 + a, 1)
+        }
+        if let i = sensors.firstIndex(where: { $0.sensor == sensor }) {
+            sensors[i].curve = curve
+        } else {
+            sensors.append(SensorChannel(sensor: sensor, curve: curve))
+        }
+    }
+}
+
 public struct SensorChannel: Codable, Equatable, Sendable {
     public var sensor: BrushSensor
     public var curve: ResponseCurve

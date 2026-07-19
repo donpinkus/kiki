@@ -118,7 +118,7 @@ struct BrushStudioPage: View {
                 case .wetMix: WetMixSection()
                 case .colorDynamics: ColorDynamicsSection(dyn: $dyn)
                 case .dynamics: DynamicsSection(dyn: $dyn)
-                case .applePencil: ApplePencilSection()
+                case .applePencil: ApplePencilSection(dyn: $dyn)
                 case .properties: PropertiesSection()
                 case .about: AboutSection(onReset: {
                     if let snapshot { coordinator.restoreBrushSnapshot(snapshot) }
@@ -726,16 +726,21 @@ private struct DynamicsSection: View {
 
     var body: some View {
         StudioGroup("Speed") {
-            CurvePointerRow("Size", note: "Dynamics engine below: enable the Size curve and add the Speed sensor (fast = thin by inverting the curve).")
-            CurvePointerRow("Opacity", note: "Flow curve + Speed sensor.")
-            CurvePointerRow("Spacing", note: "Spacing curve + Speed sensor.")
+            SensorAmountSlider(title: "Size", option: $dyn.size, sensor: .speed, anchorHigh: false,
+                               help: BrushHelpCatalog.help["Speed Size"]!)
+            SensorAmountSlider(title: "Opacity", option: $dyn.flow, sensor: .speed, anchorHigh: false,
+                               help: BrushHelpCatalog.help["Speed Opacity"]!)
+            SensorAmountSlider(title: "Spacing", option: $dyn.spacing, sensor: .speed, anchorHigh: false,
+                               centered: true, help: BrushHelpCatalog.help["Speed Spacing"]!)
         }
         StudioGroup("Jitter") {
-            CurvePointerRow("Size", note: "Size curve + Fuzzy (dab) sensor.")
-            CurvePointerRow("Opacity", note: "Flow curve + Fuzzy (dab) sensor.")
+            SensorAmountSlider(title: "Size", option: $dyn.size, sensor: .fuzzyPerDab, signed: false,
+                               help: BrushHelpCatalog.help["Jitter Size"]!)
+            SensorAmountSlider(title: "Opacity", option: $dyn.flow, sensor: .fuzzyPerDab, signed: false,
+                               help: BrushHelpCatalog.help["Jitter Opacity"]!)
         }
-        StudioGroup("Kiki sensor-curve engine") {
-            StudioFootnote("Superset of Procreate's Dynamics: any sensor (pressure, tilt, speed, distance, fade, fuzzy…) drives any parameter through an editable response curve. Draw in the pad — the red marker rides the live curve.")
+        StudioGroup("Advanced curves") {
+            StudioFootnote("The full sensor-curve engine — a superset of the sliders above (which are shortcuts into these same curves): any sensor drives any parameter through an editable response curve. Draw in the pad — the red marker rides the live curve.")
             CurveToggleSection(title: "Size", option: $dyn.size, fold: .sizeLike, defaultSensor: .pressure)
             CurveToggleSection(title: "Flow", option: $dyn.flow, fold: .sizeLike, defaultSensor: .pressure)
             CurveToggleSection(title: "Rotation", option: $dyn.rotation, fold: .rotationLike, defaultSensor: .drawingAngle)
@@ -753,18 +758,24 @@ private struct DynamicsSection: View {
 // MARK: - Apple Pencil
 
 private struct ApplePencilSection: View {
+    @Binding var dyn: BrushDynamics
+
     var body: some View {
         StudioGroup("Pressure") {
-            GapRow("Pressure graph", note: "Dedicated pressure response graph — Kiki's equivalent is the per-parameter curve editors (Dynamics tab).")
-            CurvePointerRow("Size", note: "Size curve + Pressure sensor.")
-            CurvePointerRow("Opacity", note: "Flow curve + Pressure sensor.")
-            CurvePointerRow("Flow", note: "Flow curve + Pressure sensor.")
+            SensorAmountSlider(title: "Size", option: $dyn.size, sensor: .pressure,
+                               help: BrushHelpCatalog.help["AP Pressure Size"]!)
+            SensorAmountSlider(title: "Flow", option: $dyn.flow, sensor: .pressure,
+                               help: BrushHelpCatalog.help["AP Pressure Flow"]!)
+            GapRow("Opacity", note: "Stroke opacity is a fixed ceiling in Kiki — pressure shading comes from Flow above.")
+            GapRow("Pressure graph", note: "Freeform pressure response — shape the per-parameter curves in Dynamics → Advanced curves instead.")
             GapRow("Bleed", note: "Pressure-driven edge bleed.")
         }
         StudioGroup("Tilt") {
+            SensorAmountSlider(title: "Size", option: $dyn.size, sensor: .tiltElevation,
+                               help: BrushHelpCatalog.help["Tilt Size"]!)
+            SensorAmountSlider(title: "Opacity", option: $dyn.flow, sensor: .tiltElevation,
+                               help: BrushHelpCatalog.help["Tilt Opacity"]!)
             GapRow("Tilt graph / trigger angle", note: "Angle threshold where tilt kicks in.")
-            CurvePointerRow("Size", note: "Size curve + TiltElevation sensor.")
-            CurvePointerRow("Opacity", note: "Flow curve + TiltElevation sensor.")
             GapRow("Gradation", note: "Shading softness on an angle.")
             GapRow("Bleed", note: "Tilt-driven edge bleed.")
             GapRow("Size Compression", note: "Compresses tilt size range.")
@@ -1079,6 +1090,71 @@ struct CurveAmountSlider: View {
                                          fold: .sizeLike, strength: Double(v))
                 }
             }), range: 0...1, help: help)
+    }
+}
+
+/// A Procreate-style plain amount slider that reads/writes ONE sensor channel on the
+/// target parameter's CurveOption (see the slider⇄curve bridge in BrushDynamics).
+/// When the underlying curve was hand-shaped beyond what a slider can represent, the
+/// row switches to an explicit "Custom curve" state with a Reset — never a dead label.
+struct SensorAmountSlider: View {
+    let title: String
+    @Binding var option: CurveOption?
+    let sensor: BrushSensor
+    var anchorHigh = true
+    var centered = false
+    var signed = true
+    let help: BrushHelp
+
+    private var state: SensorAmount {
+        option?.sensorAmount(for: sensor, anchorHigh: anchorHigh, centered: centered) ?? .off
+    }
+
+    var body: some View {
+        if case .custom = state {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 8) {
+                    Text(title).font(.body.weight(.medium)).foregroundStyle(.white.opacity(0.6))
+                    Spacer()
+                    Text("Custom curve")
+                        .font(.caption2.weight(.semibold))
+                        .padding(.horizontal, 10).padding(.vertical, 4)
+                        .background(StudioTheme.accent.opacity(0.18))
+                        .clipShape(Capsule())
+                        .foregroundStyle(StudioTheme.accent)
+                    Button("Reset") { write(0) }
+                        .font(.caption.weight(.medium))
+                        .buttonStyle(.bordered)
+                        .controlSize(.mini)
+                }
+                Text("This input is shaped by a hand-edited curve (Advanced curves below). Reset to control it from this slider.")
+                    .font(.caption2).foregroundStyle(.white.opacity(0.4))
+            }
+        } else {
+            BrushSliderRow(title, value: Binding(
+                get: {
+                    if case .amount(let a) = state { return CGFloat(a) }
+                    return 0
+                },
+                set: { write(Double($0)) }),
+                range: signed ? -1.0...1.0 : 0.0...1.0, help: help,
+                format: { v in
+                    if abs(v) < 0.005 { return "None" }
+                    return signed ? String(format: "%+.0f%%", v * 100) : "\(Int((v * 100).rounded()))%"
+                })
+        }
+    }
+
+    private func write(_ amount: Double) {
+        var opt = option ?? CurveOption(sensors: [], fold: .sizeLike,
+                                        maxValue: centered ? 2 : 1, useSameCurve: false)
+        opt.setSensorAmount(amount, for: sensor, anchorHigh: anchorHigh, centered: centered)
+        // Collapse back to nil when nothing is left (keeps dynamics inert).
+        if opt.sensors.isEmpty {
+            option = nil
+        } else {
+            option = opt
+        }
     }
 }
 
@@ -1476,6 +1552,33 @@ enum BrushHelpCatalog {
         "Blur": BrushHelp(summary: "Softens the smudge — dragged edges melt instead of staying crisp (Smudge mode only).",
             low: "Crisp smudge — edges keep their definition as they drag.",
             high: "Soft melt — the smudge averages what it crosses and feathers its rim."),
+        "AP Pressure Size": BrushHelp(summary: "How much pencil pressure changes the stroke width.",
+            low: "\u{2212}100%: pressing hard THINS the stroke.",
+            high: "+100%: light touch is a hairline, full pressure is full width."),
+        "AP Pressure Flow": BrushHelp(summary: "How much pencil pressure changes the paint laid per dab.",
+            low: "\u{2212}100%: pressing hard fades the paint.",
+            high: "+100%: light touch barely marks, full pressure is full paint."),
+        "Tilt Size": BrushHelp(summary: "How much pencil tilt changes the stroke width.",
+            low: "\u{2212}100%: tilting flat widens the stroke.",
+            high: "+100%: upright is full width, flat tilt thins it."),
+        "Tilt Opacity": BrushHelp(summary: "How much pencil tilt changes the paint laid per dab (Kiki: flow).",
+            low: "\u{2212}100%: tilting flat strengthens the paint.",
+            high: "+100%: upright is full paint, flat tilt fades it."),
+        "Speed Size": BrushHelp(summary: "How stroke speed changes the width.",
+            low: "\u{2212}100%: fast strokes get THICKER.",
+            high: "+100%: fast strokes thin out (expressive flicks)."),
+        "Speed Opacity": BrushHelp(summary: "How stroke speed changes the paint laid per dab.",
+            low: "\u{2212}100%: fast strokes get stronger.",
+            high: "+100%: fast strokes fade out."),
+        "Speed Spacing": BrushHelp(summary: "How stroke speed changes dab spacing.",
+            low: "\u{2212}100%: fast strokes pack dabs denser.",
+            high: "+100%: fast strokes space dabs out (broken, airy fast lines)."),
+        "Jitter Size": BrushHelp(summary: "Random per-dab size variation.",
+            low: "Every dab the same size.",
+            high: "Dabs vary from full size down to nothing."),
+        "Jitter Opacity": BrushHelp(summary: "Random per-dab paint variation.",
+            low: "Every dab the same strength.",
+            high: "Dabs vary from full paint down to nothing."),
         "Color Pressure Secondary": BrushHelp(summary: "Pressure blends toward the secondary color (Ink 2).",
             low: "Always the primary color.",
             high: "Full pressure = fully Ink 2 (two-tone nib).")
