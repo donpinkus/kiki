@@ -33,12 +33,36 @@ final class AnimateController {
     var prompt = "" {
         didSet { UserDefaults.standard.set(prompt, forKey: "animatePrompt") }
     }
+    /// Sound description ("" = no specific sound direction). Composed
+    /// server-side into the model prompt — LTX's audio latent is driven by
+    /// the same text as the video. Persisted like the motion prompt.
+    var audioPrompt = "" {
+        didSet { UserDefaults.standard.set(audioPrompt, forKey: "animateAudioPrompt") }
+    }
+    /// Generate an audio track at all. Off = the server never decodes the
+    /// audio latent and the MP4 is silent (exports included). Persisted.
+    var audioEnabled = true {
+        didSet { UserDefaults.standard.set(audioEnabled, forKey: "animateAudioEnabled") }
+    }
+
     /// Duration preset in seconds; mapped to LTX frame counts (24 fps,
     /// (n-1) % 8 == 0): 2s → 49, 4s → 97, 6s → 145. Persisted.
     var durationSeconds = 6 {
         didSet { UserDefaults.standard.set(durationSeconds, forKey: "animateDurationSeconds") }
     }
     static let durationOptions = [2, 4, 6]
+
+    /// Expected request→delivery wait for the current duration, from live
+    /// measurements (H100: ~9s gen for 49f, ~10s for 145f, plus encode +
+    /// transfer). Drives the determinate "Animating…" progress bar — an
+    /// expectation, not a promise, so the bar caps at 95% until delivery.
+    var expectedWaitSeconds: Double {
+        switch durationSeconds {
+        case 2: return 12
+        case 4: return 14
+        default: return 16
+        }
+    }
     /// The drawing the start keyframe came from (nil = Photos import or
     /// gallery-entry without a source drawing).
     var sourceDrawingID: UUID?
@@ -121,6 +145,12 @@ final class AnimateController {
         if let saved = UserDefaults.standard.string(forKey: "animatePrompt") {
             prompt = saved
         }
+        if let savedAudio = UserDefaults.standard.string(forKey: "animateAudioPrompt") {
+            audioPrompt = savedAudio
+        }
+        if UserDefaults.standard.object(forKey: "animateAudioEnabled") != nil {
+            audioEnabled = UserDefaults.standard.bool(forKey: "animateAudioEnabled")
+        }
         let savedDuration = UserDefaults.standard.integer(forKey: "animateDurationSeconds")
         if Self.durationOptions.contains(savedDuration) {
             durationSeconds = savedDuration
@@ -180,6 +210,8 @@ final class AnimateController {
             var type = "animate_request"
             let requestId: String
             let prompt: String
+            let audioPrompt: String
+            let enableAudio: Bool
             let numFrames: Int
             let keyframes: [KeyframePayload]
         }
@@ -195,6 +227,8 @@ final class AnimateController {
         let message = AnimateRequestMessage(
             requestId: requestId,
             prompt: prompt.trimmingCharacters(in: .whitespacesAndNewlines),
+            audioPrompt: audioPrompt.trimmingCharacters(in: .whitespacesAndNewlines),
+            enableAudio: audioEnabled,
             numFrames: Self.frames(forSeconds: durationSeconds),
             keyframes: keyframes
         )
@@ -307,9 +341,63 @@ final class AnimateController {
         }
     }
 
+    // MARK: - Frame forking (edit a frame in the drawing canvas)
+
+    enum KeyframeSlot: String { case start, end }
+
+    /// Set when a keyframe is forked into a drawing for editing; consumed by
+    /// AppCoordinator.openAnimateFromDrawing to route the edited canvas back
+    /// into the originating slot (instead of the default start-slot preload),
+    /// so users can grab a frame, fix it on the canvas, and keep it as the
+    /// keyframe it came from — iteratively building an animation.
+    struct PendingFrameEdit {
+        let drawingID: UUID
+        let slot: KeyframeSlot
+    }
+
+    var pendingFrameEdit: PendingFrameEdit?
+
+    /// Show the current keyframe setup in the preview (deselect any clip).
+    func showKeyframePreview() {
+        selectedClipID = nil
+        playbackURL = nil
+    }
+
+    /// Extract a clip's LAST frame (same exact-time recipe as Extend — tight
+    /// tolerance so it can't snap back to an earlier sync frame).
+    func fetchLastFrame(of clip: AnimationClip) async -> UIImage? {
+        guard let data = clip.videoData else { return nil }
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kiki-animate-frame-\(clip.id.uuidString).mp4")
+        do {
+            try data.write(to: url, options: .atomic)
+        } catch {
+            return nil
+        }
+        defer { try? FileManager.default.removeItem(at: url) }
+        do {
+            let asset = AVURLAsset(url: url)
+            let duration = try await asset.load(.duration)
+            let generator = AVAssetImageGenerator(asset: asset)
+            generator.appliesPreferredTrackTransform = true
+            generator.requestedTimeToleranceBefore = CMTime(seconds: 0.2, preferredTimescale: 600)
+            generator.requestedTimeToleranceAfter = .zero
+            let target = CMTime(
+                seconds: max(0, duration.seconds - (1.0 / 24.0)),
+                preferredTimescale: 600
+            )
+            let cgImage = try await generator.image(at: target).image
+            return UIImage(cgImage: cgImage)
+        } catch {
+            return nil
+        }
+    }
+
     /// Restore a clip's inputs into the setup panel ("remix").
     func restoreInputs(from clip: AnimationClip) {
         prompt = clip.prompt
+        audioPrompt = clip.audioPrompt
+        audioEnabled = clip.audioEnabled
         if let data = clip.startKeyframeData { startKeyframe = UIImage(data: data) }
         endKeyframe = clip.endKeyframeData.flatMap { UIImage(data: $0) }
         durationSeconds = Self.durationOptions.min(by: {
@@ -491,6 +579,8 @@ final class AnimateController {
             fps: fps ?? 24,
             sourceDrawingID: sourceDrawingID
         )
+        clip.audioPrompt = audioPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        clip.audioEnabled = audioEnabled
         clip.startKeyframeData = startKeyframe?.jpegData(compressionQuality: 0.85)
         clip.endKeyframeData = endKeyframe?.jpegData(compressionQuality: 0.85)
         clip.videoData = mp4

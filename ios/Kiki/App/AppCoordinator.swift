@@ -2173,6 +2173,10 @@ final class AppCoordinator {
             pasteSelection()
         case "pastePlace":
             canvasViewModel.commitPaste()
+        case "forkStartFrame":
+            if currentScreen == .animate, let img = animate?.startKeyframe {
+                forkFrameIntoDrawing(img, returnSlot: .start)
+            }
         case "aiEditSheet":
             showAIEditSheet = true
         case "stickerFile":
@@ -2369,12 +2373,27 @@ final class AppCoordinator {
     /// Enter the Animate screen from the current drawing: its result (or
     /// canvas, when nothing was generated yet) becomes the start keyframe
     /// and the drawing's saved animation prompt prefills the motion field.
+    ///
+    /// Frame-fork round-trip: when this drawing was created by
+    /// `forkFrameIntoDrawing`, the EDITED CANVAS (canvas-first — the frame
+    /// was baked as layer 0, so the canvas IS the corrected frame; the
+    /// generated result is a restyled derivative) returns to the keyframe
+    /// slot it came from, and the rest of the Animate setup is preserved.
     func openAnimateFromDrawing() {
         noteInteraction()
         guard currentScreen == .drawing else { return }
         saveCurrentDrawing()
         let controller = ensureAnimateController()
-        if let keyframe = lastSuccessfulImage ?? canvasViewModel.generateThumbnail() {
+        if let pending = controller.pendingFrameEdit, pending.drawingID == currentDrawingId {
+            if let edited = canvasViewModel.generateThumbnail(maxDimension: 1024) ?? lastSuccessfulImage {
+                switch pending.slot {
+                case .start: controller.startKeyframe = edited
+                case .end: controller.endKeyframe = edited
+                }
+                controller.showKeyframePreview()
+            }
+            controller.pendingFrameEdit = nil
+        } else if let keyframe = lastSuccessfulImage ?? canvasViewModel.generateThumbnail() {
             controller.startKeyframe = keyframe
             controller.endKeyframe = nil
             controller.sourceDrawingID = currentDrawingId
@@ -2384,6 +2403,25 @@ final class AppCoordinator {
         animateReturnScreen = .drawing
         stopStream()
         currentScreen = .animate
+    }
+
+    /// Fork a frame into a NEW editable drawing (single-PNG `drawingData`
+    /// loads as layer 0 — erasable, paintable, AI-editable) and remember
+    /// which keyframe slot the edited result should return to when the user
+    /// taps Animate from that drawing.
+    func forkFrameIntoDrawing(_ image: UIImage, returnSlot: AnimateController.KeyframeSlot) {
+        guard let png = image.pngData() else { return }
+        let controller = ensureAnimateController()
+        let drawing = Drawing(streamSeed: Int.random(in: 0...Int(UInt32.max)))
+        drawing.drawingData = png
+        modelContext.insert(drawing)
+        try? modelContext.save()
+        controller.pendingFrameEdit = .init(drawingID: drawing.id, slot: returnSlot)
+        Analytics.track(.animateFrameForked, properties: [
+            "slot": returnSlot.rawValue,
+            "drawing_id": drawing.id.uuidString,
+        ])
+        openDrawing(drawing)
     }
 
     /// Enter the Animate screen from the gallery. Keeps whatever setup the

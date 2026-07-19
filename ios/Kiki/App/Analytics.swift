@@ -77,6 +77,7 @@ enum AnalyticsEvent: String {
     case animateOpened = "animate.opened"
     case animateRequested = "animate.requested"
     case animateCompleted = "animate.completed"
+    case animateFrameForked = "animate.frame_forked"
     case animationShared = "animation.shared"
 
     // Speed-paint replay diagnostics — the replay pipeline is device-only

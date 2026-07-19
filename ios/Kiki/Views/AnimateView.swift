@@ -261,7 +261,14 @@ struct AnimateView: View {
         .overlay(alignment: .topLeading) {
             if controller.showMotionExamples {
                 MotionExamplesPanel(
-                    onSelect: { example in controller.prompt = example },
+                    onSelect: { example, isSound in
+                        if isSound {
+                            controller.audioPrompt = example
+                            controller.audioEnabled = true
+                        } else {
+                            controller.prompt = example
+                        }
+                    },
                     onClose: {
                         UserDefaults.standard.set(true, forKey: "animateExamplesDismissed")
                         withAnimation(.easeIn(duration: 0.15)) { controller.showMotionExamples = false }
@@ -299,16 +306,28 @@ struct AnimateView: View {
     }
 
     private func generatingOverlay(_ controller: AnimateController) -> some View {
-        VStack(spacing: 12) {
+        let _ = elapsedTick // re-render every second
+        let elapsed = controller.generationStartedAt.map { Date().timeIntervalSince($0) } ?? 0
+        let expected = controller.expectedWaitSeconds
+        return VStack(spacing: 12) {
             if let progress = controller.streamingProgress, progress.total > 0 {
+                // Frames are streaming in — real render progress.
                 ProgressView(value: Double(progress.index + 1), total: Double(progress.total))
                     .frame(width: 200)
                 Text("Rendering \(progress.index + 1)/\(progress.total)")
                     .font(.caption.weight(.medium))
             } else {
-                ProgressView()
-                Text(generatingLabel(controller))
+                // Waiting on the GPU: determinate bar against the measured
+                // typical wait — capped at 95% so it never claims done early.
+                ProgressView(value: min(elapsed / expected, 0.95))
+                    .frame(width: 200)
+                Text("Animating… \(Int(elapsed))s")
                     .font(.caption.weight(.medium))
+                Text(elapsed < expected
+                     ? "Usually takes about \(Int(expected)) seconds"
+                     : "Taking a little longer than usual…")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
             Button("Cancel") {
                 controller.cancelGeneration()
@@ -319,13 +338,8 @@ struct AnimateView: View {
             .background(.ultraThinMaterial, in: Capsule())
         }
         .padding(20)
+        .frame(width: 260)
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14))
-    }
-
-    private func generatingLabel(_ controller: AnimateController) -> String {
-        let elapsed = controller.generationStartedAt.map { Int(Date().timeIntervalSince($0)) } ?? 0
-        _ = elapsedTick // subscribe so the label re-renders every second
-        return elapsed > 1 ? "Animating… \(elapsed)s" : "Animating…"
     }
 
     // MARK: - Controls
@@ -336,6 +350,7 @@ struct AnimateView: View {
             VStack(alignment: .leading, spacing: 18) {
                 keyframesSection(controller)
                 promptSection(controller)
+                soundSection(controller)
                 durationSection(controller)
                 animateButton(controller)
                 warmupInfoBox(controller)
@@ -360,7 +375,10 @@ struct AnimateView: View {
                 keyframeSlotView(
                     image: controller.startKeyframe,
                     title: "Start",
-                    required: true
+                    required: true,
+                    onEdit: { image in
+                        coordinator.forkFrameIntoDrawing(image, returnSlot: .start)
+                    }
                 ) { pickingSlot = .start } onClear: {
                     controller.startKeyframe = nil
                     controller.sourceDrawingID = nil
@@ -387,7 +405,10 @@ struct AnimateView: View {
                 keyframeSlotView(
                     image: controller.endKeyframe,
                     title: "End",
-                    required: false
+                    required: false,
+                    onEdit: { image in
+                        coordinator.forkFrameIntoDrawing(image, returnSlot: .end)
+                    }
                 ) { pickingSlot = .end } onClear: {
                     controller.endKeyframe = nil
                 }
@@ -405,6 +426,7 @@ struct AnimateView: View {
         image: UIImage?,
         title: String,
         required: Bool,
+        onEdit: ((UIImage) -> Void)? = nil,
         onPick: @escaping () -> Void,
         onClear: @escaping () -> Void
     ) -> some View {
@@ -431,6 +453,25 @@ struct AnimateView: View {
                 )
             }
             .buttonStyle(.plain)
+            // Frame forking: long-press a filled slot to edit that frame on
+            // the drawing canvas; the edited canvas returns to this slot.
+            .contextMenu {
+                if let image, let onEdit {
+                    Button {
+                        onEdit(image)
+                    } label: {
+                        Label("Edit in canvas", systemImage: "paintbrush.pointed")
+                    }
+                }
+                Button(action: onPick) {
+                    Label("Replace…", systemImage: "photo.on.rectangle")
+                }
+                if image != nil, !required {
+                    Button(role: .destructive, action: onClear) {
+                        Label("Remove", systemImage: "xmark.circle")
+                    }
+                }
+            }
             .overlay(alignment: .topTrailing) {
                 if image != nil, !required {
                     Button(action: onClear) {
@@ -478,6 +519,40 @@ struct AnimateView: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(Color.accentColor)
+        }
+    }
+
+    /// Sound direction, separate from motion: a toggle (off = the server
+    /// muxes a silent MP4 — exports too, not just playback) plus its own
+    /// prompt box composed into the model prompt server-side.
+    private func soundSection(_ controller: AnimateController) -> some View {
+        @Bindable var controller = controller
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Sound")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Toggle("", isOn: $controller.audioEnabled)
+                    .labelsHidden()
+                    .controlSize(.mini)
+            }
+
+            if controller.audioEnabled {
+                TextField(
+                    "What should it sound like? (optional)",
+                    text: $controller.audioPrompt,
+                    axis: .vertical
+                )
+                .lineLimit(1...3)
+                .textFieldStyle(.plain)
+                .padding(10)
+                .background(Color(.tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10))
+            } else {
+                Text("Videos will be silent.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -633,6 +708,18 @@ struct AnimateView: View {
             } label: {
                 Label("Extend from last frame", systemImage: "arrow.forward.to.line")
             }
+            // Frame forking: pull the clip's last frame onto the drawing
+            // canvas, fix it up, and it comes back as the START keyframe of
+            // the next segment — the edit loop for building up an animation.
+            Button {
+                Task { @MainActor in
+                    if let frame = await controller.fetchLastFrame(of: clip) {
+                        coordinator.forkFrameIntoDrawing(frame, returnSlot: .start)
+                    }
+                }
+            } label: {
+                Label("Edit last frame in canvas", systemImage: "paintbrush.pointed")
+            }
             Button {
                 controller.restoreInputs(from: clip)
             } label: {
@@ -660,8 +747,8 @@ struct AnimateView: View {
 /// physical/motion-focused — the model gets content from the keyframes; the
 /// prompt describes how things MOVE.
 private enum MotionExamples {
-    static let sections: [(title: String, icon: String, items: [String])] = [
-        ("Camera", "video", [
+    static let sections: [(title: String, icon: String, sound: Bool, items: [String])] = [
+        ("Camera", "video", false, [
             "slow zoom in",
             "slow zoom out, revealing the scene",
             "camera pans left",
@@ -671,7 +758,7 @@ private enum MotionExamples {
             "handheld camera drifts gently",
             "dolly forward through the scene",
         ]),
-        ("Light", "sun.max", [
+        ("Light", "sun.max", false, [
             "golden-hour light sweeps across",
             "light shifts from day to night",
             "sunbeams break through the clouds",
@@ -680,7 +767,7 @@ private enum MotionExamples {
             "candlelight flickers warmly",
             "shadows stretch as the sun sets",
         ]),
-        ("Atmosphere", "wind", [
+        ("Atmosphere", "wind", false, [
             "a gentle breeze, everything sways",
             "rain begins to fall, puddles ripple",
             "snow drifts down softly",
@@ -690,7 +777,7 @@ private enum MotionExamples {
             "embers and sparks rise into the air",
             "smoke curls upward slowly",
         ]),
-        ("Creative", "sparkles", [
+        ("Creative", "sparkles", false, [
             "a rainstorm begins and lightning cracks through the sky",
             "the object evaporates into swirling colored sand",
             "everything melts like warm wax",
@@ -701,6 +788,16 @@ private enum MotionExamples {
             "gravity reverses and everything floats upward",
             "the scene ignites into cool blue flames",
         ]),
+        ("Sound", "speaker.wave.2", true, [
+            "rain patters on leaves",
+            "distant thunder rumbles",
+            "gentle wind and birdsong",
+            "waves wash in and out",
+            "a crackling campfire",
+            "soft dreamy music swells",
+            "magical chimes sparkle",
+            "low city hum, distant traffic",
+        ]),
     ]
 }
 
@@ -708,7 +805,8 @@ private enum MotionExamples {
 /// (264pt) so it never hides much of the image; scrollable; tapping a row
 /// replaces the prompt and keeps the panel open for quick experimentation.
 private struct MotionExamplesPanel: View {
-    let onSelect: (String) -> Void
+    /// (example, isSound) — sound rows fill the Sound box, others the Motion box.
+    let onSelect: (String, Bool) -> Void
     let onClose: () -> Void
 
     var body: some View {
@@ -739,7 +837,7 @@ private struct MotionExamplesPanel: View {
                                 .padding(.horizontal, 12)
                             ForEach(section.items, id: \.self) { item in
                                 Button {
-                                    onSelect(item)
+                                    onSelect(item, section.sound)
                                 } label: {
                                     Text(item)
                                         .font(.callout)
