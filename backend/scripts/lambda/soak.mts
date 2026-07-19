@@ -50,7 +50,7 @@ async function runClient(id: number): Promise<void> {
   stats[id] = st;
   const token = await mkToken();
   const ws = new WebSocket(`${BACKEND}/v1/stream${PROVIDER === 'none' ? '' : `?imageProvider=${PROVIDER}`}`, {
-    headers: { Authorization: `Bearer ${token}` },
+    headers: { Authorization: `Bearer ${token}`, 'X-Kiki-Client': 'devscript:soak' },
     perMessageDeflate: false,
   });
   const done = new Promise<void>((res) => ws.on('close', (code, reason) => {

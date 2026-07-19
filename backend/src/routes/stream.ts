@@ -209,6 +209,15 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       const captureFrame = (kind: 'sketch' | 'generated', jpeg: Buffer): void => {
         ensureFrameCapture()?.capture(kind, jpeg);
       };
+      // Who IS this connection: the app's X-Kiki-Client fingerprint
+      // ("simulator:arm64 kiki/1.0" / "device:iPad16,6 kiki/1.0"), dev
+      // scripts' self-identification, else the raw User-Agent (CFNetwork =
+      // un-tagged iOS build, node = a script). Added after a simulator
+      // running dev-minted user tokens spent 10h looking like the user's own
+      // iPad in every log (2026-07-19). Hoisted: the close handler ships it.
+      const clientTag =
+        (request.headers['x-kiki-client'] as string | undefined) ??
+        `ua:${(request.headers['user-agent'] as string | undefined) ?? 'unknown'}`;
       let clientDisconnected = false;
       /** Video-availability push timer; assigned on the slow path, cleared in
        * cleanup. Hoisted so cleanupOnDisconnect can run before assignment
@@ -438,6 +447,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             lambdaDowngraded,
             everReachedReady,
             videoStats: videoSession?.getStats() ?? null,
+            clientTag,
             sketchesSent,
             imageGenMsP50: percentile(imageGenMsSamples, 0.5),
             imageGenMsP90: percentile(imageGenMsSamples, 0.9),
@@ -573,7 +583,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       // the connection — distorting `user_id:X` queries by attaching this
       // user to background-process logs. Errors below pass `user: { id }` to
       // `captureException` explicitly so error-event attribution stays correct.
-      request.log.info({ userId, source, connId, streamId, event: 'ws_open' }, 'Stream client connected');
+      request.log.info({ userId, source, connId, streamId, client: clientTag, event: 'ws_open' }, 'Stream client connected');
 
       // fal spend cap — gate on EVERY connection (incl. reconnects / a 2nd
       // device) so the monthly free budget can't be bypassed by reconnecting.

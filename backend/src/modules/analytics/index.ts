@@ -110,6 +110,9 @@ export function trackProviderSession(props: {
     videoCancelled: number;
     videoFailed: number;
   } | null;
+  /** X-Kiki-Client fingerprint (simulator:… / device:… / ua:…) — device-vs-
+   * simulator attribution for session forensics. */
+  clientTag: string;
   /** Binary sketch frames the client sent — frames_delivered/sketches_sent
    * is the render ratio (the image server drops stale queued sketches under
    * load by design). */
@@ -136,6 +139,7 @@ export function trackProviderSession(props: {
     lambda_first_frame_ms: props.lambdaFirstFrameMs,
     lambda_downgraded: props.lambdaDowngraded,
     ever_reached_ready: props.everReachedReady,
+    client: props.clientTag,
     sketches_sent: props.sketchesSent,
     image_gen_ms_p50: props.imageGenMsP50,
     image_gen_ms_p90: props.imageGenMsP90,

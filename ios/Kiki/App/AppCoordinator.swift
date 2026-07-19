@@ -569,6 +569,22 @@ final class AppCoordinator {
         }
     }
 
+    /// "simulator:<model>" or "device:<model>" + app version — sent as
+    /// X-Kiki-Client on the stream WS handshake.
+    static let clientTag: String = {
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        var sysinfo = utsname()
+        uname(&sysinfo)
+        let model = withUnsafePointer(to: &sysinfo.machine) {
+            $0.withMemoryRebound(to: CChar.self, capacity: 1) { String(validatingCString: $0) ?? "unknown" }
+        }
+        #if targetEnvironment(simulator)
+        return "simulator:\(model) kiki/\(version)"
+        #else
+        return "device:\(model) kiki/\(version)"
+        #endif
+    }()
+
     /// Mirrors the backend's DEFAULT_ANIMATION_PROMPT (videoSession.ts) —
     /// shown as the modal's placeholder so users see what runs if they
     /// leave it empty.
@@ -1847,6 +1863,11 @@ final class AppCoordinator {
                 let token = try await authService.currentAccessToken()
                 var request = URLRequest(url: wsURL)
                 request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+                // Client fingerprint so backend logs / Insights can tell a
+                // SIMULATOR (dev tokens make it look like a real user
+                // otherwise — cost us a 10-hour warm-H100 whodunit,
+                // 2026-07-19) from a device apart in one glance.
+                request.setValue(Self.clientTag, forHTTPHeaderField: "X-Kiki-Client")
                 await MainActor.run {
                     self.startStreamSession(request: request, backendWsURL: wsURL)
                 }
