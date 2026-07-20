@@ -1783,6 +1783,54 @@ final class AppCoordinator {
         syncStreamConfig()
     }
 
+    // MARK: - Object 3D lift + placement (stage 3)
+
+    /// Object currently being lifted to 3D (drawer shows a spinner on it).
+    private(set) var liftingObjectID: UUID?
+    /// Object presented in the 3D placement sheet.
+    var placingObject: SavedObject?
+
+    /// Lift an object's cutout to a canonical 3D model (USDZ via backend ->
+    /// Hunyuan3D). 1-4 min; the drawer stays usable meanwhile.
+    func liftObjectTo3D(_ object: SavedObject) {
+        guard liftingObjectID == nil, let png = object.imageData else { return }
+        liftingObjectID = object.id
+        showTransientBanner("Building a 3D model of \(object.name) — takes a minute or two.")
+        Analytics.track(.objectLifted, properties: ["object_id": object.id.uuidString])
+        Task { @MainActor in
+            defer { liftingObjectID = nil }
+            do {
+                let result = try await authService.lift3d(image: png)
+                object.meshData = result.glb
+                object.meshThumbData = result.thumbnail
+                try? modelContext.save()
+                showTransientBanner("\(object.name) is 3D now — tap it to place from any angle.")
+            } catch {
+                showTransientBanner("3D lift failed — try again in a bit.")
+                Log.info("lift3d.failed", attributes: [
+                    "event": "lift3d.failed",
+                    "error": String(describing: error),
+                ])
+            }
+        }
+    }
+
+    /// Called by the placement sheet: paste a rendered view of the 3D model
+    /// as a float (transparent snapshot, sized relative to the document).
+    func placeRenderedObject(_ image: UIImage) {
+        placingObject = nil
+        showObjectsDrawer = false
+        guard let cg = image.cgImage else { return }
+        let maxSide: CGFloat = 900 // document px; the float is scalable anyway
+        let aspect = image.size.height / max(image.size.width, 1)
+        let w = min(maxSide, 2048)
+        let h = w * aspect
+        let rect = CGRect(x: (2048 - w) / 2, y: (2048 - h) / 2, width: w, height: h)
+        if canvasViewModel.beginPaste(image: cg, rectInDocPixels: rect) {
+            Analytics.track(.objectInserted, properties: ["mode": "3d"])
+        }
+    }
+
     // MARK: - Sticker sharing
 
     /// Whether a sticker can be cut: needs an active selection to mask with.
@@ -2267,6 +2315,14 @@ final class AppCoordinator {
             canvasViewModel.commitPaste()
         case "saveObj":
             saveSelectionToObjects()
+        case "liftObj":
+            let dl = FetchDescriptor<SavedObject>(sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
+            if let obj = (try? modelContext.fetch(dl))?.first { liftObjectTo3D(obj) }
+        case "placeObj":
+            let dp = FetchDescriptor<SavedObject>(sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
+            if let obj = (try? modelContext.fetch(dp))?.first(where: { $0.meshData != nil }) {
+                placingObject = obj
+            }
         case "insertObj":
             let d = FetchDescriptor<SavedObject>(sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
             if let obj = (try? modelContext.fetch(d))?.first { insertObject(obj) }

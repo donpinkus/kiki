@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		4000D6752F94095B0044E86F /* Sentry in Frameworks */ = {isa = PBXBuildFile; productRef = 4000D6742F94095B0044E86F /* Sentry */; };
+		4000D6772F940A000044E86F /* GLTFKit2 in Frameworks */ = {isa = PBXBuildFile; productRef = 4000D6762F940A000044E86F /* GLTFKit2 */; };
 		404C38372F69891C00EB39C6 /* CanvasModule in Frameworks */ = {isa = PBXBuildFile; productRef = 40949E012F5E400100AF4CF7 /* CanvasModule */; };
 		404C383A2F69891C00EB39C6 /* NetworkModule in Frameworks */ = {isa = PBXBuildFile; productRef = 40949E012F5E400400AF4CF7 /* NetworkModule */; };
 		404C383B2F69891C00EB39C6 /* ResultModule in Frameworks */ = {isa = PBXBuildFile; productRef = 40949E012F5E400500AF4CF7 /* ResultModule */; };
@@ -36,6 +37,7 @@
 				404C383A2F69891C00EB39C6 /* NetworkModule in Frameworks */,
 				404C38372F69891C00EB39C6 /* CanvasModule in Frameworks */,
 				4000D6752F94095B0044E86F /* Sentry in Frameworks */,
+				4000D6772F940A000044E86F /* GLTFKit2 in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -83,6 +85,7 @@
 				40949E012F5E400500AF4CF7 /* ResultModule */,
 				6060000000000000000000A2 /* ExportModule */,
 				4000D6742F94095B0044E86F /* Sentry */,
+				4000D6762F940A000044E86F /* GLTFKit2 */,
 			);
 			productName = Kiki;
 			productReference = 40949DDB2F5E235500AF4CF7 /* Kiki.app */;
@@ -118,6 +121,7 @@
 				40949E002F5E400500AF4CF7 /* XCLocalSwiftPackageReference "Packages/ResultModule" */,
 				6060000000000000000000A1 /* XCLocalSwiftPackageReference "Packages/ExportModule" */,
 				4000D6732F94095B0044E86F /* XCRemoteSwiftPackageReference "sentry-cocoa" */,
+				4000D6782F940A000044E86F /* XCRemoteSwiftPackageReference "GLTFKit2" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 40949DDC2F5E235500AF4CF7 /* Products */;
@@ -386,6 +390,14 @@
 				minimumVersion = 9.10.0;
 			};
 		};
+		4000D6782F940A000044E86F /* XCRemoteSwiftPackageReference "GLTFKit2" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/warrenm/GLTFKit2";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.5.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -393,6 +405,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 4000D6732F94095B0044E86F /* XCRemoteSwiftPackageReference "sentry-cocoa" */;
 			productName = Sentry;
+		};
+		4000D6762F940A000044E86F /* GLTFKit2 */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 4000D6782F940A000044E86F /* XCRemoteSwiftPackageReference "GLTFKit2" */;
+			productName = GLTFKit2;
 		};
 		40949E012F5E400100AF4CF7 /* CanvasModule */ = {
 			isa = XCSwiftPackageProductDependency;

@@ -54,7 +54,13 @@ struct ObjectsDrawer: View {
 
     private func objectTile(_ object: SavedObject) -> some View {
         Button {
-            coordinator.insertObject(object)
+            // 3D objects place via the SceneKit sheet (any angle, perfectly
+            // consistent); flat cutouts insert directly.
+            if object.meshData != nil {
+                coordinator.placingObject = object
+            } else {
+                coordinator.insertObject(object)
+            }
         } label: {
             VStack(spacing: 5) {
                 ZStack {
@@ -85,6 +91,23 @@ struct ObjectsDrawer: View {
                             .offset(x: 6, y: -6)
                     }
                 }
+                .overlay(alignment: .bottomTrailing) {
+                    if coordinator.liftingObjectID == object.id {
+                        ProgressView()
+                            .controlSize(.small)
+                            .padding(4)
+                            .background(.thinMaterial, in: Circle())
+                            .offset(x: 4, y: 4)
+                    } else if object.meshData != nil {
+                        Image(systemName: "cube.fill")
+                            .font(.caption)
+                            .symbolRenderingMode(.palette)
+                            .foregroundStyle(.white, Color.accentColor)
+                            .padding(3)
+                            .background(.thinMaterial, in: Circle())
+                            .offset(x: 4, y: 4)
+                    }
+                }
                 Text(object.name)
                     .font(.caption2)
                     .lineLimit(1)
@@ -107,6 +130,15 @@ struct ObjectsDrawer: View {
                     coordinator.pinObject(object)
                 } label: {
                     Label("Pin as generation reference", systemImage: "pin")
+                }
+            }
+            // Stage-3 lift: one canonical 3D model per object → every
+            // placement is perfectly consistent, from any angle.
+            if object.meshData == nil, coordinator.liftingObjectID == nil {
+                Button {
+                    coordinator.liftObjectTo3D(object)
+                } label: {
+                    Label("Lift to 3D", systemImage: "cube.transparent")
                 }
             }
             Button {

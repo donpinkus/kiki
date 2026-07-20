@@ -116,6 +116,9 @@ export interface AppConfig {
    * monthly_usage. fal bills the edit endpoint per output image (~$0.03/MP);
    * charged slightly higher for margin. Exempt users are never billed. */
   readonly EDIT_USD_PER_GENERATION: number;
+  /** Flat charge per 3D lift (POST /v1/lift3d → fal Hunyuan3D v3, ~$0.16
+   * raw) into monthly_usage. Exempt users are never billed. */
+  readonly LIFT3D_USD_PER_GENERATION: number;
   /** fal.ai API key — server-side only (CLAUDE.md #3: no secrets on client).
    * Used as `Authorization: Key <FAL_KEY>` on the fal realtime WS upgrade.
    * Required when `IMAGE_PROVIDER=fal`; ignored otherwise. */
@@ -297,6 +300,7 @@ const lambdaVideoUrl = process.env['LAMBDA_VIDEO_URL'] ?? '';
     LAMBDA_VIDEO_POOL_TARGET_STREAMS: Number(process.env['LAMBDA_VIDEO_POOL_TARGET_STREAMS'] ?? 8),
     VIDEO_USD_PER_GENERATION: Number(process.env['VIDEO_USD_PER_GENERATION'] ?? 0.05),
     EDIT_USD_PER_GENERATION: Number(process.env['EDIT_USD_PER_GENERATION'] ?? 0.04),
+    LIFT3D_USD_PER_GENERATION: Number(process.env['LIFT3D_USD_PER_GENERATION'] ?? 0.25),
     FAL_KEY: falKey,
     FAL_IDLE_CLOSE_MS: Number(process.env['FAL_IDLE_CLOSE_MS'] ?? 0),
     FAL_WARMER_ENABLED: process.env['FAL_WARMER_ENABLED'] !== 'false',

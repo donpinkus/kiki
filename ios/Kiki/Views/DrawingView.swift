@@ -346,6 +346,11 @@ struct DrawingView: View {
             AIEditSheet()
                 .environment(coordinator)
         }
+        // 3D object placement (tap a lifted object in the Objects drawer).
+        .sheet(item: $coordinator.placingObject) { object in
+            ObjectPlacementSheet(object: object)
+                .environment(coordinator)
+        }
         .fullScreenCover(isPresented: $coordinator.showStylePicker) {
             StylePickerView()
                 .environment(coordinator)

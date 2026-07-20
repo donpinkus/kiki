@@ -341,6 +341,38 @@ public actor AuthService {
         return EditResult(image: bytes, seed: resp.seed)
     }
 
+    /// Result of a 3D lift.
+    public struct Lift3dResult: Sendable {
+        public let glb: Data
+        public let thumbnail: Data?
+    }
+
+    /// Lift a drawn object to a 3D model (POST /v1/lift3d → Hunyuan3D).
+    /// Long-running by design (1-4 min, server polls the provider queue).
+    public func lift3d(image: Data) async throws -> Lift3dResult {
+        let token = try await currentAccessToken()
+        let url = backendURL.appendingPathComponent("/v1/lift3d")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 6 * 60
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        struct Body: Encodable { let imageBase64: String }
+        request.httpBody = try JSONEncoder().encode(Body(imageBase64: image.base64EncodedString()))
+        let (data, rawResponse) = try await urlSession.data(for: request)
+        guard let http = rawResponse as? HTTPURLResponse else { throw AuthError.invalidResponse }
+        if http.statusCode == 402 { throw EditError.freeLimitReached }
+        guard (200..<300).contains(http.statusCode) else {
+            struct Err: Decodable { let message: String? }
+            let body = try? JSONDecoder().decode(Err.self, from: data)
+            throw EditError.failed(body?.message ?? "HTTP \(http.statusCode)")
+        }
+        struct Resp: Decodable { let glbBase64: String; let thumbnailBase64: String? }
+        let resp = try JSONDecoder().decode(Resp.self, from: data)
+        guard let glb = Data(base64Encoded: resp.glbBase64) else { throw AuthError.invalidResponse }
+        return Lift3dResult(glb: glb, thumbnail: resp.thumbnailBase64.flatMap { Data(base64Encoded: $0) })
+    }
+
     /// Fetch the signed-in user's current free-tier usage (for the in-app
     /// meter). Authenticated; auto-refreshes the access token.
     public func fetchUsage() async throws -> UsageResponse {

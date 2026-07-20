@@ -20,6 +20,12 @@ final class SavedObject {
     /// scale when dropped into a drawing.
     var docWidth: Double
     var docHeight: Double
+    /// Canonical 3D model (USDZ, from the Hunyuan3D lift). When present, the
+    /// object places via the 3D placement sheet (any angle, perfectly
+    /// consistent) instead of the flat cutout.
+    @Attribute(.externalStorage) var meshData: Data?
+    /// Rendered thumbnail of the 3D model (for the drawer tile badge state).
+    @Attribute(.externalStorage) var meshThumbData: Data?
 
     init(name: String, imageData: Data, docWidth: Double, docHeight: Double) {
         self.id = UUID()
