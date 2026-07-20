@@ -150,24 +150,22 @@ struct ExtractView: View {
 
     private func liftCard(_ item: ExtractController.ExtractItem) -> some View {
         VStack(spacing: 8) {
-            HStack(spacing: 10) {
-                Image(uiImage: item.cutout)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 64, height: 64)
-                    .background(Color(.tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 8))
-
-                if let thumb = item.meshThumb {
-                    Image(systemName: "arrow.right")
-                        .font(.caption.weight(.bold))
-                        .foregroundStyle(.tertiary)
-                    Image(uiImage: thumb)
+            if item.state == .lifting || item.state == .failed {
+                HStack(spacing: 10) {
+                    Image(uiImage: item.cutout)
                         .resizable()
                         .scaledToFit()
                         .frame(width: 64, height: 64)
                         .background(Color(.tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 8))
+                    Spacer()
                 }
-                Spacer()
+            } else if item.glb != nil {
+                // Live, slowly-spinning 3D viewer — unmistakably a 3D object
+                // now. Drag to orbit, pinch to zoom (SceneKit camera control).
+                Model3DView(meshData: item.glb, autoRotate: true)
+                    .frame(height: 170)
+                    .frame(maxWidth: .infinity)
+                    .background(Color(.tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10))
             }
 
             switch item.state {
