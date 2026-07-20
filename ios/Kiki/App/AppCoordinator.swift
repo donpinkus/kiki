@@ -1831,6 +1831,27 @@ final class AppCoordinator {
         }
     }
 
+    // MARK: - Extract screen (tap the generated image → 3D lifts)
+
+    var showExtract = false
+    private(set) var extract: ExtractController?
+
+    /// Open Extract on the current generated image (the high-quality
+    /// artifact — extraction never uses the sketch).
+    func openExtract() {
+        guard let image = resultState.displayImage else { return }
+        extract = ExtractController(
+            image: image, authService: authService, modelContext: modelContext
+        )
+        showExtract = true
+        Analytics.track(.extractOpened)
+    }
+
+    func closeExtract() {
+        showExtract = false
+        extract = nil
+    }
+
     // MARK: - Sticker sharing
 
     /// Whether a sticker can be cut: needs an active selection to mask with.
@@ -2050,7 +2071,7 @@ final class AppCoordinator {
         currentDrawingId.flatMap { RecordingStore.shared.generatedVideoURL(for: $0) }
     }
 
-    func buildReplayComposition(layout: ReplayLayout, speed: ReplaySpeed) async -> SideBySideVideoComposer.BuiltReplay? {
+    func buildReplayComposition(layout: ReplayLayout, speed: ReplaySpeed, debugNoTransforms: Bool = false) async -> SideBySideVideoComposer.BuiltReplay? {
         guard let drawingId = currentDrawingId else {
             streamLog.error("REPLAY buildReplayComposition: no currentDrawingId")
             return nil
@@ -2071,7 +2092,8 @@ final class AppCoordinator {
                 canvasSegments: segments.canvas,
                 generatedSegments: segments.generated,
                 layout: layout,
-                speed: speed
+                speed: speed,
+                debugNoTransforms: debugNoTransforms
             )
             streamLog.info("REPLAY build finished in \(Int(Date().timeIntervalSince(started) * 1000))ms")
             Log.info("replay.built", attributes: [
@@ -2328,6 +2350,18 @@ final class AppCoordinator {
             if let obj = (try? modelContext.fetch(d))?.first { insertObject(obj) }
         case "objectsDrawer":
             showObjectsDrawer = true
+        case "extractScreen":
+            openExtract()
+        case let cmd where cmd.hasPrefix("extractFake:"):
+            let parts = cmd.dropFirst("extractFake:".count).split(separator: ",")
+            if parts.count >= 3, let u = Double(parts[0]), let v = Double(parts[1]),
+               let r = Double(parts[2]) {
+                extract?.devFakeTap(u: u, v: v, radiusFraction: r)
+            }
+        case "extractSave":
+            if let controller = extract, let item = controller.items.first(where: { $0.state == .lifted }) {
+                controller.saveToCollection(item)
+            }
         case "forkStartFrame":
             if currentScreen == .animate, let img = animate?.startKeyframe {
                 forkFrameIntoDrawing(img, returnSlot: .start)

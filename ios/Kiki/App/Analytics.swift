@@ -69,6 +69,8 @@ enum AnalyticsEvent: String {
     case objectInserted = "objects.inserted"
     case objectPinned = "objects.pinned"
     case objectLifted = "objects.lifted_3d"
+    case objectExtracted = "objects.extracted"
+    case extractOpened = "extract.opened"
 
     // AI Edit (inpaint)
     case aiEditRequested = "canvas.ai_edit_requested"

@@ -351,6 +351,13 @@ struct DrawingView: View {
             ObjectPlacementSheet(object: object)
                 .environment(coordinator)
         }
+        // Extract screen: tap the generated image → 3D lifts → collection.
+        .fullScreenCover(isPresented: $coordinator.showExtract) {
+            if let controller = coordinator.extract {
+                ExtractView(controller: controller)
+                    .environment(coordinator)
+            }
+        }
         .fullScreenCover(isPresented: $coordinator.showStylePicker) {
             StylePickerView()
                 .environment(coordinator)
@@ -645,7 +652,23 @@ struct DrawingView: View {
             if coordinator.videoAvailability != .off {
                 animateButton
             }
+            extractButton
             editButton
+        }
+    }
+
+    /// "Extract" → tap anything in the generated image to lift it into a
+    /// reusable 3D object (the generated image is the high-quality artifact —
+    /// extraction never uses the sketch).
+    private var extractButton: some View {
+        Button {
+            coordinator.openExtract()
+        } label: {
+            Label("Extract", systemImage: "cube.transparent")
+                .font(.caption.weight(.semibold))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 5)
+                .background(.ultraThinMaterial, in: Capsule())
         }
     }
 
