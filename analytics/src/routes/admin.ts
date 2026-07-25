@@ -932,9 +932,9 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
              SELECT ts, pool, instance_name FROM lambda_pool_events
              WHERE event = 'launch_requested' AND ts > now() - interval '7 days')
            SELECT req.ts, req.pool, req.instance_name,
-                  s.event AS search_outcome, s.duration_ms::bigint AS search_ms, s.detail AS search_detail,
-                  b.event AS boot_outcome, b.duration_ms::bigint AS boot_ms,
-                  e.event AS end_event, e.duration_ms::bigint AS end_ms
+                  s.event AS search_outcome, s.duration_ms::int AS search_ms, s.detail AS search_detail,
+                  b.event AS boot_outcome, b.duration_ms::int AS boot_ms,
+                  e.event AS end_event, e.duration_ms::int AS end_ms
            FROM req
            LEFT JOIN LATERAL (
              SELECT event, duration_ms, detail FROM lambda_pool_events x
