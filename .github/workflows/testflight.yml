@@ -1,0 +1,71 @@
+name: TestFlight Release
+
+# Ships a TestFlight build using the same pipeline as a local release:
+# ios/scripts/testflight-release.sh (next build number from TestFlight, archive,
+# cloud-managed App Store signing, upload, distribute to the External group).
+#
+# Trigger from anywhere — GitHub web/app → Actions → "TestFlight Release" →
+# Run workflow (pick the branch to build), or via the API/Claude.
+#
+# One-time setup (repo Settings → Secrets and variables → Actions):
+#   Secret  ASC_API_KEY_P8  — full contents of the App Store Connect API .p8 key
+#   Variables ASC_KEY_ID / ASC_ISSUER_ID — OPTIONAL, only if using a different
+#     API key than the default baked into ios/scripts/asc.mjs.
+#
+# Notes:
+#   - The build number is derived from TestFlight (highest + 1) at run time, so
+#     the CURRENT_PROJECT_VERSION bump is NOT committed back; the next run
+#     re-derives it. Local releases still commit the bump per the release doc.
+#   - macOS runners bill minutes at a 10x multiplier on private repos; a full
+#     release is roughly 20-40 min of runner time.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: testflight-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-26
+    timeout-minutes: 90
+    env:
+      ASC_KEY_ID: ${{ vars.ASC_KEY_ID || 'KKBU3VH69S' }}
+      ASC_ISSUER_ID: ${{ vars.ASC_ISSUER_ID || '227d4525-7a03-4792-8d9e-692a2743778c' }}
+    steps:
+      - name: Check App Store Connect key secret is configured
+        env:
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+        run: |
+          if [ -z "$ASC_API_KEY_P8" ]; then
+            echo "::error::Missing repo secret ASC_API_KEY_P8 (contents of the App Store Connect API .p8 key). Add it under Settings → Secrets and variables → Actions, then re-run."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode 26
+        run: |
+          XCODE="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -n1 || true)"
+          if [ -z "$XCODE" ]; then
+            echo "::error::No Xcode 26 on this runner image (App Store requires the iOS 26 SDK). Installed Xcodes:"
+            ls -d /Applications/Xcode*.app || true
+            exit 1
+          fi
+          sudo xcode-select -s "$XCODE"
+          xcodebuild -version
+
+      - name: Install App Store Connect API key
+        env:
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+        run: |
+          # altool discovers the key by name in this exact directory
+          # (AuthKey_<KEYID>.p8) — don't relocate it.
+          mkdir -p ~/.appstoreconnect/private_keys
+          printf '%s\n' "$ASC_API_KEY_P8" > ~/.appstoreconnect/private_keys/AuthKey_"$ASC_KEY_ID".p8
+
+      - name: Build, upload, distribute
+        run: |
+          export ASC_KEY_PATH="$HOME/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8"
+          ios/scripts/testflight-release.sh

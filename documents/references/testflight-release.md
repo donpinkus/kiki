@@ -1,9 +1,10 @@
 # iOS TestFlight release
 
 **This script is the standard, repeatable way to ship *every* TestFlight build — now and going
-forward.** It is not a one-off; run it for every release. There is **no fastlane/CI** — releases are
+forward.** It is not a one-off; run it for every release. There is **no fastlane** — releases are
 this single script, driven by an App Store Connect API key. If someone asks "how do I push a new
-build to testers?", the answer is always: run the script below.
+build to testers?", the answer is always: run the script below — locally on a Mac, or remotely via
+the GitHub Actions workflow (see "Remote release" below), which runs the exact same script.
 
 ## TL;DR — always use this
 
@@ -20,6 +21,31 @@ public-link group (+ submits Beta App Review). Then commit the build-number bump
 ```bash
 git add ios/Kiki.xcodeproj/project.pbxproj && git commit -m "chore(ios): bump build to <N>"
 ```
+
+## Remote release (GitHub Actions) — ship from anywhere
+
+`.github/workflows/testflight.yml` runs the same `testflight-release.sh` on a GitHub-hosted
+`macos-26` runner. Use it when away from the Mac (e.g. Claude Code on the web pushes a fix, then a
+build lands on the iPad via the TestFlight app — testers already in the group just get an Update).
+
+- **Trigger:** GitHub → repo → Actions → "TestFlight Release" → *Run workflow* (pick the branch to
+  build). Works from the iPad/phone browser or the GitHub app. Claude can trigger it too (Actions
+  API / `actions_run_trigger` MCP tool). The workflow must exist on the default branch for the UI
+  button to appear.
+- **One-time setup:** repo Settings → Secrets and variables → Actions → new **secret**
+  `ASC_API_KEY_P8` = the full text contents of the App Store Connect API `.p8` key. If using a
+  *different* API key than the default (e.g. a freshly minted one), also add repo **variables**
+  `ASC_KEY_ID` and `ASC_ISSUER_ID`. (A new key can be minted from any browser: App Store Connect →
+  Users and Access → Integrations, role App Manager — useful if the original `.p8` is on the Mac
+  and you're not.)
+- **Build number:** derived from TestFlight at run time (same `next-build` logic), so CI does NOT
+  commit the `CURRENT_PROJECT_VERSION` bump back — the next run (local or CI) re-derives it. Local
+  runs should still commit the bump as documented above.
+- **Signing on CI:** no certs are stored anywhere — the archive AND export steps both pass the API
+  key with `-allowProvisioningUpdates`, so Xcode's cloud-managed distribution signing mints what it
+  needs on the clean runner.
+- **Cost:** macOS runners bill at 10x minutes on private repos; a release is ~20-40 runner-minutes.
+  Negligible per the dev-cost policy, but don't fire builds in a loop.
 
 ## Prerequisites
 

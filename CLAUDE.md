@@ -263,7 +263,7 @@ Reading the patterns — *interpretation guide, not proof of cause*:
 | FLUX.2-klein capability notebook (potential features, not committed) | `documents/ideas/flux-klein-capabilities.md` |
 | Lambda Cloud H100 image provider (IMAGE_PROVIDER=lambda) — architecture, scripts, cold-start plan | `documents/plans/lambda-image-provider.md` + `backend/scripts/lambda/README.md` |
 | Internal per-user analytics dashboard (Kiki Insights) — setup, schema, ingest contract, deploy | `analytics/README.md` |
-| **iOS TestFlight release** — always run `ios/scripts/testflight-release.sh` (one command: build+upload+distribute). Signing, API key, gotchas | `documents/references/testflight-release.md` |
+| **iOS TestFlight release** — always run `ios/scripts/testflight-release.sh` (one command: build+upload+distribute); away from the Mac, trigger the "TestFlight Release" GitHub Actions workflow (same script on a macos-26 runner). Signing, API key, gotchas | `documents/references/testflight-release.md` |
 | Implementation decisions log | `documents/decisions.md` |
 | Removed features (RunPod orchestration, PostHog, ComfyUI, StreamDiffusion) | `documents/removed-features.md` |
 | Product requirements | `PRD.md` |

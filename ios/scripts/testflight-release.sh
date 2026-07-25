@@ -50,7 +50,15 @@ ARCHIVE="$WORK/Kiki.xcarchive"
 EXPORT="$WORK/export"
 
 echo "==> Archiving..."
-xcodebuild -scheme "$SCHEME" -destination 'generic/platform=iOS' -archivePath "$ARCHIVE" archive
+# Auth flags on the archive step too: on a clean machine (CI runner) with no local
+# signing identity, cloud-managed signing needs the API key at archive time as well.
+# Harmless locally — same flags the export step already uses.
+xcodebuild -scheme "$SCHEME" -destination 'generic/platform=iOS' -archivePath "$ARCHIVE" \
+  -allowProvisioningUpdates \
+  -authenticationKeyPath "$ASC_KEY_PATH" \
+  -authenticationKeyID "$ASC_KEY_ID" \
+  -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+  archive
 
 echo "==> Exporting (App Store distribution, cloud-managed signing)..."
 xcodebuild -exportArchive \
