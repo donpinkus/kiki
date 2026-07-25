@@ -19,8 +19,16 @@ name: TestFlight Release
 #   - macOS runners bill minutes at a 10x multiplier on private repos; a full
 #     release is roughly 20-40 min of runner time.
 
+# Two triggers:
+#   - workflow_dispatch: the "Run workflow" button (GitHub web/app), any branch.
+#   - push to the dedicated `testflight-release` branch: lets a Claude Code
+#     session ship a build with plain git (its GitHub token can push but cannot
+#     fire Actions dispatches): point `testflight-release` at the commit to ship
+#     and push. Nothing else ever lands on that branch.
 on:
   workflow_dispatch:
+  push:
+    branches: [testflight-release]
 
 concurrency:
   group: testflight-release

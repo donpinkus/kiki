@@ -28,10 +28,13 @@ git add ios/Kiki.xcodeproj/project.pbxproj && git commit -m "chore(ios): bump bu
 `macos-26` runner. Use it when away from the Mac (e.g. Claude Code on the web pushes a fix, then a
 build lands on the iPad via the TestFlight app — testers already in the group just get an Update).
 
-- **Trigger:** GitHub → repo → Actions → "TestFlight Release" → *Run workflow* (pick the branch to
-  build). Works from the iPad/phone browser or the GitHub app. Claude can trigger it too (Actions
-  API / `actions_run_trigger` MCP tool). The workflow must exist on the default branch for the UI
-  button to appear.
+- **Trigger (human):** GitHub → repo → Actions → "TestFlight Release" → *Run workflow* (pick the
+  branch to build). Works from the iPad/phone browser or the GitHub app. The workflow must exist on
+  the default branch for the UI button to appear.
+- **Trigger (Claude / git):** push the commit to ship to the dedicated **`testflight-release`**
+  branch — `git push origin <commit-or-branch>:testflight-release` (force is fine; the branch is a
+  build pointer, not history). Exists because Claude Code web sessions can push git but can't fire
+  Actions dispatches (403 on the workflow-dispatch API).
 - **One-time setup:** repo Settings → Secrets and variables → Actions → new **secret**
   `ASC_API_KEY_P8` = the full text contents of the App Store Connect API `.p8` key. If using a
   *different* API key than the default (e.g. a freshly minted one), also add repo **variables**
