@@ -22,6 +22,17 @@ const fmtMs = (v: number | null | undefined): string =>
 const pct = (num: number | undefined, den: number | undefined): string =>
   !den ? '—' : `${Math.round(((num ?? 0) / den) * 100)}%`;
 
+/** Plain-language "why they didn't get one" per pool status at close. */
+const MISS_STATUS_LABEL: Record<string, string> = {
+  launching: 'still hunting capacity when they left',
+  booting: 'GPU found, still warming when they left',
+  none: 'pool idle / not trying',
+  error: 'pool error',
+  disabled: 'pool disabled (flag/env)',
+  ready: 'WAS ready — session stayed on fal (no mid-session upgrade)',
+  untracked: 'predates status tracking',
+};
+
 /** Event → pill class: good (green), transitional (amber), bad (red). */
 const EVENT_CLS: Record<string, string> = {
   ready: 'warm',
@@ -33,6 +44,7 @@ const EVENT_CLS: Record<string, string> = {
   launch_failed: 'fail',
   instance_dead: 'fail',
   boot_stalled: 'fail',
+  sweep_abandoned: 'fail',
 };
 
 export function Fleet() {
@@ -121,6 +133,62 @@ export function Fleet() {
           </div>
         </div>
       </div>
+
+      {/* ── 2b: the misses — who wanted an H100 and never got one, and why ── */}
+      <div className="section-title">Who didn't get an H100 — and why</div>
+      <div className="card" style={{ padding: 0 }}>
+        <table>
+          <thead>
+            <tr>
+              <th>Pool was…</th><th>Sessions</th><th>Waited p50 / max</th><th>GPU arrived mid-session</th>
+            </tr>
+          </thead>
+          <tbody>
+            {(data.h100_misses ?? []).map((m) => (
+              <tr key={m.pool_status}>
+                <td>
+                  <span className={`pill ${m.pool_status === 'ready' ? 'warm' : m.pool_status === 'error' ? 'fail' : 'cold'}`}>{m.pool_status}</span>
+                  <span className="muted" style={{ fontSize: 12, marginLeft: 6 }}>{MISS_STATUS_LABEL[m.pool_status] ?? ''}</span>
+                </td>
+                <td>{m.sessions}</td>
+                <td>{fmtMs(m.waited_p50_ms)} / {fmtMs(m.waited_max_ms)}</td>
+                <td>{m.pool_ready_mid_session > 0 ? `${m.pool_ready_mid_session} (stayed on fal — auto never upgrades mid-session)` : '—'}</td>
+              </tr>
+            ))}
+            {(data.h100_misses ?? []).length === 0 && (
+              <tr><td colSpan={4} className="muted">No H100 misses in the last 7 days.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+        Every session that asked for an H100 and closed without ever being wired to one. "Waited" is the
+        whole session duration — for a never-wired session that IS the wait. Status columns land with the
+        2026-07-25 backend; older rows group under their at-resolve status or "untracked".
+      </div>
+      {(data.recent_misses ?? []).length > 0 && (
+        <div className="card" style={{ padding: 0, marginTop: 8 }}>
+          <table>
+            <thead>
+              <tr>
+                <th>When</th><th>Who</th><th>Waited</th><th>Pool at open → close</th><th>GPU during session</th><th>Client</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.recent_misses.map((m, i) => (
+                <tr key={i}>
+                  <td style={{ whiteSpace: 'nowrap' }}>{new Date(m.occurred_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</td>
+                  <td className="muted" style={{ fontSize: 12 }}>{m.email ?? '?'}</td>
+                  <td><strong>{fmtMs(m.duration_ms)}</strong></td>
+                  <td>{m.at_resolve ?? '?'} → {m.at_close ?? '?'}</td>
+                  <td>{m.ready_after_ms != null ? `ready after ${fmtMs(m.ready_after_ms)} (not picked up)` : 'never ready'}</td>
+                  <td className="muted" style={{ fontSize: 12, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis' }}>{m.client ?? ''}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       {/* ── 3: quality once they're on ── */}
       <div className="section-title">Quality once they're on it</div>
@@ -282,6 +350,69 @@ export function Fleet() {
         Search = capacity request → granted (capacity-bound, unpredictable — max matters).
         Boot = granted → serving (consistent; the popover's progress bar uses its estimate).
         Drained = the Ops kill switch terminating instances.
+      </div>
+
+      {/* ── every GPU hunt, including the failures ── */}
+      <div className="section-title">Every GPU hunt (7d) — step-by-step, failures included</div>
+      <div className="card" style={{ padding: 0 }}>
+        <table>
+          <thead>
+            <tr>
+              <th>Requested</th><th>Pool</th><th>Capacity search</th><th>Boot</th><th>End</th>
+            </tr>
+          </thead>
+          <tbody>
+            {(data.acquisitions ?? []).map((a, i) => {
+              const ageMs = Date.now() - new Date(a.ts).getTime();
+              const searchLabel = a.search_outcome
+                ? a.search_outcome
+                : ageMs < 25 * 60_000 ? 'searching now…' : 'no terminal event (redeploy or pre-instrumentation)';
+              const searchCls = a.search_outcome === 'launched' ? 'warm'
+                : a.search_outcome ? 'fail'
+                : ageMs < 25 * 60_000 ? 'cold' : 'fail';
+              return (
+                <tr key={i}>
+                  <td style={{ whiteSpace: 'nowrap' }}>{new Date(a.ts).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</td>
+                  <td>{a.pool}</td>
+                  <td>
+                    <span className={`pill ${searchCls}`}>{searchLabel}</span>
+                    {a.search_ms != null && <strong style={{ marginLeft: 6 }}>{fmtMs(a.search_ms)}</strong>}
+                    {a.search_detail && <div className="muted" style={{ fontSize: 11, maxWidth: 340, overflow: 'hidden', textOverflow: 'ellipsis' }}>{a.search_detail}</div>}
+                  </td>
+                  <td>
+                    {a.search_outcome === 'launched' ? (
+                      a.boot_outcome ? (
+                        <>
+                          <span className={`pill ${a.boot_outcome === 'ready' ? 'warm' : 'fail'}`}>{a.boot_outcome}</span>
+                          {a.boot_ms != null && <strong style={{ marginLeft: 6 }}>{fmtMs(a.boot_ms)}</strong>}
+                        </>
+                      ) : (
+                        <span className="pill cold">{ageMs < 25 * 60_000 ? 'booting…' : 'never became ready'}</span>
+                      )
+                    ) : <span className="muted">—</span>}
+                  </td>
+                  <td>
+                    {a.end_event
+                      ? <>
+                          <span className="pill cold">{a.end_event.replace('_terminate', '-reap').replace('instance_dead', 'died')}</span>
+                          {a.end_event === 'idle_terminate' && a.end_ms != null && <span className="muted" style={{ fontSize: 12, marginLeft: 6 }}>after {fmtMs(a.end_ms)} idle</span>}
+                        </>
+                      : a.search_outcome === 'launched' ? <span className="pill warm">still up</span> : <span className="muted">—</span>}
+                  </td>
+                </tr>
+              );
+            })}
+            {(data.acquisitions ?? []).length === 0 && (
+              <tr><td colSpan={5} className="muted">No capacity hunts in the last 7 days.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+        One row per capacity hunt. sweep_abandoned = the hunt stopped because demand went away (user left)
+        — its duration is how long the user-facing "Finding a GPU…" lasted before they gave up.
+        launch_failed = the retry window expired or a non-retryable API error. Terminal rows for
+        abandoned/failed hunts ship with the 2026-07-25 backend; older losses show "no terminal event".
       </div>
 
       {/* ── raw event strip ── */}

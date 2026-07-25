@@ -118,6 +118,17 @@ export function trackProviderSession(props: {
   /** Session had the H100 and lost it (finished on fal). */
   lambdaDowngraded: boolean;
   everReachedReady: boolean;
+  /** Image-pool status when the socket closed. For never-wired sessions this
+   * is the "why they never got it": 'launching' = still hunting capacity when
+   * they left, 'booting' = instance found but still warming, 'none'/'error' =
+   * pool wasn't even trying, 'ready' = it WAS ready but the session started
+   * on fal and auto never upgrades mid-session. */
+  poolStatusAtClose: string;
+  /** WS-open → first moment the pool reported a ready instance during this
+   * session (15s sampling). Null = the pool never became ready while the
+   * user was here — the true "waited N minutes, GPU never came" duration is
+   * then the session duration itself. */
+  h100ReadyAfterMs: number | null;
   /** Video-session counters (null when the session had no video path —
    * feature off or never configured). Powers the Launch tab's video
    * acquisition/success metrics. */
@@ -156,6 +167,8 @@ export function trackProviderSession(props: {
     lambda_first_frame_ms: props.lambdaFirstFrameMs,
     lambda_downgraded: props.lambdaDowngraded,
     ever_reached_ready: props.everReachedReady,
+    pool_status_at_close: props.poolStatusAtClose,
+    h100_ready_after_ms: props.h100ReadyAfterMs,
     client: props.clientTag,
     sketches_sent: props.sketchesSent,
     image_gen_ms_p50: props.imageGenMsP50,

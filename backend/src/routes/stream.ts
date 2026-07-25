@@ -191,6 +191,18 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       // Wired → first H100 frame (ms) — the connected→first-frame transition
       // in the waterfall timing widget. Null until the first lambda frame.
       let lambdaFirstFrameMs: number | null = null;
+      // First moment during THIS session the image pool reported a ready
+      // instance (sampled at auto-resolve + every 15s by the availability
+      // timer). Stays null when the pool never got there — with
+      // pool_status_at_close this is the Fleet tab's H100-miss story: "user
+      // sat here N minutes, pool was still <searching|booting> when they
+      // left" vs "pool DID become ready mid-session but auto never upgrades".
+      let h100ReadyObservedAtMs: number | null = null;
+      const noteH100PoolReady = (): void => {
+        if (h100ReadyObservedAtMs === null && poolGetState().status === 'ready') {
+          h100ReadyObservedAtMs = Date.now();
+        }
+      };
       // True when `imageProvider` was resolved from 'auto' (the launch mode).
       // Auto sessions degrade to fal MID-SESSION when the lambda upstream dies
       // with no replacement instance — the drawing keeps flowing. Explicit
@@ -364,6 +376,9 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             lambdaFirstFrameMs,
             lambdaDowngraded,
             everReachedReady,
+            poolStatusAtClose: poolGetState().status,
+            h100ReadyAfterMs:
+              h100ReadyObservedAtMs !== null ? h100ReadyObservedAtMs - sessionStartMs : null,
             videoStats: null,
             clientTag,
             sketchesSent,
@@ -479,6 +494,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         // Waterfall stage attribution: the pool's state RIGHT NOW is what this
         // session experienced ('booting' = H100 found but not yet warm).
         poolStatusAtResolve = poolGetState().status;
+        noteH100PoolReady();
         imageProvider = poolHasReady() || config.LAMBDA_IMAGE_URL ? 'lambda' : 'fal';
         request.log.info(
           { userId, connId, streamId, imageProvider, event: 'image_provider_auto' },
@@ -574,6 +590,9 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       };
       let lastAvailabilityJson: string | null = null;
       const pushVideoAvailability = (): void => {
+        // Piggyback: this is the session's only periodic pool poll, so it
+        // doubles as the h100_ready_after_ms sampler (15s granularity).
+        noteH100PoolReady();
         if (clientDisconnected || socket.readyState !== socket.OPEN) return;
         const payload = JSON.stringify(computeSystemAvailability());
         if (payload === lastAvailabilityJson) return;

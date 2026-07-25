@@ -721,7 +721,7 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
                     WHEN 'gpu_1x_gh200'     THEN 2.29
                     WHEN 'gpu_1x_a6000'     THEN 1.09
                     ELSE 4.29 END`;
-      const [image, video, pools, recentEvents, daily, gpuSpend, falSpend, spendDaily] = await Promise.all([
+      const [image, video, pools, recentEvents, daily, gpuSpend, falSpend, spendDaily, acquisitions, h100Misses, recentMisses] = await Promise.all([
         // Image system: acquisition + waits + generation + render ratio.
         query(
           `SELECT count(*)::int AS sessions,
@@ -920,6 +920,85 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
           if (err.code === '42P01' || err.code === '42703') return { rows: [] as Record<string, unknown>[] };
           throw err;
         }),
+        // ─── GPU acquisition timeline: EVERY capacity hunt (7d), including
+        // the ones that failed or were abandoned — each launch_requested
+        // chained to its search outcome (launched / launch_failed /
+        // sweep_abandoned / nothing = in flight or lost to a redeploy), boot
+        // outcome (ready / boot_stalled), and end (reap / death / drain),
+        // with the duration of every step. The anti-survivorship view: the
+        // aggregate search stats above only average the wins. ──────────────
+        query(
+          `WITH req AS (
+             SELECT ts, pool, instance_name FROM lambda_pool_events
+             WHERE event = 'launch_requested' AND ts > now() - interval '7 days')
+           SELECT req.ts, req.pool, req.instance_name,
+                  s.event AS search_outcome, s.duration_ms::bigint AS search_ms, s.detail AS search_detail,
+                  b.event AS boot_outcome, b.duration_ms::bigint AS boot_ms,
+                  e.event AS end_event, e.duration_ms::bigint AS end_ms
+           FROM req
+           LEFT JOIN LATERAL (
+             SELECT event, duration_ms, detail FROM lambda_pool_events x
+             WHERE x.instance_name = req.instance_name AND x.ts >= req.ts
+               AND x.event IN ('launched','launch_failed','sweep_abandoned')
+             ORDER BY x.ts LIMIT 1) s ON true
+           LEFT JOIN LATERAL (
+             SELECT event, duration_ms FROM lambda_pool_events x
+             WHERE x.instance_name = req.instance_name AND x.ts >= req.ts
+               AND x.event IN ('ready','boot_stalled')
+             ORDER BY x.ts LIMIT 1) b ON true
+           LEFT JOIN LATERAL (
+             SELECT event, duration_ms FROM lambda_pool_events x
+             WHERE x.instance_name = req.instance_name AND x.ts >= req.ts
+               AND x.event IN ('idle_terminate','instance_dead','disabled_terminate')
+             ORDER BY x.ts LIMIT 1) e ON true
+           ORDER BY req.ts DESC LIMIT 40`,
+        ).catch((err: { code?: string }) => {
+          if (err.code === '42P01' || err.code === '42703') return { rows: [] as Record<string, unknown>[] };
+          throw err;
+        }),
+        // ─── H100 misses (7d): sessions that wanted an H100 and NEVER wired,
+        // grouped by what the pool was doing when they gave up. waited =
+        // session duration (for a never-wired session the whole session IS
+        // the wait). pool_ready_mid_session > 0 with status 'ready' = the
+        // GPU arrived but auto never upgrades mid-session (product gap, not
+        // infra failure). Ships once pool_status_at_close lands (2026-07-25);
+        // older rows fall back to pool_status_at_resolve. ────────────────────
+        query(
+          `SELECT COALESCE(properties->>'pool_status_at_close',
+                           properties->>'pool_status_at_resolve', 'untracked') AS pool_status,
+                  count(*)::int AS sessions,
+                  round(percentile_cont(0.5) WITHIN GROUP (ORDER BY (properties->>'duration_ms')::float))::int AS waited_p50_ms,
+                  max((properties->>'duration_ms')::int) AS waited_max_ms,
+                  count(*) FILTER (WHERE (properties->>'h100_ready_after_ms') ~ '^[0-9.]+$')::int AS pool_ready_mid_session
+           FROM events
+           WHERE name = 'stream.provider_session'
+             AND occurred_at > now() - interval '7 days' AND ${EXCL}
+             AND properties->>'requested_provider' IN ('auto','lambda')
+             AND NOT COALESCE((properties->>'lambda_wired')::bool, false)
+           GROUP BY 1 ORDER BY sessions DESC`,
+          [excl],
+        ),
+        // The last 25 misses, one row per session — the concrete "this user,
+        // this long, pool was doing X" record behind the summary above.
+        query(
+          `SELECT e.occurred_at, u.email,
+                  (e.properties->>'duration_ms')::int AS duration_ms,
+                  e.properties->>'pool_status_at_resolve' AS at_resolve,
+                  COALESCE(e.properties->>'pool_status_at_close',
+                           e.properties->>'pool_status_at_bounce') AS at_close,
+                  CASE WHEN (e.properties->>'h100_ready_after_ms') ~ '^[0-9.]+$'
+                       THEN (e.properties->>'h100_ready_after_ms')::int END AS ready_after_ms,
+                  e.properties->>'client' AS client
+           FROM events e
+           LEFT JOIN users u ON u.user_id::text = e.user_id
+           WHERE e.name = 'stream.provider_session'
+             AND e.occurred_at > now() - interval '7 days'
+             AND ($1::bool = false OR COALESCE(u.is_test_account, false) = false)
+             AND e.properties->>'requested_provider' IN ('auto','lambda')
+             AND NOT COALESCE((e.properties->>'lambda_wired')::bool, false)
+           ORDER BY e.occurred_at DESC LIMIT 25`,
+          [excl],
+        ),
       ]);
       return {
         image: image.rows[0] ?? null,
@@ -930,6 +1009,9 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
         gpu_spend: gpuSpend.rows,
         fal_spend: falSpend.rows,
         spend_daily: spendDaily.rows,
+        acquisitions: acquisitions.rows,
+        h100_misses: h100Misses.rows,
+        recent_misses: recentMisses.rows,
       };
     });
 

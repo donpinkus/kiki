@@ -482,6 +482,9 @@ runcmd:
     const types = spec.instanceTypes();
     const regions = spec.regions();
     recordPoolEvent('launch_requested', name, regions[0], undefined, `${types.length} types × ${regions.length} regions`);
+    // Hoisted out of the try so the launch_failed catch can report how many
+    // (type × region) cells were tried before the sweep died.
+    let attempts = 0;
     try {
       const c = client();
       const keys = await c.listSshKeys();
@@ -496,11 +499,16 @@ runcmd:
       const deadline = Date.now() + LAUNCH_RETRY_MINS * 60_000;
       let launched: { id: string; region: string; type: string } | null = null;
       let lastErr: unknown = null;
+      let abandonReason = '';
       sweep: for (;;) {
         for (const type of types) {
           for (const region of regions) {
-            if (!enabled() || !instancesWanted()) break sweep;
+            if (!enabled() || !instancesWanted()) {
+              abandonReason = !enabled() ? 'pool disabled' : 'demand gone';
+              break sweep;
+            }
             try {
+              attempts += 1;
               const [id] = await spacedLaunch(
                 c,
                 {
@@ -532,7 +540,19 @@ runcmd:
         }
       }
       if (!launched) {
+        // Terminal row even when nobody won: without it an abandoned hunt is
+        // invisible in lambda_pool_events and the Fleet tab's search stats
+        // only ever see successes (the user who waited 20 min for capacity
+        // that never came leaves no trace). duration = how long we hunted.
         log.info({ pool: spec.kind, event: 'lambda_pool_sweep_abandoned' }, 'capacity sweep abandoned — demand gone');
+        recordPoolEvent(
+          'sweep_abandoned',
+          name,
+          regions[0],
+          Date.now() - searchStartMs,
+          `${abandonReason} after ${attempts} attempts` +
+            (lastErr ? `; last: ${(lastErr as Error).message}` : ''),
+        );
         return;
       }
       instances.set(name, {
@@ -555,7 +575,13 @@ runcmd:
     } catch (err) {
       lastError = (err as Error).message;
       log.error({ err, pool: spec.kind, event: 'lambda_pool_launch_failed' }, 'lambda pool launch failed');
-      recordPoolEvent('launch_failed', name, regions[0], Date.now() - searchStartMs, (err as Error).message);
+      recordPoolEvent(
+        'launch_failed',
+        name,
+        regions[0],
+        Date.now() - searchStartMs,
+        `after ${attempts} attempts: ${(err as Error).message}`,
+      );
     } finally {
       launchesInFlight -= 1;
       if (launchesInFlight === 0) searchStartedAtMs = 0;

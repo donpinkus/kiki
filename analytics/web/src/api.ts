@@ -256,6 +256,43 @@ export interface FleetGpuSpendRow {
 export interface FleetFalSpendRow { source: string; conns: number; billed_hours: number; cost_usd: number; }
 export interface FleetSpendDailyRow { day: string; gpu_usd: number; fal_usd: number; }
 
+/** One capacity hunt: launch_requested chained to its search outcome, boot
+ * outcome, and end event — nulls mean "that step never happened" (in flight,
+ * or the row predates the terminal-event instrumentation / a redeploy lost
+ * the sweep). */
+export interface FleetAcquisitionRow {
+  ts: string;
+  pool: string;
+  instance_name: string | null;
+  search_outcome: 'launched' | 'launch_failed' | 'sweep_abandoned' | null;
+  search_ms: number | null;
+  search_detail: string | null;
+  boot_outcome: 'ready' | 'boot_stalled' | null;
+  boot_ms: number | null;
+  end_event: string | null;
+  end_ms: number | null;
+}
+
+/** H100-miss rollup: never-wired sessions grouped by what the pool was doing
+ * when the user left. */
+export interface FleetMissRow {
+  pool_status: string;
+  sessions: number;
+  waited_p50_ms: number | null;
+  waited_max_ms: number | null;
+  pool_ready_mid_session: number;
+}
+
+export interface FleetRecentMissRow {
+  occurred_at: string;
+  email: string | null;
+  duration_ms: number | null;
+  at_resolve: string | null;
+  at_close: string | null;
+  ready_after_ms: number | null;
+  client: string | null;
+}
+
 export interface FleetData {
   image: FleetImage | null;
   video: FleetVideo | null;
@@ -265,6 +302,9 @@ export interface FleetData {
   gpu_spend: FleetGpuSpendRow[];
   fal_spend: FleetFalSpendRow[];
   spend_daily: FleetSpendDailyRow[];
+  acquisitions: FleetAcquisitionRow[];
+  h100_misses: FleetMissRow[];
+  recent_misses: FleetRecentMissRow[];
 }
 
 export interface CapacityCell {
