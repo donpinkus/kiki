@@ -43,8 +43,10 @@ __pycache__/
 *.swp
 *~
 
-# Claude Code session state (per-checkout, don't commit)
-.claude/
+# Claude Code session state (per-checkout, don't commit) — but DO commit the
+# shared settings.json (SessionStart hook for cloud/web sessions; no secrets).
+.claude/*
+!.claude/settings.json
 
 # BrushHarness transient artifacts (fetched fixtures + rendered PNGs)
 ios/Packages/CanvasModule/BrushHarness/fixtures/

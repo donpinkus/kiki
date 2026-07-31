@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'if [ -n \"${RAILWAY_API_TOKEN:-}${RAILWAY_TOKEN:-}\" ] && command -v railway >/dev/null 2>&1; then railway status >/dev/null 2>&1 || railway link -p c651eed9-55bb-464b-98f3-6d8369565740 -e production -s kiki-backend >/dev/null 2>&1 || echo \"[hook] railway link failed — deploys may not work\"; fi; for d in backend analytics; do if [ -f \"$d/package.json\" ] && [ ! -d \"$d/node_modules\" ]; then (cd \"$d\" && npm ci --silent >/dev/null 2>&1) || echo \"[hook] npm ci failed in $d\"; fi; done; exit 0'",
+            "timeout": 300
+          }
+        ]
+      }
+    ]
+  }
+}
