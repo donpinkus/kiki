@@ -1,15 +1,28 @@
 import { useEffect, useState } from 'react';
 import {
+  CONNECTION_RANGES,
   getConnections,
   getVideoFlag,
   getWarmer,
   putVideoFlag,
   putWarmer,
+  type ConnectionBucket,
+  type ConnectionRange,
   type ConnectionRow,
   type SourceFilter,
   type WarmerConfig,
   type WarmerStatus,
 } from '../api';
+import { ColdRateBars } from '../ActivityBars';
+
+const RANGE_LABELS: Record<ConnectionRange, string> = {
+  '1h': '1h',
+  '6h': '6h',
+  '24h': '1d',
+  '48h': '2d',
+  '7d': '1w',
+  '30d': '30d',
+};
 
 const FAL_USD_PER_SEC = 0.00194;
 
@@ -52,7 +65,13 @@ export function Ops() {
   const [videoFlag, setVideoFlag] = useState<{ enabled: boolean; updatedAt: string | null } | null>(null);
   const [videoSaving, setVideoSaving] = useState(false);
   const [connections, setConnections] = useState<ConnectionRow[]>([]);
+  const [buckets, setBuckets] = useState<ConnectionBucket[]>([]);
+  // Bucket/range seconds come from the server so the chart's x-axis grid
+  // always matches the aggregate it's drawing.
+  const [bucketSeconds, setBucketSeconds] = useState(3600);
+  const [rangeSeconds, setRangeSeconds] = useState(48 * 3600);
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>('all');
+  const [range, setRange] = useState<ConnectionRange>('48h');
   const [form, setForm] = useState<WarmerConfig | null>(null);
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState<number | null>(null);
@@ -100,13 +119,18 @@ export function Ops() {
 
   useEffect(() => {
     const loadConns = () =>
-      getConnections(sourceFilter)
-        .then((r) => setConnections(r.connections))
+      getConnections(sourceFilter, range)
+        .then((r) => {
+          setConnections(r.connections);
+          setBuckets(r.buckets);
+          setBucketSeconds(r.bucketSeconds);
+          setRangeSeconds(r.rangeSeconds);
+        })
         .catch((e) => setError(String(e)));
     loadConns();
     const t = setInterval(loadConns, 30_000);
     return () => clearInterval(t);
-  }, [sourceFilter]);
+  }, [sourceFilter, range]);
 
   const save = async () => {
     if (!form) return;
@@ -135,6 +159,7 @@ export function Ops() {
     );
   }
 
+  const totalInRange = buckets.reduce((a, b) => a + b.total, 0);
   const s = status.stats24h;
   const billedUsd = s ? (s.billed_ms / 1000) * FAL_USD_PER_SEC : 0;
   const lastPing = status.pings[0];
@@ -299,24 +324,45 @@ export function Ops() {
         {error && <div style={{ color: '#ff7b72', marginTop: 8 }}>{error}</div>}
       </div>
 
-      <div className="section-title">
-        Request history (48h) —{' '}
-        {(['all', 'user', 'warmer'] as SourceFilter[]).map((f) => (
-          <button
-            key={f}
-            className="ghost"
-            onClick={() => setSourceFilter(f)}
-            style={{
-              marginRight: 6,
-              padding: '2px 10px',
-              fontSize: 12,
-              opacity: sourceFilter === f ? 1 : 0.5,
-            }}
-          >
-            {f === 'all' ? 'All' : f === 'user' ? 'Users' : 'Warmer'}
-          </button>
-        ))}
+      <div className="section-title" style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+        <span>Request history</span>
+        <span>
+          {(['all', 'user', 'warmer'] as SourceFilter[]).map((f) => (
+            <button
+              key={f}
+              className="ghost"
+              onClick={() => setSourceFilter(f)}
+              style={{
+                marginRight: 6,
+                padding: '2px 10px',
+                fontSize: 12,
+                opacity: sourceFilter === f ? 1 : 0.5,
+              }}
+            >
+              {f === 'all' ? 'All' : f === 'user' ? 'Users' : 'Warmer'}
+            </button>
+          ))}
+        </span>
+        <span className="muted" style={{ fontSize: 12 }}>|</span>
+        <span>
+          {CONNECTION_RANGES.map((r) => (
+            <button
+              key={r}
+              className="ghost"
+              onClick={() => setRange(r)}
+              style={{
+                marginRight: 6,
+                padding: '2px 10px',
+                fontSize: 12,
+                opacity: range === r ? 1 : 0.5,
+              }}
+            >
+              {RANGE_LABELS[r]}
+            </button>
+          ))}
+        </span>
       </div>
+      <ColdRateBars buckets={buckets} rangeSeconds={rangeSeconds} bucketSeconds={bucketSeconds} />
       <div className="card" style={{ padding: 0 }}>
         <table>
           <thead>
@@ -368,7 +414,15 @@ export function Ops() {
         </table>
         {connections.length === 0 && (
           <div className="muted" style={{ padding: 20 }}>
-            No connections recorded yet.
+            No connections in this window.
+          </div>
+        )}
+        {/* The table pages at 500 rows; the chart above aggregates the FULL
+            window server-side, so they legitimately disagree on long ranges. */}
+        {totalInRange > connections.length && (
+          <div className="muted" style={{ padding: '10px 12px', fontSize: 12 }}>
+            Showing the {connections.length} most recent of {totalInRange} connections in this
+            window — the chart above covers all of them.
           </div>
         )}
       </div>

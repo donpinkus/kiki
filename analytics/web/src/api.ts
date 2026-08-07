@@ -140,6 +140,30 @@ export interface ConnectionRow {
 
 export type SourceFilter = 'all' | 'user' | 'warmer';
 
+/** Lookback windows for the request history. Must stay in sync with
+ * CONNECTION_RANGES in `analytics/src/routes/admin.ts` (server picks the
+ * bucket width per range and rejects unknown keys by falling back to 48h). */
+export const CONNECTION_RANGES = ['1h', '6h', '24h', '48h', '7d', '30d'] as const;
+export type ConnectionRange = (typeof CONNECTION_RANGES)[number];
+
+/** One time bucket of the cold-rate chart. `resolved` = connections that got a
+ * warm/cold verdict; `total - resolved` never produced a result at all. */
+export interface ConnectionBucket {
+  bucket: string;
+  total: number;
+  resolved: number;
+  cold: number;
+}
+
+export interface ConnectionsResponse {
+  schemaReady: boolean;
+  range: ConnectionRange;
+  rangeSeconds: number;
+  bucketSeconds: number;
+  connections: ConnectionRow[];
+  buckets: ConnectionBucket[];
+}
+
 export interface WarmerStatus {
   schemaReady: boolean;
   config: WarmerConfig | null;
@@ -199,10 +223,11 @@ export const listCaptures = (userId?: string) =>
 export const getCapture = (streamId: string) =>
   api<CaptureDetail>(`/admin/api/captures/${encodeURIComponent(streamId)}`);
 
-export const getConnections = (source: SourceFilter) =>
-  api<{ schemaReady: boolean; connections: ConnectionRow[] }>(
-    `/admin/api/ops/connections${source === 'all' ? '' : `?source=${source}`}`,
-  );
+export const getConnections = (source: SourceFilter, range: ConnectionRange) => {
+  const qs = new URLSearchParams({ range });
+  if (source !== 'all') qs.set('source', source);
+  return api<ConnectionsResponse>(`/admin/api/ops/connections?${qs}`);
+};
 
 export interface VideoFlagStatus {
   schemaReady: boolean;

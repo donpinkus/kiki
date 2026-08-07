@@ -1159,28 +1159,78 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
       }
     });
 
+    // Selectable lookback for the request history. Bucket widths are sized so
+    // each bar aggregates a meaningful sample rather than to hit a bar count:
+    // the warmer alone is ~40 connections/hour, so 1-minute buckets on the 1h
+    // view would be n=1 — a rate chart that can only read 0% or 100%.
+    const CONNECTION_RANGES: Record<string, { seconds: number; bucketSeconds: number }> = {
+      '1h': { seconds: 3600, bucketSeconds: 300 },
+      '6h': { seconds: 6 * 3600, bucketSeconds: 900 },
+      '24h': { seconds: 24 * 3600, bucketSeconds: 1800 },
+      '48h': { seconds: 48 * 3600, bucketSeconds: 3600 },
+      '7d': { seconds: 7 * 86400, bucketSeconds: 3 * 3600 },
+      '30d': { seconds: 30 * 86400, bucketSeconds: 12 * 3600 },
+    };
+
     // General fal request history — one row per fal connection (user +
     // warmer), newest first, with user email joined in. `source` filters
     // server-side so "users only" isn't drowned by ~700 warmer rows/day.
+    // `buckets` is a SEPARATE aggregate over the whole range (not derived from
+    // the 500-row page) so the cold-rate chart is never truncated by the table
+    // limit — at 7d/30d the warmer alone blows past 500 rows.
     gated.get('/admin/api/ops/connections', async (request) => {
-      const src = (request.query as { source?: string }).source;
-      const sourceFilter = src === 'user' || src === 'warmer' ? src : null;
+      const q = request.query as { source?: string; range?: string };
+      const sourceFilter = q.source === 'user' || q.source === 'warmer' ? q.source : null;
+      const requested = q.range ? CONNECTION_RANGES[q.range] : undefined;
+      const rangeKey = requested ? (q.range as string) : '48h';
+      const { seconds, bucketSeconds } = requested ?? CONNECTION_RANGES['48h'];
       try {
-        const { rows } = await query(
-          `SELECT c.opened_at, c.source, c.user_id::text AS user_id, u.email,
-                  c.wait_ms, c.found_warm, c.frames_sent, c.frames_received,
-                  c.open_ms, c.close_reason
-           FROM fal_connections c
-           LEFT JOIN users u ON u.user_id = c.user_id
-           WHERE c.opened_at > now() - interval '48 hours'
-             AND ($1::text IS NULL OR c.source = $1)
-           ORDER BY c.opened_at DESC LIMIT 500`,
-          [sourceFilter],
-        );
-        return { schemaReady: true, connections: rows };
+        const [conns, buckets] = await Promise.all([
+          query(
+            `SELECT c.opened_at, c.source, c.user_id::text AS user_id, u.email,
+                    c.wait_ms, c.found_warm, c.frames_sent, c.frames_received,
+                    c.open_ms, c.close_reason
+             FROM fal_connections c
+             LEFT JOIN users u ON u.user_id = c.user_id
+             WHERE c.opened_at > now() - ($2::int * interval '1 second')
+               AND ($1::text IS NULL OR c.source = $1)
+             ORDER BY c.opened_at DESC LIMIT 500`,
+            [sourceFilter, seconds],
+          ),
+          // date_bin would be tidier but needs PG14+; the epoch-floor form
+          // works on any version. `resolved` excludes found_warm IS NULL
+          // (connection never got a result) — those aren't warm OR cold, so
+          // they'd drag the rate toward 0 if left in the denominator.
+          query(
+            `SELECT to_timestamp(floor(extract(epoch FROM c.opened_at) / $3::int)::float8 * $3::int) AS bucket,
+                    count(*)::int                                       AS total,
+                    count(*) FILTER (WHERE c.found_warm IS NOT NULL)::int AS resolved,
+                    count(*) FILTER (WHERE c.found_warm = false)::int    AS cold
+             FROM fal_connections c
+             WHERE c.opened_at > now() - ($2::int * interval '1 second')
+               AND ($1::text IS NULL OR c.source = $1)
+             GROUP BY 1 ORDER BY 1`,
+            [sourceFilter, seconds, bucketSeconds],
+          ),
+        ]);
+        return {
+          schemaReady: true,
+          range: rangeKey,
+          rangeSeconds: seconds,
+          bucketSeconds,
+          connections: conns.rows,
+          buckets: buckets.rows,
+        };
       } catch (err) {
         if ((err as { code?: string }).code === '42P01') {
-          return { schemaReady: false, connections: [] };
+          return {
+            schemaReady: false,
+            range: rangeKey,
+            rangeSeconds: seconds,
+            bucketSeconds,
+            connections: [],
+            buckets: [],
+          };
         }
         throw err;
       }

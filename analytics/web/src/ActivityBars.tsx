@@ -15,7 +15,8 @@ const fmtDay = (d: Date, withYear: boolean) =>
   });
 
 interface Tip {
-  x: number;
+  /** px offset (SVG charts) or a CSS length like '42%' (flex-bar charts). */
+  x: number | string;
   text: string;
 }
 
@@ -181,6 +182,197 @@ export function DailyBars({
             />
           ))}
         </svg>
+      </div>
+    </div>
+  );
+}
+
+/** Cold-rate histogram for the Ops request history: one bar per time bucket,
+ * height = % of RESOLVED connections in that bucket that found the fal pool
+ * cold. Fixed 0–100% y-scale (a rate chart that rescales to its own max lies
+ * about severity). Bar opacity encodes bucket volume so a lone 1-of-1 cold
+ * bucket doesn't read as loud as a 40-of-80 one.
+ *
+ * Buckets come from a server-side aggregate over the whole range, NOT from the
+ * table's 500-row page — so 7d/30d views are complete.
+ *
+ * Flex divs rather than the SVG idiom above because this chart spans the card
+ * width (unknown at render time); an SVG would need a viewBox stretch that
+ * distorts the axis labels. */
+export function ColdRateBars({
+  buckets,
+  rangeSeconds,
+  bucketSeconds,
+}: {
+  buckets: { bucket: string; total: number; resolved: number; cold: number }[];
+  rangeSeconds: number;
+  bucketSeconds: number;
+}) {
+  const [hover, setHover] = useState<number | null>(null);
+  const H = 84;
+  const COLD = '#f0b429'; // matches .pill.cold in styles.css
+
+  // Server emits only non-empty buckets; rebuild the full axis so gaps read as
+  // gaps. Floor to the same epoch grid the server used, else bars misalign.
+  const nowSec = Math.floor(Date.now() / 1000);
+  const lastStart = Math.floor(nowSec / bucketSeconds) * bucketSeconds;
+  const count = Math.max(1, Math.round(rangeSeconds / bucketSeconds));
+  const byStart = new Map(
+    buckets.map((b) => [Math.floor(new Date(b.bucket).getTime() / 1000), b]),
+  );
+  const slots = Array.from({ length: count }, (_, i) => {
+    const start = lastStart - (count - 1 - i) * bucketSeconds;
+    const b = byStart.get(start);
+    return {
+      start,
+      date: new Date(start * 1000),
+      total: b?.total ?? 0,
+      resolved: b?.resolved ?? 0,
+      cold: b?.cold ?? 0,
+    };
+  });
+
+  const maxTotal = Math.max(1, ...slots.map((s) => s.total));
+  const sumCold = slots.reduce((a, s) => a + s.cold, 0);
+  const sumResolved = slots.reduce((a, s) => a + s.resolved, 0);
+  const overall = sumResolved > 0 ? Math.round((sumCold / sumResolved) * 100) : null;
+
+  const multiDay = rangeSeconds > 26 * 3600;
+  const fmtBucket = (d: Date) =>
+    bucketSeconds >= 86_400
+      ? d.toLocaleDateString([], { month: 'short', day: 'numeric' })
+      : multiDay
+        ? d.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric' })
+        : d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  // Sub-day buckets keep the hour even on multi-day ranges — a 48h axis of
+  // bare dates reads as "Aug 5, Aug 5, Aug 6, Aug 6" and locates nothing.
+  const fmtAxis = (d: Date) =>
+    bucketSeconds >= 86_400
+      ? d.toLocaleDateString([], { month: 'short', day: 'numeric' })
+      : multiDay
+        ? d.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric' })
+        : d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+
+  const pctOf = (s: (typeof slots)[number]) =>
+    s.resolved > 0 ? (s.cold / s.resolved) * 100 : null;
+
+  const bucketLabel =
+    bucketSeconds >= 86_400
+      ? `${Math.round(bucketSeconds / 86_400)}d`
+      : bucketSeconds >= 3600
+        ? `${Math.round(bucketSeconds / 3600)}h`
+        : `${Math.round(bucketSeconds / 60)}m`;
+
+  const h = hover === null ? null : slots[hover];
+  const tip: Tip | null =
+    h === null
+      ? null
+      : {
+          x: `${((hover! + 0.5) / count) * 100}%`,
+          text:
+            h.resolved === 0
+              ? `${fmtBucket(h.date)} · ${h.total === 0 ? 'no connections' : `${h.total} conn, no verdict`}`
+              : `${fmtBucket(h.date)} · ${Math.round((h.cold / h.resolved) * 100)}% cold (${h.cold} of ${h.resolved})` +
+                (h.total > h.resolved ? ` · ${h.total - h.resolved} no result` : ''),
+        };
+
+  // Sparse axis: ~6 labels, always including the oldest and newest bucket. The
+  // last regular label is dropped when it would crowd the (right-aligned) end
+  // label — otherwise they overlap whenever count isn't a multiple of step.
+  const step = Math.max(1, Math.ceil(count / 6));
+  const axis = slots
+    .map((s, i) => ({ s, i }))
+    .filter(({ i }) => i === count - 1 || (i % step === 0 && count - 1 - i >= step * 0.6));
+
+  return (
+    <div className="card" style={{ padding: '12px 16px', marginBottom: 10 }}>
+      <div
+        className="muted"
+        style={{ fontSize: 12, marginBottom: 6, display: 'flex', justifyContent: 'space-between', gap: 12 }}
+      >
+        <span>Cold rate — % of resolved connections that found fal cold</span>
+        <span>
+          {overall === null ? 'no verdicts' : <>overall {overall}% ({sumCold} of {sumResolved})</>}
+        </span>
+      </div>
+      <div style={{ position: 'relative', paddingTop: 26, paddingLeft: 30 }}>
+        <BarTooltip tip={tip} />
+        {/* Fixed 0/50/100% gridlines — the y-scale never moves. */}
+        {[0, 50, 100].map((g) => (
+          <div
+            key={g}
+            style={{
+              position: 'absolute',
+              left: 30,
+              right: 0,
+              top: 26 + ((100 - g) / 100) * H,
+              borderTop: `1px ${g === 0 ? 'solid' : 'dashed'} var(--border)`,
+              pointerEvents: 'none',
+            }}
+          >
+            <span
+              style={{
+                position: 'absolute',
+                left: -30,
+                top: -7,
+                fontSize: 10,
+                color: 'var(--muted)',
+              }}
+            >
+              {g}%
+            </span>
+          </div>
+        ))}
+        <div
+          style={{ display: 'flex', alignItems: 'flex-end', gap: 1, height: H }}
+          onMouseLeave={() => setHover(null)}
+          role="img"
+          aria-label={`cold rate per ${bucketLabel} bucket, ${overall ?? 0}% overall`}
+        >
+          {slots.map((s, i) => {
+            const pct = pctOf(s);
+            return (
+              <div
+                key={s.start}
+                onMouseEnter={() => setHover(i)}
+                style={{ flex: 1, height: '100%', display: 'flex', alignItems: 'flex-end', minWidth: 2 }}
+              >
+                <div
+                  style={{
+                    width: '100%',
+                    height: pct === null ? 2 : Math.max(2, (pct / 100) * H),
+                    borderRadius: 1,
+                    background: pct === null ? STUB : COLD,
+                    // Volume shading: full opacity at the busiest bucket, floor
+                    // at .3 so a single cold connection stays visible.
+                    opacity: pct === null ? 1 : hover === i ? 1 : 0.3 + 0.7 * (s.total / maxTotal),
+                  }}
+                />
+              </div>
+            );
+          })}
+        </div>
+        <div style={{ position: 'relative', height: 14, marginTop: 4 }}>
+          {axis.map(({ s, i }) => (
+            <span
+              key={s.start}
+              style={{
+                position: 'absolute',
+                left: `${((i + 0.5) / count) * 100}%`,
+                transform: i === count - 1 ? 'translateX(-100%)' : 'translateX(-50%)',
+                fontSize: 10,
+                color: 'var(--muted)',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {fmtAxis(s.date)}
+            </span>
+          ))}
+        </div>
+      </div>
+      <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>
+        One bar per {bucketLabel}. Fainter bars = fewer connections in that bucket; flat 2px = no
+        verdicts.
       </div>
     </div>
   );
