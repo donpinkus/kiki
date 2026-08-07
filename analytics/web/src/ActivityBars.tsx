@@ -244,13 +244,26 @@ export function ColdRateBars({
       : multiDay
         ? d.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric' })
         : d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-  // Sub-day buckets keep the hour even on multi-day ranges — a 48h axis of
-  // bare dates reads as "Aug 5, Aug 5, Aug 6, Aug 6" and locates nothing.
+  // Midnight rules (local): a vertical line + date label at every day start, so
+  // "which day is this spike on" is answerable without hovering. Only for
+  // sub-day buckets — at ≥1d/bar every bar IS a day and the axis already says
+  // so. Thinned past 10 boundaries (30d) or the lines become the chart.
+  const dayStarts = (() => {
+    if (bucketSeconds >= 86_400) return [] as { i: number; date: Date }[];
+    const all = slots
+      .map((s, i) => ({ i, date: s.date }))
+      .filter(({ i }) => i > 0 && slots[i].date.getDate() !== slots[i - 1].date.getDate());
+    const keep = Math.max(1, Math.ceil(all.length / 8));
+    return all.length > 10 ? all.filter((_, n) => n % keep === 0) : all;
+  })();
+
+  // With day markers carrying the date, the axis only needs the time — a 48h
+  // axis of "Aug 5, 8 AM / Aug 5, 4 PM" repeats the date six times.
   const fmtAxis = (d: Date) =>
     bucketSeconds >= 86_400
       ? d.toLocaleDateString([], { month: 'short', day: 'numeric' })
-      : multiDay
-        ? d.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric' })
+      : multiDay && dayStarts.length > 0
+        ? d.toLocaleTimeString([], { hour: 'numeric' })
         : d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 
   const pctOf = (s: (typeof slots)[number]) =>
@@ -280,9 +293,15 @@ export function ColdRateBars({
   // last regular label is dropped when it would crowd the (right-aligned) end
   // label — otherwise they overlap whenever count isn't a multiple of step.
   const step = Math.max(1, Math.ceil(count / 6));
-  const axis = slots
-    .map((s, i) => ({ s, i }))
-    .filter(({ i }) => i === count - 1 || (i % step === 0 && count - 1 - i >= step * 0.6));
+  // When the label stride is a whole number of days, every label lands on the
+  // same clock time ("5 PM" six times at 30d) — pure noise, and the day markers
+  // already carry the date. Drop the row entirely in that case.
+  const axisRepeats = bucketSeconds < 86_400 && (step * bucketSeconds) % 86_400 === 0;
+  const axis = axisRepeats
+    ? []
+    : slots
+        .map((s, i) => ({ s, i }))
+        .filter(({ i }) => i === count - 1 || (i % step === 0 && count - 1 - i >= step * 0.6));
 
   return (
     <div className="card" style={{ padding: '12px 16px', marginBottom: 10 }}>
@@ -324,11 +343,45 @@ export function ColdRateBars({
           </div>
         ))}
         <div
-          style={{ display: 'flex', alignItems: 'flex-end', gap: 1, height: H }}
+          style={{ position: 'relative', display: 'flex', alignItems: 'flex-end', gap: 1, height: H }}
           onMouseLeave={() => setHover(null)}
           role="img"
           aria-label={`cold rate per ${bucketLabel} bucket, ${overall ?? 0}% overall`}
         >
+          {/* Day boundaries: line at the bucket's LEFT edge (i/count, not the
+              bar-center i+0.5 the axis labels use) — the day starts there. */}
+          {dayStarts.map(({ i, date }) => (
+            <div
+              key={`day-${i}`}
+              style={{
+                position: 'absolute',
+                left: `${(i / count) * 100}%`,
+                top: -6,
+                bottom: 0,
+                borderLeft: '1px solid rgba(230, 232, 236, 0.28)',
+                pointerEvents: 'none',
+              }}
+            >
+              <span
+                style={{
+                  position: 'absolute',
+                  left: 4,
+                  top: -2,
+                  fontSize: 10,
+                  fontWeight: 600,
+                  color: 'var(--muted)',
+                  whiteSpace: 'nowrap',
+                  // The plot's top band is empty at any realistic cold rate;
+                  // the chip keeps the label readable if a bar ever reaches it.
+                  background: 'var(--panel)',
+                  padding: '0 3px',
+                  borderRadius: 2,
+                }}
+              >
+                {date.toLocaleDateString([], { month: 'short', day: 'numeric' })}
+              </span>
+            </div>
+          ))}
           {slots.map((s, i) => {
             const pct = pctOf(s);
             return (
@@ -352,7 +405,7 @@ export function ColdRateBars({
             );
           })}
         </div>
-        <div style={{ position: 'relative', height: 14, marginTop: 4 }}>
+        <div style={{ position: 'relative', height: axis.length === 0 ? 0 : 14, marginTop: 4 }}>
           {axis.map(({ s, i }) => (
             <span
               key={s.start}
