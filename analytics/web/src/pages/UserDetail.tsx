@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { CaptureGrid } from './Gallery';
 import { ActivityChart } from '../ActivityBars';
+import { SectionTitle } from '../PageNav';
 import { getUser, type EventRow, type SessionRow, type UserDetail as Detail } from '../api';
 
 const fmt = (iso: string | null) => (iso ? new Date(iso).toLocaleString() : '—');
@@ -256,7 +257,7 @@ export function UserDetail() {
       {/* Per-provider stream outcomes (H100 vs fal) */}
       {(data.provider_stats?.length ?? 0) > 0 && (
         <>
-          <div className="section-title">Image providers</div>
+          <SectionTitle title="Image providers" />
           <table className="data-table">
             <thead>
               <tr><th>Provider</th><th>Sessions</th><th>Bounced</th><th>Time to provider (p50)</th><th>Frames</th><th>Disconnects</th><th>Recovered</th></tr>
@@ -279,15 +280,15 @@ export function UserDetail() {
       )}
 
       {/* Session / login timeline */}
-      <div className="section-title">Activity by day</div>
+      <SectionTitle title="Activity by day" />
       <ActivityChart data={data.daily_activity ?? []} />
 
       {/* Session replays (captured sketch/generated frame streams) */}
-      <div className="section-title">Session replays</div>
+      <SectionTitle title="Session replays" />
       <CaptureGrid userId={id} />
 
       {/* Drawings gallery */}
-      <div className="section-title">Drawings ({drawings.length})</div>
+      <SectionTitle title={`Drawings (${drawings.length})`} nav="Drawings" />
       {drawings.length === 0 ? (
         <div className="muted">No drawings uploaded yet.</div>
       ) : (
@@ -309,7 +310,10 @@ export function UserDetail() {
       )}
 
       {/* Timeline grouped by app session (open→close), newest first */}
-      <div className="section-title">Timeline by session ({groups.filter((g) => g.kind === 'app').length} app sessions)</div>
+      <SectionTitle
+        title={`Timeline by session (${groups.filter((g) => g.kind === 'app').length} app sessions)`}
+        nav="Timeline by session"
+      />
       <div className="filter-bar">
         <input
           placeholder="Filter events by name…"

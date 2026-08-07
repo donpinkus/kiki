@@ -10,6 +10,7 @@
  * for actual acquisition lives on the Fleet tab (real launch outcomes).
  */
 import { useEffect, useState } from 'react';
+import { SectionTitle } from '../PageNav';
 import { getCapacity, type CapacityData } from '../api';
 
 /** Availability % → cell color (red drought → green plentiful). */
@@ -60,16 +61,19 @@ export function Capacity() {
 
   return (
     <div className="container">
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div className="section-title">GPU capacity — advertised availability</div>
-        <select value={days} onChange={(e) => setDays(Number(e.target.value))}
-          style={{ fontSize: 13, padding: '4px 8px' }}>
-          <option value={1}>last 24h</option>
-          <option value={3}>last 3 days</option>
-          <option value={7}>last 7 days</option>
-          <option value={14}>last 14 days</option>
-        </select>
-      </div>
+      <SectionTitle
+        title="GPU capacity — advertised availability"
+        nav="Advertised availability"
+        right={
+          <select value={days} onChange={(e) => setDays(Number(e.target.value))}
+            style={{ fontSize: 13, padding: '4px 8px' }}>
+            <option value={1}>last 24h</option>
+            <option value={3}>last 3 days</option>
+            <option value={7}>last 7 days</option>
+            <option value={14}>last 14 days</option>
+          </select>
+        }
+      />
 
       <div className="card" style={{ borderLeft: '3px solid var(--accent, #888)', fontSize: 13 }}>
         <strong>What this is:</strong> the free <code>/instance-types</code> poll (~every 2 min) —
@@ -81,7 +85,7 @@ export function Capacity() {
       </div>
 
       {/* Headline: current + windowed availability per (type, region). */}
-      <div className="section-title">Availability by type &amp; region</div>
+      <SectionTitle title="Availability by type &amp; region" nav="By type &amp; region" />
       <div className="card" style={{ padding: 0 }}>
         <table>
           <thead>
@@ -120,7 +124,7 @@ export function Capacity() {
       </div>
 
       {/* Time-of-day heatmap: when do droughts hit? */}
-      <div className="section-title">Availability by hour of day (Pacific)</div>
+      <SectionTitle title="Availability by hour of day (Pacific)" nav="By hour of day" />
       <div className="card" style={{ overflowX: 'auto' }}>
         <table style={{ borderCollapse: 'collapse', fontSize: 11 }}>
           <thead>

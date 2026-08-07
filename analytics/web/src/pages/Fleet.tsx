@@ -15,6 +15,7 @@
  */
 import { useEffect, useState } from 'react';
 import { getFleet, getLivePods, type FleetData, type LivePodsData, type LivePoolState } from '../api';
+import { SectionTitle } from '../PageNav';
 
 const fmtMs = (v: number | null | undefined): string =>
   v == null ? '—' : v >= 10_000 ? `${Math.round(v / 1000)}s` : v >= 1000 ? `${(v / 1000).toFixed(1)}s` : `${v}ms`;
@@ -80,16 +81,19 @@ export function Fleet() {
 
   return (
     <div className="container">
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div className="section-title">GPU fleet — last 7 days</div>
-        <label style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 13, cursor: 'pointer' }}>
-          <input type="checkbox" checked={excludeTest} onChange={(e) => setExcludeTest(e.target.checked)} />
-          Exclude test accounts
-        </label>
-      </div>
+      <SectionTitle
+        title="GPU fleet — last 7 days"
+        nav="Overview"
+        right={
+          <label style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 13, cursor: 'pointer', textTransform: 'none', letterSpacing: 0 }}>
+            <input type="checkbox" checked={excludeTest} onChange={(e) => setExcludeTest(e.target.checked)} />
+            Exclude test accounts
+          </label>
+        }
+      />
 
       {/* ── 0: live pods — what's running RIGHT NOW and why ── */}
-      <div className="section-title">Live pods — why is each one up?</div>
+      <SectionTitle title="Live pods — why is each one up?" nav="Live pods" />
       {!pods ? (
         <div className="card muted">Loading…</div>
       ) : !pods.backendReachable ? (
@@ -99,7 +103,7 @@ export function Fleet() {
       )}
 
       {/* ── 1+2: acquisition + waits, one card per system ── */}
-      <div className="section-title">Do users get a GPU — and how long do they wait?</div>
+      <SectionTitle title="Do users get a GPU — and how long do they wait?" nav="Do users get a GPU?" />
       <div className="stat-row">
         <div className="stat">
           <div className="label">Image · sessions on the H100</div>
@@ -135,7 +139,7 @@ export function Fleet() {
       </div>
 
       {/* ── 2b: the misses — who wanted an H100 and never got one, and why ── */}
-      <div className="section-title">Who didn't get an H100 — and why</div>
+      <SectionTitle title="Who didn't get an H100 — and why" nav="Who missed out" />
       <div className="card" style={{ padding: 0 }}>
         <table>
           <thead>
@@ -191,7 +195,7 @@ export function Fleet() {
       )}
 
       {/* ── 3: quality once they're on ── */}
-      <div className="section-title">Quality once they're on it</div>
+      <SectionTitle title="Quality once they're on it" nav="Quality" />
       <div className="stat-row">
         <div className="stat">
           <div className="label">Image gen time</div>
@@ -232,7 +236,7 @@ export function Fleet() {
         const usd = (v: number): string => `$${v.toFixed(2)}`;
         return (
           <>
-            <div className="section-title">Spend (7d)</div>
+            <SectionTitle title="Spend (7d)" nav="Spend" />
             <div className="stat-row">
               <div className="stat">
                 <div className="label">Total infra spend</div>
@@ -315,7 +319,7 @@ export function Fleet() {
       })()}
 
       {/* ── 5: fleet lifecycle ── */}
-      <div className="section-title">Fleet lifecycle (7d)</div>
+      <SectionTitle title="Fleet lifecycle (7d)" nav="Fleet lifecycle" />
       <div className="card" style={{ padding: 0 }}>
         <table>
           <thead>
@@ -353,7 +357,7 @@ export function Fleet() {
       </div>
 
       {/* ── every GPU hunt, including the failures ── */}
-      <div className="section-title">Every GPU hunt (7d) — step-by-step, failures included</div>
+      <SectionTitle title="Every GPU hunt (7d) — step-by-step, failures included" nav="Every GPU hunt" />
       <div className="card" style={{ padding: 0 }}>
         <table>
           <thead>
@@ -416,7 +420,7 @@ export function Fleet() {
       </div>
 
       {/* ── raw event strip ── */}
-      <div className="section-title">Recent fleet events</div>
+      <SectionTitle title="Recent fleet events" nav="Recent events" />
       <div className="card" style={{ padding: 0 }}>
         <table>
           <thead>
@@ -438,7 +442,7 @@ export function Fleet() {
       </div>
 
       {/* ── 5: daily trend ── */}
-      <div className="section-title">Daily trend (14d)</div>
+      <SectionTitle title="Daily trend (14d)" nav="Daily trend" />
       <div className="card" style={{ padding: 0 }}>
         <table>
           <thead>

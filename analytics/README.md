@@ -22,6 +22,31 @@ faces:
   volume behind a tiny swappable `BlobStore` interface (`src/blobStore.ts`) — drop
   in S3/R2 later with zero data-model change (Postgres only stores the key).
 
+### Page sections & the sticky nav
+
+Pages here are long stacks of widgets (Fleet has 10 sections), so every page gets
+a sticky "On this page" rail on the left. Write a section heading as:
+
+```tsx
+import { SectionTitle } from '../PageNav';
+
+<SectionTitle title="Fleet lifecycle (7d)" nav="Fleet lifecycle" />
+// heading with a control beside it:
+<SectionTitle title="GPU fleet — last 7 days" nav="Overview" right={<label>…</label>} />
+// controls inline after the title (Ops' filter pills) go in children:
+<SectionTitle title="Request history">{filterButtons}</SectionTitle>
+```
+
+That is the entire contract — **do not** maintain a per-page list of nav links.
+`PageNav` mounts once in `App.tsx` and discovers headings from the DOM, so
+sections that are added, removed, or conditionally rendered stay in sync for
+free. `nav` is an optional short label for the rail (headings are often full
+sentences); it also anchors the URL slug, which matters when a title
+interpolates a live count like `Drawings (139)`.
+
+The rail hides itself below 1180px viewport width and on pages with fewer than
+three sections, where it would be noise.
+
 ## Data model
 
 **Shared Postgres with the backend.** Identity is NOT duplicated here — Insights

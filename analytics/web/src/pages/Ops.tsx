@@ -14,6 +14,7 @@ import {
   type WarmerStatus,
 } from '../api';
 import { ColdRateBars } from '../ActivityBars';
+import { SectionTitle } from '../PageNav';
 
 const RANGE_LABELS: Record<ConnectionRange, string> = {
   '1h': '1h',
@@ -167,7 +168,7 @@ export function Ops() {
 
   return (
     <div className="container">
-      <div className="section-title">Video generation (LTX idle-state animation)</div>
+      <SectionTitle title="Video generation (LTX idle-state animation)" nav="Video generation" />
       <div className="stat-row">
         <div className="stat">
           <div className="label">Video generation</div>
@@ -196,7 +197,7 @@ export function Ops() {
         </div>
       </div>
 
-      <div className="section-title">fal keep-warm — last 24h</div>
+      <SectionTitle title="fal keep-warm — last 24h" nav="fal keep-warm" />
       <div className="stat-row">
         <div className="stat">
           <div className="label">Warmer</div>
@@ -224,7 +225,7 @@ export function Ops() {
         </div>
       </div>
 
-      <div className="section-title">Warmer vs real users — all fal connections (24h)</div>
+      <SectionTitle title="Warmer vs real users — all fal connections (24h)" nav="Warmer vs real users" />
       <div className="card" style={{ padding: 0 }}>
         <table>
           <thead>
@@ -259,7 +260,7 @@ export function Ops() {
         )}
       </div>
 
-      <div className="section-title">Controls</div>
+      <SectionTitle title="Controls" />
       <div className="card">
         {form ? (
           <div style={{ display: 'flex', gap: 20, alignItems: 'flex-end', flexWrap: 'wrap' }}>
@@ -324,8 +325,7 @@ export function Ops() {
         {error && <div style={{ color: '#ff7b72', marginTop: 8 }}>{error}</div>}
       </div>
 
-      <div className="section-title" style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
-        <span>Request history</span>
+      <SectionTitle title="Request history">
         <span>
           {(['all', 'user', 'warmer'] as SourceFilter[]).map((f) => (
             <button
@@ -361,7 +361,7 @@ export function Ops() {
             </button>
           ))}
         </span>
-      </div>
+      </SectionTitle>
       <ColdRateBars buckets={buckets} rangeSeconds={rangeSeconds} bucketSeconds={bucketSeconds} />
       <div className="card" style={{ padding: 0 }}>
         <table>

@@ -12,6 +12,7 @@ import { BrushTargets } from './pages/BrushTargets';
 import { Launch } from './pages/Launch';
 import { Fleet } from './pages/Fleet';
 import { Capacity } from './pages/Capacity';
+import { PageNav } from './PageNav';
 
 type AuthState = 'loading' | 'authed' | 'anon';
 
@@ -59,19 +60,26 @@ export function App() {
           Sign out
         </button>
       </div>
-      <Routes>
-        <Route path="/" element={<Users />} />
-        <Route path="/launch" element={<Launch />} />
-        <Route path="/fleet" element={<Fleet />} />
-        <Route path="/capacity" element={<Capacity />} />
-        <Route path="/users/:id" element={<UserDetail />} />
-        <Route path="/gallery" element={<Gallery />} />
-        <Route path="/gallery/:streamId" element={<Replay />} />
-        <Route path="/tests" element={<Tests />} />
-        <Route path="/brushes" element={<BrushTargets />} />
-        <Route path="/ops" element={<Ops />} />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
+      {/* PageNav mounts once here and discovers each page's <SectionTitle>
+          headings from the DOM — pages opt in just by using that component. */}
+      <div className="page-shell">
+        <PageNav />
+        <div className="page-main">
+          <Routes>
+            <Route path="/" element={<Users />} />
+            <Route path="/launch" element={<Launch />} />
+            <Route path="/fleet" element={<Fleet />} />
+            <Route path="/capacity" element={<Capacity />} />
+            <Route path="/users/:id" element={<UserDetail />} />
+            <Route path="/gallery" element={<Gallery />} />
+            <Route path="/gallery/:streamId" element={<Replay />} />
+            <Route path="/tests" element={<Tests />} />
+            <Route path="/brushes" element={<BrushTargets />} />
+            <Route path="/ops" element={<Ops />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </div>
+      </div>
     </>
   );
 }

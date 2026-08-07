@@ -84,6 +84,40 @@ tr:hover td { background: var(--panel-2); }
 .stat .sub { color: var(--muted); font-size: 12px; margin-top: 4px; }
 
 .section-title { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 28px 0 12px; }
+/* Anchor targets for the page nav: keep a scrolled-to heading clear of the top
+   edge without every caller doing offset math. */
+.section-title[data-toc-title] { scroll-margin-top: 20px; }
+
+/* ── Sticky per-page table of contents (PageNav.tsx) ───────────────────────
+   The shell wraps the whole routed page so the rail is a flow sibling of the
+   content, not an overlay — the .container keeps its own max-width and simply
+   centers in what's left. Below 1180px there isn't room for both, so the rail
+   drops out entirely and pages render exactly as they did before it existed. */
+.page-shell { display: flex; align-items: flex-start; justify-content: center; }
+.page-main { flex: 1; min-width: 0; }
+.page-nav {
+  position: sticky; top: 16px; align-self: flex-start;
+  flex: 0 0 200px; width: 200px;
+  padding: 24px 12px 24px 20px;
+  max-height: calc(100vh - 32px); overflow-y: auto;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.page-nav-head {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .05em;
+  color: var(--muted); opacity: .7; margin-bottom: 6px; padding-left: 10px;
+}
+.page-nav-item {
+  background: none; border: none; border-left: 2px solid transparent;
+  color: var(--muted); font-weight: 500; font-size: 12px; line-height: 1.35;
+  text-align: left; padding: 5px 8px 5px 10px; border-radius: 0 6px 6px 0;
+  cursor: pointer; text-transform: none; letter-spacing: 0;
+  /* Section titles are full sentences ("Every GPU hunt (7d) — step-by-step,
+     failures included"); two lines, then ellipsis. */
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.page-nav-item:hover { color: var(--text); background: var(--panel); filter: none; }
+.page-nav-item.active { color: var(--text); border-left-color: var(--accent); background: var(--panel); }
+@media (max-width: 1180px) { .page-nav { display: none; } }
 
 /* Timeline grouped by app session (UserDetail) */
 .session-group {

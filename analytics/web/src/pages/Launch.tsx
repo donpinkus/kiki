@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { getLaunch, type LaunchData, type LaunchDaily } from '../api';
 import { DailyBars } from '../ActivityBars';
+import { SectionTitle } from '../PageNav';
 
 const fmtMsShort = (ms: number) => (ms < 10_000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms / 1000)}s`);
 const fmtAgo = (iso: string) => {
@@ -64,20 +65,23 @@ export function Launch() {
 
   return (
     <div className="container">
-      <div className="section-title" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <span>Launch — at a glance</span>
-        <label
-          title="Filters users.is_test_account out of every number on this page"
-          style={{ display: 'flex', gap: 6, alignItems: 'center', cursor: 'pointer', textTransform: 'none', letterSpacing: 0 }}
-        >
-          <input
-            type="checkbox"
-            checked={excludeTest}
-            onChange={(e) => setExcludeTest(e.target.checked)}
-          />
-          Exclude test accounts
-        </label>
-      </div>
+      <SectionTitle
+        title="Launch — at a glance"
+        nav="At a glance"
+        right={
+          <label
+            title="Filters users.is_test_account out of every number on this page"
+            style={{ display: 'flex', gap: 6, alignItems: 'center', cursor: 'pointer', textTransform: 'none', letterSpacing: 0 }}
+          >
+            <input
+              type="checkbox"
+              checked={excludeTest}
+              onChange={(e) => setExcludeTest(e.target.checked)}
+            />
+            Exclude test accounts
+          </label>
+        }
+      />
       <div className="stat-row">
         <div className="stat">
           <div className="label">Active today</div>
@@ -107,7 +111,7 @@ export function Launch() {
       </div>
 
 
-      <div className="section-title">H100 provisioning — all stats out of total sessions (7d)</div>
+      <SectionTitle title="H100 provisioning — all stats out of total sessions (7d)" nav="H100 provisioning" />
       <div className="stat-row">
         {(() => {
           const rows = data.providers ?? [];
@@ -163,7 +167,7 @@ export function Launch() {
 
       {data.h100_waterfall && data.h100_waterfall.sessions > 0 && (
         <>
-          <div className="section-title">H100 waterfall — how far sessions got (7d)</div>
+          <SectionTitle title="H100 waterfall — how far sessions got (7d)" nav="H100 waterfall" />
           <div className="card">
             {(() => {
               const w = data.h100_waterfall;
@@ -331,7 +335,7 @@ export function Launch() {
 
       {data.drawing_funnel && data.drawing_funnel.opened > 0 && (
         <>
-          <div className="section-title">Drawing waterfall — engagement per canvas session (7d)</div>
+          <SectionTitle title="Drawing waterfall — engagement per canvas session (7d)" nav="Drawing waterfall" />
           <div className="card">
             {(() => {
               const f = data.drawing_funnel;
@@ -445,7 +449,7 @@ export function Launch() {
         </>
       )}
 
-      <div className="section-title">Trends (30 days)</div>
+      <SectionTitle title="Trends (30 days)" nav="Trends" />
       <div className="launch-grid">
         <DailyBars title="New users" byDay={seriesMap(data.daily, 'new_users')} />
         <DailyBars title="Daily active users" byDay={seriesMap(data.daily, 'dau')} />
@@ -457,7 +461,7 @@ export function Launch() {
         <DailyBars title="Dead streams (0 frames)" byDay={seriesMap(data.daily, 'dead_streams')} color="#ff7b72" />
       </div>
 
-      <div className="section-title">Activation funnel (all-time)</div>
+      <SectionTitle title="Activation funnel (all-time)" nav="Activation funnel" />
       <div className="card">
         {funnelSteps.map((s, i) => (
           <div key={s.label} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '6px 0' }}>
@@ -483,7 +487,7 @@ export function Launch() {
         </div>
       </div>
 
-      <div className="section-title">Retention by signup week</div>
+      <SectionTitle title="Retention by signup week" nav="Retention" />
       <div className="card" style={{ padding: 0 }}>
         <table>
           <thead>
@@ -507,7 +511,7 @@ export function Launch() {
         </table>
       </div>
 
-      <div className="section-title">Error triage — affected users (7d)</div>
+      <SectionTitle title="Error triage — affected users (7d)" nav="Error triage" />
       <div className="card" style={{ padding: 0 }}>
         <table>
           <thead>
@@ -534,7 +538,7 @@ export function Launch() {
         )}
       </div>
 
-      <div className="section-title">Most recent error events</div>
+      <SectionTitle title="Most recent error events" nav="Recent errors" />
       <div className="events card">
         {data.recentErrors.map((e, i) => (
           <div
