@@ -23,6 +23,15 @@ struct DiskColorPicker: View {
     private let indicatorSize: CGFloat = 26
     private let sbImageSize: Int = 400
 
+    /// Disk→square coordinates are scaled by this factor, then clamped to
+    /// [-1,1]. Without it the square's corners (true white, full saturation)
+    /// map to single points on the rim and are unselectable; overscanning
+    /// pulls them inward into visible, touchable regions (~21° of rim each
+    /// at 1.25). The bitmap, the drag math, and the indicator all share the
+    /// same formula, so the pixel shown under the indicator IS the selected
+    /// color — no snapping.
+    private let gamutOverscan: CGFloat = 1.25
+
     // MARK: - Body
 
     var body: some View {
@@ -108,8 +117,8 @@ struct DiskColorPicker: View {
 
     private var sbIndicator: some View {
         let r = innerDiameter / 2
-        let a = 2 * saturation - 1
-        let b = 1 - 2 * brightness
+        let a = (2 * saturation - 1) / gamutOverscan
+        let b = (1 - 2 * brightness) / gamutOverscan
         let (dx, dy) = squareToDisk(a, b)
 
         return Circle()
@@ -154,8 +163,8 @@ struct DiskColorPicker: View {
             if nd > 1 { nx /= nd; ny /= nd }
             // FG-squircle: disk → square
             let (a, b) = diskToSquare(nx, ny)
-            saturation = max(0, min(1, (a + 1) / 2))
-            brightness = max(0, min(1, (1 - b) / 2))
+            saturation = max(0, min(1, (a * gamutOverscan + 1) / 2))
+            brightness = max(0, min(1, (1 - b * gamutOverscan) / 2))
             commitColor()
         }
     }
@@ -185,8 +194,8 @@ struct DiskColorPicker: View {
 
                 // FG-squircle: disk → square
                 let (a, b) = diskToSquare(nx, ny)
-                let s = (a + 1) / 2
-                let brt = (1 - b) / 2
+                let s = max(0, min(1, (a * gamutOverscan + 1) / 2))
+                let brt = max(0, min(1, (1 - b * gamutOverscan) / 2))
 
                 let (r, g, bl) = hsbToRGB(h: hue, s: s, b: brt)
                 pixels[offset] = r

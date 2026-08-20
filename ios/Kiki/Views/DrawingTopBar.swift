@@ -206,6 +206,14 @@ struct DrawingTopBar: View {
         .popover(isPresented: $showColorPicker) {
             DiskColorPicker(color: $coordinator.currentColor)
         }
+        // Simulator dev automation: the UI bridge can't tap the swatch, so it
+        // raises this coordinator flag instead (mirrors devShowStatusDetails).
+        .onChange(of: coordinator.devShowColorPicker) { _, requested in
+            if requested {
+                showColorPicker = true
+                coordinator.devShowColorPicker = false
+            }
+        }
         .frame(width: 36, height: 36)
     }
 

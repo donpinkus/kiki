@@ -2237,6 +2237,8 @@ final class AppCoordinator {
             if currentScreen == .gallery { openMostRecentDrawing() }
         case "statusDetails":
             devShowStatusDetails = true
+        case "colorPicker":
+            devShowColorPicker = true
         case let a where a.hasPrefix("brushStudio"):
             // "brushStudio" or "brushStudio:<StudioSection rawValue>" (e.g.
             // "brushStudio:Apple Pencil") to open on a specific tab.
@@ -2389,6 +2391,7 @@ final class AppCoordinator {
             discardAIEdit()
         case "dismiss":
             devShowStatusDetails = false
+            devShowColorPicker = false
             if currentScreen == .animate { closeAnimate() }
         default:
             streamLog.warning("[dev] unknown UI action: \(action)")
@@ -2398,6 +2401,8 @@ final class AppCoordinator {
     /// Dev-automation binding for the status badge popover (normally
     /// @State-local to the badge; the sim bridge needs to open it).
     var devShowStatusDetails = false
+    /// Dev-automation binding for the color-swatch picker popover.
+    var devShowColorPicker = false
     /// Dev-action seam: section the next Brush Studio open should land on.
     var devStudioSection: StudioSection?
 
