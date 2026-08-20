@@ -15,6 +15,16 @@ public final class StrokeRecognizer {
 
     public var seeds: RecognizerSeeds
 
+    /// Screen points per input point — the on-screen magnification of the
+    /// coordinate space the caller feeds positions in. The canvas feeds
+    /// zoom-invariant canvas points (zoom is a transform above the view), so
+    /// it sets this to the current zoom at stroke start. Screen-space seeds
+    /// (`holdJitterTolerance`, `minSnapBBoxDiagonal`) are converted through
+    /// it: hand tremor and "too small to snap" are physiological, on-screen
+    /// quantities and must not scale with zoom. 1 = input space IS screen
+    /// space (tests, default).
+    public var pointScale: CGFloat = 1
+
     // MARK: - State
 
     /// All input points fed during the current stroke (canvas space).
@@ -176,7 +186,13 @@ public final class StrokeRecognizer {
         let dx = maxX - minX
         let dy = maxY - minY
         let bboxDiagonal = sqrt(dx * dx + dy * dy)
-        return bboxDiagonal <= seeds.holdJitterTolerance
+        return bboxDiagonal * safePointScale <= seeds.holdJitterTolerance
+    }
+
+    /// `pointScale` guarded against degenerate values (a zero/negative scale
+    /// would make every stroke "holding" and defeat the size gate).
+    private var safePointScale: CGFloat {
+        pointScale.isFinite && pointScale > 0.0001 ? pointScale : 1
     }
 
     // MARK: - Classification core
@@ -186,6 +202,17 @@ public final class StrokeRecognizer {
 
         guard let (classification, bbox) = Preprocessing.process(positions, seeds: seeds) else {
             cachedVerdict = .abstain(.tooShort)
+            cachedScore = 0
+            lastFeatureSnapshot = nil
+            return
+        }
+
+        // On-screen size gate: a stroke only a few multiples of the hold
+        // jitter tolerance can't distinguish "holding" from careful
+        // small-scale drawing — tiny detail marks never snap. Checked before
+        // the fits (cheap exit; this runs at speculativeFitHz mid-stroke).
+        if bbox * safePointScale < seeds.minSnapBBoxDiagonal {
+            cachedVerdict = .abstain(.strokeTooSmall)
             cachedScore = 0
             lastFeatureSnapshot = nil
             return

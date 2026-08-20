@@ -154,6 +154,10 @@ public enum AbstainReason: String, Equatable, Sendable, Codable {
     /// Arc score won the line-vs-arc contest but coverage was below the
     /// `arcCoverageMin` threshold (would look like a barely-visible bow).
     case arcTooShallow
+    /// Stroke's on-screen bounding-box diagonal is below
+    /// `minSnapBBoxDiagonal`. At that scale a hold is indistinguishable from
+    /// careful small-scale drawing, so tiny detail marks never snap.
+    case strokeTooSmall
 }
 
 // MARK: - Configuration
@@ -176,9 +180,12 @@ public struct RecognizerSeeds: Equatable, Sendable {
     // Hold detection
     public var holdStabilityWindow: TimeInterval = 0.400
     public var holdCommitDelay: TimeInterval = 0.450
-    /// Bounding-box diagonal (pt) of recent positions that still counts as
-    /// "stationary." Tolerates hand tremor and Apple Pencil position noise.
-    /// Per-sample velocity is too noisy at 240 Hz: a 1pt jitter / (1/240s) =
+    /// Bounding-box diagonal of recent positions that still counts as
+    /// "stationary," in SCREEN points (divided by the recognizer's
+    /// `pointScale` to get the canvas-space comparison — hand tremor is a
+    /// physiological, on-screen quantity, so it must not grow with zoom).
+    /// Tolerates hand tremor and Apple Pencil position noise. Per-sample
+    /// velocity is too noisy at 240 Hz: a 1pt jitter / (1/240s) =
     /// 240 pt/s, which would blow past any reasonable velocity threshold.
     /// Position-spread is the right framing.
     ///
@@ -187,7 +194,15 @@ public struct RecognizerSeeds: Equatable, Sendable {
     /// (a pen moving > ~20pt/s covers > 8pt in 400ms). Briefly inflated to
     /// 20 during an early diagnostic, which turned out to mask a separate
     /// scoring bug rather than a hold-detection problem.
-    public var holdJitterTolerance: CGFloat = 8      // pt — bbox diagonal in the window
+    public var holdJitterTolerance: CGFloat = 8      // SCREEN pt — bbox diagonal in the window
+    /// Minimum stroke bounding-box diagonal, in SCREEN points, for any snap
+    /// to be offered. Below this the whole stroke is only a few multiples of
+    /// `holdJitterTolerance`, so "holding" cannot be told apart from drawing
+    /// carefully at small scale — tiny detail marks (little squiggles, dots,
+    /// hatching) were surprise-snapping to lines/arcs. 48pt ≈ 9mm on iPad:
+    /// comfortably above detail-mark scale, and a sub-9mm line doesn't
+    /// benefit from correction anyway (raw stroke already reads straight).
+    public var minSnapBBoxDiagonal: CGFloat = 48     // SCREEN pt
     public var previewMoveCancelDist: CGFloat = 6    // pt — once preview is up, motion past this cancels
 
     // Pipeline

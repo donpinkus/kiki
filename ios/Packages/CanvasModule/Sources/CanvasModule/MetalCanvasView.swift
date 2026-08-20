@@ -699,7 +699,9 @@ public final class MetalCanvasView: UIView {
             }
             // QuickShape: reset recognizer state for the new stroke (dry brush only).
             if isQuickShapeEnabled && !config.wetEnabled {
-                ensureRecognizer().reset()
+                let r = ensureRecognizer()
+                r.reset()
+                r.pointScale = onScreenPointScale()
                 snapState = .drawing
                 qsLogTickCounter = 0
                 lastStrokeWasSnap = false
@@ -1862,6 +1864,20 @@ public final class MetalCanvasView: UIView {
         let r = StrokeRecognizer()
         recognizer = r
         return r
+    }
+
+    /// Screen points per canvas-view point. Touch locations come from
+    /// `location(in: self)`, which is zoom-invariant (the container applies
+    /// pan/zoom/rotate as a transform on `transformView` above this view), so
+    /// the recognizer's screen-space thresholds (hold jitter tolerance,
+    /// min-snap size) need the live zoom factor. Measured as the on-screen
+    /// length of a unit vector through the full view→window transform chain
+    /// (rotation preserves length, so this isolates scale).
+    private func onScreenPointScale() -> CGFloat {
+        let origin = convert(CGPoint.zero, to: nil)
+        let unit = convert(CGPoint(x: 1, y: 0), to: nil)
+        let scale = hypot(unit.x - origin.x, unit.y - origin.y)
+        return scale.isFinite && scale > 0.0001 ? scale : 1
     }
 
     private func feedRecognizer(touch: UITouch, event: UIEvent?) {

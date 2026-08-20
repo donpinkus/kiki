@@ -170,8 +170,9 @@ final class StrokeRecognizerTests: XCTestCase {
     // branch they correctly snap to .arc; see test_clean90DegArc_snapsToArc
     // and test_halfCircleArc_snapsToArc.)
 
-    func test_tinyDot_abstainsTooShort() {
-        // Path length < minPathLength = 16 pt
+    func test_tinyDot_abstainsStrokeTooSmall() {
+        // Well under minSnapBBoxDiagonal — the size gate fires before the
+        // pathLength floor even gets a look.
         let r = StrokeRecognizer()
         let pts = straightLine(from: CGPoint(x: 100, y: 100),
                                to: CGPoint(x: 105, y: 100),
@@ -179,9 +180,63 @@ final class StrokeRecognizerTests: XCTestCase {
         for p in points(pts) { r.feed(point: p) }
         let verdict = r.finalize()
         if case .abstain(let reason) = verdict {
-            XCTAssertEqual(reason, .tooShort)
+            XCTAssertEqual(reason, .strokeTooSmall)
         } else {
-            XCTFail("Expected .abstain(.tooShort), got \(verdict)")
+            XCTFail("Expected .abstain(.strokeTooSmall), got \(verdict)")
+        }
+    }
+
+    // MARK: - On-screen size gate (tiny detail marks never snap)
+
+    func test_smallDetailStroke_abstainsStrokeTooSmall() {
+        // A clean 30pt line — would score high as a line, but at detail scale
+        // (< minSnapBBoxDiagonal on screen) it must never snap: at that size
+        // "holding" is indistinguishable from careful small-scale drawing.
+        let r = StrokeRecognizer()
+        let pts = straightLine(from: CGPoint(x: 100, y: 100),
+                               to: CGPoint(x: 130, y: 100),
+                               n: 30, noise: 0.5)
+        for p in points(pts) { r.feed(point: p) }
+        let verdict = r.finalize()
+        if case .abstain(let reason) = verdict {
+            XCTAssertEqual(reason, .strokeTooSmall)
+        } else {
+            XCTFail("Expected .abstain(.strokeTooSmall), got \(verdict)")
+        }
+    }
+
+    func test_smallCanvasStroke_zoomedIn_snapsToLine() {
+        // Same 30-canvas-pt line drawn at 4× zoom = 120 screen pt: a big,
+        // deliberate on-screen stroke that happens to land on a zoomed canvas.
+        // The gate works in screen space, so this snaps.
+        let r = StrokeRecognizer()
+        r.pointScale = 4
+        let pts = straightLine(from: CGPoint(x: 100, y: 100),
+                               to: CGPoint(x: 130, y: 100),
+                               n: 30, noise: 0.5)
+        for p in points(pts) { r.feed(point: p) }
+        let verdict = r.finalize()
+        if case .line = verdict {
+            // pass
+        } else {
+            XCTFail("Expected .line at 4x zoom, got \(verdict)")
+        }
+    }
+
+    func test_mediumCanvasStroke_zoomedOut_abstainsStrokeTooSmall() {
+        // An 80-canvas-pt line at 0.5× zoom is only 40 screen pt — detail
+        // scale from the hand's point of view, so it must not snap.
+        let r = StrokeRecognizer()
+        r.pointScale = 0.5
+        let pts = straightLine(from: CGPoint(x: 100, y: 100),
+                               to: CGPoint(x: 180, y: 100),
+                               n: 40, noise: 0.5)
+        for p in points(pts) { r.feed(point: p) }
+        let verdict = r.finalize()
+        if case .abstain(let reason) = verdict {
+            XCTAssertEqual(reason, .strokeTooSmall)
+        } else {
+            XCTFail("Expected .abstain(.strokeTooSmall), got \(verdict)")
         }
     }
 
@@ -334,6 +389,36 @@ final class StrokeRecognizerTests: XCTestCase {
         for p in allInputs { r.feed(point: p) }
         XCTAssertFalse(r.isHolding,
             "10pt drift is not 'holding' — user is moving the pen, just slowly")
+    }
+
+    func test_isHolding_toleranceIsScreenSpace_notCanvasSpace() {
+        // ±2.5pt canvas jitter (~5pt bbox) counts as holding at 1× zoom, but
+        // at 4× zoom it's ~20 SCREEN pt of hand motion — active drawing, not
+        // a hold. The tolerance is physiological and must not scale with zoom.
+        func recognizer(pointScale: CGFloat) -> StrokeRecognizer {
+            let r = StrokeRecognizer()
+            r.pointScale = pointScale
+            let drawingPts = straightLine(from: CGPoint(x: 100, y: 100),
+                                          to: CGPoint(x: 400, y: 100), n: 30)
+            var allInputs = points(drawingPts)
+            let lastTime = allInputs.last!.timestamp
+            let lastPos = allInputs.last!.position
+            var rng = SeededRNG(seed: 7)
+            for i in 1...50 {
+                let jitterX = (rng.nextUnit() - 0.5) * 5  // ±2.5 canvas pt
+                let jitterY = (rng.nextUnit() - 0.5) * 5
+                allInputs.append(RecognizerInputPoint(
+                    position: CGPoint(x: lastPos.x + jitterX, y: lastPos.y + jitterY),
+                    timestamp: lastTime + TimeInterval(i) * 0.008
+                ))
+            }
+            for p in allInputs { r.feed(point: p) }
+            return r
+        }
+        XCTAssertTrue(recognizer(pointScale: 1).isHolding,
+            "±2.5pt tremor at 1× zoom is a hold")
+        XCTAssertFalse(recognizer(pointScale: 4).isHolding,
+            "the same canvas-space tremor at 4× zoom is ~20 screen pt of motion — not a hold")
     }
 
     // MARK: - Closed-shape (ellipse / circle) tests
