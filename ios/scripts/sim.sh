@@ -37,7 +37,10 @@ case "$cmd" in
     # reachable locally, so the script can't auto-pick one under `railway run`.
     args=("${@:2}")
     [[ ${#args[@]} -eq 0 ]] && args=(--user 92ad1c16-c5b7-4e54-bac8-8985574f9036)
-    (cd "$REPO_DIR/backend" && railway run npx tsx scripts/mint-dev-token.ts "${args[@]}") > "$TOKENS"
+    # Write to a temp file first so a failed mint (railway logged out, etc.)
+    # can't truncate existing good tokens.
+    (cd "$REPO_DIR/backend" && railway run npx tsx scripts/mint-dev-token.ts "${args[@]}") > "$TOKENS.tmp"
+    mv "$TOKENS.tmp" "$TOKENS"
     echo "minted for user $(token userId) → $TOKENS"
     ;;
   boot)

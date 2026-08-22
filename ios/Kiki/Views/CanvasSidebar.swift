@@ -4,18 +4,21 @@ import CanvasModule
 struct CanvasSidebar: View {
     @Environment(AppCoordinator.self) private var coordinator
     @State private var isDraggingSize = false
+    @State private var isDraggingOpacity = false
 
     private let widthRange = BrushConfig.widthRange
+    // Matches the Brush Studio Opacity row — the 0.05 floor keeps strokes visible.
+    private let opacityRange: ClosedRange<CGFloat> = 0.05...1.0
 
     var body: some View {
         @Bindable var coordinator = coordinator
 
         VStack(spacing: 12) {
             // Vertical size slider
-            VerticalSizeSlider(value: $coordinator.toolSize, range: widthRange) { editing in
+            VerticalToolSlider(value: $coordinator.toolSize, range: widthRange, logScale: true) { editing in
                 isDraggingSize = editing
             }
-            .frame(width: 30, height: 180)
+            .frame(width: 30, height: 140)
             .overlay(alignment: .trailing) {
                 if isDraggingSize {
                     // Show the configured size at rest (force=1, perp tilt) so the
@@ -39,11 +42,10 @@ struct CanvasSidebar: View {
                 }
             }
 
-            Divider().frame(width: 24)
-
-            // All brush settings live in the full-page Brush Studio (fullScreenCover owned
-            // by DrawingView); the sidebar keeps only Size for mid-drawing tweaks. Brush
-            // tool only.
+            // Brush Studio button sits BETWEEN the two sliders (Procreate's modify-button
+            // placement) — it also visually separates the tracks so they don't read as one
+            // long slider. All other brush settings live in the full-page Brush Studio
+            // (fullScreenCover owned by DrawingView). Brush tool only.
             Button {
                 coordinator.showBrushStudio = true
             } label: {
@@ -54,6 +56,33 @@ struct CanvasSidebar: View {
             }
             .tint(Color.primary)
             .disabled(coordinator.currentTool != .brush)
+
+            // Vertical opacity slider (Procreate-style, below Size). Brush only —
+            // the eraser/select paths don't consume toolOpacity (see applyTool).
+            VerticalToolSlider(value: $coordinator.toolOpacity, range: opacityRange, logScale: false) { editing in
+                isDraggingOpacity = editing
+            }
+            .frame(width: 30, height: 140)
+            .overlay(alignment: .trailing) {
+                if isDraggingOpacity {
+                    VStack(spacing: 4) {
+                        Text("Opacity \(Int((coordinator.toolOpacity * 100).rounded()))%")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .fixedSize()
+                        Circle()
+                            .fill(.white.opacity(coordinator.toolOpacity))
+                            .overlay(Circle().stroke(.primary, lineWidth: 1))
+                            .frame(width: 32, height: 32)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+                    .offset(x: 16 + 28)
+                }
+            }
+            .disabled(coordinator.currentTool != .brush)
+            .opacity(coordinator.currentTool == .brush ? 1 : 0.35)
 
             Divider().frame(width: 24)
 
@@ -112,16 +141,18 @@ struct CanvasSidebar: View {
     }
 }
 
-/// Vertical brush-size slider with a logarithmic scale and absolute tracking.
+/// Vertical tool slider with absolute tracking and a linear or logarithmic scale.
 ///
-/// - Logarithmic: brush size is perceived multiplicatively (3→4 px is a big jump, 80→81 is
-///   invisible), so equal finger travel maps to equal *ratio* change. The bottom half of the
-///   track covers the small sizes finely instead of racing through them.
+/// - Logarithmic (Size): brush size is perceived multiplicatively (3→4 px is a big jump,
+///   80→81 is invisible), so equal finger travel maps to equal *ratio* change. The bottom
+///   half of the track covers the small sizes finely instead of racing through them.
+///   Linear (Opacity): alpha is perceived roughly linearly.
 /// - Absolute tracking: the thumb jumps to the touch on press and follows the finger — the
 ///   whole strip is touchable, no need to land on the thumb.
-private struct VerticalSizeSlider: View {
+private struct VerticalToolSlider: View {
     @Binding var value: CGFloat
     let range: ClosedRange<CGFloat>
+    let logScale: Bool
     let onEditingChanged: (Bool) -> Void
 
     @State private var isEditing = false
@@ -129,12 +160,20 @@ private struct VerticalSizeSlider: View {
     private var logMin: CGFloat { log(range.lowerBound) }
     private var logMax: CGFloat { log(range.upperBound) }
 
-    private func t(for size: CGFloat) -> CGFloat {
-        (log(min(max(size, range.lowerBound), range.upperBound)) - logMin) / (logMax - logMin)
+    private func t(for value: CGFloat) -> CGFloat {
+        let clamped = min(max(value, range.lowerBound), range.upperBound)
+        if logScale {
+            return (log(clamped) - logMin) / (logMax - logMin)
+        }
+        return (clamped - range.lowerBound) / (range.upperBound - range.lowerBound)
     }
 
-    private func size(at t: CGFloat) -> CGFloat {
-        exp(logMin + min(max(t, 0), 1) * (logMax - logMin))
+    private func sliderValue(at t: CGFloat) -> CGFloat {
+        let clamped = min(max(t, 0), 1)
+        if logScale {
+            return exp(logMin + clamped * (logMax - logMin))
+        }
+        return range.lowerBound + clamped * (range.upperBound - range.lowerBound)
     }
 
     var body: some View {
@@ -173,7 +212,7 @@ private struct VerticalSizeSlider: View {
                             onEditingChanged(true)
                         }
                         let t = 1 - (gesture.location.y - thumbSize / 2) / max(height - thumbSize, 1)
-                        value = size(at: t)
+                        value = sliderValue(at: t)
                     }
                     .onEnded { _ in
                         isEditing = false
