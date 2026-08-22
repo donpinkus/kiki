@@ -3,6 +3,17 @@ import UIKit
 
 /// Procreate-style disk color picker with an outer hue ring and inner
 /// saturation/brightness circle.
+///
+/// The inner disk is the classic SB square (saturation left→right,
+/// brightness top→bottom) warped to a circle by the FG-squircle mapping,
+/// then scaled by `gamutOverscan` + clamped so the square's corners — true
+/// white and the fully saturated hue, single points on the rim at 1.0 —
+/// become touchable regions. Invariant to preserve when editing: the
+/// bitmap (`generateSBImage`), the drag math (`handleDrag`), and the
+/// indicator inverse all apply the SAME overscan formula, so the pixel
+/// under the indicator is always exactly the selected color. Any "help"
+/// layered on top of that mapping (snapping, magnetism) breaks WYSIWYG —
+/// rejected by design (2026-08-19); tune `gamutOverscan` instead.
 struct DiskColorPicker: View {
 
     @Binding var color: Color
@@ -14,6 +25,15 @@ struct DiskColorPicker: View {
     @State private var isDraggingHue = false
     @State private var isDraggingSB = false
     @State private var sbImage: UIImage?
+
+    /// Live touch point in unit-disk coords. Inside the overscan's clamped
+    /// rim bands many positions display the same color, and the canonical
+    /// inverse mapping stops at the band's inner edge — so a finger dragged
+    /// to the rim would watch the dot stall ~20pt behind it. While dragging,
+    /// the dot follows the finger instead (every point in a band shows
+    /// exactly the selected color, so it stays truthful); the inverse
+    /// mapping is only the fallback for externally-set colors.
+    @State private var sbDragPos: CGPoint?
 
     // MARK: - Layout Constants
 
@@ -117,9 +137,14 @@ struct DiskColorPicker: View {
 
     private var sbIndicator: some View {
         let r = innerDiameter / 2
-        let a = (2 * saturation - 1) / gamutOverscan
-        let b = (1 - 2 * brightness) / gamutOverscan
-        let (dx, dy) = squareToDisk(a, b)
+        let dx: CGFloat, dy: CGFloat
+        if let pos = sbDragPos {
+            (dx, dy) = (pos.x, pos.y)
+        } else {
+            let a = (2 * saturation - 1) / gamutOverscan
+            let b = (1 - 2 * brightness) / gamutOverscan
+            (dx, dy) = squareToDisk(a, b)
+        }
 
         return Circle()
             .fill(Color(hue: hue, saturation: saturation, brightness: brightness))
@@ -161,6 +186,7 @@ struct DiskColorPicker: View {
             var ny = dy / r
             let nd = sqrt(nx * nx + ny * ny)
             if nd > 1 { nx /= nd; ny /= nd }
+            sbDragPos = CGPoint(x: nx, y: ny)
             // FG-squircle: disk → square
             let (a, b) = diskToSquare(nx, ny)
             saturation = max(0, min(1, (a * gamutOverscan + 1) / 2))
@@ -276,5 +302,6 @@ struct DiskColorPicker: View {
         hue = h
         saturation = s
         brightness = b
+        sbDragPos = nil
     }
 }
