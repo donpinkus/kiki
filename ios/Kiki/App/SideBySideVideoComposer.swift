@@ -81,9 +81,8 @@ enum SideBySideVideoComposer {
         speed: ReplaySpeed = .multiplier(1),
         side: Int = 768
     ) async throws -> BuiltReplay {
-        composerLog.info("REPLAY build start: composer=v3-no-anim segments=\(canvasSegments.count, privacy: .public) layout=\(layout.rawValue, privacy: .public)")
         guard !canvasSegments.isEmpty, canvasSegments.count == generatedSegments.count else {
-            composerLog.error("REPLAY build: missing/unbalanced segments canvas=\(canvasSegments.count) generated=\(generatedSegments.count)")
+            composerLog.error("Replay build: missing/unbalanced segments canvas=\(canvasSegments.count) generated=\(generatedSegments.count)")
             throw ComposeError.missingTrack
         }
 
@@ -115,10 +114,9 @@ enum SideBySideVideoComposer {
             lastCanvasTrack = canvasTrack
             lastGeneratedTrack = generatedTrack
             lastSegmentDuration = dur
-            composerLog.info("REPLAY build: inserted \(canvasURL.lastPathComponent, privacy: .public) dur=\(dur.seconds, privacy: .public)s cursor=\(cursor.seconds, privacy: .public)s")
         }
         guard cursor > .zero else {
-            composerLog.error("REPLAY build: zero usable content after stitch")
+            composerLog.error("Replay build: zero usable content after stitch")
             throw ComposeError.missingTrack
         }
         let baseDuration = cursor
@@ -175,17 +173,16 @@ enum SideBySideVideoComposer {
                     }
                     let clipRange = try await clipTrack.load(.timeRange)
                     try track.insertTimeRange(clipRange, of: clipTrack, at: baseDuration)
-                    composerLog.info("REPLAY build: hold-\(name, privacy: .public) inserted dur=\(clipRange.duration.seconds, privacy: .public)s at=\(baseDuration.seconds, privacy: .public)s")
                     return clipRange.duration
                 }
 
                 tailDuration = try await insertHoldClip(on: canvasComp, lastFrameOf: lastCanvasURL, seconds: holdSeconds, name: "canvas")
                 let generatedTail = try await insertHoldClip(on: generatedComp, lastFrameOf: lastGeneratedURL, seconds: holdSeconds, name: "generated")
                 if generatedTail != tailDuration {
-                    composerLog.error("REPLAY build: TAIL MISMATCH canvas=\(tailDuration.seconds) generated=\(generatedTail.seconds)")
+                    composerLog.error("Replay build: tail mismatch canvas=\(tailDuration.seconds) generated=\(generatedTail.seconds)")
                 }
             } catch {
-                composerLog.error("REPLAY build: tail failed, dropping tail: \(String(describing: error), privacy: .public)")
+                composerLog.error("Replay build: tail failed, dropping tail: \(String(describing: error), privacy: .public)")
                 tailDuration = .zero
             }
         }
@@ -212,8 +209,8 @@ enum SideBySideVideoComposer {
         let (canvasTransform, generatedTransform) = transforms(for: layout, source: src, render: renderSize)
 
         let canvasInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: canvasComp)
-        canvasInstruction.setTransform(canvasTransform, at: .zero)
         let generatedInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: generatedComp)
+        canvasInstruction.setTransform(canvasTransform, at: .zero)
         generatedInstruction.setTransform(generatedTransform, at: .zero)
 
         let instruction = AVMutableVideoCompositionInstruction()
@@ -225,11 +222,12 @@ enum SideBySideVideoComposer {
         videoComposition.frameDuration = CMTime(value: 1, timescale: 30)
         videoComposition.instructions = [instruction]
 
+        // Track/instruction length mismatch makes the RT compositor render
+        // black — keep this guard permanently.
         let canvasEnd = canvasComp.timeRange.end.seconds
         let generatedEnd = generatedComp.timeRange.end.seconds
-        composerLog.info("REPLAY build done: content=\(contentDuration.seconds, privacy: .public)s tail=\(tailDuration.seconds, privacy: .public)s final=\(finalDuration.seconds, privacy: .public)s compDur=\(composition.duration.seconds, privacy: .public)s canvasTrackEnd=\(canvasEnd, privacy: .public)s generatedTrackEnd=\(generatedEnd, privacy: .public)s")
         if abs(canvasEnd - generatedEnd) > 0.001 || abs(canvasEnd - finalDuration.seconds) > 0.001 {
-            composerLog.error("REPLAY build: TRACK/INSTRUCTION LENGTH MISMATCH — RT compositor will render black")
+            composerLog.error("Replay build: track/instruction length mismatch — RT compositor will render black (canvas=\(canvasEnd) generated=\(generatedEnd) final=\(finalDuration.seconds))")
         }
 
         return BuiltReplay(composition: composition, videoComposition: videoComposition, layout: layout)
@@ -239,6 +237,15 @@ enum SideBySideVideoComposer {
     /// the watermark when requested. Mutates `built.videoComposition` — pass a
     /// fresh `build(...)` result, never one currently attached to a player.
     static func export(_ built: BuiltReplay, outputURL: URL, watermark: Bool) async throws {
+        // Simulator: never attach the CA watermark tool. The simulator's CA
+        // export renderer (OGL + IOSurface) trips an xpc_shmem malloc-region
+        // trap inside AVVideoCompositionCoreAnimationTool rendering and kills
+        // the whole app (EXC_BREAKPOINT in _xpc_api_misuse; deterministic on
+        // replay-modal open via the eager export, 2026-08-22). Device uses the
+        // Metal renderer and is fine — sim exports just skip the watermark.
+        #if targetEnvironment(simulator)
+        let watermark = false
+        #endif
         if watermark {
             built.videoComposition.animationTool = watermarkTool(
                 renderSize: built.videoComposition.renderSize,

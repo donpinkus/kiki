@@ -63,15 +63,21 @@ export async function falLift3d(image: Buffer, contentType: string): Promise<Lif
     if (Date.now() - t0 > TOTAL_TIMEOUT_MS) throw new Error('lift3d timed out');
     const stRes = await fetch(submit.status_url, { headers, signal: AbortSignal.timeout(30_000) });
     if (stRes.ok) {
-      const st = (await stRes.json()) as { status?: string };
+      const stText = await stRes.text();
+      const st = JSON.parse(stText) as { status?: string };
       if (st.status === 'COMPLETED') break;
-      if (st.status === 'FAILED') throw new Error('lift3d generation failed');
+      if (st.status === 'FAILED') throw new Error(`lift3d generation failed: ${stText.slice(0, 300)}`);
     }
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
   }
 
   const outRes = await fetch(submit.response_url, { headers, signal: AbortSignal.timeout(60_000) });
-  if (!outRes.ok) throw new Error(`lift3d result HTTP ${outRes.status}`);
+  if (!outRes.ok) {
+    // fal surfaces generation-side failures as a non-200 on the response
+    // fetch after a COMPLETED status — the body says why (e.g. "Image
+    // resolution only support [128, 5000]", 2026-08-23), so keep it.
+    throw new Error(`lift3d result HTTP ${outRes.status}: ${(await outRes.text()).slice(0, 300)}`);
+  }
   const out = (await outRes.json()) as {
     model_urls?: Record<string, unknown>;
     thumbnail?: unknown;
