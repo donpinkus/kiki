@@ -6,6 +6,79 @@ import CoreGraphics
 import UIKit
 #endif
 
+// MARK: - Layer Blend Mode
+
+/// Per-layer compositing mode (Procreate-style). Separable modes only — each
+/// channel blends independently; formulas per the W3C compositing spec,
+/// evaluated in LINEAR space (our `_srgb` textures hand the shader linear).
+/// `shaderIndex` must match the `switch` in `blendCompositorFragment`.
+public enum LayerBlendMode: String, Codable, Sendable, CaseIterable {
+    case normal
+    case darken, multiply, colorBurn, linearBurn
+    case lighten, screen, colorDodge, add
+    case overlay, softLight, hardLight
+    case difference, exclusion
+
+    public var displayName: String {
+        switch self {
+        case .normal: "Normal"
+        case .darken: "Darken"
+        case .multiply: "Multiply"
+        case .colorBurn: "Color Burn"
+        case .linearBurn: "Linear Burn"
+        case .lighten: "Lighten"
+        case .screen: "Screen"
+        case .colorDodge: "Color Dodge"
+        case .add: "Add"
+        case .overlay: "Overlay"
+        case .softLight: "Soft Light"
+        case .hardLight: "Hard Light"
+        case .difference: "Difference"
+        case .exclusion: "Exclusion"
+        }
+    }
+
+    /// Short badge shown on the layer row (Procreate's "N").
+    public var shortCode: String {
+        switch self {
+        case .normal: "N"
+        case .darken: "D"
+        case .multiply: "M"
+        case .colorBurn: "Cb"
+        case .linearBurn: "Lb"
+        case .lighten: "L"
+        case .screen: "S"
+        case .colorDodge: "Cd"
+        case .add: "A"
+        case .overlay: "O"
+        case .softLight: "Sl"
+        case .hardLight: "Hl"
+        case .difference: "Df"
+        case .exclusion: "E"
+        }
+    }
+
+    /// Stable id passed to the blend shader. Do not renumber.
+    public var shaderIndex: UInt32 {
+        switch self {
+        case .normal: 0
+        case .darken: 1
+        case .multiply: 2
+        case .colorBurn: 3
+        case .linearBurn: 4
+        case .lighten: 5
+        case .screen: 6
+        case .colorDodge: 7
+        case .add: 8
+        case .overlay: 9
+        case .softLight: 10
+        case .hardLight: 11
+        case .difference: 12
+        case .exclusion: 13
+        }
+    }
+}
+
 // MARK: - Layer Info
 
 /// Metadata for a single canvas layer (name, visibility). The actual texture
@@ -18,19 +91,26 @@ public struct LayerInfo: Codable, Sendable, Identifiable {
     public var isLocked: Bool
     /// Alpha lock: strokes only land where the layer already has content.
     public var isAlphaLocked: Bool
+    /// Compositing mode (applied at composite time, never baked into pixels).
+    public var blendMode: LayerBlendMode
+    /// Whole-layer opacity 0…1 (composite-time, never baked into pixels).
+    public var opacity: Double
 
     public init(id: UUID = UUID(), name: String, isVisible: Bool = true,
-                isLocked: Bool = false, isAlphaLocked: Bool = false) {
+                isLocked: Bool = false, isAlphaLocked: Bool = false,
+                blendMode: LayerBlendMode = .normal, opacity: Double = 1) {
         self.id = id
         self.name = name
         self.isVisible = isVisible
         self.isLocked = isLocked
         self.isAlphaLocked = isAlphaLocked
+        self.blendMode = blendMode
+        self.opacity = opacity
     }
 
-    // Backward-compatible decode: layer metadata saved before the lock flags
-    // existed (pre-2026-08) loads with both flags off.
-    enum CodingKeys: String, CodingKey { case id, name, isVisible, isLocked, isAlphaLocked }
+    // Backward-compatible decode: layer metadata saved before the lock/blend
+    // fields existed loads with flags off, Normal blend, full opacity.
+    enum CodingKeys: String, CodingKey { case id, name, isVisible, isLocked, isAlphaLocked, blendMode, opacity }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(UUID.self, forKey: .id)
@@ -38,6 +118,9 @@ public struct LayerInfo: Codable, Sendable, Identifiable {
         isVisible = try c.decode(Bool.self, forKey: .isVisible)
         isLocked = try c.decodeIfPresent(Bool.self, forKey: .isLocked) ?? false
         isAlphaLocked = try c.decodeIfPresent(Bool.self, forKey: .isAlphaLocked) ?? false
+        blendMode = (try c.decodeIfPresent(String.self, forKey: .blendMode))
+            .flatMap(LayerBlendMode.init(rawValue:)) ?? .normal
+        opacity = try c.decodeIfPresent(Double.self, forKey: .opacity) ?? 1
     }
 }
 
@@ -628,9 +711,11 @@ struct LayeredDrawing: Codable {
         let name: String
         let isVisible: Bool
         let pngData: Data
-        // Optional so pre-lock-flag saves decode (nil → false).
+        // Optionals so older saves decode (nil → false / normal / 1.0).
         let isLocked: Bool?
         let isAlphaLocked: Bool?
+        let blendMode: String?
+        let opacity: Double?
     }
 }
 

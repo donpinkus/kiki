@@ -109,6 +109,10 @@ public final class CanvasRenderer {
         /// Alpha lock: flatten preserves the layer's alpha channel, so strokes
         /// only land where content already exists.
         var isAlphaLocked: Bool = false
+        /// Composite-time blend mode; never baked into the texture.
+        var blendMode: LayerBlendMode = .normal
+        /// Composite-time whole-layer opacity 0…1; never baked into the texture.
+        var opacity: Float = 1
         let texture: MTLTexture
     }
 
@@ -483,6 +487,18 @@ public final class CanvasRenderer {
         layers[index].isAlphaLocked = locked
     }
 
+    /// Set a layer's composite blend mode.
+    func setBlendMode(_ mode: LayerBlendMode, at index: Int) {
+        guard index >= 0, index < layers.count else { return }
+        layers[index].blendMode = mode
+    }
+
+    /// Set a layer's composite opacity (clamped 0…1).
+    func setLayerOpacity(_ opacity: Float, at index: Int) {
+        guard index >= 0, index < layers.count else { return }
+        layers[index].opacity = min(1, max(0, opacity))
+    }
+
     /// Duplicate a layer: blit-copy its texture and insert the copy directly
     /// above the source. Returns the new layer's index, or nil at the layer
     /// cap / on allocation failure. The copy carries visibility + alpha lock
@@ -502,7 +518,9 @@ public final class CanvasRenderer {
         cmdBuf.waitUntilCompleted() // cold path: menu action, not per-frame
         let copy = Layer(id: UUID(), name: source.name + " copy",
                          isVisible: source.isVisible, isLocked: false,
-                         isAlphaLocked: source.isAlphaLocked, texture: texture)
+                         isAlphaLocked: source.isAlphaLocked,
+                         blendMode: source.blendMode, opacity: source.opacity,
+                         texture: texture)
         let newIndex = index + 1
         layers.insert(copy, at: newIndex)
         if activeLayerIndex >= newIndex { activeLayerIndex += 1 }
@@ -540,6 +558,8 @@ public final class CanvasRenderer {
         let isVisible: Bool
         let isLocked: Bool
         let isAlphaLocked: Bool
+        let blendMode: LayerBlendMode
+        let opacity: Float
         let data: Data
     }
 
@@ -563,6 +583,7 @@ public final class CanvasRenderer {
             guard let data = snapshotLayer(at: i) else { return nil }
             snaps.append(LayerStackSnapshot(id: layer.id, name: layer.name, isVisible: layer.isVisible,
                                             isLocked: layer.isLocked, isAlphaLocked: layer.isAlphaLocked,
+                                            blendMode: layer.blendMode, opacity: layer.opacity,
                                             data: data))
         }
         return (snaps, activeLayerIndex)
@@ -578,7 +599,8 @@ public final class CanvasRenderer {
             guard let tex = device.makeTexture(descriptor: desc) else { return }
             clearTexture(tex)
             rebuilt.append(Layer(id: snap.id, name: snap.name, isVisible: snap.isVisible,
-                                 isLocked: snap.isLocked, isAlphaLocked: snap.isAlphaLocked, texture: tex))
+                                 isLocked: snap.isLocked, isAlphaLocked: snap.isAlphaLocked,
+                                 blendMode: snap.blendMode, opacity: snap.opacity, texture: tex))
         }
         layers = rebuilt
         activeLayerIndex = min(max(0, activeIndex), layers.count - 1)
@@ -1175,9 +1197,7 @@ public final class CanvasRenderer {
 
         for i in 0..<layers.count {
             guard layers[i].isVisible else { continue }
-            enc.setFragmentTexture(layers[i].texture, index: 0)
-            enc.setFragmentBytes(&opacity, length: MemoryLayout<Float>.size, index: 0)
-            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+            drawLayerComposite(enc, layers[i])
 
             // Include in-progress stroke on the active layer (capped at stroke opacity).
             if i == activeLayerIndex, stampCount > 0, let scratch = scratchTexture {
@@ -1244,9 +1264,7 @@ public final class CanvasRenderer {
 
         for i in 0..<layers.count {
             guard layers[i].isVisible else { continue }
-            enc.setFragmentTexture(layers[i].texture, index: 0)
-            enc.setFragmentBytes(&opacity, length: MemoryLayout<Float>.size, index: 0)
-            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+            drawLayerComposite(enc, layers[i])
 
             if i == activeLayerIndex, stampCount > 0, let scratch = scratchTexture {
                 drawScratch(enc, scratch: scratch, opacity: strokeOpacity, grain: activeGrain)
@@ -1779,9 +1797,7 @@ public final class CanvasRenderer {
         for i in 0..<layers.count {
             guard layers[i].isVisible else { continue }
 
-            enc.setFragmentTexture(layers[i].texture, index: 0)
-            enc.setFragmentBytes(&opacity, length: MemoryLayout<Float>.size, index: 0)
-            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+            drawLayerComposite(enc, layers[i])
 
             // Draw scratch (active stroke) on top of the active layer, capped at the
             // per-stroke opacity ceiling (stamp alpha carries flow); grain-aware (P8).
@@ -1963,6 +1979,39 @@ public final class CanvasRenderer {
         return try? device.makeRenderPipelineState(descriptor: desc)
     }
 
+    /// Per-layer blend parameters for `blendCompositorFragment` — layout must
+    /// match the MSL `BlendParams` struct.
+    private struct BlendParams {
+        var opacity: Float
+        var mode: UInt32
+    }
+
+    /// Framebuffer-fetch blend compositor (reads `[[color(0)]]`). Device only:
+    /// the iOS SIMULATOR cannot read the render target (same limitation as the
+    /// wet/eraser PSOs) — nil there, so non-Normal blend modes draw as Normal
+    /// on the sim. Layer OPACITY still applies everywhere (fixed-function path).
+    private lazy var blendCompositorPSO: MTLRenderPipelineState? =
+        Self.makeBlendCompositorPSO(device: device, library: library)
+
+    /// Draw one layer quad honoring its blend mode + opacity. Leaves the
+    /// encoder on `compositorPSO` so surrounding draws are unaffected.
+    /// Assumes the quad vertex buffer is already bound at index 0.
+    private func drawLayerComposite(_ enc: MTLRenderCommandEncoder, _ layer: Layer) {
+        if layer.blendMode != .normal, let blendPSO = blendCompositorPSO {
+            var params = BlendParams(opacity: layer.opacity, mode: layer.blendMode.shaderIndex)
+            enc.setRenderPipelineState(blendPSO)
+            enc.setFragmentTexture(layer.texture, index: 0)
+            enc.setFragmentBytes(&params, length: MemoryLayout<BlendParams>.stride, index: 0)
+            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+            enc.setRenderPipelineState(compositorPSO)
+        } else {
+            var op = layer.opacity
+            enc.setFragmentTexture(layer.texture, index: 0)
+            enc.setFragmentBytes(&op, length: MemoryLayout<Float>.size, index: 0)
+            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+        }
+    }
+
     /// Alpha-locked flatten: source-over for color, but the destination's
     /// alpha channel is preserved bit-exactly.
     ///   rgb: src.rgb·dst.a + dst.rgb·(1 − src.a)  (src premultiplied — new
@@ -1984,6 +2033,20 @@ public final class CanvasRenderer {
         ca.sourceAlphaBlendFactor = .destinationAlpha
         ca.destinationAlphaBlendFactor = .oneMinusSourceAlpha
 
+        return try? device.makeRenderPipelineState(descriptor: desc)
+    }
+
+    /// Blend-mode compositor: programmable blending (fragment reads the
+    /// destination via [[color(0)]] and computes the full W3C blend equation
+    /// itself), so fixed-function blending is DISABLED. Fails on the simulator
+    /// ("reading from a rendertarget is not supported") → callers treat nil as
+    /// "draw Normal instead".
+    private static func makeBlendCompositorPSO(device: MTLDevice, library: MTLLibrary) -> MTLRenderPipelineState? {
+        let desc = MTLRenderPipelineDescriptor()
+        desc.vertexFunction = library.makeFunction(name: "compositorVertex")
+        desc.fragmentFunction = library.makeFunction(name: "blendCompositorFragment")
+        desc.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
+        desc.colorAttachments[0].isBlendingEnabled = false
         return try? device.makeRenderPipelineState(descriptor: desc)
     }
 
@@ -2946,6 +3009,76 @@ public final class CanvasRenderer {
         constexpr sampler texSampler(filter::linear, address::clamp_to_zero);
         float4 color = layerTexture.sample(texSampler, in.texCoord);
         return color * opacity;
+    }
+
+    // ── Blend-mode compositor (framebuffer fetch; device only) ───────────
+    // Separable W3C blend formulas on UNPREMULTIPLIED linear channels; the
+    // full compositing equation (spec: co = (1-ab)·cs + (1-as)·cb + as·ab·B)
+    // runs here because fixed-function blending can't express these modes.
+    // Indices must match LayerBlendMode.shaderIndex.
+
+    struct BlendParams {
+        float opacity;
+        uint mode;
+    };
+
+    static float3 blendFormula(uint mode, float3 s, float3 d) {
+        switch (mode) {
+            case 1: return min(s, d);                                   // darken
+            case 2: return s * d;                                       // multiply
+            case 3: {                                                   // color burn
+                float3 raw = 1.0 - min(float3(1.0), (1.0 - d) / max(s, float3(1e-5)));
+                raw = select(raw, float3(0.0), s <= float3(1e-5));
+                return select(raw, float3(1.0), d >= float3(1.0 - 1e-5));
+            }
+            case 4: return max(float3(0.0), s + d - 1.0);               // linear burn
+            case 5: return max(s, d);                                   // lighten
+            case 6: return s + d - s * d;                               // screen
+            case 7: {                                                   // color dodge
+                float3 raw = min(float3(1.0), d / max(1.0 - s, float3(1e-5)));
+                raw = select(raw, float3(1.0), s >= float3(1.0 - 1e-5));
+                return select(raw, float3(0.0), d <= float3(1e-5));
+            }
+            case 8: return min(float3(1.0), s + d);                     // add (linear dodge)
+            case 9:                                                     // overlay = hardLight(d, s)
+                return select(1.0 - 2.0 * (1.0 - d) * (1.0 - s),
+                              2.0 * d * s,
+                              d <= float3(0.5));
+            case 10: {                                                  // soft light (W3C)
+                float3 Dd = select(sqrt(d),
+                                   ((16.0 * d - 12.0) * d + 4.0) * d,
+                                   d <= float3(0.25));
+                return select(d + (2.0 * s - 1.0) * (Dd - d),
+                              d - (1.0 - 2.0 * s) * d * (1.0 - d),
+                              s <= float3(0.5));
+            }
+            case 11:                                                    // hard light
+                return select(1.0 - 2.0 * (1.0 - s) * (1.0 - d),
+                              2.0 * s * d,
+                              s <= float3(0.5));
+            case 12: return abs(s - d);                                 // difference
+            case 13: return s + d - 2.0 * s * d;                        // exclusion
+            default: return s;                                          // normal
+        }
+    }
+
+    fragment float4 blendCompositorFragment(
+        CompositorVaryings in [[stage_in]],
+        float4 dst [[color(0)]],
+        texture2d<float> layerTexture [[texture(0)]],
+        constant BlendParams& bp [[buffer(0)]]
+    ) {
+        constexpr sampler texSampler(filter::linear, address::clamp_to_zero);
+        // Layer opacity scales the premultiplied source uniformly.
+        float4 src = layerTexture.sample(texSampler, in.texCoord) * bp.opacity;
+        float sa = src.a;
+        float da = dst.a;
+        float3 sc = sa > 1e-5 ? src.rgb / sa : float3(0.0);
+        float3 dc = da > 1e-5 ? dst.rgb / da : float3(0.0);
+        float3 B = blendFormula(bp.mode, sc, dc);
+        float3 rgb = (1.0 - da) * src.rgb + (1.0 - sa) * dst.rgb + sa * da * B;
+        float a = sa + da * (1.0 - sa);
+        return float4(rgb, a);
     }
 
     // P8 grain compositor: composites the SCRATCH (the isolated in-flight stroke) while

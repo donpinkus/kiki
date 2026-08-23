@@ -345,6 +345,21 @@ public final class CanvasViewModel {
         canvasView?.setLayerAlphaLocked(locked, at: index)
     }
 
+    public func setLayerBlendMode(_ mode: LayerBlendMode, at index: Int) {
+        canvasView?.setLayerBlendMode(mode, at: index)
+        handleDrawingChanged()
+    }
+
+    /// Live composite update (per slider tick). Call `commitLayerOpacity`
+    /// when the gesture ends so the change autosaves once.
+    public func setLayerOpacity(_ opacity: Double, at index: Int) {
+        canvasView?.setLayerOpacity(opacity, at: index)
+    }
+
+    public func commitLayerOpacity() {
+        handleDrawingChanged()
+    }
+
     /// Duplicate a layer (inserted above, made active). False at the 16-layer cap.
     @discardableResult
     public func duplicateLayer(at index: Int) -> Bool {

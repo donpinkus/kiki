@@ -145,6 +145,21 @@ MetalCanvasView (UIView, CAMetalLayer)
 3. Draws scratch texture (active stroke) interleaved at the active layer's z-position
 4. Draws floating selection (lasso) on top of all layers
 
+**Per-layer blend modes + opacity (2026-08-23):** every layer draw goes through
+`drawLayerComposite` — Normal mode uses the fixed-function `compositorPSO` with the
+layer's `opacity` as the uniform; the 13 non-Normal modes (`LayerBlendMode`, separable
+W3C formulas) use `blendCompositorPSO`, a framebuffer-fetch fragment
+(`blendCompositorFragment` reads `[[color(0)]]`, un-premultiplies both sides, evaluates
+the blend formula in LINEAR space, and applies the full compositing equation itself —
+fixed-function blending disabled). **Simulator**: fbfetch unavailable → the PSO is nil and
+non-Normal modes render as Normal there (opacity still applies); device/macOS render the
+real formulas. All three composite paths (display, `flattenedCGImage` stream capture,
+`flattenedOpaqueCGImage` thumbnails/snapshots) share the helper, so exports match the
+screen. Verified headless via the BrushHarness pattern (all 14 modes + opacity-scaled
+multiply, pixel-accurate vs CPU W3C reference, 2026-08-23). Blend/opacity are
+composite-time only — never baked into layer textures — and persist via `LayeredDrawing`
+(optional fields, old saves decode to Normal/1.0).
+
 ### Brush rendering flow
 1. Touch points → `StrokePoint` array (pressure, altitude, position)
 2. Arc-length resample with **adaptive spacing** (`max(effectiveWidth × 0.3, 0.5)`)

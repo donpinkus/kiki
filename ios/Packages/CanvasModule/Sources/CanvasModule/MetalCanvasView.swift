@@ -43,7 +43,8 @@ public final class MetalCanvasView: UIView {
     public var layers: [LayerInfo] {
         renderer.layers.map {
             LayerInfo(id: $0.id, name: $0.name, isVisible: $0.isVisible,
-                      isLocked: $0.isLocked, isAlphaLocked: $0.isAlphaLocked)
+                      isLocked: $0.isLocked, isAlphaLocked: $0.isAlphaLocked,
+                      blendMode: $0.blendMode, opacity: Double($0.opacity))
         }
     }
     /// Which layer is currently active for drawing.
@@ -2853,6 +2854,19 @@ public final class MetalCanvasView: UIView {
         onStateChanged?()
     }
 
+    public func setLayerBlendMode(_ mode: LayerBlendMode, at index: Int) {
+        renderer.setBlendMode(mode, at: index)
+        isDirty = true
+        onStateChanged?()
+    }
+
+    /// Live-updates the composite; cheap enough to call per slider tick.
+    public func setLayerOpacity(_ opacity: Double, at index: Int) {
+        renderer.setLayerOpacity(Float(opacity), at: index)
+        isDirty = true
+        onStateChanged?()
+    }
+
     /// Duplicate a layer (copy inserted directly above it, made active).
     /// Structure-mutating → compound `.canvas` undo like importImageAsNewLayer.
     /// Returns false at the layer cap.
@@ -3072,7 +3086,9 @@ public final class MetalCanvasView: UIView {
                 isVisible: info.isVisible,
                 pngData: png,
                 isLocked: info.isLocked,
-                isAlphaLocked: info.isAlphaLocked
+                isAlphaLocked: info.isAlphaLocked,
+                blendMode: info.blendMode.rawValue,
+                opacity: info.opacity
             ))
         }
         guard !layerEntries.isEmpty else { return nil }
@@ -3194,6 +3210,8 @@ public final class MetalCanvasView: UIView {
                 isVisible: entry.isVisible,
                 isLocked: entry.isLocked ?? false,
                 isAlphaLocked: entry.isAlphaLocked ?? false,
+                blendMode: entry.blendMode.flatMap(LayerBlendMode.init(rawValue:)) ?? .normal,
+                opacity: Float(entry.opacity ?? 1),
                 texture: renderer.layers[i].texture
             )
             if renderer.loadImageDataIntoLayer(at: i, entry.pngData) {

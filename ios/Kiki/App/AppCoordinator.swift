@@ -2357,6 +2357,15 @@ final class AppCoordinator {
         case let cmd where cmd.hasPrefix("renameLayer:"):
             canvasViewModel.renameLayer(at: canvasViewModel.activeLayerIndex,
                                         to: String(cmd.dropFirst("renameLayer:".count)))
+        case let cmd where cmd.hasPrefix("blendMode:"):
+            if let mode = LayerBlendMode(rawValue: String(cmd.dropFirst("blendMode:".count))) {
+                canvasViewModel.setLayerBlendMode(mode, at: canvasViewModel.activeLayerIndex)
+            }
+        case let cmd where cmd.hasPrefix("layerOpacity:"):
+            if let pct = Double(cmd.dropFirst("layerOpacity:".count)) {
+                canvasViewModel.setLayerOpacity(pct / 100, at: canvasViewModel.activeLayerIndex)
+                canvasViewModel.commitLayerOpacity()
+            }
         case "deleteTopLayer":
             if canvasViewModel.layers.count > 1 {
                 canvasViewModel.deleteLayer(at: canvasViewModel.layers.count - 1)

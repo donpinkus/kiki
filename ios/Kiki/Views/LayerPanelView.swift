@@ -11,15 +11,18 @@ struct LayerPanelView: View {
     @State private var dragStartModelIndex: Int?
     @State private var dragTranslation: CGFloat = 0
 
-    // Swipe-left quick actions (Procreate: Lock / Duplicate / Delete).
-    // One row revealed at a time; `swipeTranslation` tracks the live drag.
-    @State private var revealedId: UUID?
-    @State private var swipeTranslation: CGFloat = 0
-
-    // Layer Options side menu (tap the already-selected row).
+    // Layer Options side menu (tap the already-selected row). All layer
+    // actions live here — no swipe actions (removed 2026-08-23, Donald).
     @State private var optionsLayerId: UUID?
     @State private var showRenameAlert = false
     @State private var renameText = ""
+
+    // Blend mode + layer opacity popover (tap the row's blend letter).
+    @State private var blendLayerId: UUID?
+
+    // Softer corner rounding for all layer-UI popovers — the default popover
+    // radius visually clipped the first/last rows (Donald 2026-08-23).
+    private static let popoverCornerRadius: CGFloat = 8
 
     private static let thumbnailSize: CGFloat = 52
     // Fixed row height: 52 thumbnail + 2×10 vertical padding, LazyVStack spacing 0.
@@ -27,8 +30,6 @@ struct LayerPanelView: View {
     private static let panelWidth: CGFloat = 320
     // Header: 28pt content (the + button) + 2×12 vertical padding + divider.
     private static let headerHeight: CGFloat = 53
-    // Total width of the three revealed swipe-action buttons.
-    private static let swipeActionsWidth: CGFloat = 186
 
     /// Panel grows with the layer count so every row is visible without
     /// scrolling; once it would exceed what fits on screen (minus room for the
@@ -87,6 +88,7 @@ struct LayerPanelView: View {
             }
         }
         .frame(width: Self.panelWidth, height: panelHeight)
+        .presentationCornerRadius(Self.popoverCornerRadius)
         .onAppear { refreshThumbnails() }
         .onChange(of: coordinator.canvasViewModel.layers.count) {
             refreshThumbnails()
@@ -143,7 +145,6 @@ struct LayerPanelView: View {
                     draggingId = layer.id
                     dragStartModelIndex = index
                     dragTranslation = 0
-                    closeSwipe()
                     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                 }
                 if let drag {
@@ -176,87 +177,29 @@ struct LayerPanelView: View {
         coordinator.saveCurrentDrawing()
     }
 
-    // MARK: - Swipe-left quick actions
-
-    /// Live horizontal offset for a row's content: the in-flight drag plus the
-    /// resting position (revealed rows park at -swipeActionsWidth).
-    private func swipeOffset(for layer: LayerInfo) -> CGFloat {
-        let resting: CGFloat = revealedId == layer.id ? -Self.swipeActionsWidth : 0
-        guard swipingId == layer.id else { return resting }
-        return min(0, max(-Self.swipeActionsWidth - 24, resting + swipeTranslation))
-    }
-
-    @State private var swipingId: UUID?
-
-    private func swipeGesture(layer: LayerInfo) -> some Gesture {
-        DragGesture(minimumDistance: 20, coordinateSpace: .local)
-            .onChanged { value in
-                // Horizontal-dominant drags only — vertical belongs to the
-                // ScrollView, and the reorder long-press has its own path.
-                guard abs(value.translation.width) > abs(value.translation.height) else { return }
-                guard draggingId == nil else { return }
-                swipingId = layer.id
-                swipeTranslation = value.translation.width
-            }
-            .onEnded { value in
-                guard swipingId == layer.id else { return }
-                swipingId = nil
-                swipeTranslation = 0
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
-                    if value.predictedEndTranslation.width < -Self.swipeActionsWidth / 2 {
-                        revealedId = layer.id
-                    } else if value.translation.width > 20 {
-                        revealedId = nil
-                    } else if revealedId == layer.id, value.translation.width > -20 {
-                        revealedId = nil
-                    }
-                }
-            }
-    }
-
-    private func closeSwipe() {
-        guard revealedId != nil || swipingId != nil else { return }
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
-            revealedId = nil
-            swipingId = nil
-            swipeTranslation = 0
-        }
-    }
-
     // MARK: - Row
 
     private func layerRow(layer: LayerInfo, index: Int, isActive: Bool) -> some View {
-        ZStack(alignment: .trailing) {
-            // Quick actions revealed behind the row content on swipe-left.
-            swipeActions(layer: layer, index: index)
-
-            // Opaque background always (matches the popover chrome) so the
-            // swipe actions behind the row stay hidden until revealed.
-            rowContent(layer: layer, index: index, isActive: isActive)
-                .background(isActive ? Color.accentColor : Color(uiColor: .systemBackground))
-                .offset(x: swipeOffset(for: layer))
-        }
-        .frame(height: Self.rowHeight)
-        .clipped()
-        .contentShape(Rectangle())
-        .onTapGesture {
-            if revealedId != nil || swipingId != nil {
-                closeSwipe()
-            } else if isActive {
-                // Procreate: tapping the selected layer opens Layer Options.
-                optionsLayerId = layer.id
-            } else {
-                coordinator.canvasViewModel.selectLayer(at: index)
+        rowContent(layer: layer, index: index, isActive: isActive)
+            .background(isActive ? Color.accentColor : Color(uiColor: .systemBackground))
+            .frame(height: Self.rowHeight)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                if isActive {
+                    // Procreate: tapping the selected layer opens Layer Options.
+                    optionsLayerId = layer.id
+                } else {
+                    coordinator.canvasViewModel.selectLayer(at: index)
+                }
             }
-        }
-        .gesture(swipeGesture(layer: layer))
-        .gesture(reorderGesture(layer: layer, index: index))
-        .popover(isPresented: Binding(
-            get: { optionsLayerId == layer.id },
-            set: { if !$0 { optionsLayerId = nil } }
-        ), arrowEdge: .trailing) {
-            layerOptionsMenu(layer: layer, index: index)
-        }
+            .gesture(reorderGesture(layer: layer, index: index))
+            .popover(isPresented: Binding(
+                get: { optionsLayerId == layer.id },
+                set: { if !$0 { optionsLayerId = nil } }
+            ), arrowEdge: .trailing) {
+                layerOptionsMenu(layer: layer, index: index)
+                    .presentationCornerRadius(Self.popoverCornerRadius)
+            }
     }
 
     private func rowContent(layer: LayerInfo, index: Int, isActive: Bool) -> some View {
@@ -295,12 +238,27 @@ struct LayerPanelView: View {
 
             Spacer(minLength: 8)
 
-            // Blend mode letter (Procreate's "N" = Normal). Display-only until
-            // per-layer blend modes exist in the engine.
-            Text("N")
-                .font(.system(size: 15, weight: .medium))
-                .foregroundStyle(isActive ? .white.opacity(0.85) : .secondary)
-                .frame(width: 24, height: 24)
+            // Blend mode letter (Procreate-style). Tap → blend mode + layer
+            // opacity popover; shows the current mode's short code.
+            Button {
+                blendLayerId = layer.id
+            } label: {
+                Text(layer.blendMode.shortCode)
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(isActive ? .white.opacity(0.85) : .secondary)
+                    .frame(minWidth: 24, minHeight: 24)
+            }
+            .buttonStyle(.plain)
+            // Anchored here (not on the row) — a second .popover on the same
+            // row view never fires; anchoring at the badge also points the
+            // arrow at what was tapped.
+            .popover(isPresented: Binding(
+                get: { blendLayerId == layer.id },
+                set: { if !$0 { blendLayerId = nil } }
+            ), arrowEdge: .trailing) {
+                blendModeMenu(layer: layer, index: index)
+                    .presentationCornerRadius(Self.popoverCornerRadius)
+            }
 
             // Visibility toggle (kept as the eye, not Procreate's checkbox)
             Button {
@@ -316,97 +274,186 @@ struct LayerPanelView: View {
         .padding(.vertical, 10)
     }
 
-    private func swipeActions(layer: LayerInfo, index: Int) -> some View {
-        HStack(spacing: 0) {
-            swipeActionButton(
-                title: layer.isLocked ? "Unlock" : "Lock",
-                systemImage: layer.isLocked ? "lock.open" : "lock",
-                color: .blue
-            ) {
-                coordinator.canvasViewModel.setLayerLocked(!layer.isLocked, at: index)
-                closeSwipe()
-            }
-            swipeActionButton(title: "Duplicate", systemImage: "plus.square.on.square", color: .indigo) {
-                if coordinator.canvasViewModel.duplicateLayer(at: index) {
-                    refreshThumbnails()
-                }
-                closeSwipe()
-            }
-            swipeActionButton(title: "Delete", systemImage: "trash", color: .red) {
-                closeSwipe()
-                if coordinator.canvasViewModel.layers.count > 1 {
-                    coordinator.canvasViewModel.deleteLayer(at: index)
-                }
-            }
-            .disabled(coordinator.canvasViewModel.layers.count <= 1)
-        }
-        .frame(width: Self.swipeActionsWidth, height: Self.rowHeight)
-    }
-
-    private func swipeActionButton(title: String, systemImage: String, color: Color,
-                                   action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            VStack(spacing: 4) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 15, weight: .medium))
-                Text(title)
-                    .font(.system(size: 10, weight: .medium))
-            }
-            .foregroundStyle(.white)
-            .frame(width: Self.swipeActionsWidth / 3, height: Self.rowHeight)
-            .background(color)
-        }
-        .buttonStyle(.plain)
-    }
-
     // MARK: - Layer Options menu (tap the selected layer)
 
+    /// One sectioned action list — iOS menu conventions: Title Case labels,
+    /// toggles shown with trailing checkmarks, destructive action last in red,
+    /// sections separated by grouped-background bands for scannability.
     private func layerOptionsMenu(layer: LayerInfo, index: Int) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            optionRow("Rename", systemImage: "pencil") {
+        let layerCount = coordinator.canvasViewModel.layers.count
+        return VStack(alignment: .leading, spacing: 0) {
+            // Section: rename (most common — its own group at the top)
+            optionRow("Rename…", systemImage: "pencil") {
                 optionsLayerId = nil
                 renameText = layer.name
                 showRenameAlert = true
             }
-            Divider()
-            optionRow("Select", systemImage: "circle.dashed") {
+
+            sectionBreak()
+
+            // Section: content operations
+            optionRow("Select Contents", systemImage: "circle.dashed") {
                 optionsLayerId = nil
                 coordinator.selectLayerContents(at: index)
                 coordinator.showLayerPanel = false
             }
             Divider()
-            optionRow("Copy", systemImage: "doc.on.doc") {
+            optionRow("Copy to Clipboard", systemImage: "doc.on.doc") {
                 optionsLayerId = nil
                 coordinator.copyLayer(at: index)
             }
             Divider()
-            optionRow("Duplicate", systemImage: "plus.square.on.square") {
+            optionRow("Duplicate Layer", systemImage: "plus.square.on.square") {
                 optionsLayerId = nil
                 if coordinator.canvasViewModel.duplicateLayer(at: index) {
                     refreshThumbnails()
                 }
             }
-            .disabled(coordinator.canvasViewModel.layers.count >= 16)
+            .disabled(layerCount >= 16)
             Divider()
-            optionRow("Clear", systemImage: "xmark.circle") {
+            optionRow("Clear Layer", systemImage: "xmark.circle") {
                 optionsLayerId = nil
                 coordinator.canvasViewModel.clearLayer(at: index)
                 refreshThumbnails()
             }
             .disabled(layer.isLocked)
+
+            sectionBreak()
+
+            // Section: protection toggles
+            optionRow("Lock", systemImage: layer.isLocked ? "lock.fill" : "lock",
+                      isOn: layer.isLocked) {
+                coordinator.canvasViewModel.setLayerLocked(!layer.isLocked, at: index)
+                optionsLayerId = nil
+            }
             Divider()
             optionRow("Alpha Lock", systemImage: "checkerboard.rectangle",
                       isOn: layer.isAlphaLocked) {
                 coordinator.canvasViewModel.setLayerAlphaLocked(!layer.isAlphaLocked, at: index)
                 optionsLayerId = nil
             }
+
+            sectionBreak()
+
+            // Section: destructive
+            optionRow("Delete Layer", systemImage: "trash", role: .destructive) {
+                optionsLayerId = nil
+                if layerCount > 1 {
+                    coordinator.canvasViewModel.deleteLayer(at: index)
+                }
+            }
+            .disabled(layerCount <= 1)
         }
-        .frame(width: 220)
+        .frame(width: 250)
+    }
+
+    // MARK: - Blend mode + opacity popover (tap the row's blend letter)
+
+    /// Procreate-style: whole-layer opacity slider on top, then the blend mode
+    /// list grouped darken / normal / lighten / contrast / difference, with
+    /// the current mode highlighted and each mode's short code trailing.
+    private func blendModeMenu(layer: LayerInfo, index: Int) -> some View {
+        let groups: [[LayerBlendMode]] = [
+            [.darken, .multiply, .colorBurn, .linearBurn],
+            [.normal],
+            [.lighten, .screen, .colorDodge, .add],
+            [.overlay, .softLight, .hardLight],
+            [.difference, .exclusion],
+        ]
+        return VStack(spacing: 0) {
+            // Whole-layer opacity (live composite update; saves on release).
+            VStack(spacing: 6) {
+                HStack {
+                    Text("Opacity")
+                        .font(.subheadline)
+                    Spacer()
+                    Text(layer.opacity >= 0.995 ? "Max" : "\(Int((layer.opacity * 100).rounded()))%")
+                        .font(.subheadline.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                Slider(
+                    value: Binding(
+                        get: {
+                            let layers = coordinator.canvasViewModel.layers
+                            return layers.indices.contains(index) ? layers[index].opacity : 1
+                        },
+                        set: { coordinator.canvasViewModel.setLayerOpacity($0, at: index) }
+                    ),
+                    in: 0...1
+                ) { editing in
+                    if !editing {
+                        coordinator.canvasViewModel.commitLayerOpacity()
+                    }
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+
+            sectionBreak()
+
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(Array(groups.enumerated()), id: \.offset) { groupIndex, group in
+                            if groupIndex > 0 {
+                                sectionBreak()
+                            }
+                            ForEach(Array(group.enumerated()), id: \.element) { rowIndex, mode in
+                                if rowIndex > 0 {
+                                    Divider()
+                                }
+                                blendModeRow(mode, layer: layer, index: index)
+                                    .id(mode)
+                            }
+                        }
+                    }
+                }
+                .onAppear {
+                    proxy.scrollTo(layer.blendMode, anchor: .center)
+                }
+            }
+        }
+        .frame(width: 260, height: 560)
+    }
+
+    private func blendModeRow(_ mode: LayerBlendMode, layer: LayerInfo, index: Int) -> some View {
+        let isSelected = layer.blendMode == mode
+        return Button {
+            coordinator.canvasViewModel.setLayerBlendMode(mode, at: index)
+        } label: {
+            HStack {
+                Text(mode.displayName)
+                    .font(.subheadline.weight(isSelected ? .semibold : .regular))
+                Spacer()
+                Text(mode.shortCode)
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(isSelected ? Color.white : Color.secondary)
+                    .frame(minWidth: 26, minHeight: 20)
+                    .background(
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(isSelected ? Color.white.opacity(0.25) : Color(uiColor: .secondarySystemBackground))
+                    )
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 11)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(isSelected ? Color.white : Color.primary)
+        .background(isSelected ? Color.accentColor : Color.clear)
+    }
+
+    /// Thick grouped-background band between menu sections (UIMenu-style).
+    private func sectionBreak() -> some View {
+        Rectangle()
+            .fill(Color(uiColor: .secondarySystemBackground))
+            .frame(height: 6)
     }
 
     private func optionRow(_ title: String, systemImage: String, isOn: Bool = false,
+                           role: ButtonRole? = nil,
                            action: @escaping () -> Void) -> some View {
-        Button(action: action) {
+        Button(role: role, action: action) {
             HStack {
                 Label(title, systemImage: systemImage)
                     .font(.subheadline)
@@ -422,5 +469,6 @@ struct LayerPanelView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .foregroundStyle(role == .destructive ? Color.red : Color.primary)
     }
 }
