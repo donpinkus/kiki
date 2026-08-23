@@ -2417,6 +2417,7 @@ final class AppCoordinator {
         case "dismiss":
             devShowStatusDetails = false
             devShowColorPicker = false
+            if showExtract { closeExtract() }
             if currentScreen == .animate { closeAnimate() }
             if currentScreen == .replay { closeReplay() }
         default:
