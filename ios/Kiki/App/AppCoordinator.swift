@@ -584,6 +584,10 @@ final class AppCoordinator {
         }
     }
     var showLayerPanel = false
+    /// TEMP A/B (gray-preview hunt round 2): sheet-presented replay over the
+    /// live drawing — the earlier-working configuration, kept alongside the
+    /// AppScreen.replay page so device behavior can be compared.
+    var showReplayModal = false
     var resultState: ResultState = .empty
 
     /// Availability of the video H100 system, pushed by the backend
@@ -1855,15 +1859,27 @@ final class AppCoordinator {
         liftingObjectID = object.id
         showTransientBanner("Building a 3D model of \(object.name) — takes a minute or two.")
         Analytics.track(.objectLifted, properties: ["object_id": object.id.uuidString])
+        Analytics.track(.liftStarted, properties: ["source": "drawer"])
+        let t0 = Date()
         Task { @MainActor in
             defer { liftingObjectID = nil }
             do {
                 let result = try await authService.lift3d(image: png)
+                let ms = Int(-t0.timeIntervalSinceNow * 1000)
+                ExtractController.recordLiftDuration(ms: ms)
+                Analytics.track(.liftCompleted, properties: [
+                    "source": "drawer", "duration_ms": ms, "glb_bytes": result.glb.count,
+                ])
                 object.meshData = result.glb
                 object.meshThumbData = result.thumbnail
                 try? modelContext.save()
                 showTransientBanner("\(object.name) is 3D now — tap it to place from any angle.")
             } catch {
+                Analytics.track(.liftFailed, properties: [
+                    "source": "drawer",
+                    "duration_ms": Int(-t0.timeIntervalSinceNow * 1000),
+                    "error": String(describing: error),
+                ])
                 showTransientBanner("3D lift failed — try again in a bit.")
                 Log.info("lift3d.failed", attributes: [
                     "event": "lift3d.failed",
@@ -1912,11 +1928,30 @@ final class AppCoordinator {
 
     func closeExtract() {
         showExtract = false
+        if let controller = extract, controller.hasActiveLifts {
+            // Lifts keep running after the screen closes (the in-flight Tasks
+            // retain the controller): finished ones auto-save into Objects,
+            // then toast + badge the objects-drawer button.
+            controller.isPresented = false
+            controller.onBackgroundLiftResult = { [weak self] name, success in
+                guard let self else { return }
+                if success {
+                    objectsDrawerBadge += 1
+                    showTransientBanner("\(name) is 3D now — it's in your Objects (the box icon up top).")
+                } else {
+                    showTransientBanner("A 3D lift didn't work out — open Extract to retry.")
+                }
+            }
+        }
         extract = nil
         if currentScreen == .drawing {
             startStream()
         }
     }
+
+    /// Count of background lifts finished since the objects drawer was last
+    /// opened — shown as a badge on the toolbar's shippingbox button.
+    var objectsDrawerBadge = 0
 
     // MARK: - Sticker sharing
 
@@ -2106,6 +2141,7 @@ final class AppCoordinator {
     /// clean Save-to-Files name.
     func composeReplay(layout: ReplayLayout, speed: ReplaySpeed, watermark: Bool) async -> URL? {
         guard let built = await buildReplayComposition(layout: layout, speed: speed) else { return nil }
+        VideoDiag.noteVideoExport()
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let output = dir.appendingPathComponent("Speed Paint.mp4")
         do {
@@ -2252,6 +2288,10 @@ final class AppCoordinator {
         case "replayModal", "replayScreen":
             // Legacy dev-action name kept: opens the replay share page now.
             openReplayFromDrawing()
+        case "replaySheet":
+            if currentScreen == .drawing {
+                showReplayModal = true
+            }
         // Freehand rect through the REAL loop path (Select tool, current
         // add/remove mode applies).
         case "lasso":

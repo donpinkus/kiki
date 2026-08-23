@@ -87,6 +87,23 @@ export function trackImageEdit(props: {
   });
 }
 
+/** One Insights row per 3D lift attempt (Hunyuan via /v1/lift3d) — makes
+ * lift counts, durations, and failure reasons visible on the user timeline. */
+export function trackLift3d(props: {
+  userId: string;
+  ok: boolean;
+  elapsedMs: number;
+  glbBytes?: number;
+  error?: string;
+}): void {
+  capture(props.userId, 'objects.lift3d', {
+    ok: props.ok,
+    elapsed_ms: props.elapsedMs,
+    ...(props.glbBytes !== undefined ? { glb_bytes: props.glbBytes } : {}),
+    ...(props.error ? { error: props.error.slice(0, 200) } : {}),
+  });
+}
+
 export function trackProviderSession(props: {
   userId: string;
   streamId: string | null;

@@ -71,6 +71,9 @@ enum AnalyticsEvent: String {
     case objectLifted = "objects.lifted_3d"
     case objectExtracted = "objects.extracted"
     case extractOpened = "extract.opened"
+    case liftStarted = "objects.lift_started"
+    case liftCompleted = "objects.lift_completed"
+    case liftFailed = "objects.lift_failed"
 
     // AI Edit (inpaint)
     case aiEditRequested = "canvas.ai_edit_requested"
@@ -88,14 +91,15 @@ enum AnalyticsEvent: String {
     case animateFrameForked = "animate.frame_forked"
     case animationShared = "animation.shared"
 
-    // Speed-paint replay diagnostics — the replay pipeline is device-only
-    // (AVFoundation), so its forensics ship as events: store contents on
-    // every modal open, composition stats per build, and player-item load
+    // Speed-paint replay: composition stats per build, and player-item load
     // failures (the "black preview" class of bug).
-    case replayDiag = "replay.diag"
-    case replayDiagFile = "replay.diag.file"
     case replayBuilt = "replay.built"
     case replayPreviewFailed = "replay.preview_failed"
+    /// A player item was attached + playing but the AVPlayerLayer never got
+    /// frames (the gray-preview device-state bug). Deep evidence goes to
+    /// Sentry (`event:video.playback_no_display`); this event makes episodes
+    /// visible on the user's Insights timeline.
+    case videoPlaybackNoDisplay = "video.playback_no_display"
 
     // Errors surfaced to the user. Fired whenever any error banner/message
     // becomes visible (drawing-view red banner, sign-in failure text).

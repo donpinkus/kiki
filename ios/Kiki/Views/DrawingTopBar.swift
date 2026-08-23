@@ -65,8 +65,14 @@ struct DrawingTopBar: View {
                 }
                 if coordinator.canShareVideo {
                     Section("Share video") {
-                        Button("Speed paint replay") {
+                        // TEMP A/B (gray-preview hunt round 2): both
+                        // presentations of the same replay view, so device
+                        // behavior can be compared live.
+                        Button("Speed paint replay (page)") {
                             coordinator.openReplayFromDrawing()
+                        }
+                        Button("Speed paint replay (modal)") {
+                            coordinator.showReplayModal = true
                         }
                     }
                 }
@@ -122,9 +128,22 @@ struct DrawingTopBar: View {
             // Object library: reusable cutouts saved from selections; tap a
             // tile to drop it into this drawing as a movable float.
             Button {
+                coordinator.objectsDrawerBadge = 0
                 coordinator.showObjectsDrawer.toggle()
             } label: {
                 chromeIcon("shippingbox")
+                    .overlay(alignment: .topTrailing) {
+                        // Background 3D lifts that finished since last open.
+                        if coordinator.objectsDrawerBadge > 0 {
+                            Text("\(coordinator.objectsDrawerBadge)")
+                                .font(.caption2.weight(.bold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1)
+                                .background(Color.red, in: Capsule())
+                                .offset(x: 8, y: -6)
+                        }
+                    }
             }
             .popover(isPresented: $coordinator.showObjectsDrawer) {
                 ObjectsDrawer()
@@ -164,6 +183,13 @@ struct DrawingTopBar: View {
         .environment(\.colorScheme, .dark)
         .sheet(item: $shareItem) { item in
             ShareSheet(activityItems: [item.url])
+        }
+        // TEMP A/B (gray-preview hunt round 2). A .sheet, NOT
+        // .fullScreenCover: video layers never composite inside this app's
+        // fullScreenCover on iPadOS 26 hardware.
+        .sheet(isPresented: $coordinator.showReplayModal) {
+            SpeedPaintReplayView(presentation: .modal)
+                .environment(coordinator)
         }
     }
 

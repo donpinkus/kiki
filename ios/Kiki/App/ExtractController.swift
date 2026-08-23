@@ -6,9 +6,14 @@ import SwiftData
 import SwiftUI
 
 /// The Extract screen's engine: tap anything in the GENERATED image (the
-/// high-quality artifact, not the sketch) → SAM segments it → the cutout is
-/// lifted to a canonical 3D model → "Save to Collection" persists it to the
-/// object library (cutout + mesh + thumbnail).
+/// high-quality artifact, not the sketch) → SAM segments it (add/remove
+/// points refine the selection, exactly like the canvas Select tool) → "Lift
+/// to 3D" sends the cutout to Hunyuan → "Save to Collection" persists it to
+/// the object library (cutout + mesh + thumbnail).
+///
+/// Lifts keep running after the screen closes (`isPresented = false`):
+/// finished ones auto-save into the object library and surface through
+/// `onBackgroundLiftResult` (toast + objects-drawer badge in AppCoordinator).
 @MainActor
 @Observable
 final class ExtractController {
@@ -27,16 +32,50 @@ final class ExtractController {
         /// object's document-space size).
         let sizeFraction: CGSize
         var state: State = .lifting
+        /// When the current lift attempt started (reset on retry) — drives
+        /// the determinate ETA bar.
+        var liftStartedAt = Date()
         var glb: Data?
         var meshThumb: UIImage?
+    }
+
+    /// One refinement tap, in normalized image coords (for markers).
+    struct SelectionPoint: Equatable {
+        var u: Double
+        var v: Double
+        var positive: Bool
+    }
+
+    enum PointMode {
+        case add
+        case remove
     }
 
     let sourceImage: UIImage
     private(set) var isEncoding = true
     private(set) var lastError: String?
     private(set) var items: [ExtractItem] = []
-    /// Normalized tap positions (visual feedback markers on the image).
-    private(set) var tapMarkers: [CGPoint] = []
+
+    // MARK: Current selection (multi-point SAM refinement)
+
+    var pointMode: PointMode = .add
+    private(set) var selectionPoints: [SelectionPoint] = []
+    /// Contour loops of the current mask in normalized [0,1]² coords — the
+    /// view scales these into the fitted image rect for the preview overlay.
+    private(set) var selectionLoops: [[CGPoint]] = []
+    private var currentMask: [UInt8]?
+    /// Guards stale async decodes after Clear (points changed underneath).
+    private var selectionGeneration = 0
+
+    var hasSelection: Bool { currentMask != nil && !selectionLoops.isEmpty }
+    var hasActiveLifts: Bool { items.contains { $0.state == .lifting } }
+
+    /// False once the screen is dismissed; finished lifts then auto-save
+    /// into the object library instead of waiting for a Save tap.
+    var isPresented = true
+    /// (objectName, success) — fired for lifts that finish while the screen
+    /// is closed, so the coordinator can toast + badge the objects drawer.
+    var onBackgroundLiftResult: ((String, Bool) -> Void)?
 
     private let authService: AuthService
     private let modelContext: ModelContext
@@ -69,6 +108,37 @@ final class ExtractController {
     deinit {
         if let memoryWarningObserver {
             NotificationCenter.default.removeObserver(memoryWarningObserver)
+        }
+    }
+
+    // MARK: - Lift duration stats (drives the ETA bar + copy)
+
+    /// Median of the last few measured lift durations, seeded with the
+    /// 2026-07-19 measurement (~89 s for a 100k-face lift) until real data
+    /// accrues. Self-tuning: every successful lift records into UserDefaults.
+    private static let durationsKey = "extract.liftDurationsMs"
+
+    static var estimatedLiftMs: Int {
+        let stored = (UserDefaults.standard.array(forKey: durationsKey) as? [Int]) ?? []
+        guard !stored.isEmpty else { return 90_000 }
+        let sorted = stored.sorted()
+        return sorted[sorted.count / 2]
+    }
+
+    static func recordLiftDuration(ms: Int) {
+        guard ms > 1000 else { return }
+        var stored = (UserDefaults.standard.array(forKey: durationsKey) as? [Int]) ?? []
+        stored.append(ms)
+        UserDefaults.standard.set(Array(stored.suffix(8)), forKey: durationsKey)
+    }
+
+    /// "~1½ min"-style copy for the current estimate.
+    static var estimatedLiftText: String {
+        let secs = Double(estimatedLiftMs) / 1000
+        switch secs {
+        case ..<75: return "usually ~\(Int((secs / 15).rounded() * 15))s"
+        case ..<105: return "usually ~1½ min"
+        default: return "usually ~\(Int((secs / 60).rounded())) min"
         }
     }
 
@@ -138,7 +208,11 @@ final class ExtractController {
         }
     }
 
-    /// Tap at normalized (u, v) in the image: segment → cutout → lift.
+    // MARK: - Selection (tap → SAM joint refinement over all points)
+
+    /// Tap at normalized (u, v): adds an Add/Remove point and re-decodes the
+    /// selection over ALL accumulated points (SAM joint refinement — the same
+    /// interaction as the canvas Select tool).
     func handleTap(u: Double, v: Double) {
         guard !isEncoding, let segmenter else {
             Self.log("extract.tap_ignored", [
@@ -147,15 +221,55 @@ final class ExtractController {
             ])
             return
         }
-        Self.log("extract.tap", ["u": u, "v": v])
-        tapMarkers.append(CGPoint(x: u, y: v))
+        // A Remove tap with nothing selected can't carve anything.
+        let positive = pointMode == .add || selectionPoints.isEmpty
+        selectionPoints.append(SelectionPoint(u: u, v: v, positive: positive))
+        Self.log("extract.tap", [
+            "u": u, "v": v, "positive": positive, "points": selectionPoints.count,
+        ])
+        redecodeSelection(segmenter: segmenter)
+    }
+
+    func clearSelection() {
+        selectionGeneration += 1
+        selectionPoints = []
+        selectionLoops = []
+        currentMask = nil
+        lastError = nil
+    }
+
+    /// Drop the most recent point and re-decode (mirrors Select-tool undo).
+    func undoPoint() {
+        guard !selectionPoints.isEmpty else { return }
+        selectionPoints.removeLast()
+        guard let segmenter else { return }
+        if selectionPoints.isEmpty {
+            clearSelection()
+        } else {
+            redecodeSelection(segmenter: segmenter)
+        }
+    }
+
+    private func redecodeSelection(segmenter: SAM2Segmenter) {
+        selectionGeneration += 1
+        let generation = selectionGeneration
+        let points = selectionPoints
+        let samples = points.map {
+            WandSample(
+                x: Float($0.u) * Float(Self.side),
+                y: Float($0.v) * Float(Self.side),
+                positive: $0.positive
+            )
+        }
+        guard let seed = points.first(where: { $0.positive }) else {
+            clearSelection()
+            return
+        }
         let t0 = Date()
         Task { @MainActor in
             do {
-                let sample = WandSample(
-                    x: Float(u) * Float(Self.side), y: Float(v) * Float(Self.side), positive: true
-                )
-                let logits = try await segmenter.mask(for: [sample])
+                let logits = try await segmenter.mask(for: samples)
+                guard generation == self.selectionGeneration else { return }
                 var mask = MaskContour.binaryMask(
                     fromLogits: logits.logits, width: logits.width, height: logits.height,
                     upsampledSide: Self.side
@@ -163,14 +277,16 @@ final class ExtractController {
                 // Keep just the tapped object, not disconnected same-class blobs.
                 mask = MaskContour.connectedComponent(
                     of: mask, side: Self.side,
-                    seedX: Int(u * Double(Self.side)), seedY: Int(v * Double(Self.side))
+                    seedX: Int(seed.u * Double(Self.side)), seedY: Int(seed.v * Double(Self.side))
                 )
+                currentMask = mask
+                selectionLoops = MaskContour.normalizedLoops(fromBinary: mask, side: Self.side)
                 Self.log("extract.mask_ok", [
                     "score": logits.score,
+                    "points": points.count,
                     "mask_px": mask.lazy.filter { $0 != 0 }.count,
                     "mask_ms": Int(-t0.timeIntervalSinceNow * 1000),
                 ])
-                addItem(fromMask: mask)
             } catch {
                 lastError = "Couldn't select that — try tapping elsewhere."
                 Self.log("extract.mask_failed", [
@@ -181,11 +297,18 @@ final class ExtractController {
         }
     }
 
+    /// Confirm the refined selection: cutout → lift. Clears the selection so
+    /// the user can start picking the next object while this one lifts.
+    func liftCurrentSelection() {
+        guard let mask = currentMask else { return }
+        addItem(fromMask: mask)
+        clearSelection()
+    }
+
     #if DEBUG && targetEnvironment(simulator)
     /// Sim-only: the simulator's Core ML zeroes SAM's decoder masks, so dev
-    /// automation injects a synthetic circular mask instead.
+    /// automation injects a synthetic circular mask and lifts it directly.
     func devFakeTap(u: Double, v: Double, radiusFraction: Double) {
-        tapMarkers.append(CGPoint(x: u, y: v))
         let s = Self.side
         var mask = [UInt8](repeating: 0, count: s * s)
         let cx = u * Double(s), cy = v * Double(s), r = radiusFraction * Double(s)
@@ -275,7 +398,7 @@ final class ExtractController {
         lift(itemID: item.id)
     }
 
-    /// Run the 3D lift for an item (Hunyuan via backend; 1-4 min).
+    /// Run the 3D lift for an item (Hunyuan via backend).
     private func lift(itemID: UUID) {
         guard let index = items.firstIndex(where: { $0.id == itemID }) else { return }
         let cutout = items[index].cutout
@@ -307,27 +430,44 @@ final class ExtractController {
             "png_bytes": png.count,
             "upload_w": Int(size.width), "upload_h": Int(size.height),
         ])
+        Analytics.track(.liftStarted, properties: [
+            "source": "extract",
+            "upload_w": Int(size.width), "upload_h": Int(size.height),
+        ])
         let t0 = Date()
         Task { @MainActor in
             do {
                 let result = try await authService.lift3d(image: png)
-                Self.log("extract.lift_ok", [
-                    "glb_bytes": result.glb.count,
-                    "lift_ms": Int(-t0.timeIntervalSinceNow * 1000),
+                let ms = Int(-t0.timeIntervalSinceNow * 1000)
+                Self.recordLiftDuration(ms: ms)
+                Self.log("extract.lift_ok", ["glb_bytes": result.glb.count, "lift_ms": ms])
+                Analytics.track(.liftCompleted, properties: [
+                    "source": "extract", "duration_ms": ms, "glb_bytes": result.glb.count,
                 ])
                 if let i = items.firstIndex(where: { $0.id == itemID }) {
                     items[i].glb = result.glb
                     items[i].meshThumb = result.thumbnail.flatMap { UIImage(data: $0) }
                     items[i].state = .lifted
+                    if !isPresented {
+                        let name = persistToCollection(index: i)
+                        onBackgroundLiftResult?(name ?? "Your object", true)
+                    }
                 }
             } catch {
+                let ms = Int(-t0.timeIntervalSinceNow * 1000)
                 if let i = items.firstIndex(where: { $0.id == itemID }) {
                     items[i].state = .failed
                 }
                 Self.log("extract.lift_failed", [
-                    "error": String(describing: error),
-                    "lift_ms": Int(-t0.timeIntervalSinceNow * 1000),
+                    "error": String(describing: error), "lift_ms": ms,
                 ])
+                Analytics.track(.liftFailed, properties: [
+                    "source": "extract", "duration_ms": ms,
+                    "error": String(describing: error),
+                ])
+                if !isPresented {
+                    onBackgroundLiftResult?("", false)
+                }
             }
         }
     }
@@ -335,14 +475,22 @@ final class ExtractController {
     func retry(_ item: ExtractItem) {
         guard let i = items.firstIndex(where: { $0.id == item.id }) else { return }
         items[i].state = .lifting
+        items[i].liftStartedAt = Date()
         lift(itemID: item.id)
     }
 
     /// Persist a lifted item into the object library.
     func saveToCollection(_ item: ExtractItem) {
         guard let i = items.firstIndex(where: { $0.id == item.id }),
-              items[i].state == .lifted,
-              let png = items[i].cutout.pngData() else { return }
+              items[i].state == .lifted else { return }
+        _ = persistToCollection(index: i)
+    }
+
+    /// Shared save path (Save button + background auto-save). Returns the
+    /// saved object's name.
+    @discardableResult
+    private func persistToCollection(index i: Int) -> String? {
+        guard let png = items[i].cutout.pngData() else { return nil }
         let count = (try? modelContext.fetchCount(FetchDescriptor<SavedObject>())) ?? 0
         let object = SavedObject(
             name: "Object \(count + 1)",
@@ -356,5 +504,6 @@ final class ExtractController {
         try? modelContext.save()
         items[i].state = .saved
         Analytics.track(.objectExtracted)
+        return object.name
     }
 }

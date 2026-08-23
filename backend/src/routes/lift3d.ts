@@ -15,6 +15,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { checkFalBudget, addMonthlySpendUsd } from '../modules/falBudget/index.js';
 import { falLift3d } from '../modules/fal/falLift3d.js';
+import { trackLift3d } from '../modules/analytics/index.js';
 import { config } from '../config/index.js';
 
 export const lift3dRoute: FastifyPluginAsync = async (fastify) => {
@@ -28,6 +29,7 @@ export const lift3dRoute: FastifyPluginAsync = async (fastify) => {
 
     const image = Buffer.from(imageBase64, 'base64');
     const contentType = image[0] === 0xff && image[1] === 0xd8 ? 'image/jpeg' : 'image/png';
+    const t0 = Date.now();
     try {
       const result = await falLift3d(image, contentType);
       if (!budget.exempt) {
@@ -42,12 +44,14 @@ export const lift3dRoute: FastifyPluginAsync = async (fastify) => {
         },
         'lift3d_ok',
       );
+      trackLift3d({ userId, ok: true, elapsedMs: result.elapsedMs, glbBytes: result.glb.length });
       return {
         glbBase64: result.glb.toString('base64'),
         thumbnailBase64: result.thumbnail?.toString('base64'),
       };
     } catch (err) {
       request.log.warn({ userId, err: (err as Error).message, event: 'lift3d_failed' }, 'lift3d_failed');
+      trackLift3d({ userId, ok: false, elapsedMs: Date.now() - t0, error: (err as Error).message });
       return reply.code(502).send({ error: 'lift3d_failed', message: (err as Error).message });
     }
   });

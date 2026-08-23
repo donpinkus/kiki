@@ -1,9 +1,10 @@
+import CanvasModule
 import SwiftUI
 
-/// The Extract screen: the GENERATED image on the left (tap anything to lift
-/// it into 3D via SAM + Hunyuan), the growing list of 3D lifts on the right,
-/// each with "Save to Collection". Full-screen, entered from the drawing's
-/// Extract button (next to Animate).
+/// The Extract screen: the GENERATED image on the left — tap to select with
+/// SAM, refine with Add/Remove points (same interaction as the canvas Select
+/// tool), then "Lift to 3D". The right pane lists lifts with a measured ETA;
+/// lifts keep running if the screen is closed (they auto-save into Objects).
 struct ExtractView: View {
     @Environment(AppCoordinator.self) private var coordinator
     let controller: ExtractController
@@ -28,8 +29,12 @@ struct ExtractView: View {
             .padding(.vertical, 8)
 
             HStack(spacing: 0) {
-                imagePane
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                VStack(spacing: 10) {
+                    selectionControls
+                    imagePane
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                .padding(.bottom, 12)
                 Divider()
                 liftsPane
                     .frame(width: 340)
@@ -38,7 +43,50 @@ struct ExtractView: View {
         .background(Color(.systemGroupedBackground))
     }
 
-    // MARK: - Left: tappable image
+    // MARK: - Selection controls (Add/Remove refinement + confirm)
+
+    @ViewBuilder private var selectionControls: some View {
+        @Bindable var controller = controller
+        HStack(spacing: 12) {
+            Picker("Mode", selection: $controller.pointMode) {
+                Label("Add", systemImage: "plus.circle")
+                    .tag(ExtractController.PointMode.add)
+                Label("Remove", systemImage: "minus.circle")
+                    .tag(ExtractController.PointMode.remove)
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 220)
+
+            Button {
+                controller.undoPoint()
+            } label: {
+                Image(systemName: "arrow.uturn.backward")
+            }
+            .disabled(controller.selectionPoints.isEmpty)
+
+            Button("Clear") {
+                controller.clearSelection()
+            }
+            .disabled(controller.selectionPoints.isEmpty)
+
+            Spacer()
+
+            Button {
+                withAnimation(.spring(duration: 0.3)) {
+                    controller.liftCurrentSelection()
+                }
+            } label: {
+                Label("Lift to 3D", systemImage: "cube")
+                    .font(.subheadline.weight(.semibold))
+                    .padding(.horizontal, 4)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(!controller.hasSelection)
+        }
+        .padding(.horizontal, 14)
+    }
+
+    // MARK: - Left: tappable image + selection overlay
 
     private var imagePane: some View {
         GeometryReader { geo in
@@ -50,15 +98,23 @@ struct ExtractView: View {
                     .scaledToFit()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                // Tap markers (normalized → fitted-rect coords).
-                ForEach(Array(controller.tapMarkers.enumerated()), id: \.offset) { _, p in
+                // Current selection contour (normalized loops → fitted rect).
+                if !controller.selectionLoops.isEmpty {
+                    selectionShape(in: fitted)
+                        .fill(Color.accentColor.opacity(0.22), style: FillStyle(eoFill: true))
+                    selectionShape(in: fitted)
+                        .stroke(Color.accentColor, lineWidth: 2)
+                }
+
+                // Refinement points: green = add, red = remove.
+                ForEach(Array(controller.selectionPoints.enumerated()), id: \.offset) { _, p in
                     Circle()
-                        .fill(Color.accentColor)
-                        .frame(width: 10, height: 10)
+                        .fill(p.positive ? Color.green : Color.red)
+                        .frame(width: 12, height: 12)
                         .overlay(Circle().strokeBorder(.white, lineWidth: 1.5))
                         .position(
-                            x: fitted.minX + p.x * fitted.width,
-                            y: fitted.minY + p.y * fitted.height
+                            x: fitted.minX + p.u * fitted.width,
+                            y: fitted.minY + p.v * fitted.height
                         )
                 }
 
@@ -95,7 +151,28 @@ struct ExtractView: View {
                 )
             }
         }
-        .padding(12)
+        .padding(.horizontal, 12)
+    }
+
+    /// The selection contour as a SwiftUI Shape path scaled into `fitted`.
+    private func selectionShape(in fitted: CGRect) -> Path {
+        var path = Path()
+        for loop in controller.selectionLoops {
+            guard let first = loop.first else { continue }
+            path.move(to: point(first, in: fitted))
+            for p in loop.dropFirst() {
+                path.addLine(to: point(p, in: fitted))
+            }
+            path.closeSubpath()
+        }
+        return path
+    }
+
+    private func point(_ normalized: CGPoint, in fitted: CGRect) -> CGPoint {
+        CGPoint(
+            x: fitted.minX + normalized.x * fitted.width,
+            y: fitted.minY + normalized.y * fitted.height
+        )
     }
 
     private func fittedRect(image: CGSize, in container: CGSize) -> CGRect {
@@ -126,7 +203,7 @@ struct ExtractView: View {
                     Image(systemName: "cube.transparent")
                         .font(.largeTitle)
                         .foregroundStyle(.tertiary)
-                    Text("Tap anything in the image — a character, a house, an island — and it becomes a 3D model you can reuse anywhere.")
+                    Text("Tap anything in the image — a character, a house, an island. Add more taps to grow the selection, or use Remove to carve it, then Lift to 3D.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -141,6 +218,12 @@ struct ExtractView: View {
                         }
                     }
                     .padding(.bottom, 12)
+                }
+                if controller.hasActiveLifts {
+                    Text("You can close this screen and keep drawing — finished lifts land in your Objects.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .padding(.bottom, 10)
                 }
             }
         }
@@ -170,12 +253,17 @@ struct ExtractView: View {
 
             switch item.state {
             case .lifting:
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text("Lifting to 3D — a minute or two…")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer()
+                // Determinate ETA from the measured median of recent lifts
+                // (self-tuning; caps at 95% until the result actually lands).
+                TimelineView(.periodic(from: item.liftStartedAt, by: 1)) { context in
+                    let elapsed = context.date.timeIntervalSince(item.liftStartedAt)
+                    let eta = Double(ExtractController.estimatedLiftMs) / 1000
+                    VStack(alignment: .leading, spacing: 4) {
+                        ProgressView(value: min(elapsed / max(eta, 1), 0.95))
+                        Text("Lifting to 3D — \(ExtractController.estimatedLiftText)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             case .failed:
                 HStack {
