@@ -51,7 +51,7 @@ final class ExtractController {
         case remove
     }
 
-    let sourceImage: UIImage
+    private(set) var sourceImage: UIImage
     private(set) var isEncoding = true
     private(set) var lastError: String?
     private(set) var items: [ExtractItem] = []
@@ -72,10 +72,34 @@ final class ExtractController {
 
     /// False once the screen is dismissed; finished lifts then auto-save
     /// into the object library instead of waiting for a Save tap.
-    var isPresented = true
+    private(set) var isPresented = true
     /// (objectName, success) — fired for lifts that finish while the screen
     /// is closed, so the coordinator can toast + badge the objects drawer.
     var onBackgroundLiftResult: ((String, Bool) -> Void)?
+
+    /// Save every finished-but-unsaved lift (called on screen close so
+    /// completed paid work is never dropped). Returns how many were saved.
+    func saveAllLifted() -> Int {
+        var saved = 0
+        for i in items.indices where items[i].state == .lifted {
+            if persistToCollection(index: i) != nil { saved += 1 }
+        }
+        return saved
+    }
+
+    /// The screen is closing with lifts still in flight: keep only what the
+    /// pending uploads need. This controller outlives the screen solely to
+    /// finish those uploads, and it rides along during exactly the
+    /// memory-pressure scenario the jetsam instrumentation watches — so drop
+    /// the SAM models, the source image, the selection state, and every
+    /// finished item's blobs.
+    func prepareForBackground() {
+        isPresented = false
+        segmenter = nil
+        clearSelection()
+        items.removeAll { $0.state != .lifting }
+        sourceImage = UIImage()
+    }
 
     private let authService: AuthService
     private let modelContext: ModelContext
@@ -270,24 +294,38 @@ final class ExtractController {
             do {
                 let logits = try await segmenter.mask(for: samples)
                 guard generation == self.selectionGeneration else { return }
-                var mask = MaskContour.binaryMask(
-                    fromLogits: logits.logits, width: logits.width, height: logits.height,
-                    upsampledSide: Self.side
-                )
-                // Keep just the tapped object, not disconnected same-class blobs.
-                mask = MaskContour.connectedComponent(
-                    of: mask, side: Self.side,
-                    seedX: Int(seed.u * Double(Self.side)), seedY: Int(seed.v * Double(Self.side))
-                )
+                // The 1024² mask crunching (upsample, component BFS, marching
+                // squares) is a few full-bitmap passes — off the MainActor so
+                // a tap-refine-tap loop never hitches the UI.
+                let side = Self.side
+                let seedX = Int(seed.u * Double(side)), seedY = Int(seed.v * Double(side))
+                let (mask, loops, maskPx) = await Task.detached(priority: .userInitiated) {
+                    var mask = MaskContour.binaryMask(
+                        fromLogits: logits.logits, width: logits.width, height: logits.height,
+                        upsampledSide: side
+                    )
+                    // Keep just the tapped object, not disconnected same-class blobs.
+                    mask = MaskContour.connectedComponent(
+                        of: mask, side: side, seedX: seedX, seedY: seedY
+                    )
+                    let loops = MaskContour.normalizedLoops(fromBinary: mask, side: side)
+                    var px = 0
+                    for v in mask where v != 0 { px += 1 }
+                    return (mask, loops, px)
+                }.value
+                guard generation == self.selectionGeneration else { return }
                 currentMask = mask
-                selectionLoops = MaskContour.normalizedLoops(fromBinary: mask, side: Self.side)
+                selectionLoops = loops
                 Self.log("extract.mask_ok", [
                     "score": logits.score,
                     "points": points.count,
-                    "mask_px": mask.lazy.filter { $0 != 0 }.count,
+                    "mask_px": maskPx,
                     "mask_ms": Int(-t0.timeIntervalSinceNow * 1000),
                 ])
             } catch {
+                // Same staleness rule as the success path — a slow failing
+                // decode must not surface an error for a cleared selection.
+                guard generation == self.selectionGeneration else { return }
                 lastError = "Couldn't select that — try tapping elsewhere."
                 Self.log("extract.mask_failed", [
                     "error": String(describing: error),
@@ -402,37 +440,19 @@ final class ExtractController {
     private func lift(itemID: UUID) {
         guard let index = items.firstIndex(where: { $0.id == itemID }) else { return }
         let cutout = items[index].cutout
-        // fal's Hunyuan endpoint rejects images with any side under 128 px
-        // ("Image resolution only support [128, 5000]", hit 2026-08-23 — a
-        // small tapped object makes a tiny bbox crop). Upscale to a 256 px
-        // short side (capped so the long side stays well under 5000).
-        let minDim = max(min(cutout.size.width, cutout.size.height), 1)
-        let maxDim = max(cutout.size.width, cutout.size.height, 1)
-        let upscale = max(1, min(256 / minDim, 4000 / maxDim))
-        let size = CGSize(
-            width: (cutout.size.width * upscale).rounded(),
-            height: (cutout.size.height * upscale).rounded()
-        )
-        // Hunyuan wants RGB — composite the transparent cutout on white.
-        let format = UIGraphicsImageRendererFormat()
-        format.preferredRange = .standard
-        format.scale = 1
-        let white = UIGraphicsImageRenderer(size: size, format: format).image { ctx in
-            UIColor.white.setFill()
-            ctx.fill(CGRect(origin: .zero, size: size))
-            cutout.draw(in: CGRect(origin: .zero, size: size))
-        }
-        guard let png = white.pngData() else {
-            Self.log("extract.lift_failed", ["error": "cutout pngData() returned nil"])
+        // Sizing/compositing bounds for fal's Hunyuan live in Lift3DUpload —
+        // shared with the object drawer's lift path.
+        guard let (png, uploadSize) = Lift3DUpload.preparePNG(from: cutout) else {
+            Self.log("extract.lift_failed", ["error": "upload PNG render failed"])
             return
         }
         Self.log("extract.lift_started", [
             "png_bytes": png.count,
-            "upload_w": Int(size.width), "upload_h": Int(size.height),
+            "upload_w": Int(uploadSize.width), "upload_h": Int(uploadSize.height),
         ])
         Analytics.track(.liftStarted, properties: [
             "source": "extract",
-            "upload_w": Int(size.width), "upload_h": Int(size.height),
+            "upload_w": Int(uploadSize.width), "upload_h": Int(uploadSize.height),
         ])
         let t0 = Date()
         Task { @MainActor in
@@ -463,7 +483,7 @@ final class ExtractController {
                 ])
                 Analytics.track(.liftFailed, properties: [
                     "source": "extract", "duration_ms": ms,
-                    "error": String(describing: error),
+                    "error": String(String(describing: error).prefix(200)),
                 ])
                 if !isPresented {
                     onBackgroundLiftResult?("", false)

@@ -128,7 +128,6 @@ struct DrawingTopBar: View {
             // Object library: reusable cutouts saved from selections; tap a
             // tile to drop it into this drawing as a movable float.
             Button {
-                coordinator.objectsDrawerBadge = 0
                 coordinator.showObjectsDrawer.toggle()
             } label: {
                 chromeIcon("shippingbox")
@@ -148,6 +147,9 @@ struct DrawingTopBar: View {
             .popover(isPresented: $coordinator.showObjectsDrawer) {
                 ObjectsDrawer()
                     .frame(width: 360, height: 420)
+                    // Clear the new-lifts badge only when the drawer is
+                    // actually SEEN — not on the tap that closes it.
+                    .onAppear { coordinator.objectsDrawerBadge = 0 }
             }
 
             // AI Edit (inpaint): edits the active selection if one exists,

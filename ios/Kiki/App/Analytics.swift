@@ -68,7 +68,8 @@ enum AnalyticsEvent: String {
     case objectSaved = "objects.saved"
     case objectInserted = "objects.inserted"
     case objectPinned = "objects.pinned"
-    case objectLifted = "objects.lifted_3d"
+    // (objects.lifted_3d retired 2026-08-23 — objects.lift_started with
+    // source:"drawer" replaces it; keeping both double-counted lifts.)
     case objectExtracted = "objects.extracted"
     case extractOpened = "extract.opened"
     case liftStarted = "objects.lift_started"

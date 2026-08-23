@@ -1836,30 +1836,17 @@ final class AppCoordinator {
     /// Lift an object's cutout to a canonical 3D model (USDZ via backend ->
     /// Hunyuan3D). 1-4 min; the drawer stays usable meanwhile.
     func liftObjectTo3D(_ object: SavedObject) {
-        guard liftingObjectID == nil, var png = object.imageData else { return }
-        // fal's Hunyuan endpoint rejects images with any side under 128 px
-        // ("Image resolution only support [128, 5000]") — upscale small
-        // cutouts to a 256 px short side before upload.
-        if let image = UIImage(data: png), min(image.size.width, image.size.height) < 128 {
-            let minDim = max(min(image.size.width, image.size.height), 1)
-            let maxDim = max(image.size.width, image.size.height, 1)
-            let upscale = max(1, min(256 / minDim, 4000 / maxDim))
-            let size = CGSize(
-                width: (image.size.width * upscale).rounded(),
-                height: (image.size.height * upscale).rounded()
-            )
-            let format = UIGraphicsImageRendererFormat()
-            format.preferredRange = .standard
-            format.scale = 1
-            let scaled = UIGraphicsImageRenderer(size: size, format: format).image { _ in
-                image.draw(in: CGRect(origin: .zero, size: size))
-            }
-            png = scaled.pngData() ?? png
-        }
+        guard liftingObjectID == nil, let imageData = object.imageData,
+              let image = UIImage(data: imageData),
+              // Sizing/compositing bounds for fal's Hunyuan live in
+              // Lift3DUpload — shared with the Extract screen's lift path.
+              let (png, uploadSize) = Lift3DUpload.preparePNG(from: image) else { return }
         liftingObjectID = object.id
-        showTransientBanner("Building a 3D model of \(object.name) — takes a minute or two.")
-        Analytics.track(.objectLifted, properties: ["object_id": object.id.uuidString])
-        Analytics.track(.liftStarted, properties: ["source": "drawer"])
+        showTransientBanner("Building a 3D model of \(object.name) — \(ExtractController.estimatedLiftText).")
+        Analytics.track(.liftStarted, properties: [
+            "source": "drawer", "object_id": object.id.uuidString,
+            "upload_w": Int(uploadSize.width), "upload_h": Int(uploadSize.height),
+        ])
         let t0 = Date()
         Task { @MainActor in
             defer { liftingObjectID = nil }
@@ -1878,7 +1865,7 @@ final class AppCoordinator {
                 Analytics.track(.liftFailed, properties: [
                     "source": "drawer",
                     "duration_ms": Int(-t0.timeIntervalSinceNow * 1000),
-                    "error": String(describing: error),
+                    "error": String(String(describing: error).prefix(200)),
                 ])
                 showTransientBanner("3D lift failed — try again in a bit.")
                 Log.info("lift3d.failed", attributes: [
@@ -1928,19 +1915,30 @@ final class AppCoordinator {
 
     func closeExtract() {
         showExtract = false
-        if let controller = extract, controller.hasActiveLifts {
-            // Lifts keep running after the screen closes (the in-flight Tasks
-            // retain the controller): finished ones auto-save into Objects,
-            // then toast + badge the objects-drawer button.
-            controller.isPresented = false
-            controller.onBackgroundLiftResult = { [weak self] name, success in
-                guard let self else { return }
-                if success {
-                    objectsDrawerBadge += 1
-                    showTransientBanner("\(name) is 3D now — it's in your Objects (the box icon up top).")
-                } else {
-                    showTransientBanner("A 3D lift didn't work out — open Extract to retry.")
+        if let controller = extract {
+            // Finished-but-unsaved lifts are completed paid work — save them
+            // now rather than dropping them with the controller.
+            let saved = controller.saveAllLifted()
+            if saved > 0 {
+                objectsDrawerBadge += saved
+                showTransientBanner(saved == 1
+                    ? "Your 3D object was saved — it's in your Objects (the box icon up top)."
+                    : "\(saved) 3D objects were saved to your Objects (the box icon up top).")
+            }
+            if controller.hasActiveLifts {
+                // Lifts keep running after the screen closes (the in-flight
+                // Tasks retain the controller): finished ones auto-save into
+                // Objects, then toast + badge the objects-drawer button.
+                controller.onBackgroundLiftResult = { [weak self] name, success in
+                    guard let self else { return }
+                    if success {
+                        objectsDrawerBadge += 1
+                        showTransientBanner("\(name) is 3D now — it's in your Objects (the box icon up top).")
+                    } else {
+                        showTransientBanner("A 3D lift didn't work out this time.")
+                    }
                 }
+                controller.prepareForBackground()
             }
         }
         extract = nil
