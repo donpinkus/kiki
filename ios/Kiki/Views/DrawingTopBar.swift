@@ -65,14 +65,8 @@ struct DrawingTopBar: View {
                 }
                 if coordinator.canShareVideo {
                     Section("Share video") {
-                        // TEMP A/B (gray-preview hunt round 2): both
-                        // presentations of the same replay view, so device
-                        // behavior can be compared live.
-                        Button("Speed paint replay (page)") {
+                        Button("Speed paint replay") {
                             coordinator.openReplayFromDrawing()
-                        }
-                        Button("Speed paint replay (modal)") {
-                            coordinator.showReplayModal = true
                         }
                     }
                 }
@@ -183,13 +177,6 @@ struct DrawingTopBar: View {
         .environment(\.colorScheme, .dark)
         .sheet(item: $shareItem) { item in
             ShareSheet(activityItems: [item.url])
-        }
-        // TEMP A/B (gray-preview hunt round 2). A .sheet, NOT
-        // .fullScreenCover: video layers never composite inside this app's
-        // fullScreenCover on iPadOS 26 hardware.
-        .sheet(isPresented: $coordinator.showReplayModal) {
-            SpeedPaintReplayView(presentation: .modal)
-                .environment(coordinator)
         }
     }
 
