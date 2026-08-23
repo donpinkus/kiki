@@ -18,7 +18,20 @@ import SwiftUI
 /// is export-only); the preview shows the watermark as a SwiftUI overlay
 /// instead.
 struct SpeedPaintReplayView: View {
+    /// TEMP A/B (gray-preview hunt round 2): the same view presented two
+    /// ways. `.page` = the AppScreen.replay full screen (stream stopped on
+    /// entry). `.modal` = the earlier-working configuration: a near-
+    /// fullscreen SHEET over the live drawing screen (stream keeps running
+    /// behind it). Both live in the Share menu so device behavior can be
+    /// compared directly; collapse to one once the culprit is isolated.
+    enum PresentationContext {
+        case page, modal
+    }
+
+    var presentation: PresentationContext = .page
+
     @Environment(AppCoordinator.self) private var coordinator
+    @Environment(\.dismiss) private var dismiss
 
     /// Speed options, in display order — `fit12` leads because it's the
     /// default: it sizes content + the 3s final hold to 12s total, so the
@@ -71,14 +84,83 @@ struct SpeedPaintReplayView: View {
 
     @State private var player = AVPlayer()
     @State private var loopObserver: NSObjectProtocol?
+    /// Mirrors AVPlayerLayer.isReadyForDisplay via KVO in PlayerLayerView —
+    /// feeds the VideoDiag watchdog (gray-preview diagnostics).
+    @State private var layerReadyForDisplay = false
 
     var body: some View {
-        VStack(spacing: 16) {
-            topBar
-                .padding(.horizontal, 20)
-                .padding(.top, 12)
+        Group {
+            switch presentation {
+            case .page:
+                VStack(spacing: 16) {
+                    topBar
+                        .padding(.horizontal, 20)
+                        .padding(.top, 12)
+                    content
+                }
+                .background(Color(.systemGroupedBackground))
+            case .modal:
+                NavigationStack {
+                    content
+                        .navigationTitle("Speed paint replay")
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar {
+                            ToolbarItem(placement: .cancellationAction) {
+                                Button("Done") { dismiss() }
+                            }
+                        }
+                }
+                // Near-fullscreen sheet: fixed frame + .fitted; headroom
+                // instead of a straight percentage because sheets CLIP
+                // content beyond the system's max sheet size.
+                .frame(width: modalSize.width, height: modalSize.height)
+                .presentationSizing(.fitted)
+            }
+        }
+        .sheet(item: $shareItem) { item in
+            ShareSheet(activityItems: [item.url])
+        }
+        .alert(
+            "Speed paint replay",
+            isPresented: Binding(get: { statusMessage != nil }, set: { if !$0 { statusMessage = nil } })
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(statusMessage ?? "")
+        }
+        .task(id: previewKey) { await rebuildPreview() }
+        .task(id: exportKey) {
+            // Eagerly encode for the current settings so the share tap is
+            // instant (or nearly). The 600ms settle absorbs rapid control
+            // flips; .task(id:) cancels the debounce on each change, and
+            // startEagerExport cancels any stale in-flight encode.
+            // MUST wait for the first-open flush/consolidation to finish —
+            // consolidation deletes segment files, and an export building
+            // concurrently reads them mid-delete (seen on device: -11800 on
+            // a segment being consolidated).
+            try? await Task.sleep(for: .milliseconds(600))
+            while !hasFlushed, !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(200))
+            }
+            guard !Task.isCancelled else { return }
+            startEagerExport()
+        }
+        .onDisappear {
+            player.pause()
+            if let loopObserver { NotificationCenter.default.removeObserver(loopObserver) }
+            exportTask?.cancel()
+        }
+    }
 
-            VStack(spacing: 16) {
+    /// The app is landscape-only fullscreen, so the main screen bounds are a
+    /// safe stand-in for the window size here.
+    private var modalSize: CGSize {
+        let screen = UIScreen.main.bounds.size
+        return CGSize(width: screen.width - 80, height: screen.height - 140)
+    }
+
+    private var content: some View {
+        VStack(spacing: 16) {
                 // The preview owns all the vertical space the controls below
                 // don't need — the whole point of the dedicated page.
                 preview
@@ -137,43 +219,8 @@ struct SpeedPaintReplayView: View {
                             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
                     }
                 }
-            }
-            .padding([.horizontal, .bottom], 20)
         }
-        .background(Color(.systemGroupedBackground))
-        .sheet(item: $shareItem) { item in
-            ShareSheet(activityItems: [item.url])
-        }
-        .alert(
-            "Speed paint replay",
-            isPresented: Binding(get: { statusMessage != nil }, set: { if !$0 { statusMessage = nil } })
-        ) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(statusMessage ?? "")
-        }
-        .task(id: previewKey) { await rebuildPreview() }
-        .task(id: exportKey) {
-            // Eagerly encode for the current settings so the share tap is
-            // instant (or nearly). The 600ms settle absorbs rapid control
-            // flips; .task(id:) cancels the debounce on each change, and
-            // startEagerExport cancels any stale in-flight encode.
-            // MUST wait for the first-open flush/consolidation to finish —
-            // consolidation deletes segment files, and an export building
-            // concurrently reads them mid-delete (seen on device: -11800 on
-            // a segment being consolidated).
-            try? await Task.sleep(for: .milliseconds(600))
-            while !hasFlushed, !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(200))
-            }
-            guard !Task.isCancelled else { return }
-            startEagerExport()
-        }
-        .onDisappear {
-            player.pause()
-            if let loopObserver { NotificationCenter.default.removeObserver(loopObserver) }
-            exportTask?.cancel()
-        }
+        .padding([.horizontal, .bottom], 20)
     }
 
     // MARK: - Top bar (matches AnimateView's)
@@ -214,7 +261,9 @@ struct SpeedPaintReplayView: View {
             // hardware, a masked AVPlayerLayer is suspected of compositing
             // to nothing (frames delivered, geometry correct, screen gray).
             // Corner rounding can come back later via layer.cornerRadius.
-            PlayerLayerView(player: player)
+            PlayerLayerView(player: player, onReadyForDisplay: { ready in
+                if layerReadyForDisplay != ready { layerReadyForDisplay = ready }
+            })
             if isComposing {
                 ProgressView().controlSize(.large)
             }
@@ -259,6 +308,14 @@ struct SpeedPaintReplayView: View {
         isComposing = true
         defer { isComposing = false }
         if !hasFlushed {
+            if presentation == .page {
+                // Belt-and-suspenders with RootView's no-fade rule: never
+                // attach the first player item while a screen transition could
+                // still be animating (suspected gray-preview trigger; not yet
+                // confirmed — the modal path skips this to stay faithful to
+                // the known-working configuration).
+                try? await Task.sleep(for: .milliseconds(350))
+            }
             await coordinator.flushRecording(consolidate: true)
             hasFlushed = true
         }
@@ -286,6 +343,15 @@ struct SpeedPaintReplayView: View {
         player.play()
         hasPreview = true
         watchItemStatus(item)
+        // Long-running gray-preview diagnostics: verdict + deep evidence to
+        // Sentry if this player never puts frames on screen.
+        layerReadyForDisplay = false
+        VideoDiag.watch(
+            player: newPlayer,
+            context: presentation == .page ? "replay_page" : "replay_modal",
+            layerReady: { layerReadyForDisplay },
+            isSuperseded: { newPlayer !== player }
+        )
     }
 
     /// Surface player-item load failures instead of a silent black player —
@@ -447,20 +513,31 @@ private struct ReplayShareItem: Identifiable {
 /// the autoplay loop needs no playback controls anyway.
 private struct PlayerLayerView: UIViewRepresentable {
     let player: AVPlayer
+    /// isReadyForDisplay mirror for the VideoDiag watchdog: the one signal
+    /// that distinguishes "playing" from "actually putting frames on screen".
+    var onReadyForDisplay: ((Bool) -> Void)?
 
     final class LayerView: UIView {
         override static var layerClass: AnyClass { AVPlayerLayer.self }
         var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
+        var observation: NSKeyValueObservation?
+        var onReady: ((Bool) -> Void)?
     }
 
     func makeUIView(context: Context) -> LayerView {
         let view = LayerView()
         view.playerLayer.videoGravity = .resizeAspect
         view.playerLayer.player = player
+        view.onReady = onReadyForDisplay
+        view.observation = view.playerLayer.observe(\.isReadyForDisplay, options: [.initial, .new]) { [weak view] layer, _ in
+            let ready = layer.isReadyForDisplay
+            DispatchQueue.main.async { view?.onReady?(ready) }
+        }
         return view
     }
 
     func updateUIView(_ view: LayerView, context: Context) {
         view.playerLayer.player = player
+        view.onReady = onReadyForDisplay
     }
 }

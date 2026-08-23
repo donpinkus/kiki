@@ -988,6 +988,18 @@ private struct AnimateLoopingPlayerView: UIViewRepresentable {
             playerLayer.player = player
             playerLayer.videoGravity = .resizeAspect
             player.play()
+            // Gray-preview diagnostics: watching plain-file playback here too
+            // tells us whether a wedge episode is app-wide or specific to the
+            // replay's composition path.
+            VideoDiag.watch(
+                player: player,
+                context: "animate_clip",
+                layerReady: { [weak self] in self?.playerLayer.isReadyForDisplay ?? true },
+                isSuperseded: { [weak self] in
+                    guard let self else { return true }
+                    return self.currentURL != url
+                }
+            )
         }
 
         func setMuted(_ value: Bool) {

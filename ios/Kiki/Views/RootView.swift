@@ -21,7 +21,16 @@ struct RootView: View {
             }
         }
         .statusBarHidden(true)
-        .animation(.easeInOut(duration: 0.25), value: coordinator.currentScreen)
+        // No cross-fade into the replay screen: the fade puts the whole
+        // subtree behind an animated-opacity group, and an AVPlayerLayer
+        // created inside one composites to NOTHING on iPadOS 26 hardware —
+        // the same masked/faded-video failure the black-preview hunt mapped
+        // (frames delivered, geometry correct, screen gray). The replay page
+        // therefore cuts in without animation.
+        .animation(
+            coordinator.currentScreen == .replay ? nil : .easeInOut(duration: 0.25),
+            value: coordinator.currentScreen
+        )
         .onChange(of: scenePhase) { _, newPhase in
             coordinator.handleScenePhaseChange(newPhase)
         }

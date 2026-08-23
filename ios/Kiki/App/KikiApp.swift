@@ -64,6 +64,11 @@ struct KikiApp: App {
             "build_number": buildNumber ?? "unknown",
         ])
 
+        // Gray-video-preview diagnostics (device-state bug, 2026-08-22):
+        // media-daemon death/restart notifications feed the same Sentry
+        // event stream as the per-playback watchdogs in VideoDiag.
+        VideoDiag.installGlobalListeners()
+
         let container = try! ModelContainer(for: Drawing.self, AnimationClip.self, SavedObject.self)
         self.container = container
         _coordinator = State(initialValue: AppCoordinator(modelContext: container.mainContext))
