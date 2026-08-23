@@ -584,10 +584,6 @@ final class AppCoordinator {
         }
     }
     var showLayerPanel = false
-    /// TEMP A/B (gray-preview hunt round 2): sheet-presented replay over the
-    /// live drawing — the earlier-working configuration, kept alongside the
-    /// AppScreen.replay page so device behavior can be compared.
-    var showReplayModal = false
     var resultState: ResultState = .empty
 
     /// Availability of the video H100 system, pushed by the backend
@@ -2141,7 +2137,6 @@ final class AppCoordinator {
     /// clean Save-to-Files name.
     func composeReplay(layout: ReplayLayout, speed: ReplaySpeed, watermark: Bool) async -> URL? {
         guard let built = await buildReplayComposition(layout: layout, speed: speed) else { return nil }
-        VideoDiag.noteVideoExport()
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let output = dir.appendingPathComponent("Speed Paint.mp4")
         do {
@@ -2288,10 +2283,6 @@ final class AppCoordinator {
         case "replayModal", "replayScreen":
             // Legacy dev-action name kept: opens the replay share page now.
             openReplayFromDrawing()
-        case "replaySheet":
-            if currentScreen == .drawing {
-                showReplayModal = true
-            }
         // Freehand rect through the REAL loop path (Select tool, current
         // add/remove mode applies).
         case "lasso":
