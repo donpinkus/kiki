@@ -15,6 +15,11 @@ final class AnimationClip {
 
     /// Motion prompt used for this generation ("" = server default).
     var prompt: String
+    /// Sound description ("" = none); composed server-side into the model
+    /// prompt when audio is enabled.
+    var audioPrompt: String = ""
+    /// Whether the clip was generated with an audio track.
+    var audioEnabled: Bool = true
     /// LTX frame count (duration = numFrames / fps).
     var numFrames: Int
     var fps: Int
