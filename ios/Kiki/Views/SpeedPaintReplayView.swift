@@ -1,47 +1,51 @@
 import AVKit
-import os
 import Sentry
 import SwiftUI
 
-/// Debug channel for the black-preview hunt — every line is prefixed REPLAY
-/// and marked public so it reads verbatim in the Xcode console / Console.app.
-private let replayLog = Logger(subsystem: "com.kiki.app", category: "Replay")
-
-/// Modal that previews the speed-paint replay in an autoplaying, looping player
-/// and lets the user pick a layout (side-by-side / stacked) and speed
-/// (1x / 2x / 5x / fit-to-12s) before sharing. The preview plays the stitched
-/// composition directly — no encode pass — so it appears near-instantly and
-/// re-composes live when layout or speed changes. The MP4 is only encoded when
-/// a share action is tapped, which is also when the watermark is burned
-/// (`AVVideoCompositionCoreAnimationTool` is export-only); the preview shows
-/// the watermark as a SwiftUI overlay instead.
+/// The speed-paint replay share PAGE (AppScreen.replay, entered from the
+/// drawing's Share menu): previews the replay in an autoplaying, looping
+/// player and lets the user pick a layout (side-by-side / stacked) and speed
+/// before sharing. A full screen rather than a modal so the preview gets all
+/// the real estate — and fullScreenCover was never an option: video layers
+/// inside this app's fullScreenCover never composite on iPadOS 26 hardware
+/// (even AVPlayerViewController shows nothing), while plain screens (this,
+/// Animate) and sheets display fine.
+///
+/// The preview plays the stitched composition directly — no encode pass — so
+/// it appears near-instantly and re-composes live when layout or speed
+/// changes. The MP4 is only encoded when a share action is tapped, which is
+/// also when the watermark is burned (`AVVideoCompositionCoreAnimationTool`
+/// is export-only); the preview shows the watermark as a SwiftUI overlay
+/// instead.
 struct SpeedPaintReplayView: View {
     @Environment(AppCoordinator.self) private var coordinator
-    @Environment(\.dismiss) private var dismiss
 
-    /// Speed options. `fit12` sizes content + the 3s final hold to 12s total,
-    /// so the export never splits into multiple videos when shared to
-    /// Instagram / TikTok.
+    /// Speed options, in display order — `fit12` leads because it's the
+    /// default: it sizes content + the 3s final hold to 12s total, so the
+    /// export never splits into multiple videos when shared to Instagram /
+    /// TikTok.
     private enum SpeedChoice: String, CaseIterable, Identifiable {
-        case x1, x2, x5, fit12
+        case fit12, x1, x2, x5, x10
 
         var id: String { rawValue }
 
         var label: String {
             switch self {
+            case .fit12: return "12s"
             case .x1: return "1x"
             case .x2: return "2x"
             case .x5: return "5x"
-            case .fit12: return "12s"
+            case .x10: return "10x"
             }
         }
 
         var composerSpeed: ReplaySpeed {
             switch self {
+            case .fit12: return .fitTotal(seconds: 12)
             case .x1: return .multiplier(1)
             case .x2: return .multiplier(2)
             case .x5: return .multiplier(5)
-            case .fit12: return .fitTotal(seconds: 12)
+            case .x10: return .multiplier(10)
             }
         }
     }
@@ -67,33 +71,38 @@ struct SpeedPaintReplayView: View {
 
     @State private var player = AVPlayer()
     @State private var loopObserver: NSObjectProtocol?
-    /// Mirrors AVPlayerLayer.isReadyForDisplay (via KVO in PlayerLayerView) —
-    /// the definitive "is the screen actually getting frames" signal.
-    @State private var layerReadyForDisplay = false
-    /// On-screen playback probe (temporary debug — black-preview hunt).
-    /// Rendered over the preview so diagnosis needs no log channel at all.
-    @State private var probeText = ""
 
     var body: some View {
-        NavigationStack {
-            VStack(spacing: 20) {
+        VStack(spacing: 16) {
+            topBar
+                .padding(.horizontal, 20)
+                .padding(.top, 12)
+
+            VStack(spacing: 16) {
+                // The preview owns all the vertical space the controls below
+                // don't need — the whole point of the dedicated page.
                 preview
 
-                Picker("Layout", selection: $layout) {
-                    ForEach(ReplayLayout.allCases) { Text($0.label).tag($0) }
-                }
-                .pickerStyle(.segmented)
+                HStack(spacing: 20) {
+                    Picker("Layout", selection: $layout) {
+                        ForEach(ReplayLayout.allCases) { Text($0.label).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 280)
 
-                Picker("Speed", selection: $speed) {
-                    ForEach(SpeedChoice.allCases) { Text($0.label).tag($0) }
-                }
-                .pickerStyle(.segmented)
+                    Picker("Speed", selection: $speed) {
+                        ForEach(SpeedChoice.allCases) { Text($0.label).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 340)
 
-                Toggle(isOn: $watermark) {
-                    Label("“Drawn with Kiki” watermark", systemImage: "sparkles")
+                    Toggle(isOn: $watermark) {
+                        Label("“Drawn with Kiki” watermark", systemImage: "sparkles")
+                    }
+                    .fixedSize()
                 }
 
-                VStack(spacing: 12) {
+                HStack(spacing: 12) {
                     Button {
                         shareToInstagram()
                     } label: {
@@ -119,6 +128,7 @@ struct SpeedPaintReplayView: View {
                     .buttonStyle(.bordered)
                 }
                 .controlSize(.large)
+                .frame(maxWidth: 760)
                 .disabled(!hasPreview || isComposing || isExporting)
                 .overlay {
                     if isExporting {
@@ -128,25 +138,19 @@ struct SpeedPaintReplayView: View {
                     }
                 }
             }
-            .padding()
-            .navigationTitle("Speed paint replay")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Done") { dismiss() }
-                }
-            }
-            .sheet(item: $shareItem) { item in
-                ShareSheet(activityItems: [item.url])
-            }
-            .alert(
-                "Speed paint replay",
-                isPresented: Binding(get: { statusMessage != nil }, set: { if !$0 { statusMessage = nil } })
-            ) {
-                Button("OK", role: .cancel) {}
-            } message: {
-                Text(statusMessage ?? "")
-            }
+            .padding([.horizontal, .bottom], 20)
+        }
+        .background(Color(.systemGroupedBackground))
+        .sheet(item: $shareItem) { item in
+            ShareSheet(activityItems: [item.url])
+        }
+        .alert(
+            "Speed paint replay",
+            isPresented: Binding(get: { statusMessage != nil }, set: { if !$0 { statusMessage = nil } })
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(statusMessage ?? "")
         }
         .task(id: previewKey) { await rebuildPreview() }
         .task(id: exportKey) {
@@ -154,7 +158,14 @@ struct SpeedPaintReplayView: View {
             // instant (or nearly). The 600ms settle absorbs rapid control
             // flips; .task(id:) cancels the debounce on each change, and
             // startEagerExport cancels any stale in-flight encode.
+            // MUST wait for the first-open flush/consolidation to finish —
+            // consolidation deletes segment files, and an export building
+            // concurrently reads them mid-delete (seen on device: -11800 on
+            // a segment being consolidated).
             try? await Task.sleep(for: .milliseconds(600))
+            while !hasFlushed, !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(200))
+            }
             guard !Task.isCancelled else { return }
             startEagerExport()
         }
@@ -165,21 +176,45 @@ struct SpeedPaintReplayView: View {
         }
     }
 
+    // MARK: - Top bar (matches AnimateView's)
+
+    private var topBar: some View {
+        HStack(spacing: 12) {
+            Button {
+                coordinator.closeReplay()
+            } label: {
+                Label("Back", systemImage: "chevron.left")
+                    .font(.subheadline.weight(.medium))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(.ultraThinMaterial, in: Capsule())
+            }
+
+            Spacer()
+
+            Text("Speed paint replay")
+                .font(.title3.weight(.semibold))
+
+            Spacer()
+
+            // Balances the Back button so the title stays centered.
+            Label("Back", systemImage: "chevron.left")
+                .font(.subheadline.weight(.medium))
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .hidden()
+        }
+    }
+
     private var preview: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 12)
                 .fill(Color(.secondarySystemBackground))
-            PlayerLayerView(player: player, onReadyForDisplay: { ready in
-                guard ready != layerReadyForDisplay else { return }
-                layerReadyForDisplay = ready
-                replayLog.info("REPLAY layer: isReadyForDisplay=\(ready, privacy: .public)")
-                Analytics.track(.replayPreviewFailed, properties: [
-                    "status": "layer_display",
-                    "ready_for_display": ready,
-                ])
-            })
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-            .opacity(isComposing ? 0.4 : 1)
+            // NO clipShape / opacity on the player view: on iPadOS 26
+            // hardware, a masked AVPlayerLayer is suspected of compositing
+            // to nothing (frames delivered, geometry correct, screen gray).
+            // Corner rounding can come back later via layer.cornerRadius.
+            PlayerLayerView(player: player)
             if isComposing {
                 ProgressView().controlSize(.large)
             }
@@ -194,41 +229,8 @@ struct SpeedPaintReplayView: View {
                     .padding(.trailing, layout == .vertical ? 34 : 12)
             }
         }
-        .overlay(alignment: .bottomLeading) {
-            if !probeText.isEmpty {
-                Text(probeText)
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(.white)
-                    .padding(6)
-                    .background(.black.opacity(0.65), in: RoundedRectangle(cornerRadius: 6))
-                    .padding(8)
-            }
-        }
         .aspectRatio(layout.aspectRatio, contentMode: .fit)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .task {
-            while !Task.isCancelled {
-                updateProbeText()
-                try? await Task.sleep(for: .seconds(1))
-            }
-        }
-    }
-
-    /// status: unk/rdy/fail · r: rate · t: current/duration · sz: presentation
-    /// size · disp: layer has frames · tc: paused0/waiting1/playing2 · err.
-    private func updateProbeText() {
-        guard let item = player.currentItem else {
-            probeText = "no item"
-            return
-        }
-        let statusName = ["unk", "rdy", "fail"][item.status.rawValue]
-        let time = String(format: "%.2f", item.currentTime().seconds)
-        let duration = String(format: "%.1f", item.duration.seconds)
-        let rate = String(format: "%.2f", player.rate)
-        let size = "\(Int(item.presentationSize.width))x\(Int(item.presentationSize.height))"
-        let err = item.error != nil ? " ERR:\(item.error!.localizedDescription)" : ""
-        probeText = "it=\(statusName) r=\(rate) t=\(time)/\(duration) sz=\(size) disp=\(layerReadyForDisplay ? "Y" : "N") tc=\(player.timeControlStatus.rawValue)\(err)"
-        replayLog.info("REPLAY probe: \(probeText, privacy: .public)")
     }
 
     private var watermarkBadge: some View {
@@ -256,16 +258,11 @@ struct SpeedPaintReplayView: View {
     private func rebuildPreview() async {
         isComposing = true
         defer { isComposing = false }
-        replayLog.info("REPLAY ui: rebuildPreview start layout=\(layout.rawValue, privacy: .public) speed=\(speed.rawValue, privacy: .public) flushed=\(hasFlushed, privacy: .public)")
         if !hasFlushed {
-            let flushStart = Date()
             await coordinator.flushRecording(consolidate: true)
             hasFlushed = true
-            replayLog.info("REPLAY ui: first-open flush+consolidate took \(Int(Date().timeIntervalSince(flushStart) * 1000), privacy: .public)ms")
         }
-        let buildStart = Date()
         guard let built = await coordinator.buildReplayComposition(layout: layout, speed: speed.composerSpeed) else {
-            replayLog.error("REPLAY ui: build returned nil")
             // Only alert if we never managed to compose anything — a re-compose
             // failure (layout/speed change) keeps showing the previous video.
             if !hasPreview {
@@ -273,28 +270,8 @@ struct SpeedPaintReplayView: View {
             }
             return
         }
-        // TEMP DEBUG (sim bisect for the black preview): host /tmp flag files
-        // switch the preview source. Remove once the bug is closed.
-        var debugPlainFile = false
-        var debugNoVideoComp = false
-        #if DEBUG && targetEnvironment(simulator)
-        debugPlainFile = FileManager.default.fileExists(atPath: "/tmp/kiki-debug-plainfile")
-        debugNoVideoComp = FileManager.default.fileExists(atPath: "/tmp/kiki-debug-novideocomp")
-        #endif
-        replayLog.info("REPLAY ui: build took \(Int(Date().timeIntervalSince(buildStart) * 1000), privacy: .public)ms duration=\(built.composition.duration.seconds, privacy: .public)s")
-        let item: AVPlayerItem
-        if debugPlainFile, let drawingId = coordinator.currentDrawingId,
-           let firstSegment = RecordingStore.shared.segmentURLs(for: drawingId).canvas.first {
-            replayLog.info("REPLAY ui: DEBUG plain-file preview \(firstSegment.lastPathComponent, privacy: .public)")
-            item = AVPlayerItem(url: firstSegment)
-        } else {
-            item = AVPlayerItem(asset: built.composition)
-            if !debugNoVideoComp {
-                item.videoComposition = built.videoComposition
-            } else {
-                replayLog.info("REPLAY ui: DEBUG videoComposition disabled")
-            }
-        }
+        let item = AVPlayerItem(asset: built.composition)
+        item.videoComposition = built.videoComposition
         // Fresh player per item: reusing one AVPlayer across item swaps is
         // the one factor common to every black-preview incarnation (both the
         // old VideoPlayer file path and the composition path), and stale-
@@ -308,7 +285,6 @@ struct SpeedPaintReplayView: View {
         installLoopObserver()
         player.play()
         hasPreview = true
-        replayLog.info("REPLAY ui: player swapped, playing")
         watchItemStatus(item)
     }
 
@@ -341,34 +317,7 @@ struct SpeedPaintReplayView: View {
                 ])
                 SentrySDK.capture(message: "replay.preview_item_stuck")
             default:
-                Analytics.track(.replayPreviewFailed, properties: ["status": "ready"])
-                Log.info("replay.preview_item_ready", attributes: [
-                    "event": "replay.preview_item_ready",
-                ])
-                // Deep probe 2s in: the item said ready but the screen may
-                // still be empty — capture everything that distinguishes
-                // "playing but not displayed" from "not playing at all".
-                try? await Task.sleep(for: .seconds(2))
-                guard item === player.currentItem else { return }
-                let t1 = item.currentTime().seconds
-                try? await Task.sleep(for: .milliseconds(600))
-                guard item === player.currentItem else { return }
-                let probe: [String: Any] = [
-                    "status": "probe",
-                    "rate": player.rate,
-                    "time_control": player.timeControlStatus.rawValue,
-                    "waiting_reason": player.reasonForWaitingToPlay?.rawValue ?? "none",
-                    "time_before_s": t1,
-                    "time_after_s": item.currentTime().seconds,
-                    "presentation_w": Double(item.presentationSize.width),
-                    "presentation_h": Double(item.presentationSize.height),
-                    "external_playback": player.isExternalPlaybackActive,
-                    "layer_ready_for_display": layerReadyForDisplay,
-                    "error_log_events": item.errorLog()?.events.count ?? 0,
-                ]
-                Analytics.track(.replayPreviewFailed, properties: probe)
-                Log.info("replay.preview_probe", attributes: probe.merging(["event": "replay.preview_probe"]) { a, _ in a })
-                replayLog.info("REPLAY deep-probe: \(String(describing: probe), privacy: .public)")
+                break
             }
         }
     }
@@ -498,29 +447,20 @@ private struct ReplayShareItem: Identifiable {
 /// the autoplay loop needs no playback controls anyway.
 private struct PlayerLayerView: UIViewRepresentable {
     let player: AVPlayer
-    var onReadyForDisplay: ((Bool) -> Void)?
 
     final class LayerView: UIView {
         override static var layerClass: AnyClass { AVPlayerLayer.self }
         var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
-        var observation: NSKeyValueObservation?
-        var onReady: ((Bool) -> Void)?
     }
 
     func makeUIView(context: Context) -> LayerView {
         let view = LayerView()
         view.playerLayer.videoGravity = .resizeAspect
         view.playerLayer.player = player
-        view.onReady = onReadyForDisplay
-        view.observation = view.playerLayer.observe(\.isReadyForDisplay, options: [.initial, .new]) { [weak view] layer, _ in
-            let ready = layer.isReadyForDisplay
-            DispatchQueue.main.async { view?.onReady?(ready) }
-        }
         return view
     }
 
     func updateUIView(_ view: LayerView, context: Context) {
         view.playerLayer.player = player
-        view.onReady = onReadyForDisplay
     }
 }

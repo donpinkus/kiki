@@ -11,9 +11,34 @@ struct LayerPanelView: View {
     @State private var dragStartModelIndex: Int?
     @State private var dragTranslation: CGFloat = 0
 
-    private static let thumbnailSize: CGFloat = 36
-    // Fixed row height: 36 thumbnail + 2×10 vertical padding, LazyVStack spacing 0.
-    private static let rowHeight: CGFloat = 56
+    // Swipe-left quick actions (Procreate: Lock / Duplicate / Delete).
+    // One row revealed at a time; `swipeTranslation` tracks the live drag.
+    @State private var revealedId: UUID?
+    @State private var swipeTranslation: CGFloat = 0
+
+    // Layer Options side menu (tap the already-selected row).
+    @State private var optionsLayerId: UUID?
+    @State private var showRenameAlert = false
+    @State private var renameText = ""
+
+    private static let thumbnailSize: CGFloat = 52
+    // Fixed row height: 52 thumbnail + 2×10 vertical padding, LazyVStack spacing 0.
+    private static let rowHeight: CGFloat = 72
+    private static let panelWidth: CGFloat = 320
+    // Header: 28pt content (the + button) + 2×12 vertical padding + divider.
+    private static let headerHeight: CGFloat = 53
+    // Total width of the three revealed swipe-action buttons.
+    private static let swipeActionsWidth: CGFloat = 186
+
+    /// Panel grows with the layer count so every row is visible without
+    /// scrolling; once it would exceed what fits on screen (minus room for the
+    /// top bar + popover arrow) it caps and the ScrollView takes over.
+    private var panelHeight: CGFloat {
+        let rows = CGFloat(coordinator.canvasViewModel.layers.count)
+        let content = Self.headerHeight + rows * Self.rowHeight
+        let maxHeight = UIScreen.main.bounds.height - 160
+        return min(content, maxHeight)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -24,6 +49,7 @@ struct LayerPanelView: View {
                 Spacer()
                 Button {
                     coordinator.canvasViewModel.addLayer()
+                    refreshThumbnails()
                 } label: {
                     Image(systemName: "plus")
                         .font(.system(size: 16, weight: .medium))
@@ -60,7 +86,19 @@ struct LayerPanelView: View {
                            value: coordinator.canvasViewModel.layers.map(\.id))
             }
         }
+        .frame(width: Self.panelWidth, height: panelHeight)
         .onAppear { refreshThumbnails() }
+        .onChange(of: coordinator.canvasViewModel.layers.count) {
+            refreshThumbnails()
+        }
+        .alert("Rename Layer", isPresented: $showRenameAlert) {
+            TextField("Layer name", text: $renameText)
+            Button("Rename") {
+                let index = coordinator.canvasViewModel.activeLayerIndex
+                coordinator.canvasViewModel.renameLayer(at: index, to: renameText)
+            }
+            Button("Cancel", role: .cancel) {}
+        }
     }
 
     private func refreshThumbnails() {
@@ -105,6 +143,7 @@ struct LayerPanelView: View {
                     draggingId = layer.id
                     dragStartModelIndex = index
                     dragTranslation = 0
+                    closeSwipe()
                     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                 }
                 if let drag {
@@ -137,23 +176,94 @@ struct LayerPanelView: View {
         coordinator.saveCurrentDrawing()
     }
 
+    // MARK: - Swipe-left quick actions
+
+    /// Live horizontal offset for a row's content: the in-flight drag plus the
+    /// resting position (revealed rows park at -swipeActionsWidth).
+    private func swipeOffset(for layer: LayerInfo) -> CGFloat {
+        let resting: CGFloat = revealedId == layer.id ? -Self.swipeActionsWidth : 0
+        guard swipingId == layer.id else { return resting }
+        return min(0, max(-Self.swipeActionsWidth - 24, resting + swipeTranslation))
+    }
+
+    @State private var swipingId: UUID?
+
+    private func swipeGesture(layer: LayerInfo) -> some Gesture {
+        DragGesture(minimumDistance: 20, coordinateSpace: .local)
+            .onChanged { value in
+                // Horizontal-dominant drags only — vertical belongs to the
+                // ScrollView, and the reorder long-press has its own path.
+                guard abs(value.translation.width) > abs(value.translation.height) else { return }
+                guard draggingId == nil else { return }
+                swipingId = layer.id
+                swipeTranslation = value.translation.width
+            }
+            .onEnded { value in
+                guard swipingId == layer.id else { return }
+                swipingId = nil
+                swipeTranslation = 0
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
+                    if value.predictedEndTranslation.width < -Self.swipeActionsWidth / 2 {
+                        revealedId = layer.id
+                    } else if value.translation.width > 20 {
+                        revealedId = nil
+                    } else if revealedId == layer.id, value.translation.width > -20 {
+                        revealedId = nil
+                    }
+                }
+            }
+    }
+
+    private func closeSwipe() {
+        guard revealedId != nil || swipingId != nil else { return }
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
+            revealedId = nil
+            swipingId = nil
+            swipeTranslation = 0
+        }
+    }
+
     // MARK: - Row
 
     private func layerRow(layer: LayerInfo, index: Int, isActive: Bool) -> some View {
-        HStack(spacing: 12) {
-            // Visibility toggle
-            Button {
-                coordinator.canvasViewModel.toggleLayerVisibility(at: index)
-            } label: {
-                Image(systemName: layer.isVisible ? "eye.fill" : "eye.slash")
-                    .font(.system(size: 14))
-                    .foregroundStyle(isActive ? .white : (layer.isVisible ? .primary : .secondary))
-                    .frame(width: 24, height: 24)
-            }
+        ZStack(alignment: .trailing) {
+            // Quick actions revealed behind the row content on swipe-left.
+            swipeActions(layer: layer, index: index)
 
+            // Opaque background always (matches the popover chrome) so the
+            // swipe actions behind the row stay hidden until revealed.
+            rowContent(layer: layer, index: index, isActive: isActive)
+                .background(isActive ? Color.accentColor : Color(uiColor: .systemBackground))
+                .offset(x: swipeOffset(for: layer))
+        }
+        .frame(height: Self.rowHeight)
+        .clipped()
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if revealedId != nil || swipingId != nil {
+                closeSwipe()
+            } else if isActive {
+                // Procreate: tapping the selected layer opens Layer Options.
+                optionsLayerId = layer.id
+            } else {
+                coordinator.canvasViewModel.selectLayer(at: index)
+            }
+        }
+        .gesture(swipeGesture(layer: layer))
+        .gesture(reorderGesture(layer: layer, index: index))
+        .popover(isPresented: Binding(
+            get: { optionsLayerId == layer.id },
+            set: { if !$0 { optionsLayerId = nil } }
+        ), arrowEdge: .trailing) {
+            layerOptionsMenu(layer: layer, index: index)
+        }
+    }
+
+    private func rowContent(layer: LayerInfo, index: Int, isActive: Bool) -> some View {
+        HStack(spacing: 12) {
             // Thumbnail preview of layer contents
             ZStack {
-                RoundedRectangle(cornerRadius: 4)
+                RoundedRectangle(cornerRadius: 6)
                     .fill(Color.white)
                 if let thumb = thumbnails[layer.id] {
                     Image(uiImage: thumb)
@@ -163,34 +273,154 @@ struct LayerPanelView: View {
                 }
             }
             .frame(width: Self.thumbnailSize, height: Self.thumbnailSize)
-            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.gray.opacity(0.4), lineWidth: 0.5))
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.gray.opacity(0.4), lineWidth: 0.5))
 
-            // Layer name
-            Text(layer.name)
-                .font(.subheadline.weight(isActive ? .semibold : .regular))
-                .foregroundStyle(isActive ? .white : (layer.isVisible ? .primary : .secondary))
-
-            Spacer()
-
-            // Delete button (only if more than 1 layer)
-            if coordinator.canvasViewModel.layers.count > 1 {
-                Button {
-                    coordinator.canvasViewModel.deleteLayer(at: index)
-                } label: {
-                    Image(systemName: "trash")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.red)
-                        .frame(width: 24, height: 24)
+            // Layer name + status badges
+            HStack(spacing: 6) {
+                Text(layer.name)
+                    .font(.subheadline.weight(isActive ? .semibold : .regular))
+                    .foregroundStyle(isActive ? .white : (layer.isVisible ? .primary : .secondary))
+                    .lineLimit(1)
+                if layer.isLocked {
+                    Image(systemName: "lock.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(isActive ? .white.opacity(0.85) : .secondary)
+                }
+                if layer.isAlphaLocked {
+                    Image(systemName: "checkerboard.rectangle")
+                        .font(.system(size: 11))
+                        .foregroundStyle(isActive ? .white.opacity(0.85) : .secondary)
                 }
             }
+
+            Spacer(minLength: 8)
+
+            // Blend mode letter (Procreate's "N" = Normal). Display-only until
+            // per-layer blend modes exist in the engine.
+            Text("N")
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(isActive ? .white.opacity(0.85) : .secondary)
+                .frame(width: 24, height: 24)
+
+            // Visibility toggle (kept as the eye, not Procreate's checkbox)
+            Button {
+                coordinator.canvasViewModel.toggleLayerVisibility(at: index)
+            } label: {
+                Image(systemName: layer.isVisible ? "eye.fill" : "eye.slash")
+                    .font(.system(size: 15))
+                    .foregroundStyle(isActive ? .white : (layer.isVisible ? .primary : .secondary))
+                    .frame(width: 28, height: 28)
+            }
         }
-        .padding(.horizontal, 16)
+        .padding(.horizontal, 14)
         .padding(.vertical, 10)
-        .background(isActive ? Color.accentColor : Color.clear, in: RoundedRectangle(cornerRadius: 8))
-        .contentShape(Rectangle())
-        .onTapGesture {
-            coordinator.canvasViewModel.selectLayer(at: index)
+    }
+
+    private func swipeActions(layer: LayerInfo, index: Int) -> some View {
+        HStack(spacing: 0) {
+            swipeActionButton(
+                title: layer.isLocked ? "Unlock" : "Lock",
+                systemImage: layer.isLocked ? "lock.open" : "lock",
+                color: .blue
+            ) {
+                coordinator.canvasViewModel.setLayerLocked(!layer.isLocked, at: index)
+                closeSwipe()
+            }
+            swipeActionButton(title: "Duplicate", systemImage: "plus.square.on.square", color: .indigo) {
+                if coordinator.canvasViewModel.duplicateLayer(at: index) {
+                    refreshThumbnails()
+                }
+                closeSwipe()
+            }
+            swipeActionButton(title: "Delete", systemImage: "trash", color: .red) {
+                closeSwipe()
+                if coordinator.canvasViewModel.layers.count > 1 {
+                    coordinator.canvasViewModel.deleteLayer(at: index)
+                }
+            }
+            .disabled(coordinator.canvasViewModel.layers.count <= 1)
         }
-        .gesture(reorderGesture(layer: layer, index: index))
+        .frame(width: Self.swipeActionsWidth, height: Self.rowHeight)
+    }
+
+    private func swipeActionButton(title: String, systemImage: String, color: Color,
+                                   action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 4) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 15, weight: .medium))
+                Text(title)
+                    .font(.system(size: 10, weight: .medium))
+            }
+            .foregroundStyle(.white)
+            .frame(width: Self.swipeActionsWidth / 3, height: Self.rowHeight)
+            .background(color)
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: - Layer Options menu (tap the selected layer)
+
+    private func layerOptionsMenu(layer: LayerInfo, index: Int) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            optionRow("Rename", systemImage: "pencil") {
+                optionsLayerId = nil
+                renameText = layer.name
+                showRenameAlert = true
+            }
+            Divider()
+            optionRow("Select", systemImage: "circle.dashed") {
+                optionsLayerId = nil
+                coordinator.selectLayerContents(at: index)
+                coordinator.showLayerPanel = false
+            }
+            Divider()
+            optionRow("Copy", systemImage: "doc.on.doc") {
+                optionsLayerId = nil
+                coordinator.copyLayer(at: index)
+            }
+            Divider()
+            optionRow("Duplicate", systemImage: "plus.square.on.square") {
+                optionsLayerId = nil
+                if coordinator.canvasViewModel.duplicateLayer(at: index) {
+                    refreshThumbnails()
+                }
+            }
+            .disabled(coordinator.canvasViewModel.layers.count >= 16)
+            Divider()
+            optionRow("Clear", systemImage: "xmark.circle") {
+                optionsLayerId = nil
+                coordinator.canvasViewModel.clearLayer(at: index)
+                refreshThumbnails()
+            }
+            .disabled(layer.isLocked)
+            Divider()
+            optionRow("Alpha Lock", systemImage: "checkerboard.rectangle",
+                      isOn: layer.isAlphaLocked) {
+                coordinator.canvasViewModel.setLayerAlphaLocked(!layer.isAlphaLocked, at: index)
+                optionsLayerId = nil
+            }
+        }
+        .frame(width: 220)
+    }
+
+    private func optionRow(_ title: String, systemImage: String, isOn: Bool = false,
+                           action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack {
+                Label(title, systemImage: systemImage)
+                    .font(.subheadline)
+                Spacer()
+                if isOn {
+                    Image(systemName: "checkmark")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Color.accentColor)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }

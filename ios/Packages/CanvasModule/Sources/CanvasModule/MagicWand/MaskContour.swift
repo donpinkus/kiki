@@ -131,21 +131,180 @@ public enum MaskContour {
     public static func path(
         fromBinary mask: [UInt8], side: Int, simplifyTolerance: CGFloat = 1.25
     ) -> CGPath? {
-        let loops = traceLoops(mask: mask, side: side)
-        guard !loops.isEmpty else { return nil }
+        path(fromLoops: normalizedLoops(fromBinary: mask, side: side, simplifyTolerance: simplifyTolerance))
+    }
 
-        let path = CGMutablePath()
+    /// Contour loops in NORMALIZED [0,1]² coords — the Sendable intermediate for
+    /// off-main-thread derivation (CGPath itself isn't Sendable; build it on the
+    /// main actor with `path(fromLoops:)`).
+    public static func normalizedLoops(
+        fromBinary mask: [UInt8], side: Int, simplifyTolerance: CGFloat = 1.25
+    ) -> [[CGPoint]] {
         let inv = 1.0 / CGFloat(side)
-        for loop in loops {
+        return traceLoops(mask: mask, side: side).compactMap { loop in
             let simplified = simplify(loop, tolerance: simplifyTolerance)
-            guard simplified.count >= 3 else { continue }
-            path.move(to: CGPoint(x: simplified[0].x * inv, y: simplified[0].y * inv))
-            for p in simplified.dropFirst() {
-                path.addLine(to: CGPoint(x: p.x * inv, y: p.y * inv))
-            }
+            guard simplified.count >= 3 else { return nil }
+            return simplified.map { CGPoint(x: $0.x * inv, y: $0.y * inv) }
+        }
+    }
+
+    /// Assemble a closed multi-subpath CGPath from normalized loops.
+    public static func path(fromLoops loops: [[CGPoint]]) -> CGPath? {
+        guard !loops.isEmpty else { return nil }
+        let path = CGMutablePath()
+        for loop in loops {
+            path.move(to: loop[0])
+            for p in loop.dropFirst() { path.addLine(to: p) }
             path.closeSubpath()
         }
         return path.isEmpty ? nil : path
+    }
+
+    // MARK: - Freehand rasterization + move transform
+
+    /// Rasterize a closed view-space path into a side² binary mask (top-left
+    /// origin, even-odd fill so self-intersections behave like holes).
+    public static func rasterize(path: CGPath, viewSize: CGSize, side: Int) -> [UInt8] {
+        guard viewSize.width > 0, viewSize.height > 0 else {
+            return [UInt8](repeating: 0, count: side * side)
+        }
+        var pixels = [UInt8](repeating: 0, count: side * side)
+        pixels.withUnsafeMutableBytes { raw in
+            guard let base = raw.baseAddress,
+                  let ctx = CGContext(
+                    data: base, width: side, height: side, bitsPerComponent: 8,
+                    bytesPerRow: side, space: CGColorSpaceCreateDeviceGray(),
+                    bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return }
+            // Y-flip: CGContext origin is bottom-left, our masks are top-left.
+            ctx.translateBy(x: 0, y: CGFloat(side))
+            ctx.scaleBy(x: CGFloat(side) / viewSize.width, y: -CGFloat(side) / viewSize.height)
+            ctx.setFillColor(gray: 1, alpha: 1)
+            ctx.addPath(path)
+            ctx.fillPath(using: .evenOdd)
+        }
+        for i in 0..<pixels.count { pixels[i] = pixels[i] > 127 ? 1 : 0 }
+        return pixels
+    }
+
+    /// Transform a binary mask by the selection-move affine (matches the
+    /// renderer's `updateSelectionVertices`: rotate+scale about `center`, then
+    /// translate). All positional args are NORMALIZED [0,1]² coords. Inverse
+    /// nearest-neighbor sampling.
+    public static func transform(
+        _ mask: [UInt8], side: Int,
+        translation: CGPoint, scale: CGFloat, rotation: CGFloat, center: CGPoint
+    ) -> [UInt8] {
+        guard scale > 0.0001 else { return [UInt8](repeating: 0, count: mask.count) }
+        var out = [UInt8](repeating: 0, count: mask.count)
+        let s = CGFloat(side)
+        let invScale = 1.0 / scale
+        let c = cos(-rotation), sn = sin(-rotation)
+        let cx = center.x * s, cy = center.y * s
+        let tx = translation.x * s, ty = translation.y * s
+        mask.withUnsafeBufferPointer { src in
+            for y in 0..<side {
+                let fy = CGFloat(y) + 0.5
+                for x in 0..<side {
+                    // Inverse map: p = c + R(−θ)·((p' − c − t)) / s
+                    let dx = CGFloat(x) + 0.5 - cx - tx
+                    let dy = fy - cy - ty
+                    let rx = (dx * c - dy * sn) * invScale
+                    let ry = (dx * sn + dy * c) * invScale
+                    let sx = Int(cx + rx)
+                    let sy = Int(cy + ry)
+                    guard sx >= 0, sx < side, sy >= 0, sy < side else { continue }
+                    out[y * side + x] = src[sy * side + sx]
+                }
+            }
+        }
+        return out
+    }
+
+    /// Element-wise subtraction: `a` minus `b`, returning (result, changed).
+    public static func subtracting(_ a: [UInt8], _ b: [UInt8]) -> (mask: [UInt8], changed: Bool) {
+        precondition(a.count == b.count)
+        var out = a
+        var changed = false
+        for i in 0..<out.count where b[i] != 0 && out[i] != 0 {
+            out[i] = 0
+            changed = true
+        }
+        return (out, changed)
+    }
+
+    // MARK: - Signed distance field (fast Expand)
+
+    /// Signed 3-4 chamfer distance for a binary mask: positive inside
+    /// (3 × chamfer distance to the nearest background pixel), negative outside
+    /// (−3 × distance to the nearest mask pixel). Two forward/backward passes
+    /// each — computed ONCE per mask, after which any expand/contract radius is
+    /// a single `expandByDistance` threshold (this is what makes the Expand
+    /// slider draggable: O(1) in radius instead of O(radius) dilation passes).
+    public static func signedDistance(_ mask: [UInt8], side: Int) -> [Int32] {
+        let n = side * side
+        let inf: Int32 = .max / 4
+        // distToMask: 0 on mask pixels; distToBackground: 0 on background pixels.
+        var toMask = [Int32](repeating: 0, count: n)
+        var toBackground = [Int32](repeating: 0, count: n)
+        for i in 0..<n {
+            if mask[i] != 0 { toBackground[i] = inf } else { toMask[i] = inf }
+        }
+        chamfer(&toMask, side: side)
+        chamfer(&toBackground, side: side)
+        var signed = [Int32](repeating: 0, count: n)
+        for i in 0..<n {
+            signed[i] = mask[i] != 0 ? toBackground[i] : -toMask[i]
+        }
+        return signed
+    }
+
+    /// Threshold a signed distance field into the mask expanded (`radius` > 0)
+    /// or contracted (`radius` < 0) by ~`radius` pixels. `radius == 0`
+    /// reproduces the original mask exactly.
+    public static func expandByDistance(_ signed: [Int32], by radius: Int) -> [UInt8] {
+        let threshold = Int32(-3 * radius)
+        var out = [UInt8](repeating: 0, count: signed.count)
+        for i in 0..<signed.count where signed[i] > threshold || (signed[i] == threshold && radius != 0) {
+            // radius 0: strictly-positive = inside (original mask). radius ≠ 0:
+            // include the exact-boundary band too so growth is symmetric.
+            out[i] = 1
+        }
+        return out
+    }
+
+    /// In-place two-pass 3-4 chamfer distance transform over a seeded grid
+    /// (0 at sources, +inf elsewhere).
+    private static func chamfer(_ dist: inout [Int32], side: Int) {
+        // Forward: top-left → bottom-right.
+        for y in 0..<side {
+            let row = y * side
+            for x in 0..<side {
+                let i = row + x
+                var d = dist[i]
+                if x > 0 { d = min(d, dist[i - 1] + 3) }
+                if y > 0 {
+                    d = min(d, dist[i - side] + 3)
+                    if x > 0 { d = min(d, dist[i - side - 1] + 4) }
+                    if x < side - 1 { d = min(d, dist[i - side + 1] + 4) }
+                }
+                dist[i] = d
+            }
+        }
+        // Backward: bottom-right → top-left.
+        for y in stride(from: side - 1, through: 0, by: -1) {
+            let row = y * side
+            for x in stride(from: side - 1, through: 0, by: -1) {
+                let i = row + x
+                var d = dist[i]
+                if x < side - 1 { d = min(d, dist[i + 1] + 3) }
+                if y < side - 1 {
+                    d = min(d, dist[i + side] + 3)
+                    if x < side - 1 { d = min(d, dist[i + side + 1] + 4) }
+                    if x > 0 { d = min(d, dist[i + side - 1] + 4) }
+                }
+                dist[i] = d
+            }
+        }
     }
 
     // MARK: - Marching squares

@@ -53,6 +53,8 @@ The canvas uses `.bgra8Unorm_srgb` Metal textures. The `_srgb` suffix means Meta
 
 CIContext is cached on `CanvasRenderer` (created once at init, backed by the same MTLDevice). The CIImage paths handle premultiplied alpha correctly — but **you** must pass the right color space at each Metal boundary (linearSRGB) vs. output (sRGB); see the mental-model table above. Using the cached CIContext does **not** absolve you of getting the gamma side right.
 
+**`CIContext.render(to: MTLTexture)` silently writes NOTHING on current runtimes — sim AND device** (verified 2026-08-22: iOS 18.3.1 simulator by direct byte probes, iPadOS 26 hardware via the `-KikiCanvasLoadSelfTest 1` launch-arg self-test → `directCIRender=BROKEN(no-op)`; solid-red render → all-zero texture bytes on cached and fresh contexts, with and without an explicit command buffer — the READ direction, `CIImage(mtlTexture:)`, works fine). Consequence before the fix: **every saved drawing reopened blank, and the next autosave persisted the blank layers** — a silent production data-loss loop (present in the sim since at least Jul 19; date of the device regression unknown — the path was verified working in June, so likely an OS update), masked by overlay layout showing only the generated image. `renderCIImage` now probes the direct path once per renderer (`directCIRenderToTextureWorks`, 4×4 red render + readback) and self-heals onto `renderCIImageViaCPU` when broken: CI renders to a CPU bitmap in **RGBAh + linearSRGB** (keeping premultiplication in linear space — CI's 8-bit bitmap output premultiplies in the ENCODED space, measured 128 for ½-alpha white, i.e. the CGContext gamma trap above), uploads to a temp `rgba16Float` texture, and one compositor draw stores it into the `_srgb` layer so Metal's hardware does the exact linear→sRGB encode. Note `toBitmap` writes rows top-down, so the caller's Metal pre-flip must be undone there (loads came back vertically mirrored until it was). Regression check: launch with `-KikiCanvasLoadSelfTest 1` → PASS/FAIL line in syslog + a Sentry message (kiki-ios) for devices without USB log access.
+
 **Y-flip:** CIImage uses bottom-left origin; Metal textures use top-left. Apply `CGAffineTransform(scaleX: 1, y: -1).translatedBy(x: 0, y: -extent.height)` when converting in either direction.
 
 ### Color Space — Always Explicit sRGB
@@ -167,6 +169,28 @@ MetalCanvasView (UIView, CAMetalLayer)
 - Clip mask: `setClipPath()` persists the path across tool switches. Stamps outside the path are discarded (CPU-side via `CGPath.contains(_:using: .evenOdd)` — even-odd since 2026-07-19 so magic-wand masks with holes/disjoint subpaths clip correctly; identical to winding for simple lasso loops)
 - Commit: Metal render pass composites selection texture onto active layer (source-over)
 - Cancel: discard selection texture + undo to pre-lasso snapshot
+
+### Unified Selection (2026-07-19, supersedes separate lasso/wand selections)
+
+`SelectionController` (MagicWand/) owns ONE selection: a list of per-object 1024²
+bitmaps (`.auto(points:)` SAM-authored / `.freehand` hand-drawn or carved), whose
+union (+ selection-wide Expand via union distance field) publishes the clip path.
+Key mechanics:
+- **Tap routing** (reopen-on-tap): Add outside → new object (auto-commits current);
+  any tap inside an auto object → reopen + joint refine; Remove on freehand →
+  SAM-carve (single-point decode ∩ object, contiguous-guarded). No "New Object" UI.
+- **Freehand loops**: `MetalCanvasView.onFreehandLoopClosed` (set ⇒ lasso capture
+  becomes a mask author: no undo snapshot, no extraction) → `MaskContour.rasterize`
+  (even-odd) → add object or `subtracting` bake (carved auto objects → freehand
+  source, points discarded).
+- **Move**: `beginMove` → `beginMoveExtraction(path:)` (renderer extraction, even-odd
+  fill) + container float gestures → commit composites + `MaskContour.transform`
+  moves every object bitmap/point by the same affine (rotate+scale about extraction-
+  bounds center, then translate — must match `updateSelectionVertices`). Cancel =
+  snapshot restore + canvas undo. Clip visuals hidden while floating.
+- **Selection undo**: snapshot stack (arrays are COW → ~free). `sessionGeneration`
+  guards discard in-flight decode/derive results after restore/clear.
+- Legacy lasso Phase-A-from-touch is dead code behind `onFreehandLoopClosed == nil`.
 
 ### Magic wand flow (`MagicWand/`, 2026-07-19)
 - **No Metal selection extraction** — the wand is Phase-B-only: it produces a clip path (`setClipPath`) + ants + point markers; nothing floats/moves.

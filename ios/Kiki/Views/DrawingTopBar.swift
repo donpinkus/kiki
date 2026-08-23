@@ -66,10 +66,7 @@ struct DrawingTopBar: View {
                 if coordinator.canShareVideo {
                     Section("Share video") {
                         Button("Speed paint replay") {
-                            // Present immediately — the modal flushes/
-                            // consolidates behind its own spinner, so there
-                            // is no dead delay before anything appears.
-                            coordinator.showReplayModal = true
+                            coordinator.openReplayFromDrawing()
                         }
                     }
                 }
@@ -151,8 +148,9 @@ struct DrawingTopBar: View {
                 chromeIcon("square.on.square")
             }
             .popover(isPresented: $coordinator.showLayerPanel) {
+                // LayerPanelView sizes itself: grows with the layer count,
+                // caps near screen height (then its ScrollView scrolls).
                 LayerPanelView()
-                    .frame(width: 260, height: 400)
             }
 
             colorSwatch
@@ -166,10 +164,6 @@ struct DrawingTopBar: View {
         .environment(\.colorScheme, .dark)
         .sheet(item: $shareItem) { item in
             ShareSheet(activityItems: [item.url])
-        }
-        .fullScreenCover(isPresented: $coordinator.showReplayModal) {
-            SpeedPaintReplayView()
-                .environment(coordinator)
         }
     }
 
@@ -368,11 +362,14 @@ private struct KikiAIStatusDetails: View {
 
     var body: some View {
         // 1s tick so elapsed counts and progress bars advance live while
-        // the popover is open.
-        TimelineView(.periodic(from: .now, by: 1)) { _ in
+        // the popover is open. The tick's date is passed INTO the stage rows
+        // — without a changing input, SwiftUI skips re-rendering the child
+        // and the countdown freezes at its first value (shipped bug,
+        // caught 2026-07-19).
+        TimelineView(.periodic(from: .now, by: 1)) { context in
             VStack(alignment: .leading, spacing: 10) {
                 // ── IMAGE system ─────────────────────────────────────────
-                Text("Kiki's AI")
+                Text("Kiki's image AI")
                     .font(.headline)
                 if coordinator.isStreamIdlePaused {
                     Text("Resting — no activity for a while, so the connection is paused. Draw anything to wake it back up.")
@@ -381,6 +378,7 @@ private struct KikiAIStatusDetails: View {
                 }
                 SystemStageView(
                     status: coordinator.imageSystemStatus,
+                    now: context.date,
                     readyText: "Ready — sketch magic is available.",
                     offText: "Asleep — powered down after 30 quiet minutes."
                 )
@@ -413,10 +411,11 @@ private struct KikiAIStatusDetails: View {
                         .font(.headline)
                     SystemStageView(
                         status: coordinator.videoSystemStatus,
+                        now: context.date,
                         readyText: "Ready — animations are available.",
                         offText: "Asleep."
                     )
-                    Text("Powers the Animate button and the automatic animation when you pause drawing.")
+                    Text("Powers the Animate page — tap Animate on a drawing or in the gallery.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -433,6 +432,11 @@ private struct KikiAIStatusDetails: View {
 /// capped at 95% until the backend actually reports ready).
 private struct SystemStageView: View {
     let status: StreamWebSocketClient.SystemStatus?
+    /// The TimelineView tick. MUST flow in as an input: it's what makes
+    /// SwiftUI re-render this row each second — computing Date() internally
+    /// leaves the inputs unchanged between ticks, so SwiftUI skips the child
+    /// and every countdown freezes.
+    let now: Date
     let readyText: String
     let offText: String
 
@@ -453,7 +457,7 @@ private struct SystemStageView: View {
     }
 
     private var elapsedSeconds: Int? {
-        status?.stageStartedAtMs.map { max(0, Int(Date().timeIntervalSince1970 - $0 / 1000)) }
+        status?.stageStartedAtMs.map { max(0, Int(now.timeIntervalSince1970 - $0 / 1000)) }
     }
 
     @ViewBuilder
@@ -488,11 +492,11 @@ private struct SystemStageView: View {
                     }
                 }
             }
-        default: // waking (interest registered, launch imminent) or unknown
+        default: // 'waking': interest registered, GPU search starts momentarily
             HStack(spacing: 8) {
                 ProgressView()
                     .controlSize(.small)
-                Text("Waking up…")
+                Text("Waking up — about to start looking for a GPU…")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

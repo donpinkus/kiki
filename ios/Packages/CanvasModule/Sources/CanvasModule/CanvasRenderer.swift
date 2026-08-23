@@ -65,6 +65,11 @@ public final class CanvasRenderer {
     /// PSO compiled (including the Simulator). Smudge still needs `isWetRenderingAvailable`.
     var isWetInkAvailable: Bool { wetInkScratchPSO != nil }
     private let compositorPSO: MTLRenderPipelineState
+    /// Compositor variant whose blend preserves the DESTINATION's alpha
+    /// exactly (out.a = dst.a; src rgb is scaled by dst.a) — the alpha-locked
+    /// stroke flatten. Fixed-function, so it works on the simulator too.
+    private lazy var alphaLockCompositorPSO: MTLRenderPipelineState? =
+        Self.makeAlphaLockCompositorPSO(device: device, library: library)
 
     /// Debug toggle for the Phase-4 draw-order experiment: when true, wet stamps are
     /// issued as N separate single-instance draws (serialized by submission order)
@@ -99,6 +104,11 @@ public final class CanvasRenderer {
         let id: UUID
         var name: String
         var isVisible: Bool
+        /// Fully locked: brush/eraser/clear are refused for this layer.
+        var isLocked: Bool = false
+        /// Alpha lock: flatten preserves the layer's alpha channel, so strokes
+        /// only land where content already exists.
+        var isAlphaLocked: Bool = false
         let texture: MTLTexture
     }
 
@@ -455,6 +465,56 @@ public final class CanvasRenderer {
         layers[index].isVisible.toggle()
     }
 
+    /// Rename a layer.
+    func renameLayer(at index: Int, to name: String) {
+        guard index >= 0, index < layers.count else { return }
+        layers[index].name = name
+    }
+
+    /// Toggle the full edit lock for a layer.
+    func setLocked(_ locked: Bool, at index: Int) {
+        guard index >= 0, index < layers.count else { return }
+        layers[index].isLocked = locked
+    }
+
+    /// Toggle alpha lock for a layer.
+    func setAlphaLocked(_ locked: Bool, at index: Int) {
+        guard index >= 0, index < layers.count else { return }
+        layers[index].isAlphaLocked = locked
+    }
+
+    /// Duplicate a layer: blit-copy its texture and insert the copy directly
+    /// above the source. Returns the new layer's index, or nil at the layer
+    /// cap / on allocation failure. The copy carries visibility + alpha lock
+    /// but drops the full lock (Procreate duplicates unlocked-editable too,
+    /// and a locked fresh copy is never what the user wants).
+    func duplicateLayer(at index: Int) -> Int? {
+        guard layers.count < Self.maxLayerCount,
+              index >= 0, index < layers.count else { return nil }
+        let source = layers[index]
+        let desc = makeLayerDescriptor()
+        guard let texture = device.makeTexture(descriptor: desc),
+              let cmdBuf = commandQueue.makeCommandBuffer(),
+              let blit = cmdBuf.makeBlitCommandEncoder() else { return nil }
+        blit.copy(from: source.texture, to: texture)
+        blit.endEncoding()
+        cmdBuf.commit()
+        cmdBuf.waitUntilCompleted() // cold path: menu action, not per-frame
+        let copy = Layer(id: UUID(), name: source.name + " copy",
+                         isVisible: source.isVisible, isLocked: false,
+                         isAlphaLocked: source.isAlphaLocked, texture: texture)
+        let newIndex = index + 1
+        layers.insert(copy, at: newIndex)
+        if activeLayerIndex >= newIndex { activeLayerIndex += 1 }
+        return newIndex
+    }
+
+    /// Clear one layer's texture to transparent (cold path — menu action).
+    func clearLayer(at index: Int) {
+        guard index >= 0, index < layers.count else { return }
+        clearTexture(layers[index].texture)
+    }
+
     /// Reorder a layer from one position to another.
     func moveLayer(from source: Int, to destination: Int) {
         guard source >= 0, source < layers.count,
@@ -478,6 +538,8 @@ public final class CanvasRenderer {
         let id: UUID
         let name: String
         let isVisible: Bool
+        let isLocked: Bool
+        let isAlphaLocked: Bool
         let data: Data
     }
 
@@ -499,7 +561,9 @@ public final class CanvasRenderer {
         var snaps: [LayerStackSnapshot] = []
         for (i, layer) in layers.enumerated() {
             guard let data = snapshotLayer(at: i) else { return nil }
-            snaps.append(LayerStackSnapshot(id: layer.id, name: layer.name, isVisible: layer.isVisible, data: data))
+            snaps.append(LayerStackSnapshot(id: layer.id, name: layer.name, isVisible: layer.isVisible,
+                                            isLocked: layer.isLocked, isAlphaLocked: layer.isAlphaLocked,
+                                            data: data))
         }
         return (snaps, activeLayerIndex)
     }
@@ -513,7 +577,8 @@ public final class CanvasRenderer {
             let desc = makeLayerDescriptor()
             guard let tex = device.makeTexture(descriptor: desc) else { return }
             clearTexture(tex)
-            rebuilt.append(Layer(id: snap.id, name: snap.name, isVisible: snap.isVisible, texture: tex))
+            rebuilt.append(Layer(id: snap.id, name: snap.name, isVisible: snap.isVisible,
+                                 isLocked: snap.isLocked, isAlphaLocked: snap.isAlphaLocked, texture: tex))
         }
         layers = rebuilt
         activeLayerIndex = min(max(0, activeIndex), layers.count - 1)
@@ -628,7 +693,21 @@ public final class CanvasRenderer {
         guard let enc = cmdBuf.makeRenderCommandEncoder(descriptor: rpd) else { return }
 
         enc.setVertexBuffer(quadVertexBuffer, offset: 0, index: 0)
-        drawScratch(enc, scratch: scratch, opacity: activeStrokeOpacity, grain: activeGrain)
+        if layers.indices.contains(activeLayerIndex), layers[activeLayerIndex].isAlphaLocked,
+           let lockPSO = alphaLockCompositorPSO {
+            // Alpha lock: flatten through the dst-alpha-preserving blend so the
+            // stroke only lands where the layer already has content. Grain is
+            // bypassed here (the grain compositor has no alpha-lock variant);
+            // the live preview is NOT masked — the scratch composites over the
+            // whole stack on screen — so the stroke visually clips on lift.
+            var op = activeStrokeOpacity
+            enc.setRenderPipelineState(lockPSO)
+            enc.setFragmentTexture(scratch, index: 0)
+            enc.setFragmentBytes(&op, length: MemoryLayout<Float>.size, index: 0)
+            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+        } else {
+            drawScratch(enc, scratch: scratch, opacity: activeStrokeOpacity, grain: activeGrain)
+        }
         enc.endEncoding()
 
         cmdBuf.commit()
@@ -1266,8 +1345,92 @@ public final class CanvasRenderer {
         // linear→sRGB encoding on store. Passing sRGB here would double-encode (gamma
         // applied twice → washed-out midtones, e.g. dark grays lifting to mid-gray).
         // We tell CIContext to output linear values; Metal handles the sRGB encoding.
-        ciContext.render(ciImage, to: texture, commandBuffer: nil,
+        //
+        // BUT: on some OS/runtime combinations CIContext.render(to: MTLTexture)
+        // silently writes NOTHING (verified 2026-08-22 on the iOS 18.3.1 simulator;
+        // reported by Donald as reopen-blank data loss on iPadOS 26 hardware too).
+        // Every saved drawing then reopened blank, and the next autosave persisted
+        // the blank layers. `directCIRenderToTextureWorks` probes the path once per
+        // renderer; when broken we use the CPU route, which is exact (see below).
+        if directCIRenderToTextureWorks {
+            ciContext.render(ciImage, to: texture, commandBuffer: nil,
+                             bounds: bounds, colorSpace: linearSRGBColorSpace)
+        } else {
+            renderCIImageViaCPU(ciImage, to: texture, bounds: bounds)
+        }
+    }
+
+    /// One-time probe: does CIContext.render(to: MTLTexture) actually write?
+    /// Renders solid red into a tiny bgra8Unorm_srgb texture and reads it back.
+    /// Broken (all-zero) on the iOS simulator since ≥Jul 2026 and on iPadOS 26
+    /// devices; self-healing here beats a compile-time platform split.
+    fileprivate lazy var directCIRenderToTextureWorks: Bool = {
+        let desc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm_srgb, width: 4, height: 4, mipmapped: false)
+        desc.usage = [.shaderRead, .shaderWrite, .renderTarget]
+        desc.storageMode = .shared
+        guard let probe = device.makeTexture(descriptor: desc) else { return false }
+        let bounds = CGRect(x: 0, y: 0, width: 4, height: 4)
+        let red = CIImage(color: CIColor(red: 1, green: 0, blue: 0, alpha: 1)).cropped(to: bounds)
+        ciContext.render(red, to: probe, commandBuffer: nil,
                          bounds: bounds, colorSpace: linearSRGBColorSpace)
+        var bytes = [UInt8](repeating: 0, count: 4 * 4 * 4)
+        probe.getBytes(&bytes, bytesPerRow: 16, from: MTLRegionMake2D(0, 0, 4, 4), mipmapLevel: 0)
+        let works = bytes.contains { $0 != 0 }
+        if !works {
+            NSLog("CanvasRenderer: CIContext.render(to:texture) is a no-op on this runtime — using CPU image-load fallback")
+        }
+        return works
+    }()
+
+    /// Exact CPU fallback for loading images into `_srgb` textures: CI renders to
+    /// a CPU bitmap in LINEAR half-float (premultiplication stays in linear space —
+    /// CI's 8-bit bitmap output premultiplies in the ENCODED space, measured 128
+    /// for ½-alpha white, which is the CGContext gamma trap the module doc bans),
+    /// uploads to a temp rgba16Float texture, and one compositor draw stores it
+    /// into the `_srgb` target — Metal's hardware does the exact linear→sRGB encode.
+    /// Cold path (drawing load only).
+    private func renderCIImageViaCPU(_ ciImage: CIImage, to texture: MTLTexture, bounds: CGRect) {
+        let w = Int(bounds.width), h = Int(bounds.height)
+        guard w > 0, h > 0 else { return }
+        // The caller pre-flips the image for Metal's top-left origin, but
+        // toBitmap already writes row 0 = top (CG layout) — flip back, or the
+        // loaded canvas comes out mirrored vertically (verified via thumbnail).
+        let upright = ciImage.transformed(by: CGAffineTransform(scaleX: 1, y: -1)
+            .translatedBy(x: 0, y: -bounds.height))
+        let rowBytes = w * 8 // RGBA × 16-bit half
+        var buf = [UInt8](repeating: 0, count: rowBytes * h)
+        buf.withUnsafeMutableBytes { raw in
+            ciContext.render(upright, toBitmap: raw.baseAddress!, rowBytes: rowBytes,
+                             bounds: bounds, format: .RGBAh, colorSpace: linearSRGBColorSpace)
+        }
+
+        let desc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba16Float, width: w, height: h, mipmapped: false)
+        desc.usage = [.shaderRead]
+        desc.storageMode = .shared
+        guard let temp = device.makeTexture(descriptor: desc) else { return }
+        buf.withUnsafeBytes { raw in
+            temp.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0,
+                         withBytes: raw.baseAddress!, bytesPerRow: rowBytes)
+        }
+
+        guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
+        let rpd = MTLRenderPassDescriptor()
+        rpd.colorAttachments[0].texture = texture
+        rpd.colorAttachments[0].loadAction = .clear // replace semantics, like CI render
+        rpd.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        rpd.colorAttachments[0].storeAction = .store
+        guard let enc = cmdBuf.makeRenderCommandEncoder(descriptor: rpd) else { return }
+        var opacity: Float = 1.0
+        enc.setRenderPipelineState(compositorPSO)
+        enc.setVertexBuffer(quadVertexBuffer, offset: 0, index: 0)
+        enc.setFragmentTexture(temp, index: 0)
+        enc.setFragmentBytes(&opacity, length: MemoryLayout<Float>.size, index: 0)
+        enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+        enc.endEncoding()
+        cmdBuf.commit()
+        cmdBuf.waitUntilCompleted() // cold path (drawing load), CPU reads follow
     }
 
     /// Load a CGImage into the active layer (convenience wrapper).
@@ -1647,7 +1810,7 @@ public final class CanvasRenderer {
         for layer in layers { clearTexture(layer.texture) }
     }
 
-    private func clearTexture(_ texture: MTLTexture) {
+    fileprivate func clearTexture(_ texture: MTLTexture) {
         guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
         let rpd = MTLRenderPassDescriptor()
         rpd.colorAttachments[0].texture = texture
@@ -1795,6 +1958,30 @@ public final class CanvasRenderer {
         ca.sourceRGBBlendFactor = .one
         ca.destinationRGBBlendFactor = .oneMinusSourceAlpha
         ca.sourceAlphaBlendFactor = .one
+        ca.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+
+        return try? device.makeRenderPipelineState(descriptor: desc)
+    }
+
+    /// Alpha-locked flatten: source-over for color, but the destination's
+    /// alpha channel is preserved bit-exactly.
+    ///   rgb: src.rgb·dst.a + dst.rgb·(1 − src.a)  (src premultiplied — new
+    ///        paint is scaled by the existing coverage, so transparent areas
+    ///        stay empty and feathered edges scale proportionally)
+    ///   a:   src.a·dst.a + dst.a·(1 − src.a) = dst.a
+    private static func makeAlphaLockCompositorPSO(device: MTLDevice, library: MTLLibrary) -> MTLRenderPipelineState? {
+        let desc = MTLRenderPipelineDescriptor()
+        desc.vertexFunction = library.makeFunction(name: "compositorVertex")
+        desc.fragmentFunction = library.makeFunction(name: "compositorFragment")
+        desc.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
+
+        let ca = desc.colorAttachments[0]!
+        ca.isBlendingEnabled = true
+        ca.rgbBlendOperation = .add
+        ca.alphaBlendOperation = .add
+        ca.sourceRGBBlendFactor = .destinationAlpha
+        ca.destinationRGBBlendFactor = .oneMinusSourceAlpha
+        ca.sourceAlphaBlendFactor = .destinationAlpha
         ca.destinationAlphaBlendFactor = .oneMinusSourceAlpha
 
         return try? device.makeRenderPipelineState(descriptor: desc)
@@ -2815,4 +3002,65 @@ public final class CanvasRenderer {
         return color * maskAlpha;
     }
     """
+}
+
+// MARK: - Load-path self-test
+
+/// Physical-device self-test for the image-load pipeline, triggered by the
+/// `-KikiCanvasLoadSelfTest 1` launch argument (read the verdict via
+/// `ipad.sh logs`). Exists because CIContext.render(to: MTLTexture) silently
+/// no-ops on some runtimes (iOS 18.3.1 simulator; suspected iPadOS 26 device),
+/// which made every reopened drawing load blank — and the next autosave then
+/// persisted the blank layers (real data loss, reported 2026-08-22).
+/// Exercises, at renderer level, exactly what reopening a drawing does:
+/// ground-truth pixels via raw texture bytes → layerPNGData (save) → clear →
+/// loadImageDataIntoLayer (load, which self-selects direct vs CPU route) →
+/// pixel compare.
+public enum CanvasLoadSelfTest {
+    public static func report() -> String {
+        guard let renderer = CanvasRenderer() else { return "FAIL: renderer init" }
+        let side = 256
+        renderer.configureDocument(side: side, viewScale: 1)
+        guard !renderer.layers.isEmpty else { return "FAIL: no layer after configure" }
+        let texture = renderer.layers[0].texture
+
+        // Ground truth: opaque red 64×64 block at (32,32), written as raw bytes
+        // (BGRA sRGB-encoded premultiplied — exact for alpha 1). No CI involved.
+        let block = 64
+        var px = [UInt8](repeating: 0, count: block * block * 4)
+        for i in 0..<(block * block) {
+            px[i * 4 + 0] = 0    // B
+            px[i * 4 + 1] = 0    // G
+            px[i * 4 + 2] = 255  // R
+            px[i * 4 + 3] = 255  // A
+        }
+        px.withUnsafeBytes { raw in
+            texture.replace(region: MTLRegionMake2D(32, 32, block, block), mipmapLevel: 0,
+                            withBytes: raw.baseAddress!, bytesPerRow: block * 4)
+        }
+
+        // Save side.
+        guard let png = renderer.layerPNGData(at: 0) else { return "FAIL: layerPNGData nil" }
+
+        // Direct-render probe verdict (also decides which route the load uses).
+        let direct = renderer.directCIRenderToTextureWorks
+
+        // Load side (fresh texture so stale bytes can't fake a pass).
+        renderer.clearTexture(texture)
+        guard renderer.loadImageDataIntoLayer(at: 0, png) else { return "FAIL: load returned false" }
+
+        func pixel(_ x: Int, _ y: Int) -> [UInt8] {
+            var b = [UInt8](repeating: 0, count: 4)
+            texture.getBytes(&b, bytesPerRow: 4, from: MTLRegionMake2D(x, y, 1, 1), mipmapLevel: 0)
+            return b
+        }
+        let center = pixel(64, 64)   // inside the block
+        let corner = pixel(200, 200) // outside — must stay transparent
+        let centerOK = abs(Int(center[2]) - 255) <= 2 && Int(center[0]) <= 2
+            && Int(center[1]) <= 2 && abs(Int(center[3]) - 255) <= 2
+        let cornerOK = corner == [0, 0, 0, 0]
+        let verdict = (centerOK && cornerOK) ? "PASS" : "FAIL"
+        return "\(verdict): directCIRender=\(direct ? "works" : "BROKEN(no-op)") "
+            + "pngBytes=\(png.count) centerBGRA=\(center) cornerBGRA=\(corner)"
+    }
 }

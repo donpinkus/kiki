@@ -93,6 +93,10 @@ public final class CanvasViewModel {
     /// it as the "user is actively working" signal.
     public var onContentChanged: (() -> Void)?
 
+    /// A brush/eraser stroke was refused because the active layer is locked
+    /// (Procreate-style swipe Lock) — the app can surface a hint.
+    public var onLockedLayerStrokeRefused: (() -> Void)?
+
     func handleStrokeCompleted(_ stroke: Stroke) {
         onStrokeCompleted?(stroke)
     }
@@ -327,6 +331,68 @@ public final class CanvasViewModel {
 
     public func moveLayer(from source: Int, to destination: Int) {
         canvasView?.moveLayer(from: source, to: destination)
+    }
+
+    public func renameLayer(at index: Int, to name: String) {
+        canvasView?.renameLayer(at: index, to: name)
+    }
+
+    public func setLayerLocked(_ locked: Bool, at index: Int) {
+        canvasView?.setLayerLocked(locked, at: index)
+    }
+
+    public func setLayerAlphaLocked(_ locked: Bool, at index: Int) {
+        canvasView?.setLayerAlphaLocked(locked, at: index)
+    }
+
+    /// Duplicate a layer (inserted above, made active). False at the 16-layer cap.
+    @discardableResult
+    public func duplicateLayer(at index: Int) -> Bool {
+        canvasView?.duplicateLayer(at: index) ?? false
+    }
+
+    /// Clear one layer to transparent (undoable). No-op on locked layers.
+    public func clearLayer(at index: Int) {
+        canvasView?.clearLayer(at: index)
+        handleDrawingChanged()
+    }
+
+    /// One layer's contents as a transparent CGImage (full document res).
+    public func layerImage(at index: Int) -> CGImage? {
+        canvasView?.layerCGImage(at: index)
+    }
+
+    /// Procreate "Select": replace the selection with this layer's painted
+    /// pixels (alpha > ~10%). Switches to the Select tool's mask pathway —
+    /// the caller should also make the Select tool current so the chrome and
+    /// panel appear. Returns false when the layer is empty.
+    @discardableResult
+    public func selectLayerContents(at index: Int) -> Bool {
+        guard let canvasView, let cgImage = canvasView.layerCGImage(at: index) else { return false }
+        let side = selection.bitmapSide
+        // Downsample the layer into the selection's bitmap grid and threshold
+        // its ALPHA channel. BGRA little-endian context (the repo-standard
+        // format — see CanvasModule/CLAUDE.md); memory row 0 = top scanline,
+        // matching the top-left row order selection bitmaps use. Alpha is the
+        // 4th byte of each BGRA pixel.
+        let bitmapInfo = CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+        guard let ctx = CGContext(data: nil, width: side, height: side,
+                                  bitsPerComponent: 8, bytesPerRow: side * 4,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: bitmapInfo) else { return false }
+        ctx.interpolationQuality = .medium
+        ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: side, height: side))
+        guard let data = ctx.data else { return false }
+        let bytes = data.bindMemory(to: UInt8.self, capacity: side * side * 4)
+        var mask = [UInt8](repeating: 0, count: side * side)
+        var any = false
+        for i in 0..<(side * side) where bytes[i * 4 + 3] > 25 {
+            mask[i] = 1
+            any = true
+        }
+        guard any else { return false }
+        selection.selectFromBitmap(mask, viewSize: canvasView.bounds.size)
+        return true
     }
 
     public func undo() {

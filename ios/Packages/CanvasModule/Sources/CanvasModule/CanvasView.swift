@@ -70,12 +70,15 @@ public struct CanvasView: UIViewRepresentable {
         canvasView.onInteractionBegan = { [weak viewModel] in
             viewModel?.handleInteractionBegan()
         }
+        canvasView.onLockedLayerStrokeRefused = { [weak viewModel] in
+            viewModel?.onLockedLayerStrokeRefused?()
+        }
         canvasView.onInteractionEnded = { [weak viewModel] in
             viewModel?.handleInteractionEnded()
         }
-        canvasView.onLassoSelectionStarted = { [weak viewModel] path, bounds in
-            viewModel?.handleLassoSelectionStarted(path: path, bounds: bounds)
-        }
+        // (Legacy lasso Phase A extraction no longer fires — freehand loops are
+        // routed to the SelectionController via onFreehandLoopClosed, wired in
+        // CanvasViewModel.attach. onLassoSelectionStarted stays unwired.)
         canvasView.onSnapEvent = { [weak viewModel] event in
             viewModel?.handleSnapEvent(event)
         }
@@ -99,9 +102,11 @@ public struct CanvasView: UIViewRepresentable {
         container.currentBrushColorProvider = { [weak viewModel] in
             viewModel?.currentBrushColorProvider?() ?? .black
         }
-        // Lasso gesture transforms → Metal canvas selection quad positioning.
-        container.onLassoTransformChanged = { [weak canvasView] translation, scale, rotation in
+        // Float gesture transforms → Metal selection quad + the unified
+        // selection's Move bookkeeping (so the mask follows the content).
+        container.onLassoTransformChanged = { [weak canvasView, weak viewModel] translation, scale, rotation in
             canvasView?.updateSelectionTransform(translation: translation, scale: scale, rotation: rotation)
+            viewModel?.selection.moveTransformChanged(translation: translation, scale: scale, rotation: rotation)
         }
         // Apply initial overlay drawing-mode state (via the view model so it survives a
         // container re-create).

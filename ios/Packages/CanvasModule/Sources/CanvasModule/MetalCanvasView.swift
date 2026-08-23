@@ -41,7 +41,10 @@ public final class MetalCanvasView: UIView {
 
     /// Layer metadata, read from the renderer (single source of truth).
     public var layers: [LayerInfo] {
-        renderer.layers.map { LayerInfo(id: $0.id, name: $0.name, isVisible: $0.isVisible) }
+        renderer.layers.map {
+            LayerInfo(id: $0.id, name: $0.name, isVisible: $0.isVisible,
+                      isLocked: $0.isLocked, isAlphaLocked: $0.isAlphaLocked)
+        }
     }
     /// Which layer is currently active for drawing.
     public var activeLayerIndex: Int { renderer.activeLayerIndex }
@@ -73,6 +76,9 @@ public final class MetalCanvasView: UIView {
     /// CanvasViewModel listens to this to sync its @Observable properties.
     public var onStateChanged: (() -> Void)?
     public var onInteractionBegan: (() -> Void)?
+    /// A brush/eraser stroke was refused because the active layer is locked —
+    /// the app can surface a "layer is locked" hint.
+    public var onLockedLayerStrokeRefused: (() -> Void)?
     public var onInteractionEnded: (() -> Void)?
     /// DEV: fires (throttled, ~per move event) while drawing a dynamic brush, with the live brush
     /// inputs + resulting multipliers, for the on-device input HUD. nil = not observed.
@@ -653,6 +659,19 @@ public final class MetalCanvasView: UIView {
                 print("[QS] touchesBegan rejected (drawingTouch=\(drawingTouch != nil ? "busy" : "nil"))")
             }
             return
+        }
+
+        // Locked layer: refuse mutating strokes (brush + eraser) outright.
+        // Selection tools stay usable — they don't write the layer.
+        if renderer.layers.indices.contains(renderer.activeLayerIndex),
+           renderer.layers[renderer.activeLayerIndex].isLocked {
+            switch currentTool {
+            case .brush, .eraser:
+                onLockedLayerStrokeRefused?()
+                return
+            default:
+                break
+            }
         }
         drawingTouch = touch
         onInteractionBegan?()
@@ -2817,6 +2836,69 @@ public final class MetalCanvasView: UIView {
         onStateChanged?()
     }
 
+    public func renameLayer(at index: Int, to name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        renderer.renameLayer(at: index, to: trimmed)
+        onStateChanged?()
+    }
+
+    public func setLayerLocked(_ locked: Bool, at index: Int) {
+        renderer.setLocked(locked, at: index)
+        onStateChanged?()
+    }
+
+    public func setLayerAlphaLocked(_ locked: Bool, at index: Int) {
+        renderer.setAlphaLocked(locked, at: index)
+        onStateChanged?()
+    }
+
+    /// Duplicate a layer (copy inserted directly above it, made active).
+    /// Structure-mutating → compound `.canvas` undo like importImageAsNewLayer.
+    /// Returns false at the layer cap.
+    @discardableResult
+    public func duplicateLayer(at index: Int) -> Bool {
+        guard renderer.layers.count < CanvasRenderer.maxLayerCount else { return false }
+        var pushedSnapshot = false
+        if isUndoEnabled, let current = renderer.snapshotLayerStack() {
+            undoSnapshots.append(.canvas(layers: current.layers, activeIndex: current.activeIndex, strokeCount: strokeCount))
+            trimUndoAndClearRedo()
+            pushedSnapshot = true
+        }
+        guard let newIndex = renderer.duplicateLayer(at: index) else {
+            // Nothing changed — drop the snapshot we just pushed (if any).
+            if pushedSnapshot { undoSnapshots.removeLast() }
+            return false
+        }
+        renderer.setActiveLayer(newIndex)
+        isDirty = true
+        onDrawingChanged?()
+        onStateChanged?()
+        return true
+    }
+
+    /// Clear one layer to transparent (single-layer `.layer` undo entry).
+    /// Refused for locked layers.
+    public func clearLayer(at index: Int) {
+        guard renderer.layers.indices.contains(index),
+              !renderer.layers[index].isLocked else { return }
+        if isUndoEnabled, let id = renderer.layerID(at: index),
+           let data = renderer.snapshotLayer(at: index) {
+            undoSnapshots.append(.layer(id: id, snapshotData: data))
+            trimUndoAndClearRedo()
+        }
+        renderer.clearLayer(at: index)
+        isDirty = true
+        onDrawingChanged?()
+        onStateChanged?()
+    }
+
+    /// One layer's contents as an upright CGImage (transparent where unpainted)
+    /// at full document resolution — the "Copy layer" source.
+    public func layerCGImage(at index: Int) -> CGImage? {
+        renderer.layerToCGImage(at: index)
+    }
+
     // MARK: - Public API
 
     /// Clear the entire canvas — resets to a single empty layer. Undoable:
@@ -2988,7 +3070,9 @@ public final class MetalCanvasView: UIView {
                 id: info.id.uuidString,
                 name: info.name,
                 isVisible: info.isVisible,
-                pngData: png
+                pngData: png,
+                isLocked: info.isLocked,
+                isAlphaLocked: info.isAlphaLocked
             ))
         }
         guard !layerEntries.isEmpty else { return nil }
@@ -3108,6 +3192,8 @@ public final class MetalCanvasView: UIView {
                 id: UUID(uuidString: entry.id) ?? UUID(),
                 name: entry.name,
                 isVisible: entry.isVisible,
+                isLocked: entry.isLocked ?? false,
+                isAlphaLocked: entry.isAlphaLocked ?? false,
                 texture: renderer.layers[i].texture
             )
             if renderer.loadImageDataIntoLayer(at: i, entry.pngData) {

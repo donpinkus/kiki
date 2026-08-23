@@ -25,6 +25,10 @@ enum AppScreen: Equatable {
     case gallery
     case drawing
     case animate
+    /// Speed-paint replay share page (from a drawing's Share menu). A full
+    /// screen, NOT a modal: the preview wants all the real estate, and
+    /// fullScreenCover kills video compositing on iPadOS 26 hardware.
+    case replay
 
     var analyticsName: String {
         switch self {
@@ -32,6 +36,7 @@ enum AppScreen: Equatable {
         case .gallery: return "Gallery"
         case .drawing: return "Drawing"
         case .animate: return "Animate"
+        case .replay: return "Replay"
         }
     }
 }
@@ -579,14 +584,6 @@ final class AppCoordinator {
         }
     }
     var showLayerPanel = false
-
-    /// Speed-paint replay modal (fullScreenCover in DrawingTopBar). Lives on
-    /// the coordinator (not top-bar @State) so the dev-automation bridge can
-    /// present it in the simulator.
-    var showReplayModal = false
-    /// TEMP DEBUG (black-preview bisect): present the replay modal from the
-    /// gallery (RootView cover) with no canvas ever created.
-    var devShowReplayFromGallery = false
     var resultState: ResultState = .empty
 
     /// Availability of the video H100 system, pushed by the backend
@@ -1368,6 +1365,18 @@ final class AppCoordinator {
         DevAutomation.startReplayListener()
         #if DEBUG
         WandSelfTest.runIfRequested()
+        // Canvas image-load self-test (`-KikiCanvasLoadSelfTest 1`): verifies the
+        // save→load pixel round trip on this exact runtime and logs a PASS/FAIL
+        // line readable via `ipad.sh logs` / `sim.sh logs`. Added while chasing
+        // the reopen-blank data loss (CIContext.render(to:texture) no-op).
+        if UserDefaults.standard.bool(forKey: "KikiCanvasLoadSelfTest") {
+            let report = CanvasLoadSelfTest.report()
+            Logger(subsystem: "com.kiki.app", category: "CanvasLoadSelfTest")
+                .warning("self-test: \(report, privacy: .public)")
+            // Also ship to Sentry so the verdict is readable when the device
+            // has no USB log access (wifi-paired devicectl only).
+            SentrySDK.capture(message: "CanvasLoadSelfTest: \(report)")
+        }
         #endif
         DevAutomation.onReplayRequested = { [weak self] fixture in
             self?.devReplayFixture(fixture)
@@ -1431,6 +1440,10 @@ final class AppCoordinator {
         // replay) counts as activity and wakes a resting stream.
         canvasViewModel.onContentChanged = { [weak self] in
             self?.noteInteraction()
+        }
+        // Locked layer: tell the user why their stroke did nothing.
+        canvasViewModel.onLockedLayerStrokeRefused = { [weak self] in
+            self?.showTransientBanner("This layer is locked — unlock it in Layers to draw.")
         }
         // Supply the current brush color to the canvas ring preview
         canvasViewModel.currentBrushColorProvider = { [weak self] in
@@ -1684,6 +1697,32 @@ final class AppCoordinator {
         return (cg, rect)
     }
 
+    // MARK: - Layer Options actions (layer panel side menu)
+
+    /// Procreate "Copy" layer option: put the layer's full contents (with
+    /// alpha) on the system pasteboard AND the in-app selection clipboard, so
+    /// the existing sidebar Paste can float it right away.
+    func copyLayer(at index: Int) {
+        guard let cg = canvasViewModel.layerImage(at: index) else { return }
+        let image = UIImage(cgImage: cg)
+        UIPasteboard.general.image = image
+        // Full-document rect: the layer image spans the whole 2048² canvas.
+        selectionClipboard = SelectionClipboard(
+            image: cg,
+            rectInDocPixels: CGRect(x: 0, y: 0, width: 2048, height: 2048)
+        )
+        showTransientBanner("Layer copied — paste from the left sidebar.")
+    }
+
+    /// Procreate "Select" layer option: selection = the layer's painted
+    /// pixels. Switches to the Select tool so the ants/panel appear.
+    func selectLayerContents(at index: Int) {
+        currentTool = .select
+        if !canvasViewModel.selectLayerContents(at: index) {
+            showTransientBanner("This layer is empty — nothing to select.")
+        }
+    }
+
     /// Copy the selection's content (visible strokes only, transparent
     /// elsewhere) into the clipboard + system pasteboard.
     func copySelection() {
@@ -1840,6 +1879,11 @@ final class AppCoordinator {
     /// artifact — extraction never uses the sketch).
     func openExtract() {
         guard let image = resultState.displayImage else { return }
+        noteInteraction()
+        // The stream has no business running under the Extract cover (same as
+        // the Animate screen) — and SAM inference on top of a live relay was
+        // pushing the app into watchdog RAM kills (Sentry KIKI-APP-IOS-1).
+        stopStream()
         extract = ExtractController(
             image: image, authService: authService, modelContext: modelContext
         )
@@ -1850,6 +1894,9 @@ final class AppCoordinator {
     func closeExtract() {
         showExtract = false
         extract = nil
+        if currentScreen == .drawing {
+            startStream()
+        }
     }
 
     // MARK: - Sticker sharing
@@ -1951,86 +1998,12 @@ final class AppCoordinator {
     /// `RecordingStore.consolidate`). Never consolidate while a replay
     /// preview/export may be reading the segment files.
     func flushRecording(consolidate: Bool = false) async {
-        guard let drawingId = currentDrawingId else {
-            streamLog.info("REPLAY flushRecording: no current drawing")
-            return
-        }
-        let started = Date()
+        guard let drawingId = currentDrawingId else { return }
         if let recorder, let urls = await recorder.checkpoint() {
             Self.appendSegmentReporting(canvasTemp: urls.canvas, generatedTemp: urls.generated, for: drawingId)
-        } else {
-            streamLog.info("REPLAY flushRecording: no new footage since last checkpoint — relying on stored segments")
         }
-        let checkpointMs = Int(Date().timeIntervalSince(started) * 1000)
         if consolidate {
-            let consolidateStart = Date()
-            let before = RecordingStore.shared.segmentURLs(for: drawingId).canvas.count
             await Self.consolidateReporting(for: drawingId)
-            let consolidateMs = Int(Date().timeIntervalSince(consolidateStart) * 1000)
-            streamLog.info("REPLAY flush: checkpoint=\(checkpointMs)ms consolidate=\(consolidateMs)ms pairs=\(before)→\(RecordingStore.shared.segmentURLs(for: drawingId).canvas.count)")
-            await Self.logReplayDiagnostics(for: drawingId, pairsBeforeConsolidation: before)
-        } else {
-            streamLog.info("REPLAY flush: checkpoint=\(checkpointMs)ms (no consolidate)")
-        }
-    }
-
-    /// Per-file forensics for the current drawing's recording store, shipped
-    /// to Sentry Logs (`event:replay.diag*`) and the Xcode console on every
-    /// replay-modal open. Runs on natural occurrences — cheap (a handful of
-    /// files post-consolidation) and exactly what's needed to debug "the
-    /// preview is black" without pulling files off the device.
-    private nonisolated static func logReplayDiagnostics(for drawingId: UUID, pairsBeforeConsolidation: Int) async {
-        let store = RecordingStore.shared
-        let segments = store.segmentURLs(for: drawingId)
-        let animation = store.generatedVideoURL(for: drawingId)
-        let summary: [String: Any] = [
-            "drawing_id": drawingId.uuidString,
-            "pairs_before_consolidation": pairsBeforeConsolidation,
-            "pairs_after_consolidation": segments.canvas.count,
-            "has_animation_mp4": animation != nil,
-        ]
-        Analytics.track(.replayDiag, properties: summary)
-        Log.info("replay.diag", attributes: summary.merging(["event": "replay.diag"]) { a, _ in a })
-        streamLog.info("REPLAY DIAG drawing=\(drawingId.uuidString, privacy: .public) pairs=\(pairsBeforeConsolidation)→\(segments.canvas.count, privacy: .public)")
-        for (kind, urls) in [("canvas", segments.canvas), ("generated", segments.generated)] {
-            for url in urls {
-                let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
-                let bytes = (attrs?[.size] as? NSNumber)?.intValue ?? -1
-                let asset = AVURLAsset(url: url)
-                let duration = (try? await asset.load(.duration).seconds) ?? -1
-                let playable = (try? await asset.load(.isPlayable)) ?? false
-                let tracks = (try? await asset.loadTracks(withMediaType: .video)) ?? []
-                var width = 0, height = 0
-                var fps: Float = -1
-                var trackSeconds = -1.0
-                var codec: UInt32 = 0
-                if let track = tracks.first {
-                    let natural = (try? await track.load(.naturalSize)) ?? .zero
-                    width = Int(natural.width)
-                    height = Int(natural.height)
-                    fps = (try? await track.load(.nominalFrameRate)) ?? -1
-                    trackSeconds = (try? await track.load(.timeRange).duration.seconds) ?? -1
-                    if let format = (try? await track.load(.formatDescriptions))?.first {
-                        codec = CMFormatDescriptionGetMediaSubType(format)
-                    }
-                }
-                let fileProps: [String: Any] = [
-                    "kind": kind,
-                    "file": url.lastPathComponent,
-                    "bytes": bytes,
-                    "duration_s": duration,
-                    "playable": playable,
-                    "video_tracks": tracks.count,
-                    "width": width,
-                    "height": height,
-                    "fps": fps,
-                    "track_duration_s": trackSeconds,
-                    "codec_fourcc": Int(codec),
-                ]
-                Analytics.track(.replayDiagFile, properties: fileProps)
-                Log.info("replay.diag.file", attributes: fileProps.merging(["event": "replay.diag.file"]) { a, _ in a })
-                streamLog.info("REPLAY DIAG \(kind, privacy: .public)/\(url.lastPathComponent, privacy: .public): \(bytes)B dur=\(duration, privacy: .public)s playable=\(playable, privacy: .public) tracks=\(tracks.count) \(width)x\(height) @\(fps)fps trackDur=\(trackSeconds, privacy: .public)")
-            }
         }
     }
 
@@ -2071,14 +2044,10 @@ final class AppCoordinator {
         currentDrawingId.flatMap { RecordingStore.shared.generatedVideoURL(for: $0) }
     }
 
-    func buildReplayComposition(layout: ReplayLayout, speed: ReplaySpeed, debugNoTransforms: Bool = false) async -> SideBySideVideoComposer.BuiltReplay? {
-        guard let drawingId = currentDrawingId else {
-            streamLog.error("REPLAY buildReplayComposition: no currentDrawingId")
-            return nil
-        }
+    func buildReplayComposition(layout: ReplayLayout, speed: ReplaySpeed) async -> SideBySideVideoComposer.BuiltReplay? {
+        guard let drawingId = currentDrawingId else { return nil }
         let segments = RecordingStore.shared.segmentURLs(for: drawingId)
         guard !segments.canvas.isEmpty else {
-            streamLog.error("REPLAY compose: no stored segments for drawing \(drawingId.uuidString)")
             Log.error("replay.no_segments", attributes: [
                 "event": "replay.no_segments",
                 "drawing_id": drawingId.uuidString,
@@ -2087,15 +2056,12 @@ final class AppCoordinator {
             return nil
         }
         do {
-            let started = Date()
             let built = try await SideBySideVideoComposer.build(
                 canvasSegments: segments.canvas,
                 generatedSegments: segments.generated,
                 layout: layout,
-                speed: speed,
-                debugNoTransforms: debugNoTransforms
+                speed: speed
             )
-            streamLog.info("REPLAY build finished in \(Int(Date().timeIntervalSince(started) * 1000))ms")
             Log.info("replay.built", attributes: [
                 "event": "replay.built",
                 "segments": segments.canvas.count,
@@ -2264,27 +2230,9 @@ final class AppCoordinator {
         case "animateExamples":
             animate?.showMotionExamples.toggle()
         #if DEBUG && targetEnvironment(simulator)
-        case "replayModal":
-            if currentScreen == .drawing {
-                Task { @MainActor in
-                    // TEMP DEBUG (black-preview bisect): host flag tears the
-                    // stream down first, eliminating capture/decode/idle-video
-                    // activity behind the modal.
-                    if FileManager.default.fileExists(atPath: "/tmp/kiki-debug-stopstream") {
-                        stopStream()
-                        try? await Task.sleep(for: .seconds(1))
-                    }
-                    showReplayModal = true
-                }
-            }
-        case "replayFromGallery":
-            if currentScreen == .gallery {
-                let descriptor = FetchDescriptor<Drawing>(sortBy: [SortDescriptor(\.updatedAt, order: .reverse)])
-                if let drawing = (try? modelContext.fetch(descriptor))?.first(where: { RecordingStore.shared.hasRecording($0.id) }) {
-                    currentDrawingId = drawing.id
-                    devShowReplayFromGallery = true
-                }
-            }
+        case "replayModal", "replayScreen":
+            // Legacy dev-action name kept: opens the replay share page now.
+            openReplayFromDrawing()
         // Freehand rect through the REAL loop path (Select tool, current
         // add/remove mode applies).
         case "lasso":
@@ -2331,6 +2279,33 @@ final class AppCoordinator {
             }
         #endif
         #if DEBUG && targetEnvironment(simulator)
+        case "gallery":
+            if currentScreen == .drawing { navigateToGallery() }
+        case "addLayer":
+            canvasViewModel.addLayer()
+        case "dupLayer":
+            canvasViewModel.duplicateLayer(at: canvasViewModel.activeLayerIndex)
+        case "clearLayer":
+            canvasViewModel.clearLayer(at: canvasViewModel.activeLayerIndex)
+        case "lockLayer":
+            let i = canvasViewModel.activeLayerIndex
+            canvasViewModel.setLayerLocked(!canvasViewModel.layers[i].isLocked, at: i)
+        case "alphaLockLayer":
+            let i = canvasViewModel.activeLayerIndex
+            canvasViewModel.setLayerAlphaLocked(!canvasViewModel.layers[i].isAlphaLocked, at: i)
+        case "copyLayer":
+            copyLayer(at: canvasViewModel.activeLayerIndex)
+        case "selectLayerContents":
+            selectLayerContents(at: canvasViewModel.activeLayerIndex)
+        case let cmd where cmd.hasPrefix("renameLayer:"):
+            canvasViewModel.renameLayer(at: canvasViewModel.activeLayerIndex,
+                                        to: String(cmd.dropFirst("renameLayer:".count)))
+        case "deleteTopLayer":
+            if canvasViewModel.layers.count > 1 {
+                canvasViewModel.deleteLayer(at: canvasViewModel.layers.count - 1)
+            }
+        case "layerPanel":
+            showLayerPanel.toggle()
         case "copySel":
             copySelection()
         case "pasteSel":
@@ -2393,6 +2368,7 @@ final class AppCoordinator {
             devShowStatusDetails = false
             devShowColorPicker = false
             if currentScreen == .animate { closeAnimate() }
+            if currentScreen == .replay { closeReplay() }
         default:
             streamLog.warning("[dev] unknown UI action: \(action)")
         }
@@ -2660,6 +2636,42 @@ final class AppCoordinator {
             let drawingCount = (try? modelContext.fetchCount(descriptor)) ?? 0
             Analytics.track(.galleryOpened, properties: ["drawing_count": drawingCount])
         }
+    }
+
+    /// Enter the speed-paint replay share page from the drawing screen.
+    /// Checkpoints the LIVE recorder before the stream (and with it the
+    /// recorder) is torn down, so the replay includes strokes drawn moments
+    /// ago without racing stopStream's detached finalize.
+    func openReplayFromDrawing() {
+        noteInteraction()
+        guard currentScreen == .drawing else { return }
+        saveCurrentDrawing()
+        Task { @MainActor in
+            await flushRecording()
+            stopStream()
+            currentScreen = .replay
+        }
+    }
+
+    /// Leave the replay share page back to the drawing (its only entry
+    /// point). Same canvas re-queue + stream restart as closeAnimate().
+    func closeReplay() {
+        guard let drawingId = currentDrawingId else {
+            currentScreen = .gallery
+            return
+        }
+        let id = drawingId
+        var descriptor = FetchDescriptor<Drawing>(predicate: #Predicate { $0.id == id })
+        descriptor.fetchLimit = 1
+        if let drawing = try? modelContext.fetch(descriptor).first {
+            canvasViewModel.setPendingState(CanvasState(
+                drawingData: drawing.drawingData ?? Data(),
+                backgroundImageData: drawing.backgroundImageData
+            ))
+        }
+        currentScreen = .drawing
+        startStream()
+        seedResultStateForCurrentDrawing()
     }
 
     func deleteDrawing(_ drawing: Drawing) {

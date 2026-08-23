@@ -14,11 +14,30 @@ public struct LayerInfo: Codable, Sendable, Identifiable {
     public let id: UUID
     public var name: String
     public var isVisible: Bool
+    /// Fully locked: no painting, erasing, or clearing (Procreate swipe-Lock).
+    public var isLocked: Bool
+    /// Alpha lock: strokes only land where the layer already has content.
+    public var isAlphaLocked: Bool
 
-    public init(id: UUID = UUID(), name: String, isVisible: Bool = true) {
+    public init(id: UUID = UUID(), name: String, isVisible: Bool = true,
+                isLocked: Bool = false, isAlphaLocked: Bool = false) {
         self.id = id
         self.name = name
         self.isVisible = isVisible
+        self.isLocked = isLocked
+        self.isAlphaLocked = isAlphaLocked
+    }
+
+    // Backward-compatible decode: layer metadata saved before the lock flags
+    // existed (pre-2026-08) loads with both flags off.
+    enum CodingKeys: String, CodingKey { case id, name, isVisible, isLocked, isAlphaLocked }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        isVisible = try c.decode(Bool.self, forKey: .isVisible)
+        isLocked = try c.decodeIfPresent(Bool.self, forKey: .isLocked) ?? false
+        isAlphaLocked = try c.decodeIfPresent(Bool.self, forKey: .isAlphaLocked) ?? false
     }
 }
 
@@ -609,6 +628,9 @@ struct LayeredDrawing: Codable {
         let name: String
         let isVisible: Bool
         let pngData: Data
+        // Optional so pre-lock-flag saves decode (nil → false).
+        let isLocked: Bool?
+        let isAlphaLocked: Bool?
     }
 }
 
