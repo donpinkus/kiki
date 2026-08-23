@@ -1832,7 +1832,26 @@ final class AppCoordinator {
     /// Lift an object's cutout to a canonical 3D model (USDZ via backend ->
     /// Hunyuan3D). 1-4 min; the drawer stays usable meanwhile.
     func liftObjectTo3D(_ object: SavedObject) {
-        guard liftingObjectID == nil, let png = object.imageData else { return }
+        guard liftingObjectID == nil, var png = object.imageData else { return }
+        // fal's Hunyuan endpoint rejects images with any side under 128 px
+        // ("Image resolution only support [128, 5000]") — upscale small
+        // cutouts to a 256 px short side before upload.
+        if let image = UIImage(data: png), min(image.size.width, image.size.height) < 128 {
+            let minDim = max(min(image.size.width, image.size.height), 1)
+            let maxDim = max(image.size.width, image.size.height, 1)
+            let upscale = max(1, min(256 / minDim, 4000 / maxDim))
+            let size = CGSize(
+                width: (image.size.width * upscale).rounded(),
+                height: (image.size.height * upscale).rounded()
+            )
+            let format = UIGraphicsImageRendererFormat()
+            format.preferredRange = .standard
+            format.scale = 1
+            let scaled = UIGraphicsImageRenderer(size: size, format: format).image { _ in
+                image.draw(in: CGRect(origin: .zero, size: size))
+            }
+            png = scaled.pngData() ?? png
+        }
         liftingObjectID = object.id
         showTransientBanner("Building a 3D model of \(object.name) — takes a minute or two.")
         Analytics.track(.objectLifted, properties: ["object_id": object.id.uuidString])
