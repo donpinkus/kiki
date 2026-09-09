@@ -584,10 +584,6 @@ final class AppCoordinator {
         }
     }
     var showLayerPanel = false
-    /// TEMP A/B (gray-preview hunt round 2): sheet-presented replay over the
-    /// live drawing — the earlier-working configuration, kept alongside the
-    /// AppScreen.replay page so device behavior can be compared.
-    var showReplayModal = false
     var resultState: ResultState = .empty
 
     /// Availability of the video H100 system, pushed by the backend
@@ -2286,10 +2282,6 @@ final class AppCoordinator {
         case "replayModal", "replayScreen":
             // Legacy dev-action name kept: opens the replay share page now.
             openReplayFromDrawing()
-        case "replaySheet":
-            if currentScreen == .drawing {
-                showReplayModal = true
-            }
         // Freehand rect through the REAL loop path (Select tool, current
         // add/remove mode applies).
         case "lasso":

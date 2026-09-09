@@ -18,20 +18,7 @@ import SwiftUI
 /// is export-only); the preview shows the watermark as a SwiftUI overlay
 /// instead.
 struct SpeedPaintReplayView: View {
-    /// TEMP A/B (gray-preview hunt round 2): the same view presented two
-    /// ways. `.page` = the AppScreen.replay full screen (stream stopped on
-    /// entry). `.modal` = the earlier-working configuration: a near-
-    /// fullscreen SHEET over the live drawing screen (stream keeps running
-    /// behind it). Both live in the Share menu so device behavior can be
-    /// compared directly; collapse to one once the culprit is isolated.
-    enum PresentationContext {
-        case page, modal
-    }
-
-    var presentation: PresentationContext = .page
-
     @Environment(AppCoordinator.self) private var coordinator
-    @Environment(\.dismiss) private var dismiss
 
     /// Speed options, in display order — `fit12` leads because it's the
     /// default: it sizes content + the 3s final hold to 12s total, so the
@@ -89,34 +76,13 @@ struct SpeedPaintReplayView: View {
     @State private var layerReadyForDisplay = false
 
     var body: some View {
-        Group {
-            switch presentation {
-            case .page:
-                VStack(spacing: 16) {
-                    topBar
-                        .padding(.horizontal, 20)
-                        .padding(.top, 12)
-                    content
-                }
-                .background(Color(.systemGroupedBackground))
-            case .modal:
-                NavigationStack {
-                    content
-                        .navigationTitle("Speed paint replay")
-                        .navigationBarTitleDisplayMode(.inline)
-                        .toolbar {
-                            ToolbarItem(placement: .cancellationAction) {
-                                Button("Done") { dismiss() }
-                            }
-                        }
-                }
-                // Near-fullscreen sheet: fixed frame + .fitted; headroom
-                // instead of a straight percentage because sheets CLIP
-                // content beyond the system's max sheet size.
-                .frame(width: modalSize.width, height: modalSize.height)
-                .presentationSizing(.fitted)
-            }
+        VStack(spacing: 16) {
+            topBar
+                .padding(.horizontal, 20)
+                .padding(.top, 12)
+            content
         }
+        .background(Color(.systemGroupedBackground))
         .sheet(item: $shareItem) { item in
             ShareSheet(activityItems: [item.url])
         }
@@ -150,13 +116,6 @@ struct SpeedPaintReplayView: View {
             if let loopObserver { NotificationCenter.default.removeObserver(loopObserver) }
             exportTask?.cancel()
         }
-    }
-
-    /// The app is landscape-only fullscreen, so the main screen bounds are a
-    /// safe stand-in for the window size here.
-    private var modalSize: CGSize {
-        let screen = UIScreen.main.bounds.size
-        return CGSize(width: screen.width - 80, height: screen.height - 140)
     }
 
     private var content: some View {
@@ -308,14 +267,11 @@ struct SpeedPaintReplayView: View {
         isComposing = true
         defer { isComposing = false }
         if !hasFlushed {
-            if presentation == .page {
-                // Belt-and-suspenders with RootView's no-fade rule: never
-                // attach the first player item while a screen transition could
-                // still be animating (suspected gray-preview trigger; not yet
-                // confirmed — the modal path skips this to stay faithful to
-                // the known-working configuration).
-                try? await Task.sleep(for: .milliseconds(350))
-            }
+            // Belt-and-suspenders with RootView's no-fade rule: never attach
+            // the first player item while a screen transition could still be
+            // animating (suspected gray-preview trigger; not confirmed —
+            // VideoDiag will tell us if it ever fires here).
+            try? await Task.sleep(for: .milliseconds(350))
             await coordinator.flushRecording(consolidate: true)
             hasFlushed = true
         }
@@ -348,7 +304,7 @@ struct SpeedPaintReplayView: View {
         layerReadyForDisplay = false
         VideoDiag.watch(
             player: newPlayer,
-            context: presentation == .page ? "replay_page" : "replay_modal",
+            context: "replay_page",
             layerReady: { layerReadyForDisplay },
             isSuperseded: { newPlayer !== player }
         )
