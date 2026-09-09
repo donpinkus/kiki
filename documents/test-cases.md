@@ -113,3 +113,15 @@ Last updated: 2026-07-18 (rewritten for the fal + Lambda H100 provider architect
 41. **Motion ideas panel.** Tapping into the Motion field the first time opens a narrow (264pt) closable panel on the preview's left edge with categorized example prompts (Camera / Light / Atmosphere / Creative). Tapping an example fills the prompt and keeps the panel open. After closing it once, it only reopens via "See examples". The panel never covers more than the left strip of the image.
 
 42. **Back restores the drawing.** Entering Animate from a drawing and tapping Back returns to that drawing with the canvas strokes intact (not a blank canvas) and the stream restarted.
+
+43. **Generation ETA.** Tapping Animate shows a determinate progress bar with elapsed seconds and "Usually takes about N seconds" (N scales with duration preset); the bar caps at 95% until delivery and the label flips to "Taking a little longer than usual…" past the estimate. Frame-streaming progress replaces it once rendering frames arrive.
+
+44. **Sound box + toggle.** A separate Sound section holds an optional sound description (composed into the model prompt server-side — pod logs show "… Sound: …") and an on/off toggle; off generates a truly silent MP4 (no AAC track — exports silent too, not just muted playback). The ideas panel's Sound section fills the Sound box; clips remember their audio settings for Reuse setup.
+
+## Speed-paint replay (share page)
+
+45. **Replay page opens with a playing preview.** In a drawing with strokes: Share → "Speed paint replay" opens the full-screen page; the preview starts playing within a few seconds (spinner first is fine) — never a persistent gray/black rectangle. (If gray: check Sentry `event:video.playback_no_display` before debugging — known device-state wedge, reboot clears it.)
+
+46. **Controls re-compose live.** Switching layout (Side by side ↔ Stacked) and speed (12s default; 1x/2x/5x/10x) re-composes the preview without leaving the page; share buttons stay enabled once a preview exists.
+
+47. **Back restores the drawing.** Back returns to the drawing with canvas strokes intact and the stream restarting — never a blank canvas. Strokes drawn seconds before opening the page appear in the replay.
