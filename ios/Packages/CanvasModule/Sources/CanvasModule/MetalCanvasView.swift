@@ -3339,10 +3339,21 @@ public final class MetalCanvasView: UIView {
     private func generateStampsForStroke(_ stroke: Stroke, scale: CGFloat,
                                          includeEndCap: Bool = true) -> [CanvasRenderer.StampInstance] {
         StrokeStampGenerator.stamps(
-            for: stroke, scale: scale, clip: clipMask,
+            for: stroke, scale: scale, clip: clip(forWalkScale: scale),
             tuning: StrokeStampGenerator.DevTuning(
                 maxSpeed: devMaxSpeed, distancePeriod: devDistancePeriod, fadePeriod: devFadePeriod),
             includeEndCap: includeEndCap)
+    }
+
+    /// The selection clip addressed in the walk's own unit. Live strokes walk in view
+    /// points (`scale == canvasScale`) — the clip's native space. Fixture replays walk
+    /// in canvas pixels (`scale == 1`), so the clip's space is stretched by
+    /// canvasScale to match (it used to be applied un-scaled → every dab rejected).
+    private func clip(forWalkScale scale: CGFloat) -> StampClip? {
+        guard let clipMask else { return nil }
+        guard canvasScale > 0, scale > 0, abs(scale - canvasScale) > 1e-6 else { return clipMask }
+        let f = canvasScale / scale
+        return clipMask.withSpace(CGSize(width: clipMask.space.width * f, height: clipMask.space.height * f))
     }
 
     /// Read-only access to the flattened canvas (all visible layers) as a CGImage

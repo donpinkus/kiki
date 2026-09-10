@@ -60,6 +60,14 @@ struct StampClip {
         self.scaleY = CGFloat(side) / max(space.height, 1)
     }
 
+    /// The same bitmap re-addressed for a walk in a different unit: a walk in canvas
+    /// pixels (BrushHarness fixtures replayed at scale 1) tests `canvasScale`× larger
+    /// coordinates than the view-point path was authored in, so the clip's space
+    /// scales with it. Shares the bits (COW).
+    func withSpace(_ newSpace: CGSize) -> StampClip {
+        StampClip(bits: bits, side: side, space: newSpace)
+    }
+
     /// Is the point (in the path's own space) inside the clip? Points outside
     /// the authored space are outside the clip.
     @inline(__always)
