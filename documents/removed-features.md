@@ -11,6 +11,29 @@ git show 6fbe8b3:<file-path>             # view the old version
 
 ---
 
+## Split-screen and Overlay drawing layouts
+
+**Removed:** 2026-09-10, commit `efc1070` (recover from its parent `79e5ad0`).
+
+**What they did**: `AppCoordinator.drawingLayout` (Settings → Display) switched between
+three drawing layouts. **Split-screen** (the original): a fixed `ResultView` pane on the left
+half with its own `PromptTitleBar` (style tile + prompt editor), eyedropper-from-result
+(`EyedropperRing`), success particles (`ParticleField`), idle-timeout/error visuals, and a
+"Send to Canvas" bar (`swapStreamImageToCanvas` → `swapLineart` → `bakeImageIntoCanvas`).
+**Overlay**: the generated image locked opaque exactly over the canvas inside the transform
+view, with a visual-only fresh-stroke surface above it (`MetalOverlayLayerView`,
+`CanvasRenderer.overlayStrokeTexture` + `renderOverlayFrame`/`flattenScratchIntoOverlay`/
+`clearOverlayStrokes`, wiped on every returned generation frame), lasso/wand chrome
+re-hosted above it (`setLassoPreviewHost`), and SAM segmenting the generated image instead
+of the sketch. Spec: `documents/plans/completed/overlay-mode.md`.
+
+**Why removed**: owner decision — the app has one drawing mode (canvas fills the pane,
+result floats as `FloatingResultPanel`); overlay "doesn't work well enough yet" and the
+three-way switch multiplied every canvas/selection/capture code path. If overlay is
+revisited it should be a fresh design, not a resurrection of this branch.
+
+---
+
 ## RunPod Pod Orchestration (image + video pods)
 
 **Removed:** 2026-07-17, commit `b0fede2` (recover from its parent `d9e3c43`).

@@ -42,7 +42,7 @@ Last updated: 2026-07-18 (rewritten for the fal + Lambda H100 provider architect
 
 13. **Never blank after first image.** Once the first successful generated image appears, the right pane never shows a blank/empty state — even during errors, reconnections, or provisioning. The last successful image stays visible.
 
-14. **Result layouts.** Settings → Display toggles between **Overlay** (the default — generated image locked opaque exactly on top of the canvas, transforming with it; fresh strokes flash on a visual-only surface and clear on each returned frame), **Split** (fixed result pane on the left half), and **Fullscreen** (the result floats as an image-only panel over the canvas). The choice persists across launches.
+14. **One layout.** There is no layout setting: the canvas fills the pane below the toolbar and the generated image floats as a panel (cases 26–30). Pinching or twisting the canvas keeps the point under the fingers fixed (a corner pinch must not slide the content away).
 
 15. **Error toast.** If generation fails, a non-blocking error toast appears at the bottom of the result pane. It auto-dismisses after 10 seconds. The last successful image remains visible behind it.
 
@@ -76,11 +76,11 @@ Last updated: 2026-07-18 (rewritten for the fal + Lambda H100 provider architect
 
 ---
 
-## Fullscreen Result Panel
+## Floating Result Panel
 
-26. **Always visible, image-sized.** In fullscreen, the generated image floats as a panel sized to the image (rounded corners + drop shadow, no buttons or glass backing). It is always visible — never auto-hidden and there is no close button.
+26. **Always visible, image-sized.** The generated image floats as a panel sized to the image (rounded corners + drop shadow, no buttons or glass backing). It is always visible — never auto-hidden and there is no close button.
 
-27. **Canvas fills the pane.** In fullscreen the drawing surface fills the available height below the toolbar (a large square), not a small centered square.
+27. **Canvas fills the pane.** The drawing surface fills the available height below the toolbar (a large square), not a small centered square.
 
 28. **Draw through the panel.** A single finger or Apple Pencil that touches the panel draws on the canvas underneath — the panel never intercepts single-touch drawing. A stroke begun on the canvas keeps drawing as it passes over the panel.
 

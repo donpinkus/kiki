@@ -1,14 +1,20 @@
 # CanvasModule — Metal Drawing Engine
 
-## Dev loop: BrushHarness (headless macOS rendering)
+## Dev loop: BrushHarness (headless macOS rendering) + OfflineTests
 
 Brush/color-mixing work does NOT need an iPad round-trip: `BrushHarness/` compiles the
-real engine (CanvasRenderer + StrokeStampGenerator + WetStrokeWalker) into a macOS CLI
+real engine (CanvasRenderer + StrokeStampGenerator + walkers) into a macOS CLI
 that renders synthetic strokes and recorded fixtures to PNGs — **including the wet brush**
 (Apple-silicon Macs have framebuffer fetch; the iOS Simulator does not). Run instructions:
 `BrushHarness/README.md`. Recorded fixtures come from the app: Brush Studio → "Record
 strokes" → share the JSON → `brushharness --fixtures <file>`. Device testing remains for
 feel/latency/input only.
+
+`OfflineTests/` holds two `swiftc` assertion mains (see its README): `main.swift` (pure
+math: dynamics, KM, stabilizer, lightness, presets) and `walkers/main.swift` (stroke-walk
+invariants: incremental == full walk for every curated preset, scale invariance, eraser
+batch invariance + no starvation, wet batch invariance, `StampClip` vs `CGPath`). Run
+BOTH after touching anything under the walk. Neither is in CI — by hand only.
 
 ## Critical Rules (NEVER violate)
 
@@ -109,6 +115,18 @@ ctx.scaleBy(x: scale, y: -scale)
 ```
 Without this flip, the mask is upside-down and operations (lasso, clip) hit the wrong region.
 
+### Known conventions (not bugs — don't "fix" blind)
+
+- **Shaped-tip art is vertically mirrored** relative to its PNG by the stamp vertex table
+  (texcoord (0,1) lands on the canvas TOP). Round tips are symmetric; every shipped chiral
+  tip (chisel, bristle) was tuned on device with this orientation, and the "Flip Y" knob is
+  defined relative to it. Changing the table changes every preset's look.
+- **Layer blend modes evaluate in LINEAR light** (correct W3C math on the `_srgb` textures).
+  Procreate/Photoshop blend in the encoded (gamma) space, so Multiply/Screen/Overlay differ
+  visibly from those apps for the same layers. Design choice.
+- **Snapped QuickShape strokes bypass `finishStroke`** (they commit through the snap
+  finalizers), so `onStrokeCompleted` — the fixture recorder — never sees them.
+
 ### R8Unorm Textures — Alpha Is Always 1
 
 Metal's R8Unorm format returns `(R, 0, 0, 1.0)` when sampled — `.a` is always 1 regardless of the R value. If you use an R8 texture as a mask with a destination-out blend (`dst *= 1 - src.alpha`), it clears the **entire** target because alpha is always 1.
@@ -129,10 +147,12 @@ MetalCanvasView (UIView, CAMetalLayer)
 │   ├── compositorPSO — fullscreen quad, source-over (layer compositing + selection display)
 │   ├── maskedCopyPSO — fullscreen quad, no blend (lasso extraction: canvas × mask → selection)
 │   └── maskedClearPSO — fullscreen quad, destination-out (lasso clear: uses maskedClearFragment)
-├── Stamp generation (CPU: arc-length resample, adaptive spacing)
+├── Stamp generation (CPU: DryStrokeWalker / EraserStrokeWalker / WetStrokeWalker —
+│   stateful, incremental per touch batch; StrokeWalkUnits = document-px constants)
 ├── Touch handling (coalesced touches, per-tool dispatch)
-├── Undo (per-layer raw byte snapshots via getBytes/replace, depth 30)
-└── Lasso (CAShapeLayer preview, Metal extraction/display/commit, CPU clip mask)
+├── Undo (per-layer snapshots → LayerSnapshotBlob (LZ4 off-main), depth 30 + 256 MB budget,
+│   memory-warning eviction, stroke count recorded per entry)
+└── Lasso (CAShapeLayer preview, Metal extraction/display/commit, StampClip bitmap clip)
 ```
 
 ### Layer state — single source of truth
@@ -161,17 +181,39 @@ composite-time only — never baked into layer textures — and persist via `Lay
 (optional fields, old saves decode to Normal/1.0).
 
 ### Brush rendering flow
-1. Touch points → `StrokePoint` array (pressure, altitude, position)
-2. Arc-length resample with **adaptive spacing** (`max(effectiveWidth × 0.3, 0.5)`)
+1. Touch points → `StrokePoint` array (pressure, altitude, position). The lift point is fed
+   through the stabilizer like any sample; `finish()` then walks the catch-up tail from the
+   lagged cursor to it (it used to be appended raw AND tailed — three passes over the tip).
+2. Arc-length resample with **adaptive spacing** (`max(effectiveWidth × spacing, floor)`),
+   done by `DryStrokeWalker` — created at touch-begin, `advance`d over only the NEW points
+   per batch (`previewStamps()` = the live scratch, no end cap, taper applied as a post-pass),
+   and finalized by `StrokeStampGenerator.stamps(for:)` = init+advance+finish on the same
+   walker, so the committed stroke is byte-identical to the preview + cap + taper
+   (`OfflineTests/walkers` asserts this for every preset). Live end-taper DENSITY is the one
+   approximation: the walk can't know the total arc mid-stroke, so tips of tapered brushes
+   can bead slightly until lift. The first dab is placed once the second point exists
+   (direction/dt known); a tap places it at finish.
+   **Units:** every walk-length constant lives in `StrokeWalkUnits` as DOCUMENT px and is
+   divided by the walk `scale` (canvasScale live, 1 for canvas-px fixtures) — spacing floors,
+   sag cap κ, Fall Off die length, wet Charge half-life / blur radius, the Speed/Distance
+   sensor periods (`DevTuning`, px and px/s). Pre-2026-09-10 they were bare view-point
+   literals (≈½ these on the 12.9" reference), so feel differed between iPad sizes and the
+   harness; the doubled values keep the reference iPad's feel within ~8%.
 3. Per-stamp: `StampInstance` (center, radius, rotation, premultiplied color). **Stamp color is fed in LINEAR** — `brush.color` is sRGB, but stamps render into a `.bgra8Unorm_srgb` scratch whose store re-encodes linear→sRGB, so `premultipliedColor` (and the wet brush) apply sRGB→linear (`s2l`) first. Packing sRGB directly double-encodes → strokes paint a shade too light and eyedropper sample→repaint compounds lighter. **Stamp alpha = the brush's `flow`** (per-stamp deposit), NOT opacity — so overlapping stamps build up *within* a stroke.
 4. All stamps → shared `MTLBuffer` → single instanced draw call into scratch texture (premultiplied source-over; the scratch holds the whole stroke in isolation, saturating toward alpha 1)
 5. On touchesEnded: flatten scratch into active layer, scaling the whole scratch by the brush's **per-stroke `opacity` ceiling** (`compositorFragment` `color * opacity`). This two-stage flow/opacity split ("Glaze") is why a sub-100% stroke that crosses itself stays flat instead of stacking. Live preview (`compositeToDrawable`) and snapshot/export paths apply the same ceiling — the former via `CanvasRenderer.activeStrokeOpacity`, the latter via an explicit `strokeOpacity:` parameter. See `documents/plans/pro-brush-roadmap.md` Phase 0.
 
 ### Eraser flow (different from brush)
+- `EraserStrokeWalker` (arc-carry across batches, width pullback, first dab at touch-down so
+  a tap erases a dot) — offline-asserted batch invariance + no starvation on scribbles
 - Stamps applied **directly to active layer texture** per touchesMoved (not via scratch)
 - Uses temporary `MTLBuffer` per batch — no shared-buffer races
-- Commits **without** `waitUntilCompleted` — async, same-queue ordering
-- Undo snapshot pushed at touchesBegan (before any erasing), popped on cancel
+- Commits **without** `waitUntilCompleted` — async, same-queue ordering. The renderer flags
+  `pendingAsyncLayerWrites`; every CPU-side layer read/write (undo snapshot/restore, PNG
+  export, CGImage read) drains the queue first when it's set — `.shared` memory is coherent
+  but NOT ordered against in-flight command buffers.
+- Undo snapshot pushed at touchesBegan (before any erasing), popped on cancel (the redo
+  stack that push cleared is restored on cancel)
 
 ### Persistence
 - Canvas saved as **layered JSON envelope** with per-layer PNGs
@@ -180,8 +222,8 @@ composite-time only — never baked into layer textures — and persist via `Lay
 
 ### Lasso flow (entirely Metal — no CG color pipeline)
 - Path preview: two `CAShapeLayer`s (white + black offset dashes)
-- Extraction: rasterize CGPath → R8 mask texture, then Metal maskedCopy + maskedClear passes
-- Clip mask: `setClipPath()` persists the path across tool switches. Stamps outside the path are discarded (CPU-side via `CGPath.contains(_:using: .evenOdd)` — even-odd since 2026-07-19 so magic-wand masks with holes/disjoint subpaths clip correctly; identical to winding for simple lasso loops)
+- Extraction: rasterize CGPath → R8 mask texture, then Metal maskedCopy + maskedClear passes. The crop rect is snapped outward to the texel grid so Move → Place with no motion is a lossless copy (a fractional rect resampled bilinearly every cycle)
+- Clip mask: `setClipPath()` persists the path across tool switches and bakes it into a `StampClip` (2048² even-odd bitmap over the view space, re-baked on layout). Stamps outside are discarded with one array read per dab — `CGPath.contains` per dab against a thousands-of-segment wand contour made long strokes inside a selection quadratic (2026-09-10)
 - Commit: Metal render pass composites selection texture onto active layer (source-over)
 - Cancel: discard selection texture + undo to pre-lasso snapshot
 
@@ -204,14 +246,27 @@ Key mechanics:
   bounds center, then translate — must match `updateSelectionVertices`). Cancel =
   snapshot restore + canvas undo. Clip visuals hidden while floating.
 - **Selection undo**: snapshot stack (arrays are COW → ~free). `sessionGeneration`
-  guards discard in-flight decode/derive results after restore/clear.
+  guards discard in-flight decode/derive results after restore/clear AND after
+  `commitCurrent` (a decode landing after its object was committed / the tool switched
+  used to publish a ghost mask with no points). A snapshot restored mid-decode re-queues
+  the decode.
+- **Objects have ids.** A second tap during the first image encode commits the first
+  object undecoded (points + empty mask) and decodes it later by id
+  (`enqueueDecodeCommittedObject`) instead of dropping it; Remove-carve edits only the
+  tapped object by id.
+- **Lifecycle:** `resetForNewDocument()` on every `CanvasViewModel.attach` (a fresh canvas
+  view = a new document — the selection used to leak across drawings and republish the old
+  mask as the new clip); `releaseModels()` drops SAM + the embedding when leaving the
+  drawing screen. Move and paste floats are mutually exclusive (one selection texture) and
+  both refuse a locked layer; `CanvasViewModel.settleTransientEdits()` commits any float
+  before a synchronous save (leaving mid-Move used to persist the cut-out layer).
 - Legacy lasso Phase-A-from-touch is dead code behind `onFreehandLoopClosed == nil`.
 
 ### Magic wand flow (`MagicWand/`, 2026-07-19)
 - **No Metal selection extraction** — the wand is Phase-B-only: it produces a clip path (`setClipPath`) + ants + point markers; nothing floats/moves.
 - Tap (`MetalCanvasView` `.magicWand` touch case, ≤12 pt travel) → `onWandTap` → `MagicWandController.handleTap` → SAM point prompt over the accumulated object points → best-score 256² logits → bilinear upsample to 1024² (`vImageScale_PlanarF`), threshold >0 → union with committed object bitmaps → marching squares + Douglas-Peucker (`MaskContour.path`, normalized [0,1]² coords, even-odd) → scaled to view points → `setClipPath`.
 - `SAM2Segmenter` (actor): Apple's coreml-sam2.1-small 3-model split — ImageEncoder (once per image), PromptEncoder + MaskDecoder (per tap). `.cpuAndGPU` on device; **`.cpuOnly` + fake-mask dev injection on the simulator — the sim's Core ML zeroes `low_res_masks` (scores fine) on every runtime/compute-unit combination tested (18.3.1, 26.5 × CPU, GPU) while the identical .mlmodelc is correct on macOS. Read masks via MLMultiArray subscripts, not `withUnsafeBufferPointer` (CPU backend can hand back a strided/lazy buffer that reads as zeros).**
-- Wand markers (green/red dots + white outline) are CAShapeLayers re-hosted together with the lasso preview layers by `setLassoPreviewHost` (overlay mode parks them above the generated image).
+- Wand markers (green/red dots + white outline) are CAShapeLayers hosted on the canvas view's own layer alongside the lasso preview layers.
 - Object model: current object refined live (pos/neg points), `startNewObject()` freezes its bitmap (embedding can then re-encode if the canvas changed — committed bitmaps stay valid). Undo while wand active steps back points, then reopens the last committed object.
 - **Params (post-processing on the cached decode — no model re-run):** `granularity` (Small/Auto/Large — picks among SAM's 3 candidate masks; the "tolerance" analog), `contiguous` (keep only the 4-connected component at the first positive point, `MaskContour.connectedComponent`), `expansion` (±20 mask-px morphological grow/shrink, `MaskContour.expand`, separable 1-D passes). All apply to the CURRENT object only; committed objects keep their frozen bitmaps. `SAM2Segmenter.maskCandidates` returns all 3 logit grids + scores + areas; `mask()` is the argmax convenience.
 - **Unselected-region stripes:** while any clip is active (wand or lasso Phase B), `clipDimLayer` (CAShapeLayer, even-odd full-rect+clip path, diagonal-stripe `UIColor(patternImage:)` fill) washes everything OUTSIDE the selectable region; ants layers animate `lineDashPhase` ("march"). CALayers never hit-test, so wand taps pass through. Rebuilt in `setClipPath`/`layoutSubviews` (`updateClipDimPath`).
@@ -223,13 +278,16 @@ Key mechanics:
 |------|------|
 | `MetalCanvasView.swift` | UIView, touch handling, CADisplayLink render loop, undo, lasso |
 | `CanvasRenderer.swift` | Metal device/queue/pipelines, Layer struct, texture management, render passes, CIContext, shaders (embedded MSL). **UIKit-free** (compiles on macOS for BrushHarness) — keep it that way |
-| `StrokeStampGenerator.swift` | The pure stroke→stamps dab pipeline (dynamics, jitter, scatter, taper). Extracted from MetalCanvasView so BrushHarness runs the identical shipped code headless |
+| `StrokeStampGenerator.swift` | `DryStrokeWalker` (stateful incremental dab walk: dynamics, jitter, scatter, taper) + `stamps(for:)` finalization. Pure; BrushHarness/OfflineTests run the identical shipped code headless |
+| `EraserStrokeWalker.swift` | Eraser's incremental arc-carry walk + `StrokeWalkUnits` (document-px walk constants) |
+| `StampClip.swift` | Baked even-odd clip bitmap for the dab walks (pure CoreGraphics) |
+| `LayerSnapshotBlob.swift` | LZ4-compressed-off-main undo snapshot of one layer |
 | `WetStrokeWalker.swift` | The wet brush's incremental stroke walk + carried-load smear (pure; canvas access injected as closures) |
 | `WetKM.swift` | Spectral KM tables/mix + premult-`_srgb`-texel recovery (pure; asserted by OfflineTests) |
 | `BrushFixture.swift` | Recorded-stroke JSON contract between the iPad recorder (Brush Studio) and BrushHarness |
 | `CanvasViewModel.swift` | @Observable bridge between AppCoordinator and MetalCanvasView, snapshot/thumbnail compositing |
 | `CanvasView.swift` | UIViewRepresentable wrapper, callback wiring |
-| `RotatableCanvasContainer.swift` | Gesture handling (zoom/rotate/pan), cursor overlay, background image, lasso selection view. Also hosts app-overlay hooks: `externalTransformRegionProvider`/`onExternalTransform` (forward a two-finger gesture that starts over a registered rect — e.g. the fullscreen result panel — instead of transforming the canvas) and `onContactPointChanged` (reports the live single-touch contact point + brush diameter in pane space for the panel transparency-hole effect). |
+| `RotatableCanvasContainer.swift` | Gesture handling (zoom/rotate/pan — pinch/twist anchored at the fingers via `keepAnchored`), cursor overlay, background image, lasso selection view. Also hosts app-overlay hooks: `externalTransformRegionProvider`/`onExternalTransform` (forward a two-finger gesture that starts over a registered rect — e.g. the fullscreen result panel — instead of transforming the canvas) and `onContactPointChanged` (reports the live single-touch contact point + brush diameter in pane space for the panel transparency-hole effect). |
 | `LassoSelectionView.swift` | Gesture-only view for lasso transform (pan/pinch/rotate), marching ants |
 | `MagicWand/SAM2Segmenter.swift` | On-device SAM 2.1 Core ML wrapper (actor; encode-once / decode-per-tap). UIKit-free |
 | `MagicWand/MaskContour.swift` | Logits→binary upsample, mask union, marching-squares→CGPath, RDP simplify. UIKit-free |

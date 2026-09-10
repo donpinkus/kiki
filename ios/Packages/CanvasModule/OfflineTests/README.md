@@ -15,7 +15,23 @@ swiftc ../Sources/CanvasModule/BrushDynamics.swift ../Sources/CanvasModule/WetKM
 ```
 
 Expect `ALL PASSED`. Re-run after any change to the fold math, combine modes, sensor
-normalization, the LUM/LUT bake, the KM tables/mix, or the texel-recovery math. The `1e-3`
+normalization, the LUM/LUT bake, the KM tables/mix, or the texel-recovery math.
+
+**Stroke-walk invariants** (`walkers/main.swift`, compiled with the BrushHarness file list —
+Metal compiles on macOS, no GPU is used): incremental `DryStrokeWalker` == full
+`stamps(for:)` for every curated preset + dynamics brush, scale invariance (view-space walk
+at `scale` == canvas-space walk at 1), eraser batch invariance / first dab / no starvation
+on a tight scribble / gaps ≤ own spacing, wet batch invariance, `StampClip` vs
+`CGPath.contains`. Run after touching anything under the walk:
+
+```bash
+cd ios/Packages/CanvasModule/OfflineTests
+S=../Sources/CanvasModule
+swiftc -O -D BRUSH_HARNESS $S/DrawingEngine.swift $S/BrushDynamics.swift $S/BrushShapeCatalog.swift \
+  $S/BrushPresets.swift $S/WetKM.swift $S/BrushFixture.swift $S/StrokeStabilizer.swift $S/StrokeStampGenerator.swift \
+  $S/StampClip.swift $S/EraserStrokeWalker.swift $S/WetStrokeWalker.swift $S/LightnessMap.swift \
+  $S/CanvasRenderer.swift walkers/main.swift -o /tmp/walkertest && /tmp/walkertest
+``` The `1e-3`
 tolerance on the gamma-curve checks reflects 256-entry LUT quantization (Krita's curve LUT
 is the same resolution), not a defect.
 
