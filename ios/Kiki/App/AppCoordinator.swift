@@ -423,8 +423,11 @@ final class AppCoordinator {
     var showInputHUD = false
     /// Tunable engine-normalization constants (pushed into the canvas via DrawingView's CanvasView
     /// on each @Observable update; dialed via Brush Studio sliders).
-    var devMaxSpeed: Double = 1500
-    var devDistancePeriod: Double = 600
+    /// Sensor normalization (Brush Studio dev sliders). DOCUMENT px / px·s⁻¹ since
+    /// 2026-09-10 (`StrokeWalkUnits`): the old 1500 / 600 were view points — the same
+    /// on-screen feel on the 12.9" iPad is 3000 / 1200 document px.
+    var devMaxSpeed: Double = 3000
+    var devDistancePeriod: Double = 1200
     var devFadePeriod: Double = 64
     /// The active test brush's instruction note (shown in Brush Studio).
     var activeTestNote: String?

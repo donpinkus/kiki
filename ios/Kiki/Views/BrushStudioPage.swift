@@ -785,8 +785,8 @@ private struct DeveloperSection: View {
         StudioGroup("Engine") {
             Toggle("Live input HUD", isOn: $coordinator.showInputHUD)
                 .font(.subheadline.weight(.medium))
-            devSlider("Max speed", value: $coordinator.devMaxSpeed, range: 500...30000, fmt: "%.0f")
-            devSlider("Distance period", value: $coordinator.devDistancePeriod, range: 100...4000, fmt: "%.0f")
+            devSlider("Max speed (doc px/s)", value: $coordinator.devMaxSpeed, range: 1000...60000, fmt: "%.0f")
+            devSlider("Distance period (doc px)", value: $coordinator.devDistancePeriod, range: 200...8000, fmt: "%.0f")
             devSlider("Fade period", value: $coordinator.devFadePeriod, range: 8...512, fmt: "%.0f")
         }
 

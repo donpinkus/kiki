@@ -1,6 +1,6 @@
 # Overlay Drawing Mode — Implementation Spec
 
-**Status:** ✅ **Shipped.** Overlay is now a live `DrawingLayout` case and the app's default layout (`AppCoordinator.drawingLayout = .overlay`). Doc kept as the behavior spec / locked product decisions record. (Moved to completed/ 2026-07-18.)
+**Status:** ❌ **Removed 2026-09-10** (commit `efc1070`; see `documents/removed-features.md`). Kiki has one drawing layout — canvas fills the pane, generated image floats as `FloatingResultPanel`. This doc is kept as the historical spec only; overlay "didn't work well enough yet" and any revival should be a fresh design. (Shipped 2026-07-18 as the default layout; removed with split-screen.)
 **Owner:** Donald
 
 ## What we're building
