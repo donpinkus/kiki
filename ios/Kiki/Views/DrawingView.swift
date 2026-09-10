@@ -1,7 +1,6 @@
 import SwiftUI
 import SwiftData
 import CanvasModule
-import ResultModule
 
 struct DrawingView: View {
     @Environment(AppCoordinator.self) private var coordinator
@@ -52,29 +51,21 @@ struct DrawingView: View {
                 // rotate aren't clipped by the drawing surface's square footprint.
                 // The drawing surface itself stays a centered `canvasSide` square
                 // inside the container (see RotatableCanvasContainer).
-                let canvasPaneWidth = coordinator.drawingLayout == .splitScreen
-                    ? geometry.size.width * coordinator.dividerPosition
-                    : geometry.size.width
-                // Largest square that fits the available pane (full width in
-                // fullscreen, the left half in split screen) and the height
-                // below the top toolbar — so the canvas fills the space instead
-                // of sitting as a small centered square.
+                let canvasPaneWidth = geometry.size.width
+                // Largest square that fits the pane width and the height below the
+                // top toolbar — so the canvas fills the space instead of sitting as
+                // a small centered square.
                 let canvasSide = min(canvasPaneWidth, geometry.size.height)
 
                 ZStack(alignment: .topLeading) {
                     CanvasView(
                         viewModel: coordinator.canvasViewModel,
                         drawingSurfaceSide: canvasSide,
-                        overlayActive: coordinator.drawingLayout == .overlay,
-                        overlayImage: coordinator.drawingLayout == .overlay
-                            ? coordinator.resultState.displayImage
-                            : nil,
                         externalTransformRegionProvider: { [weak coordinator] in
                             // Two-finger gestures over the floating panel's rect
                             // move/scale it instead of the canvas. nil = no panel
-                            // (split screen, or no image yet) → canvas behaves normally.
+                            // (no image yet) → canvas behaves normally.
                             guard let coordinator,
-                                  coordinator.drawingLayout == .fullscreen,
                                   let image = coordinator.resultState.displayImage else { return nil }
                             return PanelLayout.rect(
                                 for: image,
@@ -116,7 +107,7 @@ struct DrawingView: View {
                         .frame(
                             maxWidth: .infinity,
                             maxHeight: .infinity,
-                            alignment: coordinator.drawingLayout == .splitScreen ? .trailing : .center
+                            alignment: .center
                         )
                         .ignoresSafeArea(.keyboard)
                         .zIndex(0)
@@ -157,15 +148,8 @@ struct DrawingView: View {
                             }
                     }
 
-                    if coordinator.drawingLayout == .splitScreen {
-                        splitScreenResultPane(geometry: geometry)
-                            .zIndex(2)
-                    } else if coordinator.drawingLayout == .fullscreen,
-                              let image = coordinator.resultState.displayImage {
-                        // Overlay mode renders the generated image INSIDE the canvas
-                        // container (locked to the canvas transform), so this branch is
-                        // fullscreen-only. Overlay → render nothing here.
-                        // Fullscreen: image-only floating preview, sized to the
+                    if let image = coordinator.resultState.displayImage {
+                        // Image-only floating preview, sized to the
                         // image's aspect ratio. Visual-only (allowsHitTesting
                         // false) — a single finger / pencil draws straight through
                         // it onto the canvas; two fingers over it move/scale it
@@ -197,19 +181,6 @@ struct DrawingView: View {
                         .offset(coordinator.panelOffset)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
                         .padding(PanelLayout.edgeInset)
-                        .zIndex(3)
-                    }
-
-                    // Overlay layout renders the generated image inside the
-                    // canvas container; anchor the Edit button to the canvas
-                    // pane's bottom-right instead.
-                    if coordinator.drawingLayout == .overlay,
-                       coordinator.resultState.displayImage != nil {
-                        ZStack(alignment: .bottomTrailing) {
-                            Color.clear
-                            resultActionButtons.padding(4)
-                        }
-                        .frame(width: canvasSide, height: canvasSide)
                         .zIndex(3)
                     }
 
@@ -606,42 +577,6 @@ struct DrawingView: View {
         .shadow(color: .black.opacity(0.25), radius: 10, y: 3)
     }
 
-    // MARK: - Split Screen Result Pane
-
-    private func splitScreenResultPane(geometry: GeometryProxy) -> some View {
-        HStack(spacing: 0) {
-            ResultView(
-                state: coordinator.resultState,
-                currentBrushColor: coordinator.currentColor,
-                onColorPicked: { coordinator.currentColor = $0 },
-                isUserDrawing: coordinator.canvasViewModel.isInteracting
-            )
-            .overlay(alignment: .top) {
-                PromptTitleBar()
-            }
-            .overlay(alignment: .bottomTrailing) {
-                VStack(alignment: .trailing, spacing: 8) {
-                    if coordinator.canSwapStreamImageToCanvas {
-                        streamSwapBar
-                    }
-                    if coordinator.resultState.displayImage != nil {
-                        resultActionButtons
-                    }
-                }
-                .padding(4)
-            }
-
-            Rectangle()
-                .fill(Color(.separator))
-                .frame(width: 1)
-
-            Color.clear
-                .frame(width: geometry.size.width * coordinator.dividerPosition)
-                .contentShape(Rectangle())
-                .allowsHitTesting(false)
-        }
-    }
-
     // MARK: - Private
 
     /// Animate + Edit, bottom-right of the generated image. Animate is
@@ -729,114 +664,4 @@ struct DrawingView: View {
             .background(.ultraThinMaterial, in: Capsule())
             .opacity(enabled ? 1 : 0.5)
     }
-
-    private var streamSwapBar: some View {
-        Button {
-            coordinator.swapStreamImageToCanvas()
-        } label: {
-            Label("Send to Canvas", systemImage: "arrow.right")
-                .font(.caption)
-        }
-        .buttonStyle(.borderedProminent)
-        .controlSize(.small)
-    }
-}
-
-private struct PromptTitleBar: View {
-    @Environment(AppCoordinator.self) private var coordinator
-    // Fixed content height — both the style tile and the prompt input stay
-    // this tall regardless of text length. Long prompts scroll inside the
-    // TextEditor rather than growing the bar.
-    private static let contentHeight: CGFloat = 92
-    private static let cornerRadius: CGFloat = 10
-
-    var body: some View {
-        @Bindable var coordinator = coordinator
-
-        HStack(alignment: .center, spacing: 8) {
-            styleButton
-            promptInput
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 16)
-    }
-
-    // Glass-like specular stroke — brighter top, accent-tinted bottom edge.
-    // Fakes the light-catching edge of Apple's Liquid Glass.
-    private static let glassStroke = LinearGradient(
-        colors: [
-            .white.opacity(0.35),
-            .white.opacity(0.05),
-            Color.accentColor.opacity(0.35)
-        ],
-        startPoint: .top,
-        endPoint: .bottom
-    )
-
-    private var styleButton: some View {
-        Button {
-            coordinator.showStylePicker = true
-        } label: {
-            VStack(spacing: 4) {
-                Text("STYLE")
-                    .font(.caption2.weight(.semibold))
-                    .tracking(1.2)
-                    .foregroundStyle(.secondary)
-                Text(coordinator.selectedStyle.name)
-                    .font(.subheadline.weight(.semibold))
-                    .multilineTextAlignment(.center)
-                    .minimumScaleFactor(0.75)
-                    .lineLimit(2)
-                    .foregroundStyle(Color.accentColor)
-            }
-            .padding(.horizontal, 6)
-            .frame(width: Self.contentHeight, height: Self.contentHeight)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: Self.cornerRadius))
-            .overlay(
-                RoundedRectangle(cornerRadius: Self.cornerRadius)
-                    .stroke(Self.glassStroke, lineWidth: 1)
-            )
-            .shadow(color: .black.opacity(0.18), radius: 2, y: 1)
-            .shadow(color: .black.opacity(0.12), radius: 8, y: 4)
-        }
-        .buttonStyle(.plain)
-    }
-
-    // Multi-line text input. `lineLimit(4, reservesSpace: true)` reserves
-    // ~4 lines of height so the bar stays at a fixed initial size; extra
-    // text scrolls internally once the limit is reached. Leading pencil
-    // icon is the primary affordance — signals "type here."
-    private var promptInput: some View {
-        @Bindable var coordinator = coordinator
-        return HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "pencil.line")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .padding(.top, 2)
-            TextField(
-                "Describe your image…",
-                text: $coordinator.promptText,
-                axis: .vertical
-            )
-            .textFieldStyle(.plain)
-            .font(.subheadline)
-            .lineLimit(4, reservesSpace: true)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .frame(maxWidth: .infinity, alignment: .topLeading)
-        .frame(height: Self.contentHeight)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: Self.cornerRadius))
-        .overlay(
-            RoundedRectangle(cornerRadius: Self.cornerRadius)
-                .stroke(Self.glassStroke, lineWidth: 1)
-        )
-        .shadow(color: .black.opacity(0.18), radius: 2, y: 1)
-        .shadow(color: .black.opacity(0.12), radius: 8, y: 4)
-    }
-}
-
-#Preview {
-    DrawingView()
-        .environment(AppCoordinator(modelContext: try! ModelContainer(for: Drawing.self).mainContext))
 }

@@ -9,7 +9,6 @@ struct SettingsPanel: View {
 
         NavigationStack {
             Form {
-                displaySection
                 videoSection
                 streamParametersSection
                 captureSection
@@ -22,7 +21,6 @@ struct SettingsPanel: View {
                         coordinator.streamResolution = 1024
                         coordinator.streamScheduleMu = 1.2
                         coordinator.streamCaptureFPS = 5
-                        coordinator.drawingLayout = .overlay
                         coordinator.videoResolution = 512
                         coordinator.videoFrames = 145
                         coordinator.videoPromptSuffix = AppCoordinator.defaultVideoPromptSuffix
@@ -38,19 +36,6 @@ struct SettingsPanel: View {
     private static let resolutionOptions: [Int] = [320, 384, 448, 512]
 
     // MARK: - Sections
-
-    private var displaySection: some View {
-        @Bindable var coordinator = coordinator
-
-        return Section("Display") {
-            Picker("Layout", selection: $coordinator.drawingLayout) {
-                Text("Split").tag(DrawingLayout.splitScreen)
-                Text("Fullscreen").tag(DrawingLayout.fullscreen)
-                Text("Overlay").tag(DrawingLayout.overlay)
-            }
-            .pickerStyle(.segmented)
-        }
-    }
 
     private var videoSection: some View {
         @Bindable var coordinator = coordinator

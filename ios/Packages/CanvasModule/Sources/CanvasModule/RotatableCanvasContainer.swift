@@ -54,20 +54,10 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
     /// The container itself has no transform (SwiftUI manages its frame).
     private let transformView = UIView()
     private let backgroundImageView = UIImageView()
-    /// Overlay drawing mode: opaque generated image, locked exactly on top of the
-    /// canvas (inside `transformView`, so it inherits the canvas pan/zoom/rotate
-    /// 1:1). Non-interactive — touches fall through to `canvasView` underneath, so
-    /// real drawing/generation are unchanged. Hidden unless overlay mode is active.
-    private let generatedImageView = UIImageView()
-    /// Overlay drawing mode: visual-only fresh-stroke surface, a `CAMetalLayer` view
-    /// above `generatedImageView`. The Metal canvas composites the overlay-stroke
-    /// texture into this layer every tick. Non-interactive. Hidden unless active.
-    private let overlayStrokeView = MetalOverlayLayerView()
     /// AI Edit preview: an opaque composited "what Accept would look like"
     /// image locked over the canvas (inside `transformView`, so it tracks
     /// pan/zoom/rotate 1:1). Visual-only — layer textures are untouched until
-    /// the user accepts. Independent of overlay drawing mode (which owns
-    /// `generatedImageView`); this sits above both. Hidden unless previewing.
+    /// the user accepts. Hidden unless previewing.
     private let editPreviewImageView = UIImageView()
     private let cursorView = CursorOverlayView()
     private let ringView = ColorPickerRingView()
@@ -158,26 +148,7 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
         canvasView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         transformView.addSubview(canvasView)
 
-        // Overlay drawing mode: opaque generated image locked over the canvas, plus a
-        // visual-only fresh-stroke surface above it. Both inside transformView (so they
-        // ride the canvas pan/zoom/rotate exactly) and both non-interactive (single
-        // finger / pencil draws straight through to canvasView). Hidden until activated.
-        generatedImageView.frame = transformView.bounds
-        generatedImageView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        generatedImageView.contentMode = .scaleAspectFill
-        generatedImageView.clipsToBounds = true
-        generatedImageView.isUserInteractionEnabled = false
-        generatedImageView.isHidden = true
-        transformView.addSubview(generatedImageView)
-
-        overlayStrokeView.frame = transformView.bounds
-        overlayStrokeView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        overlayStrokeView.isUserInteractionEnabled = false
-        overlayStrokeView.isHidden = true
-        transformView.addSubview(overlayStrokeView)
-
-        // AI Edit preview — above the overlay-mode views so the preview wins
-        // regardless of layout. scaleToFill: the preview is a document-square
+        // AI Edit preview — above the canvas. scaleToFill: the preview is a document-square
         // composite, and the canvas view is the same square, so this is an
         // exact 1:1 alignment (aspectFill would be equivalent; toFill states
         // the intent that no cropping is expected).
@@ -559,42 +530,6 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
         // Multi-finger gestures naturally cancel it since they introduce additional touches.
     }
 
-    // MARK: - Overlay Drawing Mode
-
-    /// Toggle overlay drawing mode. When active, the opaque generated image +
-    /// visual-only fresh-stroke surface are shown locked over the canvas, and the
-    /// canvas's Metal renderer also composites overlay strokes into the overlay
-    /// layer each tick. When inactive, both views hide and the canvas stops
-    /// touching the overlay path (zero added work in split-screen/fullscreen).
-    public func setOverlayActive(_ active: Bool) {
-        generatedImageView.isHidden = !active
-        overlayStrokeView.isHidden = !active
-        // Configure the overlay metal layer's device once, then hand it to the
-        // canvas so it renders into it. nil detaches it (inert).
-        if active {
-            overlayStrokeView.configureDevice(canvasView.metalDevice)
-            canvasView.overlayStrokeLayer = overlayStrokeView.metalLayer
-        } else {
-            canvasView.overlayStrokeLayer = nil
-        }
-        // Lasso path-preview dashes live on the canvas's own layer, which the
-        // opaque generated image covers in overlay mode — park them above it
-        // (transformView.layer shares the canvas's coordinate space).
-        canvasView.setLassoPreviewHost(active ? transformView.layer : nil)
-    }
-
-    /// Push the generated image to display locked over the canvas (overlay mode).
-    /// `nil` clears it. Bound to `resultState.displayImage` upstream, which already
-    /// falls back to the last successful image → "show last, never blank" for free.
-    public func setOverlayImage(_ image: UIImage?) {
-        generatedImageView.image = image
-    }
-
-    /// Wipe the visual-only overlay-stroke surface (called on each generation frame).
-    public func clearOverlayStrokes() {
-        canvasView.clearOverlayStrokes()
-    }
-
     /// Show/hide the AI Edit preview image locked over the canvas. `nil` hides.
     /// Selection chrome (ants/stripes/markers) is suppressed while previewing —
     /// it would otherwise draw above the opaque preview.
@@ -608,13 +543,6 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
 
     public func setBackgroundImage(_ image: UIImage?) {
         backgroundImageView.image = image
-    }
-
-    /// Bake the image into the canvas's persistent bitmap (making it erasable)
-    /// and clear the background image layer.
-    public func bakeImageIntoCanvas(_ image: UIImage) {
-        canvasView.bakeImage(image)
-        backgroundImageView.image = nil
     }
 
     public var backgroundImage: UIImage? {
@@ -642,10 +570,8 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
         selectionView.onTransformChanged = { [weak self] translation, scale, rotation in
             self?.onLassoTransformChanged?(translation, scale, rotation)
         }
-        // Top of transformView — above the overlay-mode generated image /
-        // fresh-stroke surfaces, so the marching ants stay visible in overlay
-        // layout (they were invisible when inserted just above canvasView).
-        // Non-overlay layouts are unaffected (those views are hidden).
+        // Top of transformView so the marching ants sit above every canvas-space view
+        // (edit preview included).
         transformView.addSubview(selectionView)
         canvasView.isUserInteractionEnabled = false
         lassoSelectionView = selectionView

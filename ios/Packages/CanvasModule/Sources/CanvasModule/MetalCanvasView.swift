@@ -66,7 +66,14 @@ public final class MetalCanvasView: UIView {
 
     // MARK: - Callbacks
 
+    /// A user edit changed the drawing (stroke, erase, undo, layer op…). Drives
+    /// autosave + the content version.
     public var onDrawingChanged: (() -> Void)?
+    /// Saved data finished loading into the document. Content changed (the selection
+    /// embedding etc. must refresh) but nothing needs saving — it used to fire
+    /// `onDrawingChanged`, which autosaved every drawing 1 s after opening it (full
+    /// PNG re-encode, `updatedAt` bump → gallery reorder).
+    public var onDrawingLoaded: (() -> Void)?
 
     /// Fires once per completed brush stroke (dry + wet; not eraser/lasso) with the
     /// stroke normalized to CANVAS PIXELS (positions and brush width × canvasScale) —
@@ -109,25 +116,6 @@ public final class MetalCanvasView: UIView {
     private var displayLink: CADisplayLink?
     private var isDirty = true
 
-    /// Overlay drawing mode: the external `CAMetalLayer` (owned by
-    /// `RotatableCanvasContainer`, sitting above the generated image inside the
-    /// transformed view) into which we also composite the visual-only overlay
-    /// strokes every display tick. `nil` in split-screen/fullscreen → the overlay
-    /// path is completely inert (zero added GPU/CPU work). Set by the container.
-    public var overlayStrokeLayer: CAMetalLayer? {
-        didSet {
-            guard oldValue !== overlayStrokeLayer else { return }
-            if overlayStrokeLayer != nil {
-                // May no-op if the document isn't laid out yet (canvasWidth == 0);
-                // layoutSubviews re-tries the allocation once configureDocument runs.
-                renderer.ensureOverlayStrokeTexture()
-            } else {
-                // Leaving overlay mode → free the ~16 MB accumulation texture.
-                renderer.releaseOverlayStrokeTexture()
-            }
-            isDirty = true
-        }
-    }
     /// Canvas bitmap deferred from loadDrawingData until layout is ready.
     private var pendingCanvasImage: CGImage?
     /// Encoded canvas bitmap deferred from loadDrawingData until layout is ready.
@@ -148,15 +136,17 @@ public final class MetalCanvasView: UIView {
     /// `finish()` provides catch-up-on-lift so lagged strokes end at the pencil tip.
     private var stabilizer: StrokeStabilizer?
 
-    /// For eraser: tracks the last stroke-point index that was applied to the canvas.
-    /// Eraser stamps are applied incrementally (each touchesMoved renders only NEW
-    /// stamps directly into the canvas), unlike brush which rebuilds all stamps each frame.
-    private var lastEraserPointIndex: Int = 0
-    /// Position of the last eraser stamp placed, persisted across touchesMoved batches
-    /// so spacing is continuous (no gap/clustering at batch boundaries).
-    private var lastEraserStampPos: CGPoint = .zero
-    /// Spacing from the last eraser stamp, carried across batches.
-    private var lastEraserSpacing: CGFloat = 0.5
+    /// Dry brush: the stateful walk for the active stroke (`DryStrokeWalker`). Each
+    /// touch batch advances it over the NEW points only; `previewStamps()` is the live
+    /// scratch. Finalization re-walks the whole stroke through
+    /// `StrokeStampGenerator.stamps(for:)` (same math + end cap + taper).
+    private var dryWalker: DryStrokeWalker?
+    /// Eraser: incremental arc-carry walk, applied directly to the layer per batch.
+    private var eraserWalker: EraserStrokeWalker?
+    /// The active selection clip, baked to a bitmap once per `setClipPath` /
+    /// layout so every dab's clip test is one array read (was `CGPath.contains`
+    /// per dab against a thousands-of-segment wand contour).
+    private var clipMask: StampClip?
 
     // Wet brush (pro-brush Phase 4) — one walker per stroke holds the incremental
     // cross-batch bookkeeping + carried load (`WetStrokeWalker`, pure/extracted so the
@@ -177,13 +167,39 @@ public final class MetalCanvasView: UIView {
     /// `deleteLayer(at:)`. `canvas` entries capture the whole layer stack for
     /// operations that destroy layer structure (clearAll) so multi-layer
     /// documents restore completely.
+    /// One layer of a whole-stack (`.canvas`) undo entry: metadata + compressed bytes.
+    private struct StackEntry {
+        let id: UUID
+        let name: String
+        let isVisible: Bool
+        let isLocked: Bool
+        let isAlphaLocked: Bool
+        let blendMode: LayerBlendMode
+        let opacity: Float
+        let blob: LayerSnapshotBlob
+    }
+    /// Every entry records `strokeCount` as it was BEFORE the mutation it undoes, so
+    /// undo/redo restore the exact count (it used to blind-decrement on every layer
+    /// undo — entries pushed by Move/Paste/Clear never incremented it, so a paste-only
+    /// drawing read as empty: no stream, no save, deleted on exit).
     private enum UndoEntry {
-        case layer(id: UUID, snapshotData: Data)
-        case canvas(layers: [CanvasRenderer.LayerStackSnapshot], activeIndex: Int, strokeCount: Int)
+        case layer(id: UUID, blob: LayerSnapshotBlob, strokeCount: Int)
+        case canvas(layers: [StackEntry], activeIndex: Int, strokeCount: Int)
+
+        var footprint: Int {
+            switch self {
+            case .layer(_, let blob, _): return blob.footprint
+            case .canvas(let layers, _, _): return layers.reduce(0) { $0 + $1.blob.footprint }
+            }
+        }
     }
     private var undoSnapshots: [UndoEntry] = []
     private var redoSnapshots: [UndoEntry] = []
     private static let maxUndoDepth = 30
+    /// Resident-byte ceiling across undo + redo (LZ4 footprints; raw until compression
+    /// lands). Oldest undo entries go first, then redo. 256 MB ≈ 16 raw entries, or
+    /// hundreds of typical sketch-layer entries.
+    private static let undoByteBudget = 256 * 1024 * 1024
 
     public var canUndo: Bool { !undoSnapshots.isEmpty }
     public var canRedo: Bool { !redoSnapshots.isEmpty }
@@ -344,12 +360,16 @@ public final class MetalCanvasView: UIView {
 
     deinit {
         displayLink?.invalidate()
+        NotificationCenter.default.removeObserver(self)
     }
 
     private func setup() {
         backgroundColor = .clear
         isOpaque = false
         isMultipleTouchEnabled = false
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(handleMemoryWarning),
+            name: UIApplication.didReceiveMemoryWarningNotification, object: nil)
 
         // Configure CAMetalLayer (the view's layer IS the metal layer).
         let metalLayer = self.layer as! CAMetalLayer
@@ -445,18 +465,6 @@ public final class MetalCanvasView: UIView {
         }
     }
 
-    /// Wipe the visual-only overlay-stroke surface (overlay drawing mode). Called on
-    /// each returned generation frame so fresh strokes flash, then the generated image
-    /// takes over. No-op when no overlay texture is allocated (not in overlay mode).
-    public func clearOverlayStrokes() {
-        renderer.clearOverlayStrokes()
-        isDirty = true
-    }
-
-    /// The Metal device backing this canvas — shared with the overlay-stroke layer so
-    /// both render on the same device/queue.
-    public var metalDevice: MTLDevice { renderer.device }
-
     public override class var layerClass: AnyClass { CAMetalLayer.self }
 
     /// Fixed document resolution (square), in pixels. Decoupled from the view
@@ -468,6 +476,9 @@ public final class MetalCanvasView: UIView {
 
     public override func layoutSubviews() {
         super.layoutSubviews()
+        // A zero-size pass (SwiftUI's first layout, hidden containers) would set an
+        // invalid drawableSize and configure a nonsense viewScale; wait for a real one.
+        guard bounds.width > 0, bounds.height > 0 else { return }
         let metalLayer = self.layer as! CAMetalLayer
         let scale = window?.screen.scale ?? UIScreen.main.scale
         metalLayer.contentsScale = scale
@@ -478,22 +489,14 @@ public final class MetalCanvasView: UIView {
         // …but the document texture stays at a FIXED resolution. viewScale is the
         // live document-pixels-per-view-point ratio so touch mapping tracks the
         // view as it resizes; the texture itself is never reallocated/resampled.
-        let viewScale = bounds.width > 0
-            ? CGFloat(Self.documentSide) / bounds.width
-            : scale
+        let viewScale = CGFloat(Self.documentSide) / bounds.width
         renderer.configureDocument(side: Self.documentSide, viewScale: viewScale)
 
-        // If overlay mode was activated before the document was laid out (e.g. the
-        // app launched directly into overlay layout), the overlayStrokeLayer didSet
-        // fired while canvasWidth == 0 and the texture didn't allocate. Now that
-        // configureDocument has set the resolution, allocate it. No-op otherwise.
-        if overlayStrokeLayer != nil {
-            renderer.ensureOverlayStrokeTexture()
-        }
-
-        // The stripes' outer rect is view-sized — retrace it when layout moves.
+        // The stripes' outer rect is view-sized — retrace it when layout moves,
+        // and re-bake the dab clip bitmap for the new size.
         if lassoClipPath != nil {
             updateClipDimPath()
+            if clipMask?.space != bounds.size { rebuildClipMask() }
         }
 
         // If drawing data was loaded before layout (canvas texture didn't exist
@@ -504,6 +507,10 @@ public final class MetalCanvasView: UIView {
             applyPendingCanvasImageData()
         } else if pendingCanvasImage != nil {
             applyPendingCanvasImage()
+        } else if let strokes = pendingLegacyStrokes {
+            pendingLegacyStrokes = nil
+            replayLegacyStrokes(strokes)
+            onDrawingLoaded?()
         }
 
         isDirty = true
@@ -548,16 +555,6 @@ public final class MetalCanvasView: UIView {
         renderer.activeWetInk = !isErasing && (currentBrushConfig().map { $0.wetEnabled && !$0.wetSmudge } ?? false)
         renderer.renderFrame(drawable: drawable, isErasing: isErasing)
 
-        // Overlay drawing mode: composite the visual-only overlay strokes
-        // (accumulated + the live scratch this frame already holds) into the
-        // overlay layer, in the same tick. No extra stamp generation; the scratch
-        // was populated above. Only runs when an overlay layer is attached.
-        // Pass the LAYER (not a pre-acquired drawable): renderOverlayFrame acquires
-        // the drawable only after its render guards pass, so it never leaks an
-        // un-presented drawable (which deadlocks nextDrawable → UI freeze).
-        if let overlayLayer = overlayStrokeLayer {
-            renderer.renderOverlayFrame(layer: overlayLayer)
-        }
     }
 
     // MARK: - Touch Handling
@@ -701,7 +698,8 @@ public final class MetalCanvasView: UIView {
                 // No snapshot when wet rendering is unavailable (Simulator) — the stroke
                 // paints nothing, so it must not create an undo entry either.
                 if renderer.isWetRenderingAvailable {
-                    wetWalker = WetStrokeWalker(startPosition: touch.location(in: self), brush: config)
+                    wetWalker = WetStrokeWalker(startPosition: touch.location(in: self), brush: config,
+                                                scale: canvasScale)
                     pushUndoSnapshot()
                     applyNewWetStamps()
                 }
@@ -711,10 +709,13 @@ public final class MetalCanvasView: UIView {
                 // from the flatten path, no snapshot here. Works on the Simulator (no
                 // framebuffer fetch).
                 if renderer.isWetInkAvailable {
-                    wetWalker = WetStrokeWalker(startPosition: touch.location(in: self), brush: config)
+                    wetWalker = WetStrokeWalker(startPosition: touch.location(in: self), brush: config,
+                                                scale: canvasScale)
                     appendNewWetInkStamps()
                 }
             } else {
+                dryWalker = DryStrokeWalker(stroke: activeStroke!, scale: canvasScale, clip: clipMask,
+                                            tuning: currentDevTuning())
                 appendStampsForLatestPoints(touch: touch, event: nil)
             }
             // QuickShape: reset recognizer state for the new stroke (dry brush only).
@@ -739,11 +740,11 @@ public final class MetalCanvasView: UIView {
             let brush = BrushConfig(color: .black, baseWidth: width, pressureGamma: 0.7)
             activeStroke = Stroke(points: [makeStrokePoint(from: touch)], brush: brush)
             activeStrokeStamps = []
-            lastEraserPointIndex = 0
-            lastEraserStampPos = touch.location(in: self)
-            lastEraserSpacing = max(width * 0.3, 0.5)
+            eraserWalker = EraserStrokeWalker(brush: brush, scale: canvasScale)
             // Snapshot canvas BEFORE any erasing so undo restores the pre-erase state.
             pushUndoSnapshot()
+            // The first dab lands at touch-down (a tap erases a dot).
+            applyNewEraserStamps()
 
         case .lasso:
             lassoPoints = [point]
@@ -938,8 +939,12 @@ public final class MetalCanvasView: UIView {
             return
         }
 
-        // Telemetry / diagnostic at touchesEnded.
-        if isQuickShapeEnabled, let recognizer {
+        // Telemetry / diagnostic at touchesEnded (dry brush strokes only — the
+        // recognizer is never fed by eraser / selection / wet strokes, so reporting
+        // its empty verdict for them polluted the abstain funnel).
+        var isDryBrushStroke = false
+        if case .brush(let cfg) = currentTool, !cfg.wetEnabled { isDryBrushStroke = true }
+        if isDryBrushStroke, isQuickShapeEnabled, let recognizer {
             // This block is only reached when the stroke ended WITHOUT having
             // entered any handle-drag mode (those cases return earlier above).
             // So we know no snap committed during this touch.
@@ -978,11 +983,14 @@ public final class MetalCanvasView: UIView {
             }
         }
 
-        // Brush + StreamLine: the smoothed cursor lags behind the pencil, so the
-        // stabilized stroke would stop short of where the user lifted. Pull it to the
-        // true lift position so the stroke reaches the pen tip.
-        if case .brush(let config) = currentTool, config.streamline > 0 {
-            activeStroke?.points.append(makeStrokePoint(from: touch))
+        // Brush: feed the true lift position through the stabilizer like any other
+        // sample, so `finish()`'s catch-up tail (see finishStroke) walks from the
+        // lagged cursor to exactly where the pencil lifted. (This used to append the
+        // RAW lift point here AND run the catch-up — the tail was laid three times.)
+        if case .brush = currentTool {
+            let raw = makeStrokePoint(from: touch)
+            if retainStrokeGeometry { activeRawPoints.append(raw) }
+            activeStroke?.points.append(stabilizer?.feed(raw) ?? raw)
         }
 
         if case .lasso = currentTool {
@@ -1072,7 +1080,8 @@ public final class MetalCanvasView: UIView {
         activeStrokeStamps = []
         drawingTouch = nil
         wandTapStart = nil
-        lastEraserPointIndex = 0
+        eraserWalker = nil
+        dryWalker = nil
         wetWalker = nil
         stabilizer = nil
         lassoPoints.removeAll()
@@ -1084,84 +1093,38 @@ public final class MetalCanvasView: UIView {
 
     // MARK: - Stamp Generation
 
-    /// Rebuild all stamp instances for the current active stroke. Delegates to
-    /// `generateStampsForStroke` which handles arc-length interpolation with
-    /// adaptive spacing.
+    /// Advance the dry walk over the points added since the last batch and refresh the
+    /// live preview. Live preview: NO end cap (it re-evaluates at the pencil with live
+    /// force each frame — grows/shrinks in place and dances with scatter). The cap lands
+    /// via the finishStroke regen, so the finished stroke still ends exactly at the lift
+    /// point.
     private func appendStampsForLatestPoints(touch: UITouch, event: UIEvent?) {
         guard let stroke = activeStroke else { return }
-        // Live preview: NO end cap (it re-evaluates at the pencil with live force each
-        // frame — grows/shrinks in place and dances with scatter). The cap lands via the
-        // touchesEnded regen, so the finished stroke still ends exactly at the lift point.
-        activeStrokeStamps = generateStampsForStroke(stroke, scale: canvasScale, includeEndCap: false)
+        if dryWalker == nil {
+            dryWalker = DryStrokeWalker(stroke: stroke, scale: canvasScale, clip: clipMask,
+                                        tuning: currentDevTuning())
+        }
+        dryWalker?.advance(stroke)
+        activeStrokeStamps = dryWalker?.previewStamps() ?? []
+    }
+
+    private func currentDevTuning() -> StrokeStampGenerator.DevTuning {
+        StrokeStampGenerator.DevTuning(maxSpeed: devMaxSpeed, distancePeriod: devDistancePeriod,
+                                       fadePeriod: devFadePeriod)
     }
 
     // MARK: - Eraser (incremental application)
 
-    /// Generate stamps from newly-added stroke points and apply them directly
-    /// to the active layer texture with destination-out blend. Called per touchesMoved.
-    ///
-    /// Unlike brush (which stages stamps in scratch for live preview then flattens
-    /// on touchesEnded), eraser commits each batch immediately so the erased region
-    /// is visible in real time. Undo snapshot was pre-pushed at touchesBegan.
-    ///
-    /// Uses adaptive spacing and persists stamp position across batches.
-    /// When `lassoClipPath` is set, stamps outside the clip path are skipped.
+    /// Walk the newly-added eraser points and apply the new stamps directly to the
+    /// active layer texture with destination-out blend. Called at touch-down (first
+    /// dab) and per touchesMoved. Unlike the brush (scratch preview → flatten), the
+    /// eraser commits each batch immediately. Undo snapshot is pre-pushed at
+    /// touchesBegan. The walk itself is `EraserStrokeWalker` (arc-carry across
+    /// batches, offline-asserted).
     private func applyNewEraserStamps() {
-        guard let stroke = activeStroke, stroke.points.count > lastEraserPointIndex else { return }
-
-        let brush = stroke.brush
-        let scale = canvasScale
-        let color = SIMD4<Float>(1, 1, 1, 1)
-        let clipPath = lassoClipPath
-
-        var newStamps: [CanvasRenderer.StampInstance] = []
-        // Use the persisted last-stamp position for correct cross-batch spacing.
-        var stampPos = lastEraserStampPos
-        var spacing = lastEraserSpacing
-
-        // Walk from the first unprocessed point to the end of the stroke.
-        let startIdx = max(lastEraserPointIndex, 1)
-        for i in startIdx..<stroke.points.count {
-            let prev = stroke.points[i - 1]
-            let curr = stroke.points[i]
-            let dx = curr.position.x - prev.position.x
-            let dy = curr.position.y - prev.position.y
-            let segDist = hypot(dx, dy)
-            guard segDist > 0 else { continue }
-
-            // How far along this segment do we need to go before the next stamp?
-            let distFromLastStamp = hypot(prev.position.x - stampPos.x, prev.position.y - stampPos.y)
-            var traveled = max(0, spacing - distFromLastStamp)
-
-            while traveled <= segDist {
-                let t = traveled / segDist
-                let x = prev.position.x + dx * t
-                let y = prev.position.y + dy * t
-                let force = prev.force + (curr.force - prev.force) * t
-                let altitude = prev.altitude + (curr.altitude - prev.altitude) * t
-                let width = brush.effectiveWidth(force: force, altitude: altitude)
-
-                let pos = CGPoint(x: x, y: y)
-                // Even-odd to match the dry-stamp clip (wand masks have holes).
-                if clipPath.map({ $0.contains(pos, using: .evenOdd) }) ?? true {
-                    newStamps.append(CanvasRenderer.StampInstance(
-                        center: SIMD2<Float>(Float(x * scale), Float(y * scale)),
-                        radius: Float(width * 0.5 * scale),
-                        rotation: 0,
-                        color: color
-                    ))
-                }
-
-                stampPos = CGPoint(x: x, y: y)
-                spacing = max(width * 0.3, 0.5)
-                traveled += spacing
-            }
-        }
-
-        lastEraserPointIndex = stroke.points.count
-        lastEraserStampPos = stampPos
-        lastEraserSpacing = spacing
-
+        guard let stroke = activeStroke, var walker = eraserWalker else { return }
+        let newStamps = walker.advance(stroke: stroke, scale: canvasScale, clip: clipMask)
+        eraserWalker = walker
         guard !newStamps.isEmpty else { return }
         renderer.applyEraserStamps(newStamps)
     }
@@ -1177,7 +1140,7 @@ public final class MetalCanvasView: UIView {
         guard let stroke = activeStroke, var walker = wetWalker else { return }
 
         let newStamps = walker.advance(
-            stroke: stroke, scale: canvasScale, clipPath: lassoClipPath,
+            stroke: stroke, scale: canvasScale, clip: clipMask,
             sample: { [renderer] x, y in renderer.sampleLayerColor(x: x, y: y) },
             sampleAveraged: { [renderer] x, y, r in renderer.sampleLayerColorAveraged(x: x, y: y, radius: r) },
             mix: { [renderer] a, b, t in renderer.kmMixCPU(a, b, t) })
@@ -1195,7 +1158,7 @@ public final class MetalCanvasView: UIView {
     private func appendNewWetInkStamps() {
         guard let stroke = activeStroke, var walker = wetWalker else { return }
         let newStamps = walker.advance(
-            stroke: stroke, scale: canvasScale, clipPath: lassoClipPath,
+            stroke: stroke, scale: canvasScale, clip: clipMask,
             sample: { [renderer] x, y in renderer.sampleLayerColor(x: x, y: y) },
             sampleAveraged: { [renderer] x, y, r in renderer.sampleLayerColorAveraged(x: x, y: y, radius: r) },
             mix: { [renderer] a, b, t in renderer.kmMixCPU(a, b, t) })
@@ -1215,9 +1178,8 @@ public final class MetalCanvasView: UIView {
             activeStroke = nil
             activeStrokeStamps = []
             drawingTouch = nil
-            lastEraserPointIndex = 0
-            lastEraserStampPos = .zero
-            lastEraserSpacing = 0.5
+            eraserWalker = nil
+            dryWalker = nil
             wetWalker = nil
             stabilizer = nil
             onInteractionEnded?()
@@ -1289,13 +1251,6 @@ public final class MetalCanvasView: UIView {
         }
         renderer.activeStrokeOpacity = Float(stroke.brush.opacity)
         renderer.flattenScratchIntoCanvas()
-        // Overlay drawing mode: accumulate the just-finished brush stroke into the
-        // visual-only overlay surface too, at the same opacity ceiling. The scratch
-        // still holds this stroke (flattenScratchIntoCanvas reads it, doesn't clear).
-        // No-op unless an overlay texture is allocated.
-        if overlayStrokeLayer != nil {
-            renderer.flattenScratchIntoOverlay(strokeOpacity: Float(stroke.brush.opacity))
-        }
 
         strokeCount += 1
         onDrawingChanged?()
@@ -1417,14 +1372,14 @@ public final class MetalCanvasView: UIView {
         if brush.wetEnabled, brush.wetSmudge {
             guard renderer.isWetRenderingAvailable else { return }
             renderer.waitUntilQueueDrained()
-            var walker = WetStrokeWalker(startPosition: start, brush: brush)
+            var walker = WetStrokeWalker(startPosition: start, brush: brush, scale: scale)
             var upTo = 1
             while upTo <= stroke.points.count {
                 let prefix = Stroke(id: stroke.id,
                                     points: Array(stroke.points.prefix(upTo)),
                                     brush: brush)
                 let stamps = walker.advance(
-                    stroke: prefix, scale: scale, clipPath: nil,
+                    stroke: prefix, scale: scale, clip: nil,
                     sample: { [renderer] x, y in renderer.sampleLayerColor(x: x, y: y) },
                     sampleAveraged: { [renderer] x, y, r in renderer.sampleLayerColorAveraged(x: x, y: y, radius: r) },
                     mix: { [renderer] a, b, t in renderer.kmMixCPU(a, b, t) })
@@ -1442,9 +1397,9 @@ public final class MetalCanvasView: UIView {
             // The KM under-color is a canvas sample — drain so this stroke sees the
             // strokes re-painted before it.
             renderer.waitUntilQueueDrained()
-            var walker = WetStrokeWalker(startPosition: start, brush: brush)
+            var walker = WetStrokeWalker(startPosition: start, brush: brush, scale: scale)
             let stamps = walker.advance(
-                stroke: stroke, scale: scale, clipPath: nil,
+                stroke: stroke, scale: scale, clip: nil,
                 sample: { [renderer] x, y in renderer.sampleLayerColor(x: x, y: y) },
                 sampleAveraged: { [renderer] x, y, r in renderer.sampleLayerColorAveraged(x: x, y: y, radius: r) },
                 mix: { [renderer] a, b, t in renderer.kmMixCPU(a, b, t) })
@@ -1455,7 +1410,7 @@ public final class MetalCanvasView: UIView {
         renderer.commitStampsToCanvas(stamps,
                                       strokeOpacity: Float(brush.opacity),
                                       shapeTexture: renderer.shapeTexture(for: brush.shapeID),
-                                      grain: renderer.grainSettings(for: brush, widthPx: brush.baseWidth * canvasScale, strokeID: stroke.id),
+                                      grain: renderer.grainSettings(for: brush, widthPx: brush.baseWidth * scale, strokeID: stroke.id),
                                       lightness: renderer.lightnessSettings(for: brush),
                                       flip: renderer.flipSettings(for: brush))
     }
@@ -2413,22 +2368,6 @@ public final class MetalCanvasView: UIView {
         return result
     }
 
-    /// Re-host the lasso path-preview dash layers. Overlay mode parks them on a
-    /// layer above the opaque generated image (they'd be invisible on our own
-    /// layer, which sits underneath it); `nil` returns them home. The host must
-    /// share this view's coordinate space (the canvas fills its container, so
-    /// `transformView.layer` qualifies).
-    public func setLassoPreviewHost(_ host: CALayer?) {
-        let target = host ?? layer
-        guard lassoPreviewWhite.superlayer !== target else { return }
-        // Order matters: stripes first so ants + markers draw above them.
-        for shapeLayer in [clipDimLayer, lassoPreviewWhite, lassoPreviewBlack,
-                           wandMarkerPositive, wandMarkerNegative, wandMarkerOutline] {
-            shapeLayer.removeFromSuperlayer()
-            target.addSublayer(shapeLayer)
-        }
-    }
-
     // MARK: - Magic Wand Public API
 
     /// Show/replace the wand prompt-point markers (view-point coords). Empty
@@ -2479,6 +2418,7 @@ public final class MetalCanvasView: UIView {
     /// When set, brush/eraser stamps outside the path are discarded.
     public func setClipPath(_ path: CGPath?) {
         lassoClipPath = path
+        rebuildClipMask()
         if let path = path {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
@@ -2491,6 +2431,17 @@ public final class MetalCanvasView: UIView {
         } else {
             hideLassoPreview()
         }
+    }
+
+    /// Bake the clip path (view points) into the dab-test bitmap. The path is
+    /// authored in this view's coordinate space, so it is re-baked whenever the
+    /// view size changes (layoutSubviews) as well as on every setClipPath.
+    private func rebuildClipMask() {
+        guard let path = lassoClipPath, bounds.width > 0, bounds.height > 0 else {
+            clipMask = nil
+            return
+        }
+        clipMask = StampClip(path: path, space: bounds.size)
     }
 
     /// Rebuild the unselected-region stripe path: full canvas rect + the clip
@@ -2668,6 +2619,7 @@ public final class MetalCanvasView: UIView {
     public func commitSelection() {
         pushUndoSnapshot()
         renderer.commitSelection()
+        strokeCount += 1   // content landed (Move place / Paste place)
         isDirty = true
     }
 
@@ -2682,17 +2634,67 @@ public final class MetalCanvasView: UIView {
 
     private func pushUndoSnapshot() {
         guard isUndoEnabled else { return }   // Studio pad: no 16 MB snapshots
-        guard let id = renderer.layerID(at: activeLayerIndex),
-              let data = renderer.snapshotLayer(at: activeLayerIndex) else { return }
-        undoSnapshots.append(.layer(id: id, snapshotData: data))
+        guard let entry = makeLayerEntry(at: activeLayerIndex) else { return }
+        undoSnapshots.append(entry)
         trimUndoAndClearRedo()
     }
 
-    private func trimUndoAndClearRedo() {
-        if undoSnapshots.count > Self.maxUndoDepth {
-            undoSnapshots.removeFirst()
+    /// Snapshot one layer into an undo entry carrying the CURRENT stroke count.
+    private func makeLayerEntry(at index: Int) -> UndoEntry? {
+        guard let id = renderer.layerID(at: index),
+              let data = renderer.snapshotLayer(at: index) else { return nil }
+        return .layer(id: id, blob: LayerSnapshotBlob(raw: data), strokeCount: strokeCount)
+    }
+
+    /// Snapshot the whole layer stack into a compound undo entry.
+    private func makeCanvasEntry() -> UndoEntry? {
+        guard let current = renderer.snapshotLayerStack() else { return nil }
+        let entries = current.layers.map { snap in
+            StackEntry(id: snap.id, name: snap.name, isVisible: snap.isVisible, isLocked: snap.isLocked,
+                       isAlphaLocked: snap.isAlphaLocked, blendMode: snap.blendMode, opacity: snap.opacity,
+                       blob: LayerSnapshotBlob(raw: snap.data))
         }
+        return .canvas(layers: entries, activeIndex: current.activeIndex, strokeCount: strokeCount)
+    }
+
+    private func restoreStack(_ entries: [StackEntry], activeIndex: Int) {
+        var snaps: [CanvasRenderer.LayerStackSnapshot] = []
+        for e in entries {
+            guard let data = e.blob.data() else { return } // never restore a partial stack
+            snaps.append(CanvasRenderer.LayerStackSnapshot(
+                id: e.id, name: e.name, isVisible: e.isVisible, isLocked: e.isLocked,
+                isAlphaLocked: e.isAlphaLocked, blendMode: e.blendMode, opacity: e.opacity, data: data))
+        }
+        renderer.restoreLayerStack(snaps, activeIndex: activeIndex)
+    }
+
+    private func trimUndoAndClearRedo() {
         redoSnapshots.removeAll()
+        trimUndoToBudget()
+    }
+
+    /// Enforce the depth cap and the resident-byte budget (oldest undo first, then
+    /// redo). Always keeps the newest undo entry.
+    private func trimUndoToBudget() {
+        if undoSnapshots.count > Self.maxUndoDepth {
+            undoSnapshots.removeFirst(undoSnapshots.count - Self.maxUndoDepth)
+        }
+        var total = undoSnapshots.reduce(0) { $0 + $1.footprint } + redoSnapshots.reduce(0) { $0 + $1.footprint }
+        while total > Self.undoByteBudget, !redoSnapshots.isEmpty {
+            total -= redoSnapshots.removeFirst().footprint
+        }
+        while total > Self.undoByteBudget, undoSnapshots.count > 1 {
+            total -= undoSnapshots.removeFirst().footprint
+        }
+    }
+
+    /// System memory pressure: keep only the last few undo steps, drop redo.
+    @objc private func handleMemoryWarning() {
+        redoSnapshots.removeAll()
+        if undoSnapshots.count > 3 {
+            undoSnapshots.removeFirst(undoSnapshots.count - 3)
+        }
+        onStateChanged?()
     }
 
     /// Pop the newest undo entry and restore it in place — the cancel-stroke
@@ -2702,11 +2704,12 @@ public final class MetalCanvasView: UIView {
     private func restorePoppedUndoEntry() {
         guard let entry = undoSnapshots.popLast() else { return }
         switch entry {
-        case .layer(let id, let snapshotData):
-            guard let index = renderer.layerIndex(id: id) else { return }
-            renderer.restoreLayer(at: index, from: snapshotData)
-        case .canvas(let snaps, let activeIndex, let savedStrokeCount):
-            renderer.restoreLayerStack(snaps, activeIndex: activeIndex)
+        case .layer(let id, let blob, let savedStrokeCount):
+            guard let index = renderer.layerIndex(id: id), let data = blob.data() else { return }
+            renderer.restoreLayer(at: index, from: data)
+            strokeCount = savedStrokeCount
+        case .canvas(let entries, let activeIndex, let savedStrokeCount):
+            restoreStack(entries, activeIndex: activeIndex)
             strokeCount = savedStrokeCount
         }
     }
@@ -2723,26 +2726,27 @@ public final class MetalCanvasView: UIView {
 
         guard let entry = undoSnapshots.popLast() else { return }
         switch entry {
-        case .layer(let id, let snapshotData):
+        case .layer(let id, let blob, let savedStrokeCount):
             // Resolve the layer's CURRENT index by id — indices go stale when
             // layers are deleted/reordered. Purge-on-delete should prevent a
             // miss; skip defensively if it happens.
-            guard let index = renderer.layerIndex(id: id) else {
+            guard let index = renderer.layerIndex(id: id), let data = blob.data() else {
                 onStateChanged?()
                 return
             }
-            if let current = renderer.snapshotLayer(at: index) {
-                redoSnapshots.append(.layer(id: id, snapshotData: current))
+            if let current = makeLayerEntry(at: index) {
+                redoSnapshots.append(current)
             }
-            renderer.restoreLayer(at: index, from: snapshotData)
-            if strokeCount > 0 { strokeCount -= 1 }
-        case .canvas(let snaps, let activeIndex, let savedStrokeCount):
-            if let current = renderer.snapshotLayerStack() {
-                redoSnapshots.append(.canvas(layers: current.layers, activeIndex: current.activeIndex, strokeCount: strokeCount))
+            renderer.restoreLayer(at: index, from: data)
+            strokeCount = savedStrokeCount
+        case .canvas(let entries, let activeIndex, let savedStrokeCount):
+            if let current = makeCanvasEntry() {
+                redoSnapshots.append(current)
             }
-            renderer.restoreLayerStack(snaps, activeIndex: activeIndex)
+            restoreStack(entries, activeIndex: activeIndex)
             strokeCount = savedStrokeCount
         }
+        trimUndoToBudget()
 
         // QuickShape: if the just-undone stroke was a snap committed within
         // the last 2 seconds, fire the wrong-snap proxy event. Clear the
@@ -2768,23 +2772,24 @@ public final class MetalCanvasView: UIView {
     public func performRedo() {
         guard let entry = redoSnapshots.popLast() else { return }
         switch entry {
-        case .layer(let id, let snapshotData):
-            guard let index = renderer.layerIndex(id: id) else {
+        case .layer(let id, let blob, let savedStrokeCount):
+            guard let index = renderer.layerIndex(id: id), let data = blob.data() else {
                 onStateChanged?()
                 return
             }
-            if let current = renderer.snapshotLayer(at: index) {
-                undoSnapshots.append(.layer(id: id, snapshotData: current))
+            if let current = makeLayerEntry(at: index) {
+                undoSnapshots.append(current)
             }
-            renderer.restoreLayer(at: index, from: snapshotData)
-            strokeCount += 1
-        case .canvas(let snaps, let activeIndex, let savedStrokeCount):
-            if let current = renderer.snapshotLayerStack() {
-                undoSnapshots.append(.canvas(layers: current.layers, activeIndex: current.activeIndex, strokeCount: strokeCount))
+            renderer.restoreLayer(at: index, from: data)
+            strokeCount = savedStrokeCount
+        case .canvas(let entries, let activeIndex, let savedStrokeCount):
+            if let current = makeCanvasEntry() {
+                undoSnapshots.append(current)
             }
-            renderer.restoreLayerStack(snaps, activeIndex: activeIndex)
+            restoreStack(entries, activeIndex: activeIndex)
             strokeCount = savedStrokeCount
         }
+        trimUndoToBudget()
         onDrawingChanged?()
         onStateChanged?()
         isDirty = true
@@ -2820,14 +2825,20 @@ public final class MetalCanvasView: UIView {
         // whole stack and are self-contained.
         if let id = renderer.layerID(at: index) {
             let isForDeleted: (UndoEntry) -> Bool = { entry in
-                if case .layer(let lid, _) = entry { return lid == id }
+                if case .layer(let lid, _, _) = entry { return lid == id }
                 return false
             }
             undoSnapshots.removeAll(where: isForDeleted)
             redoSnapshots.removeAll(where: isForDeleted)
         }
+        // Deleting is destructive → a compound entry restores the whole stack.
+        if isUndoEnabled, let entry = makeCanvasEntry() {
+            undoSnapshots.append(entry)
+            trimUndoAndClearRedo()
+        }
         renderer.removeLayer(at: index)
         isDirty = true
+        onDrawingChanged?()
         onStateChanged?()
     }
 
@@ -2874,8 +2885,8 @@ public final class MetalCanvasView: UIView {
     public func duplicateLayer(at index: Int) -> Bool {
         guard renderer.layers.count < CanvasRenderer.maxLayerCount else { return false }
         var pushedSnapshot = false
-        if isUndoEnabled, let current = renderer.snapshotLayerStack() {
-            undoSnapshots.append(.canvas(layers: current.layers, activeIndex: current.activeIndex, strokeCount: strokeCount))
+        if isUndoEnabled, let entry = makeCanvasEntry() {
+            undoSnapshots.append(entry)
             trimUndoAndClearRedo()
             pushedSnapshot = true
         }
@@ -2896,9 +2907,8 @@ public final class MetalCanvasView: UIView {
     public func clearLayer(at index: Int) {
         guard renderer.layers.indices.contains(index),
               !renderer.layers[index].isLocked else { return }
-        if isUndoEnabled, let id = renderer.layerID(at: index),
-           let data = renderer.snapshotLayer(at: index) {
-            undoSnapshots.append(.layer(id: id, snapshotData: data))
+        if isUndoEnabled, let entry = makeLayerEntry(at: index) {
+            undoSnapshots.append(entry)
             trimUndoAndClearRedo()
         }
         renderer.clearLayer(at: index)
@@ -2919,8 +2929,8 @@ public final class MetalCanvasView: UIView {
     /// the pre-clear layer STACK (all layers + structure) is captured, not
     /// just the active layer, so undo restores multi-layer documents fully.
     public func clearAll() {
-        if isUndoEnabled, let current = renderer.snapshotLayerStack() {
-            undoSnapshots.append(.canvas(layers: current.layers, activeIndex: current.activeIndex, strokeCount: strokeCount))
+        if isUndoEnabled, let entry = makeCanvasEntry() {
+            undoSnapshots.append(entry)
             trimUndoAndClearRedo()
         }
         renderer.resetToSingleLayer()
@@ -2942,8 +2952,8 @@ public final class MetalCanvasView: UIView {
     public func importImageAsNewLayer(_ image: UIImage, name: String) -> Bool {
         guard let cgImage = image.cgImage else { return false }
         guard renderer.layers.count < CanvasRenderer.maxLayerCount else { return false }
-        if let current = renderer.snapshotLayerStack() {
-            undoSnapshots.append(.canvas(layers: current.layers, activeIndex: current.activeIndex, strokeCount: strokeCount))
+        if let entry = makeCanvasEntry() {
+            undoSnapshots.append(entry)
             trimUndoAndClearRedo()
         }
         for index in renderer.layers.indices where renderer.layers[index].isVisible {
@@ -2967,8 +2977,8 @@ public final class MetalCanvasView: UIView {
     public func addImageAsNewLayer(_ image: UIImage, name: String) -> Bool {
         guard let cgImage = image.cgImage else { return false }
         guard renderer.layers.count < CanvasRenderer.maxLayerCount else { return false }
-        if let current = renderer.snapshotLayerStack() {
-            undoSnapshots.append(.canvas(layers: current.layers, activeIndex: current.activeIndex, strokeCount: strokeCount))
+        if let entry = makeCanvasEntry() {
+            undoSnapshots.append(entry)
             trimUndoAndClearRedo()
         }
         let newIndex = renderer.addLayer(name: name)
@@ -3061,25 +3071,17 @@ public final class MetalCanvasView: UIView {
         return ctx.makeImage()
     }
 
-    /// Load an image onto the canvas (e.g., "Send to Canvas"). Undoable like
-    /// any stroke — the bake lands on the active layer.
-    public func bakeImage(_ image: UIImage) {
-        guard let cgImage = image.cgImage else { return }
-        pushUndoSnapshot()
-        renderer.loadImageIntoCanvas(cgImage)
-        strokeCount += 1
-        isDirty = true
-        onStateChanged?()
-    }
-
     /// Export all layers as a JSON envelope with per-layer PNG data.
-    /// Returns nil if the canvas has no content.
+    /// Returns nil only when the document isn't allocated yet (nothing to save) or a
+    /// layer failed to encode (never persist a partial stack — the next autosave
+    /// retries). An EMPTY document exports fine: undoing back to blank must persist,
+    /// or the last non-blank save resurrects on reopen.
     public func exportLayeredData() -> Data? {
-        guard strokeCount > 0 else { return nil }
+        guard renderer.hasCanvas, !layers.isEmpty else { return nil }
 
         var layerEntries: [LayeredDrawing.LayerEntry] = []
         for (i, info) in layers.enumerated() {
-            guard let png = renderer.layerPNGData(at: i) else { continue }
+            guard let png = renderer.layerPNGData(at: i) else { return nil }
             layerEntries.append(LayeredDrawing.LayerEntry(
                 id: info.id.uuidString,
                 name: info.name,
@@ -3142,9 +3144,25 @@ public final class MetalCanvasView: UIView {
             return
         }
 
-        // Legacy stroke JSON fallback — replay immediately.
+        // Legacy stroke JSON fallback — replay (deferred to layout like the other
+        // formats; it used to be dropped when the document wasn't allocated yet).
         if let savedStrokes = try? JSONDecoder().decode([Stroke].self, from: data),
-           !savedStrokes.isEmpty, renderer.hasCanvas {
+           !savedStrokes.isEmpty {
+            guard renderer.hasCanvas else {
+                pendingLegacyStrokes = savedStrokes
+                isDirty = true
+                return
+            }
+            replayLegacyStrokes(savedStrokes)
+        }
+    }
+
+    private var pendingLegacyStrokes: [Stroke]?
+
+    private func replayLegacyStrokes(_ savedStrokes: [Stroke]) {
+        undoSnapshots.removeAll()
+        redoSnapshots.removeAll()
+        do {
             let scale = canvasScale
             for stroke in savedStrokes {
                 let stamps = generateStampsForStroke(stroke, scale: scale)
@@ -3177,7 +3195,7 @@ public final class MetalCanvasView: UIView {
         undoSnapshots.removeAll()
         redoSnapshots.removeAll()
         isDirty = true
-        onDrawingChanged?()
+        onDrawingLoaded?()
     }
 
     /// Apply a deferred canvas bitmap load (single-layer backward compat).
@@ -3188,7 +3206,7 @@ public final class MetalCanvasView: UIView {
         undoSnapshots.removeAll()
         redoSnapshots.removeAll()
         isDirty = true
-        onDrawingChanged?()
+        onDrawingLoaded?()
     }
 
     /// Apply a deferred layered drawing load.
@@ -3227,7 +3245,7 @@ public final class MetalCanvasView: UIView {
         undoSnapshots.removeAll()
         redoSnapshots.removeAll()
         isDirty = true
-        onDrawingChanged?()
+        onDrawingLoaded?()
     }
 
     /// Generate stamp instances for a complete stroke (used by replay + active drawing).
@@ -3237,7 +3255,7 @@ public final class MetalCanvasView: UIView {
     private func generateStampsForStroke(_ stroke: Stroke, scale: CGFloat,
                                          includeEndCap: Bool = true) -> [CanvasRenderer.StampInstance] {
         StrokeStampGenerator.stamps(
-            for: stroke, scale: scale, clipPath: lassoClipPath,
+            for: stroke, scale: scale, clip: clipMask,
             tuning: StrokeStampGenerator.DevTuning(
                 maxSpeed: devMaxSpeed, distancePeriod: devDistancePeriod, fadePeriod: devFadePeriod),
             includeEndCap: includeEndCap)

@@ -174,12 +174,6 @@ public final class CanvasViewModel {
             self.container?.clearLassoSelection()
             self.canvasView?.cancelSelection() // discard float + restore snapshot
         }
-
-        // Re-apply overlay drawing-mode state (the container may be freshly created).
-        if overlayActive {
-            container.setOverlayActive(true)
-            container.setOverlayImage(overlayImage)
-        }
     }
 
     public func selectBrush(_ config: BrushConfig) {
@@ -204,47 +198,6 @@ public final class CanvasViewModel {
         if case .lasso = selectedTool { return true }
         if case .magicWand = selectedTool { return true }
         return false
-    }
-
-    // MARK: - Overlay Drawing Mode
-
-    /// Whether overlay drawing mode is active (generated image locked over the canvas
-    /// + visual-only fresh-stroke surface). Cached so it can be re-applied when the
-    /// container is re-created (the UIViewRepresentable can re-make the view).
-    private var overlayActive = false
-    private var overlayImage: UIImage?
-
-    /// Activate/deactivate overlay drawing mode. Idempotent; safe to call every
-    /// SwiftUI update. Inert (and detaches the overlay layer) when `false`.
-    ///
-    /// MUST early-return when unchanged: this is called from `CanvasView.updateUIView`
-    /// on every SwiftUI update, and `overlayActive` is an `@Observable` stored property.
-    /// Writing it unconditionally mutates observed state *during* the view update, which
-    /// SwiftUI resolves by re-running the update → mutate again → infinite loop (the
-    /// 2026-06-22 all-layouts freeze: `updateUIView` spun forever, the canvas never laid
-    /// out). The guard makes steady-state updates mutate nothing.
-    public func setOverlayActive(_ active: Bool) {
-        guard active != overlayActive else { return }
-        overlayActive = active
-        container?.setOverlayActive(active)
-        container?.setOverlayImage(active ? overlayImage : nil)
-    }
-
-    /// Push the generated image to display locked over the canvas (overlay mode).
-    /// Stored so it survives a container re-create; only displayed while active.
-    ///
-    /// Same `@Observable`-mutation-during-update hazard as `setOverlayActive` — guard on
-    /// identity so re-pushing the same image (or nil→nil every update) is a true no-op.
-    public func setOverlayImage(_ image: UIImage?) {
-        guard image !== overlayImage else { return }
-        overlayImage = image
-        if overlayActive { container?.setOverlayImage(image) }
-    }
-
-    /// Wipe the visual-only overlay-stroke surface. Called on each returned generation
-    /// frame (still + video). Harmless no-op when not in overlay mode.
-    public func clearOverlayStrokes() {
-        container?.clearOverlayStrokes()
     }
 
     /// Debug toggle for the Phase-4 wet-paint draw-order experiment.
@@ -274,8 +227,7 @@ public final class CanvasViewModel {
 
     /// Selection snapshot of what the user sees on the canvas square: all
     /// layers over the lineart background, on white, capped at SAM's input
-    /// resolution. Overlay mode substitutes the generated image at the
-    /// AppCoordinator level (see its source-image provider).
+    /// resolution. This is the ONLY selection source (SAM segments the sketch).
     public func selectionCanvasSnapshot() -> CGImage? {
         guard let canvasView else { return nil }
         return canvasView.opaqueImageSnapshot(
@@ -428,13 +380,6 @@ public final class CanvasViewModel {
             strokeCount: 0,
             bounds: .zero
         ))
-    }
-
-    public func swapLineart(image: UIImage) {
-        guard let canvasView else { return }
-        canvasView.clearAll()
-        container?.bakeImageIntoCanvas(image)
-        updateState()
     }
 
     /// Import an image as a new top layer, hiding existing layers ("Edit" →

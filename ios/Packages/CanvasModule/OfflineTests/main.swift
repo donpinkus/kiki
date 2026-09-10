@@ -345,9 +345,9 @@ do {
     b.wetCharge = 1.0
     checkBool("charge 1 → bottomless", b.wetChargeHalfLife == .infinity)
     b.wetCharge = 0.0
-    check("charge 0 half-life floor", Double(b.wetChargeHalfLife), 180.0)
+    check("charge 0 half-life floor", Double(b.wetChargeHalfLife), 360.0)
     b.wetCharge = 0.5
-    check("charge 0.5 half-life", Double(b.wetChargeHalfLife), 180.0 + 3420 * 0.25)
+    check("charge 0.5 half-life", Double(b.wetChargeHalfLife), 360.0 + 6840 * 0.25)
     var prev = 0.0
     var monotonic = true
     for c in stride(from: 0.0, through: 0.99, by: 0.11) {

@@ -512,9 +512,13 @@ public struct BrushConfig: Codable, Sendable {
 
     /// Charge → deposit-decay half-life in document px (pure; offline-asserted).
     /// `.infinity` at charge ≥ 0.999 (bottomless — the identity the default relies on).
+    /// Range 360…7200 px: the pre-2026-09-10 mapping (180…3600) was consumed in view
+    /// points on device, i.e. ~2× these on the 12.9" iPad; the walk now measures true
+    /// document px everywhere (see `StrokeWalkUnits`), so the range doubled to keep the
+    /// tuned presets' feel.
     public var wetChargeHalfLife: CGFloat {
         let c = max(0, min(1, wetCharge))
-        return c >= 0.999 ? .infinity : 180 + 3420 * c * c
+        return c >= 0.999 ? .infinity : 360 + 6840 * c * c
     }
 
     /// Compute effective stroke width for a given pressure and tilt.

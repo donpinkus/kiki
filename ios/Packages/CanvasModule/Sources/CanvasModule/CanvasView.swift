@@ -11,17 +11,10 @@ public struct CanvasView: UIViewRepresentable {
     private let devMaxSpeed: Double
     private let devDistancePeriod: Double
     private let devFadePeriod: Double
-    /// Overlay drawing mode: when active, `overlayImage` is shown opaque, locked over
-    /// the canvas, with a visual-only fresh-stroke surface above it. Both default off
-    /// so split-screen/fullscreen are untouched.
-    private let overlayActive: Bool
-    private let overlayImage: UIImage?
 
     public init(
         viewModel: CanvasViewModel,
         drawingSurfaceSide: CGFloat = 0,
-        overlayActive: Bool = false,
-        overlayImage: UIImage? = nil,
         externalTransformRegionProvider: (() -> CGRect?)? = nil,
         onExternalTransform: ((CGPoint, CGFloat) -> Void)? = nil,
         onContactPointChanged: ((CGPoint?, CGFloat) -> Void)? = nil,
@@ -32,8 +25,6 @@ public struct CanvasView: UIViewRepresentable {
     ) {
         self.viewModel = viewModel
         self.drawingSurfaceSide = drawingSurfaceSide
-        self.overlayActive = overlayActive
-        self.overlayImage = overlayImage
         self.externalTransformRegionProvider = externalTransformRegionProvider
         self.onExternalTransform = onExternalTransform
         self.onContactPointChanged = onContactPointChanged
@@ -108,10 +99,6 @@ public struct CanvasView: UIViewRepresentable {
             canvasView?.updateSelectionTransform(translation: translation, scale: scale, rotation: rotation)
             viewModel?.selection.moveTransformChanged(translation: translation, scale: scale, rotation: rotation)
         }
-        // Apply initial overlay drawing-mode state (via the view model so it survives a
-        // container re-create).
-        viewModel.setOverlayActive(overlayActive)
-        viewModel.setOverlayImage(overlayImage)
         return container
     }
 
@@ -127,9 +114,5 @@ public struct CanvasView: UIViewRepresentable {
         uiView.canvasView.devMaxSpeed = devMaxSpeed
         uiView.canvasView.devDistancePeriod = devDistancePeriod
         uiView.canvasView.devFadePeriod = devFadePeriod
-        // Push overlay drawing-mode state on every update (image changes ~2 FPS while
-        // streaming). Routed through the view model — idempotent setters.
-        viewModel.setOverlayActive(overlayActive)
-        viewModel.setOverlayImage(overlayImage)
     }
 }

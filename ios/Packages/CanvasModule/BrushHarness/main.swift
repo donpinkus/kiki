@@ -168,7 +168,7 @@ final class Scene {
             guard let start = stroke.points.first?.position else { return }
             var walker = WetStrokeWalker(startPosition: start, brush: stroke.brush)
             let stamps = walker.advance(
-                stroke: stroke, scale: 1, clipPath: nil,
+                stroke: stroke, scale: 1, clip: nil,
                 sample: { [renderer] x, y in renderer.sampleLayerColor(x: x, y: y) },
                 sampleAveraged: { [renderer] x, y, r in renderer.sampleLayerColorAveraged(x: x, y: y, radius: r) },
                 mix: { [renderer] a, b, t in renderer.kmMixCPU(a, b, t) })
@@ -191,7 +191,7 @@ final class Scene {
                                     points: Array(stroke.points.prefix(upTo)),
                                     brush: stroke.brush)
                 let stamps = walker.advance(
-                    stroke: prefix, scale: 1, clipPath: nil,
+                    stroke: prefix, scale: 1, clip: nil,
                     sample: { [renderer] x, y in
                         let s = renderer.sampleLayerColor(x: x, y: y)
                         if ProcessInfo.processInfo.environment["HARNESS_DEBUG"] != nil {

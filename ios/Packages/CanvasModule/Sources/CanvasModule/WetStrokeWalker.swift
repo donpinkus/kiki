@@ -29,7 +29,8 @@ struct WetStrokeWalker {
 
     private var lastPointIndex = 0
     private var lastSpacing: CGFloat
-    /// Total arc length walked (document px) — drives the Charge reservoir decay.
+    /// Total arc length walked (walk units; × scale = document px) — drives the Charge
+    /// reservoir decay.
     private var arcTotal: CGFloat = 0
     /// Dab counter for the Wetness Jitter hash stream (cross-batch persistent).
     private var dabCounter: UInt64 = 0
@@ -39,8 +40,12 @@ struct WetStrokeWalker {
     /// visible gaps on direction changes at speed).
     private var arcSinceLastStamp: CGFloat = 0
 
-    init(startPosition: CGPoint, brush: BrushConfig) {
-        lastSpacing = max(brush.baseWidth * brush.spacing, 0.5)
+    /// Minimum stamp gap in walk units (document px / scale).
+    private let spacingFloor: CGFloat
+
+    init(startPosition: CGPoint, brush: BrushConfig, scale: CGFloat = 1) {
+        spacingFloor = StrokeWalkUnits.spacingFloor(scale: scale)
+        lastSpacing = max(brush.baseWidth * brush.spacing, spacingFloor)
     }
 
     /// Walk the stroke's new points (since the previous `advance`) and return the wet
@@ -49,7 +54,7 @@ struct WetStrokeWalker {
     mutating func advance(
         stroke: Stroke,
         scale: CGFloat,
-        clipPath: CGPath?,
+        clip: StampClip?,
         sample: (Int, Int) -> (color: SIMD3<Float>, alpha: Float)?,
         sampleAveraged: (Int, Int, Int) -> (color: SIMD3<Float>, alpha: Float)?,
         mix: (SIMD3<Float>, SIMD3<Float>, Float) -> SIMD3<Float>
@@ -65,10 +70,12 @@ struct WetStrokeWalker {
         let dep = Float(max(0, min(1, brush.wetStrength)))
         let baseColor = SIMD3<Float>(s2l(brush.color.red), s2l(brush.color.green), s2l(brush.color.blue))
         // Blur (smudge only): neighborhood-averaged pickup + softened dab rim, so the
-        // smudge MELTS edges instead of dragging them crisply. Radius scales with blur
-        // and brush size (capped — the CPU read is per dab).
+        // smudge MELTS edges instead of dragging them crisply. Radius (document px — the
+        // sampler reads texels) scales with blur and the brush's document-px width
+        // (capped — the CPU read is per dab). 0.06 × document px ≈ the old 0.12 × view
+        // points on the reference iPad (see StrokeWalkUnits).
         let blur = brush.wetSmudge ? Float(max(0, min(1, brush.wetBlur))) : 0
-        let blurRadius = blur > 0 ? max(1, min(8, Int(blur * Float(brush.baseWidth) * 0.12))) : 0
+        let blurRadius = blur > 0 ? max(1, min(8, Int(blur * Float(brush.baseWidth * scale) * 0.06))) : 0
         let hardness = Float(brush.hardness) * (1 - 0.6 * blur)
         let aspect = Float(min(max(brush.aspectRatio, 0.05), 1))
         let spacingFrac = max(brush.spacing, 0.02)
@@ -109,15 +116,16 @@ struct WetStrokeWalker {
         // the load's ALPHA also tracks the sampled alpha — including alpha ≈ 0 over blank
         // canvas, which is what makes a drag-off tail deplete and die.
         func emit(_ pos: CGPoint, _ width: CGFloat) {
-            // Even-odd to match the dry-stamp clip (wand masks have holes).
-            guard clipPath.map({ $0.contains(pos, using: .evenOdd) }) ?? true else { return }
+            // Baked even-odd clip bitmap, same as the dry walk (wand masks have holes).
+            if let clip, !clip.contains(pos) { return }
             let cx = Int(pos.x * scale), cy = Int(pos.y * scale)
             // Charge: the reservoir level rides in wetTargetAlpha for INK stamps — the
             // scratch fragment scales its deposited alpha by it (the KM weight in
             // color.a stays pure Mix; over bare paper only alpha can express dryness).
             // Ink stamps never reach the RMW pipeline, so the smudge ≥0 convention is
             // safe to reuse. Smudge keeps packing its carried alpha, unchanged.
-            var remaining = chargeHalfLife.isFinite ? Float(pow(0.5, Double(arcTotal / chargeHalfLife))) : 1
+            // arcTotal is walk units; the half-life is document px.
+            var remaining = chargeHalfLife.isFinite ? Float(pow(0.5, Double(arcTotal * scale / chargeHalfLife))) : 1
             if !brush.wetSmudge, wetJitter > 0 {
                 dabCounter &+= 1
                 remaining *= 1 - wetJitter * Float(brushHash01(jitterSeed, dabCounter, 0x3E7))
@@ -154,7 +162,7 @@ struct WetStrokeWalker {
             let w0 = brush.effectiveWidth(force: p0.force, altitude: p0.altitude)
             emit(p0.position, w0)
             arcSinceLastStamp = 0
-            spacing = max(w0 * spacingFrac, 0.5)
+            spacing = max(w0 * spacingFrac, spacingFloor)
         }
 
         let startIdx = max(lastPointIndex, 1)
@@ -179,7 +187,7 @@ struct WetStrokeWalker {
                 // coverage and bare canvas shows through (fixture-3's white cracks).
                 // Pull the dab back so its distance from the previous one fits its OWN
                 // spacing. One refinement is enough — width varies smoothly.
-                let ownGap = max(width * spacingFrac, 0.5)
+                let ownGap = max(width * spacingFrac, spacingFloor)
                 if ownGap < spacing {
                     traveled = max(traveled - (spacing - ownGap), 0)
                     t = traveled / segDist
@@ -192,7 +200,7 @@ struct WetStrokeWalker {
 
                 emit(CGPoint(x: x, y: y), width)
 
-                spacing = max(width * spacingFrac, 0.5)
+                spacing = max(width * spacingFrac, spacingFloor)
                 traveled += spacing
             }
             // Post-loop `traveled` sits one gap past the last stamp (emitted or carried);

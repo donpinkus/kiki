@@ -114,7 +114,42 @@ public final class CanvasRenderer {
         /// Composite-time whole-layer opacity 0…1; never baked into the texture.
         var opacity: Float = 1
         let texture: MTLTexture
+        /// Monotonic content revision — bumped by every texture write (stroke,
+        /// erase, restore, load, clear, selection commit). Keys the PNG export cache
+        /// so autosave only re-encodes layers that actually changed.
+        var revision: Int = 0
     }
+
+    /// Document-unique revision counter (never reused, so a restored layer with an
+    /// old id can't alias a cached PNG of a different state).
+    private var revisionCounter = 0
+    private func nextRevision() -> Int { revisionCounter &+= 1; return revisionCounter }
+    /// Mark a layer's texture as changed.
+    func markLayerMutated(at index: Int) {
+        guard index >= 0, index < layers.count else { return }
+        layers[index].revision = nextRevision()
+    }
+    /// Current revision of a layer (nil if out of range).
+    func layerRevision(at index: Int) -> Int? {
+        guard index >= 0, index < layers.count else { return nil }
+        return layers[index].revision
+    }
+
+    /// Set while an ASYNC layer write (eraser / wet-smudge batch) may still be in
+    /// flight on the GPU. Every CPU-side layer read/write (`getBytes` / `replace` /
+    /// Core Image reads) drains the queue first when it's set — `.shared` storage is
+    /// memory-coherent but NOT ordered against pending command buffers, so an undo
+    /// restore or snapshot taken ~1 ms after the last eraser batch could otherwise
+    /// see stale texels or be overwritten by the late batch.
+    private var pendingAsyncLayerWrites = false
+    private func drainPendingAsyncWrites() {
+        guard pendingAsyncLayerWrites else { return }
+        pendingAsyncLayerWrites = false
+        waitUntilQueueDrained()
+    }
+
+    /// Per-layer PNG export cache keyed by (layer id → revision).
+    private var layerPNGCache: [UUID: (revision: Int, png: Data)] = [:]
 
     /// All canvas layers. Index 0 = bottom (drawn first).
     /// Internal setter: MetalCanvasView updates metadata during load.
@@ -132,16 +167,6 @@ public final class CanvasRenderer {
     /// Scratch texture for the active (in-progress) stroke. Rebuilt each frame
     /// from stamp instances; conceptually memoryless between frames.
     private(set) var scratchTexture: MTLTexture?
-
-    /// Overlay-stroke accumulation texture (overlay drawing mode only). Holds the
-    /// fresh strokes drawn *since the last generated frame* — a visual-only surface
-    /// shown above the opaque generated image in `.overlay` layout. NOT part of the
-    /// drawing/generation pipeline: it never feeds the canvas layers, has no undo,
-    /// no layers, and is wiped (`clearOverlayStrokes`) on every returned generation
-    /// frame. Allocated lazily on first overlay use so split-screen/fullscreen never
-    /// pay for it. `.bgra8Unorm_srgb` + `.shared`, identical format to the canvas so
-    /// the exact same stamp pipeline + color path applies (linear `s2l` premultiplied).
-    private(set) var overlayStrokeTexture: MTLTexture?
 
     /// Per-stroke opacity ceiling for the live render path — the on-screen preview
     /// (`compositeToDrawable`) and the stroke-end flatten (`flattenScratchIntoCanvas`).
@@ -442,13 +467,14 @@ public final class CanvasRenderer {
         let desc = makeLayerDescriptor()
         guard let texture = device.makeTexture(descriptor: desc) else { return activeLayerIndex }
         clearTexture(texture)
-        layers.append(Layer(id: id, name: name, isVisible: true, texture: texture))
+        layers.append(Layer(id: id, name: name, isVisible: true, texture: texture, revision: nextRevision()))
         return layers.count - 1
     }
 
     /// Remove a layer. Must keep at least 1 layer.
     func removeLayer(at index: Int) {
         guard layers.count > 1, index >= 0, index < layers.count else { return }
+        layerPNGCache[layers[index].id] = nil
         layers.remove(at: index)
         if activeLayerIndex >= layers.count {
             activeLayerIndex = layers.count - 1
@@ -520,7 +546,7 @@ public final class CanvasRenderer {
                          isVisible: source.isVisible, isLocked: false,
                          isAlphaLocked: source.isAlphaLocked,
                          blendMode: source.blendMode, opacity: source.opacity,
-                         texture: texture)
+                         texture: texture, revision: nextRevision())
         let newIndex = index + 1
         layers.insert(copy, at: newIndex)
         if activeLayerIndex >= newIndex { activeLayerIndex += 1 }
@@ -531,6 +557,7 @@ public final class CanvasRenderer {
     func clearLayer(at index: Int) {
         guard index >= 0, index < layers.count else { return }
         clearTexture(layers[index].texture)
+        markLayerMutated(at: index)
     }
 
     /// Reorder a layer from one position to another.
@@ -600,7 +627,8 @@ public final class CanvasRenderer {
             clearTexture(tex)
             rebuilt.append(Layer(id: snap.id, name: snap.name, isVisible: snap.isVisible,
                                  isLocked: snap.isLocked, isAlphaLocked: snap.isAlphaLocked,
-                                 blendMode: snap.blendMode, opacity: snap.opacity, texture: tex))
+                                 blendMode: snap.blendMode, opacity: snap.opacity, texture: tex,
+                                 revision: nextRevision()))
         }
         layers = rebuilt
         activeLayerIndex = min(max(0, activeIndex), layers.count - 1)
@@ -614,8 +642,9 @@ public final class CanvasRenderer {
         let desc = makeLayerDescriptor()
         guard let tex = device.makeTexture(descriptor: desc) else { return }
         clearTexture(tex)
-        layers = [Layer(id: UUID(), name: "Layer 1", isVisible: true, texture: tex)]
+        layers = [Layer(id: UUID(), name: "Layer 1", isVisible: true, texture: tex, revision: nextRevision())]
         activeLayerIndex = 0
+        layerPNGCache.removeAll()
     }
 
     // MARK: - Stamp Buffer
@@ -734,131 +763,8 @@ public final class CanvasRenderer {
 
         cmdBuf.commit()
         cmdBuf.waitUntilCompleted()
-    }
-
-    // MARK: - Overlay Stroke Surface (overlay drawing mode)
-
-    /// Lazily allocate the overlay-stroke accumulation texture (overlay mode only),
-    /// matching the document resolution + format. Cleared to transparent. No-op if
-    /// the document isn't configured yet or the texture already exists.
-    func ensureOverlayStrokeTexture() {
-        guard overlayStrokeTexture == nil, canvasWidth > 0, canvasHeight > 0 else {
-            return
-        }
-        let desc = makeLayerDescriptor()
-        guard let tex = device.makeTexture(descriptor: desc) else {
-            return
-        }
-        clearTexture(tex)
-        overlayStrokeTexture = tex
-    }
-
-    /// Wipe the overlay-stroke accumulation texture to fully transparent. Called on
-    /// every returned generation frame (still + video, ~2 FPS) so fresh strokes flash,
-    /// then the generated image takes over. No-op when the overlay texture isn't
-    /// allocated (i.e. not in overlay mode) → harmless in split-screen/fullscreen.
-    ///
-    /// Uses an async clear render pass — NOT the blocking `clearTexture` — because
-    /// this runs on the (main-thread) per-generation-frame cadence, and the overlay is
-    /// visual-only: it's same-queue-ordered with the next `renderOverlayFrame`, so no
-    /// CPU-coherent readback/`waitUntilCompleted` is needed. (`clearTexture`'s wait is
-    /// reserved for alloc/resize, per CanvasModule/CLAUDE.md.)
-    func clearOverlayStrokes() {
-        guard let tex = overlayStrokeTexture else { return }
-        guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
-        let rpd = MTLRenderPassDescriptor()
-        rpd.colorAttachments[0].texture = tex
-        rpd.colorAttachments[0].loadAction = .clear
-        rpd.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
-        rpd.colorAttachments[0].storeAction = .store
-        guard let enc = cmdBuf.makeRenderCommandEncoder(descriptor: rpd) else { return }
-        enc.endEncoding()
-        cmdBuf.commit()
-    }
-
-    /// Release the overlay-stroke accumulation texture (~16 MB) when leaving overlay
-    /// mode, so split-screen/fullscreen don't carry it for the canvas's lifetime after
-    /// a single overlay visit. Re-allocated lazily (`ensureOverlayStrokeTexture`) on the
-    /// next overlay activation — and because the fresh texture is cleared on alloc, this
-    /// also guarantees stale strokes from a prior overlay session never reappear.
-    func releaseOverlayStrokeTexture() {
-        overlayStrokeTexture = nil
-    }
-
-    /// Render the overlay-stroke surface into its own drawable: the accumulated
-    /// overlay strokes (source-over) plus the live in-progress stroke (the same
-    /// `scratch` the canvas uses this frame), capped at `activeStrokeOpacity`.
-    /// Transparent everywhere there's no stroke so the opaque generated image
-    /// underneath shows through. Mirrors `compositeToDrawable`'s blend setup, so
-    /// color is identical to the canvas (linear `s2l` premultiplied → `_srgb` store).
-    ///
-    /// Runs on the same display tick as `renderFrame`; the scratch already holds this
-    /// frame's stamps (populated by the caller before `renderFrame`), so no extra
-    /// stamp work is added. No `waitUntilCompleted` — async present, hot-path safe.
-    ///
-    /// Takes the LAYER, not a pre-acquired drawable: `nextDrawable()` is called only
-    /// AFTER the render guards pass, so we never acquire a drawable we won't present.
-    /// Acquiring without presenting (e.g. when `overlayStrokeTexture` isn't allocated
-    /// yet on the first frames after entering overlay mode) leaks the drawable, and
-    /// after the 2-deep pool exhausts `nextDrawable()` blocks the main thread forever
-    /// → hard UI freeze. (Root cause of the 2026-06-22 gallery freeze.)
-    func renderOverlayFrame(layer: CAMetalLayer) {
-        guard let overlay = overlayStrokeTexture, let scratch = scratchTexture else {
-            return
-        }
-        guard let drawable = layer.nextDrawable() else {
-            return
-        }
-        guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
-
-        let rpd = MTLRenderPassDescriptor()
-        rpd.colorAttachments[0].texture = drawable.texture
-        rpd.colorAttachments[0].loadAction = .clear
-        rpd.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
-        rpd.colorAttachments[0].storeAction = .store
-
-        guard let enc = cmdBuf.makeRenderCommandEncoder(descriptor: rpd) else { return }
-        enc.setRenderPipelineState(compositorPSO)
-        enc.setVertexBuffer(quadVertexBuffer, offset: 0, index: 0)
-
-        // Accumulated overlay strokes (full opacity — already flattened at their ceiling).
-        var full: Float = 1.0
-        enc.setFragmentTexture(overlay, index: 0)
-        enc.setFragmentBytes(&full, length: MemoryLayout<Float>.size, index: 0)
-        enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
-
-        // Live in-progress stroke on top, capped at the per-stroke opacity ceiling;
-        // grain-aware (P8) so the overlay preview matches the committed look.
-        if stampCount > 0 {
-            drawScratch(enc, scratch: scratch, opacity: activeStrokeOpacity, grain: activeGrain)
-        }
-
-        enc.endEncoding()
-        cmdBuf.present(drawable)
-        cmdBuf.commit()
-    }
-
-    /// Flatten the active stroke's `scratch` into the overlay accumulation texture
-    /// (stroke completion in overlay mode). Source-over, capped at `strokeOpacity` —
-    /// the same ceiling the canvas applies, so the accumulated overlay matches the
-    /// live preview. No-op when the overlay texture isn't allocated. Async commit
-    /// (no `waitUntilCompleted`): this is the visual-only surface, not the canvas
-    /// persistence path, so we never need a CPU-coherent readback here.
-    func flattenScratchIntoOverlay(strokeOpacity: Float) {
-        guard let overlay = overlayStrokeTexture, let scratch = scratchTexture else { return }
-        guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
-
-        let rpd = MTLRenderPassDescriptor()
-        rpd.colorAttachments[0].texture = overlay
-        rpd.colorAttachments[0].loadAction = .load
-        rpd.colorAttachments[0].storeAction = .store
-
-        guard let enc = cmdBuf.makeRenderCommandEncoder(descriptor: rpd) else { return }
-        enc.setVertexBuffer(quadVertexBuffer, offset: 0, index: 0)
-        drawScratch(enc, scratch: scratch, opacity: strokeOpacity, grain: activeGrain)
-        enc.endEncoding()
-
-        cmdBuf.commit()
+        pendingAsyncLayerWrites = false   // the wait drained everything before it
+        markLayerMutated(at: activeLayerIndex)
     }
 
     /// Render eraser stamps directly into the canvas texture with destination-out
@@ -891,10 +797,16 @@ public final class CanvasRenderer {
         var canvasSizeFlip = SIMD4<Float>(Float(canvasWidth), Float(canvasHeight), 0, 0)
         enc.setVertexBytes(&canvasSizeFlip, length: MemoryLayout<SIMD4<Float>>.size, index: 2)
         enc.setFragmentTexture(brushMaskTexture, index: 0)
+        // The Simulator's fixed-function eraser fallback runs `brushStampFragment`,
+        // which declares the moving-grain texture/params slots and reads the params
+        // unconditionally — bind the "off" set so it never reads unbound memory.
+        bindMovingGrain(enc, nil)
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: stamps.count)
         enc.endEncoding()
 
         cmdBuf.commit()
+        pendingAsyncLayerWrites = true
+        markLayerMutated(at: activeLayerIndex)
     }
 
     /// Wet-mix brush (pro-brush Phase 4, Step 1). Writes stamps DIRECTLY into the active
@@ -947,6 +859,8 @@ public final class CanvasRenderer {
         enc.endEncoding()
 
         cmdBuf.commit()
+        pendingAsyncLayerWrites = true
+        markLayerMutated(at: activeLayerIndex)
     }
 
     /// Block until every command buffer submitted so far on the renderer's queue has
@@ -1115,11 +1029,13 @@ public final class CanvasRenderer {
 
         cmdBuf.commit()
         cmdBuf.waitUntilCompleted()  // OK — runs once per stroke during load, not interactive
+        markLayerMutated(at: activeLayerIndex)
     }
 
     /// Snapshot a specific layer's texture into CPU-side Data for undo.
     func snapshotLayer(at index: Int) -> Data? {
         guard index >= 0, index < layers.count else { return nil }
+        drainPendingAsyncWrites()
         let texture = layers[index].texture
         let bytesPerRow = canvasWidth * 4
         let byteCount = bytesPerRow * canvasHeight
@@ -1142,6 +1058,8 @@ public final class CanvasRenderer {
     func restoreLayer(at index: Int, from data: Data) {
         guard index >= 0, index < layers.count,
               data.count == canvasWidth * canvasHeight * 4 else { return }
+        drainPendingAsyncWrites()
+        markLayerMutated(at: index)
         let texture = layers[index].texture
         let bytesPerRow = canvasWidth * 4
         data.withUnsafeBytes { ptr in
@@ -1159,14 +1077,55 @@ public final class CanvasRenderer {
     /// Read a specific layer texture into a CGImage for per-layer persistence.
     func layerToCGImage(at index: Int) -> CGImage? {
         guard index >= 0, index < layers.count else { return nil }
+        drainPendingAsyncWrites()
         return textureToCGImage(layers[index].texture)
     }
 
     /// Encode a specific layer as PNG without routing transparent pixels through
-    /// UIKit/CoreGraphics premultiplication.
+    /// UIKit/CoreGraphics premultiplication. Cached per (layer id, revision): an
+    /// unchanged layer costs a dictionary lookup, not a 2048² encode.
     func layerPNGData(at index: Int) -> Data? {
         guard index >= 0, index < layers.count else { return nil }
-        return textureToPNGData(layers[index].texture)
+        let layer = layers[index]
+        if let hit = layerPNGCache[layer.id], hit.revision == layer.revision { return hit.png }
+        drainPendingAsyncWrites()
+        guard let png = textureToPNGData(layer.texture) else { return nil }
+        layerPNGCache[layer.id] = (layer.revision, png)
+        return png
+    }
+
+    /// Cached PNG for a layer if its revision is current (no encode). Lets the
+    /// async export skip unchanged layers without touching the texture.
+    func cachedLayerPNG(id: UUID, revision: Int) -> Data? {
+        guard let hit = layerPNGCache[id], hit.revision == revision else { return nil }
+        return hit.png
+    }
+
+    /// Store an externally-encoded PNG for a layer revision (async export path).
+    func storeLayerPNG(id: UUID, revision: Int, png: Data) {
+        // Only keep it if the layer still exists and hasn't moved on.
+        guard let layer = layers.first(where: { $0.id == id }), layer.revision == revision else { return }
+        layerPNGCache[id] = (revision, png)
+    }
+
+    /// Encode raw layer bytes (a `snapshotLayer` result) as PNG. Safe OFF the main
+    /// thread: a private temp texture is uploaded from the bytes and read through the
+    /// exact same `textureToPNGData` path, so color semantics match the sync export
+    /// (CIContext + MTLDevice are thread-safe per Apple).
+    func pngData(fromLayerBytes bytes: Data) -> Data? {
+        guard canvasWidth > 0, canvasHeight > 0,
+              bytes.count == canvasWidth * canvasHeight * 4 else { return nil }
+        let desc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm_srgb, width: canvasWidth, height: canvasHeight, mipmapped: false)
+        desc.usage = [.shaderRead]
+        desc.storageMode = .shared
+        guard let temp = device.makeTexture(descriptor: desc) else { return nil }
+        bytes.withUnsafeBytes { ptr in
+            guard let base = ptr.baseAddress else { return }
+            temp.replace(region: MTLRegionMake2D(0, 0, canvasWidth, canvasHeight), mipmapLevel: 0,
+                         withBytes: base, bytesPerRow: canvasWidth * 4)
+        }
+        return textureToPNGData(temp)
     }
 
     /// Read the flattened (all visible layers composited) canvas into a CGImage
@@ -1222,25 +1181,51 @@ public final class CanvasRenderer {
         return textureToCGImage(tempTexture)
     }
 
+    /// Cached full-document snapshot target + background texture for the stream
+    /// capture loop (called every ~500 ms while drawing). Allocating two 16 MB
+    /// textures and re-rendering the unchanged background image through Core Image on
+    /// every tick was pure repetition on the main thread.
+    private var snapshotScratchTexture: MTLTexture?
+    private var backgroundTextureCache: (key: ObjectIdentifier, texture: MTLTexture)?
+
+    private func cachedBackgroundTexture(for image: CGImage) -> MTLTexture? {
+        let key = ObjectIdentifier(image)
+        if let cache = backgroundTextureCache, cache.key == key,
+           cache.texture.width == canvasWidth, cache.texture.height == canvasHeight {
+            return cache.texture
+        }
+        guard let tex = makeSnapshotTexture(width: canvasWidth, height: canvasHeight) else { return nil }
+        // Both CI routes fully overwrite the target (no clear needed).
+        let ciImage = CIImage(cgImage: image, options: [.colorSpace: sRGBColorSpace])
+        renderCIImage(ciImage, to: tex)
+        backgroundTextureCache = (key, tex)
+        return tex
+    }
+
+    /// Drop the cached background texture (the lineart image changed or was removed).
+    func invalidateBackgroundCache() {
+        backgroundTextureCache = nil
+    }
+
     /// Read the flattened canvas composited over an opaque background. This is
     /// used for gallery thumbnails and stream snapshots, where matching the
     /// Metal canvas' linear source-over blend matters more than preserving alpha.
     func flattenedOpaqueCGImage(backgroundImage: CGImage?, maxPixelDimension: Int? = nil,
                                 strokeOpacity: Float = 1.0) -> CGImage? {
-        guard !layers.isEmpty else { return nil }
-        guard let targetSize = snapshotTextureSize(maxPixelDimension: maxPixelDimension) else { return nil }
-        guard let tempTexture = makeSnapshotTexture(width: targetSize.width, height: targetSize.height) else {
-            return nil
+        guard !layers.isEmpty, canvasWidth > 0, canvasHeight > 0 else { return nil }
+        // Always composite at DOCUMENT resolution, then downsample with Lanczos for
+        // capped requests (thumbnails). Rendering the 2048² layers straight into a
+        // ~512 px target sampled them bilinearly with no mips — thin strokes
+        // sparkled or vanished in gallery tiles.
+        if snapshotScratchTexture == nil || snapshotScratchTexture?.width != canvasWidth
+            || snapshotScratchTexture?.height != canvasHeight {
+            snapshotScratchTexture = makeSnapshotTexture(width: canvasWidth, height: canvasHeight)
         }
+        guard let tempTexture = snapshotScratchTexture else { return nil }
 
         var backgroundTexture: MTLTexture?
         if let backgroundImage {
-            backgroundTexture = makeSnapshotTexture(width: targetSize.width, height: targetSize.height)
-            if let backgroundTexture {
-                clearTexture(backgroundTexture)
-                let ciImage = CIImage(cgImage: backgroundImage, options: [.colorSpace: sRGBColorSpace])
-                renderCIImage(ciImage, to: backgroundTexture)
-            }
+            backgroundTexture = cachedBackgroundTexture(for: backgroundImage)
         }
 
         guard let cmdBuf = commandQueue.makeCommandBuffer() else { return nil }
@@ -1282,8 +1267,21 @@ public final class CanvasRenderer {
         enc.endEncoding()
         cmdBuf.commit()
         cmdBuf.waitUntilCompleted()
+        pendingAsyncLayerWrites = false
 
-        return textureToCGImage(tempTexture)
+        guard let targetSize = snapshotTextureSize(maxPixelDimension: maxPixelDimension) else { return nil }
+        if targetSize.width == canvasWidth, targetSize.height == canvasHeight {
+            return textureToCGImage(tempTexture)
+        }
+        guard let ciImage = textureToCIImage(tempTexture) else { return nil }
+        let scale = CGFloat(targetSize.width) / CGFloat(canvasWidth)
+        let filter = CIFilter(name: "CILanczosScaleTransform")
+        filter?.setValue(ciImage, forKey: kCIInputImageKey)
+        filter?.setValue(scale, forKey: kCIInputScaleKey)
+        filter?.setValue(1.0, forKey: kCIInputAspectRatioKey)
+        let scaled = filter?.outputImage ?? ciImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        let rect = CGRect(x: 0, y: 0, width: targetSize.width, height: targetSize.height)
+        return ciContext.createCGImage(scaled, from: rect, format: .BGRA8, colorSpace: sRGBColorSpace)
     }
 
     /// Convert any Metal texture to CGImage via CIImage (correct sRGB + premultiplied alpha).
@@ -1346,7 +1344,9 @@ public final class CanvasRenderer {
 
     private func renderCIImageIntoLayer(at index: Int, _ ciImage: CIImage) {
         guard index >= 0, index < layers.count else { return }
+        drainPendingAsyncWrites()
         renderCIImage(ciImage, to: layers[index].texture)
+        markLayerMutated(at: index)
     }
 
     private func renderCIImage(_ source: CIImage, to texture: MTLTexture) {
@@ -1595,6 +1595,7 @@ public final class CanvasRenderer {
 
         cmdBuf.commit()
         cmdBuf.waitUntilCompleted()  // OK — runs once per lasso, not per frame
+        markLayerMutated(at: activeLayerIndex)
 
         selectionTexture = selTex
         selectionBounds = pxBounds
@@ -1682,6 +1683,7 @@ public final class CanvasRenderer {
 
         cmdBuf.commit()
         cmdBuf.waitUntilCompleted()  // OK — runs once on commit
+        markLayerMutated(at: activeLayerIndex)
 
         discardSelection()
     }

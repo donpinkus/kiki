@@ -41,17 +41,6 @@ enum AppScreen: Equatable {
     }
 }
 
-enum DrawingLayout: String, CaseIterable {
-    /// Result pane on the left half; canvas on the right half.
-    case splitScreen
-    /// Canvas fills the pane; the generated image floats as a draggable panel.
-    case fullscreen
-    /// Generated image overlaid opaque, locked exactly on top of the canvas
-    /// (pan/zoom/rotate together); fresh strokes flash on a visual-only surface
-    /// above it and clear on every returned generation frame.
-    case overlay
-}
-
 @MainActor
 @Observable
 final class AppCoordinator {
@@ -655,7 +644,6 @@ final class AppCoordinator {
     static let defaultAnimationPrompt =
         "gentle cinematic motion: the scene subtly comes alive with natural movement, " +
         "soft ambient animation, camera slowly drifting closer"
-    var dividerPosition: CGFloat = 0.5
     /// Message for the red error banner in `DrawingView`. Set on stream/auth
     /// failures; cleared automatically when the condition resolves (successful
     /// sign-in, stream reaching `.ready`, subscription activation) or manually
@@ -699,7 +687,7 @@ final class AppCoordinator {
     /// base coordinate space and open the hole. No-op (and closes the hole) when
     /// the panel isn't shown.
     func updatePanelHole(paneContact: CGPoint, diameter: CGFloat, paneSize: CGSize) {
-        guard drawingLayout == .fullscreen, let image = resultState.displayImage else {
+        guard let image = resultState.displayImage else {
             panelHole.isActive = false
             return
         }
@@ -720,17 +708,6 @@ final class AppCoordinator {
     /// DrawingView observes this and auto-clears it after 5s. AppStorage flag
     /// in DrawingView ensures we only show it once per device, ever.
     var shouldShowQuickShapeTooltip: Bool = false
-
-    // MARK: - Layout
-
-    var drawingLayout: DrawingLayout = .overlay {
-        didSet {
-            UserDefaults.standard.set(drawingLayout.rawValue, forKey: "drawingLayout")
-            // Clear any in-flight panel hole so it can't linger across a layout
-            // switch (the panel only exists in fullscreen).
-            panelHole = PanelHole()
-        }
-    }
 
     // MARK: - Modules
 
@@ -1353,10 +1330,9 @@ final class AppCoordinator {
             }
         }
 
-        if let stored = UserDefaults.standard.string(forKey: "drawingLayout"),
-           let layout = DrawingLayout(rawValue: stored) {
-            self.drawingLayout = layout
-        }
+        // One drawing layout since 2026-09-10 (canvas fills the pane, result floats);
+        // drop the retired Split/Fullscreen/Overlay preference from older installs.
+        UserDefaults.standard.removeObject(forKey: "drawingLayout")
 
         // Simulator dev bypass: seed Keychain from launch-argument tokens
         // BEFORE the auth gate below reads it, and start the stroke-replay
@@ -1457,15 +1433,10 @@ final class AppCoordinator {
         canvasViewModel.onFirstBrushStrokeCommitted = { [weak self] in
             self?.shouldShowQuickShapeTooltip = true
         }
-        // Selection: segment what the user is actually looking at — the
-        // generated image in overlay mode (locked 1:1 over the canvas square),
-        // else the flattened canvas itself.
+        // Selection: SAM segments the flattened canvas (the sketch), never the
+        // generated image.
         canvasViewModel.selection.sourceImageProvider = { [weak self] in
-            guard let self else { return nil }
-            if self.drawingLayout == .overlay, let generated = self.resultState.displayImage?.cgImage {
-                return generated
-            }
-            return self.canvasViewModel.selectionCanvasSnapshot()
+            self?.canvasViewModel.selectionCanvasSnapshot()
         }
     }
 
@@ -1609,16 +1580,6 @@ final class AppCoordinator {
 
     func redo() {
         canvasViewModel.redo()
-    }
-
-    func swapStreamImageToCanvas() {
-        guard let image = lastSuccessfulImage else { return }
-        canvasViewModel.swapLineart(image: image)
-    }
-
-    /// True when a generated frame is available to send to the canvas.
-    var canSwapStreamImageToCanvas: Bool {
-        lastSuccessfulImage != nil
     }
 
     // MARK: - Sharing / Export
@@ -1952,18 +1913,12 @@ final class AppCoordinator {
     /// Whether a sticker can be cut: needs an active selection to mask with.
     var canShareSticker: Bool { canvasViewModel.hasSelectionForEdit }
 
-    /// Cut the current selection out of what the user sees (generated image in
-    /// overlay layout, else the flattened canvas) as a transparent PNG sticker,
-    /// cropped to the selection's bounding box. Returns a temp-file URL for the
-    /// native share sheet; nil when there's no selection or the cut fails.
+    /// Cut the current selection out of the flattened canvas as a transparent PNG
+    /// sticker, cropped to the selection's bounding box. Returns a temp-file URL for
+    /// the native share sheet; nil when there's no selection or the cut fails.
     func makeStickerFile() -> URL? {
         guard canvasViewModel.hasSelectionForEdit else { return nil }
-        let sourceCG: CGImage? = if drawingLayout == .overlay, let gen = resultState.displayImage {
-            gen.cgImage
-        } else {
-            canvasViewModel.editSourceSnapshot(side: Self.aiEditSide)
-        }
-        guard let source = sourceCG,
+        guard let source = canvasViewModel.editSourceSnapshot(side: Self.aiEditSide),
               let mask = canvasViewModel.selectionMaskForEdit(side: source.width),
               let bbox = Self.maskBoundingBox(mask) else { return nil }
 
@@ -3005,10 +2960,6 @@ final class AppCoordinator {
             self.streamFrameCount += 1
             self.lastSuccessfulImage = image
             self.recorder?.generatedChanged(image)
-            // Overlay mode: a new generated frame reflects the user's latest strokes
-            // via fal's img2img loop → wipe the visual-only fresh-stroke surface so
-            // the strokes "hand off" to the generated image. No-op in other layouts.
-            self.canvasViewModel.clearOverlayStrokes()
             self.resultState = .streaming(image: image, frameCount: self.streamFrameCount)
 
             let count = self.streamFrameCount

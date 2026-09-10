@@ -85,27 +85,25 @@ struct DrawingTopBar: View {
             Spacer()
 
             // MARK: Center — Style, Prompt
-            if coordinator.drawingLayout != .splitScreen {
-                Button {
-                    coordinator.showStylePicker = true
-                } label: {
-                    Text(coordinator.selectedStyle.name)
-                        .font(.caption.weight(.medium))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(Color.accentColor.opacity(0.12), in: Capsule())
-                        .foregroundStyle(Color.accentColor)
-                }
-
-                TextField("Describe what you want…", text: $coordinator.promptText)
-                    .textFieldStyle(.plain)
-                    .font(.subheadline)
-                    .foregroundStyle(KikiTheme.icon)
-                    .padding(.horizontal, 12)
+            Button {
+                coordinator.showStylePicker = true
+            } label: {
+                Text(coordinator.selectedStyle.name)
+                    .font(.caption.weight(.medium))
+                    .padding(.horizontal, 10)
                     .padding(.vertical, 6)
-                    .background(KikiTheme.buttonCircle, in: Capsule())
-                    .frame(minWidth: 120, maxWidth: 400)
+                    .background(Color.accentColor.opacity(0.12), in: Capsule())
+                    .foregroundStyle(Color.accentColor)
             }
+
+            TextField("Describe what you want…", text: $coordinator.promptText)
+                .textFieldStyle(.plain)
+                .font(.subheadline)
+                .foregroundStyle(KikiTheme.icon)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(KikiTheme.buttonCircle, in: Capsule())
+                .frame(minWidth: 120, maxWidth: 400)
 
             Spacer()
 
