@@ -67,6 +67,7 @@ struct DrawingView: View {
                             // (no image yet) → canvas behaves normally.
                             guard let coordinator,
                                   let image = coordinator.resultState.displayImage else { return nil }
+                            coordinator.panelPaneSize = geometry.size
                             return PanelLayout.rect(
                                 for: image,
                                 in: geometry.size,

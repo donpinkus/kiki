@@ -69,9 +69,18 @@ public final class SelectionController {
             /// edited (carved) — its points no longer describe it.
             case freehand
         }
+        /// Stable identity so async work (a deferred decode, a carve) can find the
+        /// object after the array was reordered by taps in between.
+        let id: UUID
         var source: Source
         /// Pre-expansion bitmap, maskSide².
         var mask: [UInt8]
+
+        init(id: UUID = UUID(), source: Source, mask: [UInt8]) {
+            self.id = id
+            self.source = source
+            self.mask = mask
+        }
     }
 
     /// Selection-state snapshot for undo. Arrays are COW — snapshots share
@@ -204,8 +213,8 @@ public final class SelectionController {
                     currentBase = nil
                 } else {
                     // Remove-tap on a hand-drawn region: SAM identifies the
-                    // tapped thing, and we carve it out of that object.
-                    carveByDecode(at: normalized, objectIndex: k)
+                    // tapped thing, and we carve it out of THAT object.
+                    carveByDecode(at: normalized, objectID: objects[k].id)
                     return
                 }
             }
@@ -384,6 +393,46 @@ public final class SelectionController {
         bumpAndRefresh()
     }
 
+    /// A different document is now on the canvas (drawing opened / created): drop
+    /// everything — objects, points, undo stack, in-flight work, the cached
+    /// embedding — WITHOUT an undo step, and without any cancel side effects (the
+    /// old canvas view is gone). Publishes an empty selection.
+    public func resetForNewDocument() {
+        opChain?.cancel()
+        opChain = nil
+        sessionGeneration &+= 1
+        refreshDirty = false
+        isMoving = false
+        preMoveSnapshot = nil
+        moveTransform = (.zero, 1, 0)
+        undoStack.removeAll()
+        currentPoints = []
+        currentPointCount = 0
+        currentBase = nil
+        currentCandidates = nil
+        distCache = nil
+        objects = []
+        objectCount = 0
+        isBusy = false
+        isEncoding = false
+        hasSelection = false
+        lastPath = nil
+        encodedVersion = nil
+        onSelectionChanged?(nil, [])
+    }
+
+    /// Drop the SAM models + image embedding (they reload lazily on the next tap).
+    /// Call when leaving the drawing screen or under memory pressure.
+    public func releaseModels() {
+        opChain?.cancel()
+        opChain = nil
+        sessionGeneration &+= 1
+        isBusy = false
+        isEncoding = false
+        segmenter = nil
+        encodedVersion = nil
+    }
+
     /// Leaving the Select tool: commit any floating move + freeze the current
     /// object. The selection itself PERSISTS (clip stays active).
     public func toolDeactivated() {
@@ -462,6 +511,17 @@ public final class SelectionController {
         currentBase = snap.currentBase
         currentPointCount = currentPoints.count
         objectCount = objects.count
+        // A snapshot taken while the first decode was still in flight has points
+        // but no candidates — nothing would ever derive a mask for them. Re-decode.
+        if !currentPoints.isEmpty, currentCandidates == nil {
+            enqueueSegmentCurrentObject()
+        }
+        // Committed objects whose deferred decode was discarded: re-run it.
+        for obj in objects where MaskContour.isEmpty(obj.mask) {
+            if case .auto(let points) = obj.source, !points.isEmpty {
+                enqueueDecodeCommittedObject(id: obj.id, points: points)
+            }
+        }
     }
 
     private func pushUndo() {
@@ -469,16 +529,74 @@ public final class SelectionController {
         if undoStack.count > Self.maxUndoDepth { undoStack.removeFirst() }
     }
 
-    /// Freeze the current auto object into the committed list.
+    /// Freeze the current auto object into the committed list. Any decode still in
+    /// flight for it is discarded (generation bump) — it must not land on the NEXT
+    /// object's empty point set as a ghost mask. If the object's first decode never
+    /// landed (the user tapped a second thing during the 2–5 s image encode), the
+    /// object is committed with its points and an empty mask, and its decode is
+    /// queued separately so the first tap isn't silently lost.
     private func commitCurrent() {
         defer {
             currentPoints = []
             currentPointCount = 0
             currentCandidates = nil
             currentBase = nil
+            sessionGeneration &+= 1
         }
-        guard !currentPoints.isEmpty, let base = currentBase, !MaskContour.isEmpty(base) else { return }
-        objects.append(SelectionObject(source: .auto(points: currentPoints), mask: base))
+        guard !currentPoints.isEmpty else { return }
+        if let base = currentBase, !MaskContour.isEmpty(base) {
+            objects.append(SelectionObject(source: .auto(points: currentPoints), mask: base))
+        } else if currentCandidates == nil, currentPoints.contains(where: \.positive) {
+            let pending = SelectionObject(source: .auto(points: currentPoints),
+                                          mask: [UInt8](repeating: 0, count: maskSide * maskSide))
+            objects.append(pending)
+            enqueueDecodeCommittedObject(id: pending.id, points: currentPoints)
+        }
+    }
+
+    /// Decode a committed-but-undecoded object's points and fill its bitmap in place
+    /// (looked up by id — taps in between may have reordered `objects`). Uses the
+    /// auto candidate + contiguous-at-first-positive-point, like a fresh object.
+    private func enqueueDecodeCommittedObject(id: UUID, points: [TapPoint]) {
+        let generation = sessionGeneration
+        let side = Float(maskSide)
+        let samples = points.map {
+            WandSample(x: Float($0.normalized.x) * side, y: Float($0.normalized.y) * side, positive: $0.positive)
+        }
+        let seed = points.first(where: { $0.positive })?.normalized
+        let previous = opChain
+        opChain = Task { [weak self] in
+            await previous?.value
+            guard let self, !Task.isCancelled else { return }
+            self.isBusy = true
+            defer { self.isBusy = false }
+            do {
+                let segmenter = try await self.ensureSegmenter()
+                try await self.ensureEmbedding(segmenter)
+                let cands = try await segmenter.maskCandidates(for: samples)
+                guard self.sessionGeneration == generation,
+                      let k = self.objects.firstIndex(where: { $0.id == id }) else { return }
+                var mask = MaskContour.binaryMask(
+                    fromLogits: cands.logits[cands.bestScoreIndex], width: cands.width, height: cands.height,
+                    upsampledSide: self.maskSide)
+                if self.contiguous, let seed {
+                    mask = MaskContour.connectedComponent(
+                        of: mask, side: self.maskSide,
+                        seedX: Int(seed.x * CGFloat(self.maskSide)), seedY: Int(seed.y * CGFloat(self.maskSide)))
+                }
+                if MaskContour.isEmpty(mask) {
+                    self.objects.remove(at: k)
+                } else {
+                    self.objects[k].mask = mask
+                }
+                self.objectCount = self.objects.count
+                self.bumpAndRefresh()
+            } catch is CancellationError {
+            } catch {
+                selLog.error("deferred decode failed: \(String(describing: error))")
+                self.reportError("\(error)")
+            }
+        }
     }
 
     /// Subtract `mask` from every overlapping object; carved auto objects
@@ -499,7 +617,7 @@ public final class SelectionController {
 
     /// Remove-tap on a freehand region: SAM-decode the tapped thing (single
     /// positive prompt) and carve (decoded ∩ that object) out of it.
-    private func carveByDecode(at normalized: CGPoint, objectIndex: Int) {
+    private func carveByDecode(at normalized: CGPoint, objectID: UUID) {
         pushUndo()
         commitCurrent()
         let generation = sessionGeneration
@@ -526,8 +644,17 @@ public final class SelectionController {
                     of: carve, side: self.maskSide,
                     seedX: Int(normalized.x * CGFloat(self.maskSide)),
                     seedY: Int(normalized.y * CGFloat(self.maskSide)))
-                guard !MaskContour.isEmpty(carve) else { return }
-                self.subtractFromObjects(carve)
+                guard !MaskContour.isEmpty(carve),
+                      let k = self.objects.firstIndex(where: { $0.id == objectID }) else { return }
+                let (result, changed) = MaskContour.subtracting(self.objects[k].mask, carve)
+                guard changed else { return }
+                if MaskContour.isEmpty(result) {
+                    self.objects.remove(at: k)
+                } else {
+                    self.objects[k].mask = result
+                    // Carved bitmap no longer matches its points (see unified-selection.md).
+                    self.objects[k].source = .freehand
+                }
                 self.objectCount = self.objects.count
                 self.bumpAndRefresh()
             } catch is CancellationError {

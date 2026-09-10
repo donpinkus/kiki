@@ -2557,15 +2557,30 @@ public final class MetalCanvasView: UIView {
     /// without touching undo history.
     @discardableResult
     public func beginPasteFloat(image: CGImage, rectInView: CGRect) -> CGRect? {
-        let clamped = rectInView.intersection(CGRect(origin: .zero, size: bounds.size))
-        guard clamped.width >= 4, clamped.height >= 4 else { return nil }
+        // Fit WITHOUT changing the aspect: the float texture is sized to this rect
+        // and the image is stretched into it, so clipping the rect against the
+        // bounds (the old behavior) squashed every paste that touched an edge.
+        // Shrink uniformly only if it's larger than the canvas, then translate
+        // inside.
+        var rect = rectInView
+        let canvas = CGRect(origin: .zero, size: bounds.size)
+        let fit = min(canvas.width / max(rect.width, 1), canvas.height / max(rect.height, 1), 1)
+        if fit < 1 {
+            rect = CGRect(x: rect.midX - rect.width * fit / 2, y: rect.midY - rect.height * fit / 2,
+                          width: rect.width * fit, height: rect.height * fit)
+        }
+        if rect.maxX > canvas.maxX { rect.origin.x = canvas.maxX - rect.width }
+        if rect.maxY > canvas.maxY { rect.origin.y = canvas.maxY - rect.height }
+        if rect.minX < 0 { rect.origin.x = 0 }
+        if rect.minY < 0 { rect.origin.y = 0 }
+        guard rect.width >= 4, rect.height >= 4 else { return nil }
         let px = CGRect(
-            x: clamped.origin.x * canvasScale, y: clamped.origin.y * canvasScale,
-            width: clamped.width * canvasScale, height: clamped.height * canvasScale
+            x: rect.origin.x * canvasScale, y: rect.origin.y * canvasScale,
+            width: rect.width * canvasScale, height: rect.height * canvasScale
         )
         guard renderer.setSelectionFromImage(image, rect: px) else { return nil }
         isDirty = true
-        return clamped
+        return rect
     }
 
     /// Discard a paste float. Unlike `cancelSelection` this performs NO undo —
@@ -2800,13 +2815,18 @@ public final class MetalCanvasView: UIView {
     public func addLayer() {
         let count = renderer.layers.count
         guard count < CanvasRenderer.maxLayerCount else { return }
+        if isInSnapEditMode { finalizeEditedSnap() }
         let newIndex = renderer.addLayer(name: "Layer \(count + 1)")
         renderer.setActiveLayer(newIndex)
         isDirty = true
+        onDrawingChanged?()
         onStateChanged?()
     }
 
     public func selectLayer(at index: Int) {
+        // A pending snapped shape belongs to the layer it was drawn on — land it
+        // before the active layer changes.
+        if isInSnapEditMode { finalizeEditedSnap() }
         renderer.setActiveLayer(index)
         isDirty = true
         onStateChanged?()
@@ -2815,10 +2835,12 @@ public final class MetalCanvasView: UIView {
     public func toggleLayerVisibility(at index: Int) {
         renderer.toggleVisibility(at: index)
         isDirty = true
+        onDrawingChanged?()
         onStateChanged?()
     }
 
     public func deleteLayer(at index: Int) {
+        if isInSnapEditMode { finalizeEditedSnap() }
         // Purge undo/redo entries for the deleted layer — restoring them
         // would target whatever layer inherits the id-resolved miss (or
         // silently no-op). Compound `.canvas` entries stay: they rebuild the
@@ -2845,6 +2867,7 @@ public final class MetalCanvasView: UIView {
     public func moveLayer(from source: Int, to destination: Int) {
         renderer.moveLayer(from: source, to: destination)
         isDirty = true
+        onDrawingChanged?()
         onStateChanged?()
     }
 
@@ -2852,16 +2875,19 @@ public final class MetalCanvasView: UIView {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         renderer.renameLayer(at: index, to: trimmed)
+        onDrawingChanged?()
         onStateChanged?()
     }
 
     public func setLayerLocked(_ locked: Bool, at index: Int) {
         renderer.setLocked(locked, at: index)
+        onDrawingChanged?()
         onStateChanged?()
     }
 
     public func setLayerAlphaLocked(_ locked: Bool, at index: Int) {
         renderer.setAlphaLocked(locked, at: index)
+        onDrawingChanged?()
         onStateChanged?()
     }
 
@@ -3108,6 +3134,54 @@ public final class MetalCanvasView: UIView {
         guard strokeCount > 0 else { return nil }
         guard let cgImage = renderer.flattenedCGImage(strokeOpacity: currentStrokeOpacity()) else { return nil }
         return UIImage(cgImage: cgImage).pngData()
+    }
+
+    /// Off-main export: unchanged layers reuse their cached PNG; changed layers are
+    /// snapshotted to raw bytes here (a few ms each) and PNG-encoded on a background
+    /// task, so the 1 s autosave no longer stalls the main thread with a 2048² encode
+    /// per layer. Returns nil if the document isn't allocated or an encode failed.
+    public func exportLayeredDataAsync() async -> Data? {
+        guard renderer.hasCanvas, !layers.isEmpty else { return nil }
+        struct Source { let index: Int; let id: UUID; let revision: Int; let cached: Data?; let raw: Data? }
+        var sources: [Source] = []
+        for (i, info) in layers.enumerated() {
+            guard let rev = renderer.layerRevision(at: i) else { return nil }
+            if let png = renderer.cachedLayerPNG(id: info.id, revision: rev) {
+                sources.append(Source(index: i, id: info.id, revision: rev, cached: png, raw: nil))
+            } else {
+                guard let raw = renderer.snapshotLayer(at: i) else { return nil }
+                sources.append(Source(index: i, id: info.id, revision: rev, cached: nil, raw: raw))
+            }
+        }
+        let metas = layers
+        let activeIndex = activeLayerIndex
+        let renderer = self.renderer
+        let encoded: [Data?] = await Task.detached(priority: .utility) {
+            sources.map { src -> Data? in
+                if let cached = src.cached { return cached }
+                guard let raw = src.raw else { return nil }
+                return renderer.pngData(fromLayerBytes: raw)
+            }
+        }.value
+        var layerEntries: [LayeredDrawing.LayerEntry] = []
+        for (src, png) in zip(sources, encoded) {
+            guard let png else { return nil }
+            if src.cached == nil { renderer.storeLayerPNG(id: src.id, revision: src.revision, png: png) }
+            let info = metas[src.index]
+            layerEntries.append(LayeredDrawing.LayerEntry(
+                id: info.id.uuidString,
+                name: info.name,
+                isVisible: info.isVisible,
+                pngData: png,
+                isLocked: info.isLocked,
+                isAlphaLocked: info.isAlphaLocked,
+                blendMode: info.blendMode.rawValue,
+                opacity: info.opacity
+            ))
+        }
+        guard !layerEntries.isEmpty else { return nil }
+        let drawing = LayeredDrawing(version: 1, layers: layerEntries, activeLayerIndex: activeIndex)
+        return try? JSONEncoder().encode(drawing)
     }
 
     /// Load canvas from saved data. Auto-detects format:

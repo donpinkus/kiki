@@ -58,6 +58,9 @@ public struct CanvasView: UIViewRepresentable {
         canvasView.onDrawingChanged = { [weak viewModel] in
             viewModel?.handleDrawingChanged()
         }
+        canvasView.onDrawingLoaded = { [weak viewModel] in
+            viewModel?.handleDrawingLoaded()
+        }
         canvasView.onInteractionBegan = { [weak viewModel] in
             viewModel?.handleInteractionBegan()
         }

@@ -274,7 +274,7 @@ final class StreamSession {
     /// Used by the preview controller so preview and live frames match.
     func captureFrameJPEG() -> Data? {
         guard let snapshot = canvasViewModel.captureSnapshot() else { return nil }
-        guard let resized = resizeImage(snapshot.image, to: captureSize) else { return nil }
+        guard let resized = Self.resizeImage(snapshot.image, to: captureSize) else { return nil }
         return resized.jpegData(compressionQuality: 0.7)
     }
 
@@ -497,16 +497,24 @@ final class StreamSession {
                 // Send config update if it changed since last send
                 await self.sendConfigIfChanged()
 
-                let jpeg: Data? = await MainActor.run {
+                // Only the Metal readback needs the main thread (renderer state);
+                // the resize, JPEG encode and byte-compare run here on the capture
+                // task — they used to stall the main thread every 500 ms mid-stroke.
+                let captured: (image: UIImage, size: CGSize, previous: Data?)? = await MainActor.run {
                     guard let snapshot = self.canvasViewModel.captureSnapshot() else { return nil }
-                    guard let resized = self.resizeImage(snapshot.image, to: self.captureSize) else { return nil }
-                    guard let data = resized.jpegData(compressionQuality: 0.7) else { return nil }
+                    return (snapshot.image, self.captureSize, self.lastSentJpegData)
+                }
+                var jpeg: Data?
+                if let captured,
+                   let resized = Self.resizeImage(captured.image, to: captured.size),
+                   let data = resized.jpegData(compressionQuality: 0.7) {
                     // Skip if the rendered output hasn't changed since last send.
                     // Catches all visual changes: mid-stroke, eraser, lasso, undo.
-                    if data == self.lastSentJpegData { return nil }
-                    // Canvas changed — hand the snapshot to the video recorder.
-                    self.onCanvasFrameCaptured?(resized)
-                    return data
+                    if data != captured.previous {
+                        jpeg = data
+                        // Canvas changed — hand the snapshot to the video recorder.
+                        await MainActor.run { self.onCanvasFrameCaptured?(resized) }
+                    }
                 }
 
                 if let jpeg {
@@ -737,7 +745,8 @@ final class StreamSession {
         connectionEventTask = nil
     }
 
-    private func resizeImage(_ image: UIImage, to size: CGSize) -> UIImage? {
+    /// Thread-safe (UIGraphicsImageRenderer is usable off the main thread).
+    nonisolated private static func resizeImage(_ image: UIImage, to size: CGSize) -> UIImage? {
         let format = UIGraphicsImageRendererFormat()
         format.preferredRange = .standard
         let renderer = UIGraphicsImageRenderer(size: size, format: format)

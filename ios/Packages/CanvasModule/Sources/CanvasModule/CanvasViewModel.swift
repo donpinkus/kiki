@@ -119,6 +119,12 @@ public final class CanvasViewModel {
     func attach(_ canvasView: MetalCanvasView, container: RotatableCanvasContainer) {
         self.canvasView = canvasView
         self.container = container
+        // A fresh canvas view IS a new document: the selection (objects, points,
+        // undo stack, in-flight move, cached embedding) must not carry over from the
+        // previous drawing — it used to, and republished the old mask as the new
+        // drawing's clip on the next refresh.
+        selection.resetForNewDocument()
+        isPasting = false
 
         // Apply pending state from a saved drawing (set via setPendingState before navigation).
         // This runs BEFORE callbacks are wired in makeUIView, so no handleDrawingChanged fires.
@@ -158,8 +164,15 @@ public final class CanvasViewModel {
             self.selectSelectionTool()
         }
         selection.onBeginMove = { [weak self] path in
-            guard let self, let canvasView = self.canvasView, let container = self.container,
-                  let rect = canvasView.beginMoveExtraction(path: path) else { return false }
+            guard let self, let canvasView = self.canvasView, let container = self.container else { return false }
+            // One float at a time (the paste float and the move float share the
+            // renderer's single selection texture), and never cut a locked layer.
+            guard !self.isPasting else { return false }
+            if self.activeLayerIsLocked {
+                self.onLockedLayerStrokeRefused?()
+                return false
+            }
+            guard let rect = canvasView.beginMoveExtraction(path: path) else { return false }
             container.showLassoSelection(bounds: rect, path: path)
             return true
         }
@@ -457,7 +470,11 @@ public final class CanvasViewModel {
     /// gestures. Nothing touches layers until `commitPaste`.
     @discardableResult
     public func beginPaste(image: CGImage, rectInDocPixels: CGRect) -> Bool {
-        guard !isPasting, let canvasView, let container else { return false }
+        guard !isPasting, !selection.isMoving, let canvasView, let container else { return false }
+        if activeLayerIsLocked {
+            onLockedLayerStrokeRefused?()
+            return false
+        }
         guard let viewRect = canvasView.beginPasteFloat(image: image, rectInDocPixels: rectInDocPixels) else {
             return false
         }
@@ -481,6 +498,27 @@ public final class CanvasViewModel {
         container.clearLassoSelection()
         canvasView.discardPasteFloat()
         isPasting = false
+    }
+
+    /// True while content is floating (paste float or selection Move). Saving or
+    /// leaving the drawing in this state would persist the layer with the content
+    /// cut out (Move) or drop the paste — `settleTransientEdits` lands it first.
+    public var hasTransientEdit: Bool { isPasting || selection.isMoving }
+
+    /// Land any floating content (commit, never discard — pixels are never lost).
+    public func settleTransientEdits() {
+        if isPasting { commitPaste() }
+        if selection.isMoving { selection.commitMove() }
+    }
+
+    private var activeLayerIsLocked: Bool {
+        layers.indices.contains(activeLayerIndex) && layers[activeLayerIndex].isLocked
+    }
+
+    /// Leaving the drawing screen: drop the SAM models + embedding (~100 MB+) so
+    /// Animate/Extract/gallery don't carry them; they reload lazily on the next tap.
+    public func releaseSelectionResources() {
+        selection.releaseModels()
     }
 
     public func resetViewTransform() {
@@ -520,6 +558,12 @@ public final class CanvasViewModel {
     /// or nil if the canvas is not attached or empty.
     public func exportDrawingData() -> Data? {
         canvasView?.exportLayeredData()
+    }
+
+    /// Off-main variant for autosave (see `MetalCanvasView.exportLayeredDataAsync`).
+    public func exportDrawingDataAsync() async -> Data? {
+        guard let canvasView else { return nil }
+        return await canvasView.exportLayeredDataAsync()
     }
 
     /// Returns the current background image (lineart swap) as PNG data, or nil.
@@ -567,6 +611,13 @@ public final class CanvasViewModel {
             strokeCount: canvasView?.strokeCount ?? 0,
             bounds: canvasView?.bounds ?? .zero
         ))
+    }
+
+    /// Saved data finished loading into the canvas (no user edit → no autosave), but
+    /// the content changed: bump the version so the selection re-encodes.
+    func handleDrawingLoaded() {
+        contentVersion &+= 1
+        updateState()
     }
 
     func handleTransformChanged() {

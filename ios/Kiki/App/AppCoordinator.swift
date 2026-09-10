@@ -675,6 +675,27 @@ final class AppCoordinator {
         panelOffset.width += translationDelta.x
         panelOffset.height += translationDelta.y
         panelScale = min(max(panelScale * scaleDelta, Self.minPanelScale), Self.maxPanelScale)
+        clampPanelIntoPane()
+    }
+
+    /// The drawing pane size the panel lives in (set by DrawingView's geometry). Lets
+    /// the transform keep the panel's centre inside the pane — it used to be
+    /// draggable fully off-screen with no gesture able to reach it again.
+    var panelPaneSize: CGSize = .zero
+
+    private func clampPanelIntoPane() {
+        guard panelPaneSize.width > 0, panelPaneSize.height > 0,
+              let image = resultState.displayImage else { return }
+        let rect = PanelLayout.rect(for: image, in: panelPaneSize, offset: panelOffset, scale: panelScale)
+        // Keep at least a 44 pt grab margin of the panel inside the pane on each axis.
+        let margin: CGFloat = 44
+        var dx: CGFloat = 0, dy: CGFloat = 0
+        if rect.maxX < margin { dx = margin - rect.maxX }
+        if rect.minX > panelPaneSize.width - margin { dx = panelPaneSize.width - margin - rect.minX }
+        if rect.maxY < margin { dy = margin - rect.maxY }
+        if rect.minY > panelPaneSize.height - margin { dy = panelPaneSize.height - margin - rect.minY }
+        panelOffset.width += dx
+        panelOffset.height += dy
     }
 
     /// The "transparency hole" punched into the fullscreen result panel around
@@ -1296,7 +1317,14 @@ final class AppCoordinator {
 
     // MARK: - Private State
 
-    private var lastSuccessfulImage: UIImage?
+    private var lastSuccessfulImage: UIImage? {
+        didSet { if lastSuccessfulImage !== oldValue { lastSuccessfulImageJPEG = nil } }
+    }
+    /// The JPEG bytes that `lastSuccessfulImage` was loaded from / last saved as.
+    /// Saving re-uses them instead of re-encoding the decoded image: every open+save
+    /// round trip used to re-compress the stored generated image at 0.85 (generational
+    /// JPEG decay).
+    private var lastSuccessfulImageJPEG: Data?
     private var canvasObservationTask: Task<Void, Never>?
 
     // MARK: - Lifecycle
@@ -2441,6 +2469,7 @@ final class AppCoordinator {
         // Restore generated image
         if let imgData = drawing.generatedImageData {
             lastSuccessfulImage = UIImage(data: imgData)
+            lastSuccessfulImageJPEG = imgData
         } else {
             lastSuccessfulImage = nil
         }
@@ -2477,6 +2506,7 @@ final class AppCoordinator {
         discardAIEdit()
         saveCurrentDrawing()
         saveDebounceTask?.cancel()
+        canvasViewModel.releaseSelectionResources()
 
         // Emit drawing.closed before we clear the id.
         if let drawingId = currentDrawingId, let openedAt = currentDrawingOpenedAt {
@@ -2700,11 +2730,34 @@ final class AppCoordinator {
         }
     }
 
+    /// Synchronous save (navigation, backgrounding, explicit). Lands any floating
+    /// content first: leaving mid-Move used to persist the layer with the selection
+    /// CUT OUT and the float lost with the canvas view — unrecoverable.
     func saveCurrentDrawing() {
         guard !isSuppressingObservation else { return }
         guard let drawingId = currentDrawingId else { return }
+        canvasViewModel.settleTransientEdits()
         guard let drawingData = canvasViewModel.exportDrawingData() else { return }
+        writeDrawing(id: drawingId, drawingData: drawingData)
+    }
 
+    /// Debounced autosave: PNG-encodes changed layers off the main thread. While
+    /// content is floating (paste / Move) the save is re-armed rather than landing
+    /// the float behind the user's back.
+    private func autosaveNow() async {
+        guard !isSuppressingObservation, let drawingId = currentDrawingId else { return }
+        if canvasViewModel.hasTransientEdit {
+            scheduleSave()
+            return
+        }
+        guard let drawingData = await canvasViewModel.exportDrawingDataAsync() else { return }
+        // Navigation during the encode already saved synchronously; don't write a
+        // stale envelope over a different (or closed) drawing.
+        guard currentDrawingId == drawingId, currentScreen == .drawing else { return }
+        writeDrawing(id: drawingId, drawingData: drawingData)
+    }
+
+    private func writeDrawing(id drawingId: UUID, drawingData: Data) {
         let id = drawingId
         var descriptor = FetchDescriptor<Drawing>(predicate: #Predicate { $0.id == id })
         descriptor.fetchLimit = 1
@@ -2712,7 +2765,10 @@ final class AppCoordinator {
 
         drawing.drawingData = drawingData
         drawing.backgroundImageData = canvasViewModel.exportBackgroundImageData()
-        drawing.generatedImageData = lastSuccessfulImage?.jpegData(compressionQuality: 0.85)
+        if lastSuccessfulImageJPEG == nil {
+            lastSuccessfulImageJPEG = lastSuccessfulImage?.jpegData(compressionQuality: 0.85)
+        }
+        drawing.generatedImageData = lastSuccessfulImageJPEG
         drawing.canvasThumbnailData = canvasViewModel.generateThumbnail()?.jpegData(compressionQuality: 0.7)
         drawing.promptText = promptText
         drawing.animationPrompt = animationPromptText.isEmpty ? nil : animationPromptText
@@ -2736,7 +2792,7 @@ final class AppCoordinator {
         saveDebounceTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(1))
             guard !Task.isCancelled, let self else { return }
-            saveCurrentDrawing()
+            await autosaveNow()
         }
     }
 
@@ -2748,7 +2804,8 @@ final class AppCoordinator {
             for await _ in canvasViewModel.canvasChanges {
                 guard !Task.isCancelled else { return }
                 guard !isSuppressingObservation else { continue }
-                guard !canvasViewModel.isEmpty else { continue }
+                // No emptiness gate: undoing back to a blank canvas is a change that
+                // must persist too (the last non-blank save used to resurrect).
                 scheduleSave()
             }
         }
@@ -3281,6 +3338,12 @@ final class AppCoordinator {
         switch phase {
         case .background:
             markBackgrounded()
+            // Persist now — a jetsam in the background would lose everything since
+            // the last 1 s debounce (and layer-structure edits weren't saved at all).
+            if currentScreen == .drawing {
+                saveDebounceTask?.cancel()
+                saveCurrentDrawing()
+            }
             if streamSession != nil {
                 streamWasActiveBeforeBackground = true
                 stopStream()
