@@ -210,8 +210,10 @@ public enum MaskContour {
                     let dy = fy - cy - ty
                     let rx = (dx * c - dy * sn) * invScale
                     let ry = (dx * sn + dy * c) * invScale
-                    let sx = Int(cx + rx)
-                    let sy = Int(cy + ry)
+                    // floor, not Int(): truncation maps (−1, 0) onto column/row 0 →
+                    // a 1-px smear along the top/left edge after every move.
+                    let sx = Int((cx + rx).rounded(.down))
+                    let sy = Int((cy + ry).rounded(.down))
                     guard sx >= 0, sx < side, sy >= 0, sy < side else { continue }
                     out[y * side + x] = src[sy * side + sx]
                 }

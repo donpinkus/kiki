@@ -141,7 +141,14 @@ struct WetStrokeWalker {
                 // what it crosses (true melt) instead of dragging a lagging color.
                 let pickupEff = max(pickup, blur)
                 if s.alpha > 0.05 {
-                    load = mix(load, s.color, pickupEff * s.alpha)
+                    if brush.wetSmudge, loadAlpha < 0.02 {
+                        // Carrying nothing (started on blank canvas): adopt the first
+                        // paint met outright. Mixing from the phantom ink seed used to
+                        // deposit an ink-tinted (dark) edge on entry.
+                        load = s.color
+                    } else {
+                        load = mix(load, s.color, pickupEff * s.alpha)
+                    }
                 }
                 if brush.wetSmudge {
                     loadAlpha += (s.alpha - loadAlpha) * pickupEff

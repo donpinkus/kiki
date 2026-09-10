@@ -17,9 +17,11 @@ final class TouchTrackingGestureRecognizer: UIGestureRecognizer {
     private(set) var activeTouchCount = 0
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        let wasTracking = activeTouchCount > 0
         activeTouchCount += touches.count
         updatePencilProperties(from: touches)
-        state = .began
+        // A second finger joining an in-progress gesture is a change, not a new begin.
+        state = wasTracking ? .changed : .began
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
@@ -29,12 +31,15 @@ final class TouchTrackingGestureRecognizer: UIGestureRecognizer {
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
         activeTouchCount = max(0, activeTouchCount - touches.count)
-        state = .ended
+        // Only finish when the LAST touch lifts. Ending on the first finger of a
+        // pinch made UIKit reset() us while the other finger was still down, so the
+        // survivor reported activeTouchCount ≤ 1 and read as a single-touch draw.
+        state = activeTouchCount == 0 ? .ended : .changed
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
         activeTouchCount = max(0, activeTouchCount - touches.count)
-        state = .cancelled
+        state = activeTouchCount == 0 ? .cancelled : .changed
     }
 
     override func reset() {

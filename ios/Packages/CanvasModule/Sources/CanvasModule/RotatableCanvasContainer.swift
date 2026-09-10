@@ -301,12 +301,14 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
             onInteractionChanged?(true)
 
         case .changed:
+            keepAnchored(gesture.location(in: self), deltaRotation: gesture.rotation)
             rotation += gesture.rotation
             gesture.rotation = 0
             applyTransform()
             onTransformChanged?()
 
         case .ended, .cancelled:
+            keepAnchored(gesture.location(in: self), deltaRotation: gesture.rotation)
             rotation += gesture.rotation
             // Snap to nearest 90 degrees if within threshold
             let nearestQuarter = (rotation / (.pi / 2)).rounded() * (.pi / 2)
@@ -330,13 +332,17 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
             onInteractionChanged?(true)
 
         case .changed:
-            scale = (scale * gesture.scale).clamped(to: Self.minScale...Self.maxScale)
+            let newScale = (scale * gesture.scale).clamped(to: Self.minScale...Self.maxScale)
+            keepAnchored(gesture.location(in: self), scaleFactor: newScale / scale)
+            scale = newScale
             gesture.scale = 1.0
             applyTransform()
             onTransformChanged?()
 
         case .ended, .cancelled:
-            scale = (scale * gesture.scale).clamped(to: Self.minScale...Self.maxScale)
+            let newScale = (scale * gesture.scale).clamped(to: Self.minScale...Self.maxScale)
+            keepAnchored(gesture.location(in: self), scaleFactor: newScale / scale)
+            scale = newScale
             applyTransform()
             onTransformChanged?()
             onInteractionChanged?(false)
@@ -605,6 +611,29 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
         transformView.transform = CGAffineTransform(translationX: translation.x, y: translation.y)
             .rotated(by: rotation)
             .scaledBy(x: scale, y: scale)
+    }
+
+    /// The transform composes T·R·S about the transform view's centre, so a pinch
+    /// or twist far from the centre used to slide the content out from under the
+    /// fingers. Shift the translation so `anchor` (container space) stays put when
+    /// the scale multiplies by `scaleFactor` and/or the rotation advances by
+    /// `deltaRotation`. Call BEFORE mutating `scale` / `rotation`.
+    private func keepAnchored(_ anchor: CGPoint, scaleFactor: CGFloat = 1, deltaRotation: CGFloat = 0) {
+        // The view's visual centre in container space: `center` is the anchor
+        // point's untransformed position; our transform carries the translation.
+        let center = CGPoint(x: transformView.center.x + translation.x,
+                             y: transformView.center.y + translation.y)
+        var v = CGPoint(x: center.x - anchor.x, y: center.y - anchor.y)
+        if deltaRotation != 0 {
+            let c = cos(deltaRotation), s = sin(deltaRotation)
+            v = CGPoint(x: v.x * c - v.y * s, y: v.x * s + v.y * c)
+        }
+        if scaleFactor != 1 {
+            v = CGPoint(x: v.x * scaleFactor, y: v.y * scaleFactor)
+        }
+        let newCenter = CGPoint(x: anchor.x + v.x, y: anchor.y + v.y)
+        translation.x += newCenter.x - center.x
+        translation.y += newCenter.y - center.y
     }
 }
 

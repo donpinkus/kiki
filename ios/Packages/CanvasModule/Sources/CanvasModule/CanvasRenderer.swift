@@ -1390,8 +1390,17 @@ public final class CanvasRenderer {
         guard let probe = device.makeTexture(descriptor: desc) else { return false }
         let bounds = CGRect(x: 0, y: 0, width: 4, height: 4)
         let red = CIImage(color: CIColor(red: 1, green: 0, blue: 0, alpha: 1)).cropped(to: bounds)
-        ciContext.render(red, to: probe, commandBuffer: nil,
-                         bounds: bounds, colorSpace: linearSRGBColorSpace)
+        // Explicit command buffer + wait so the verdict measures the render, not a
+        // race against an unscheduled nil-buffer render.
+        if let cb = commandQueue.makeCommandBuffer() {
+            ciContext.render(red, to: probe, commandBuffer: cb,
+                             bounds: bounds, colorSpace: linearSRGBColorSpace)
+            cb.commit()
+            cb.waitUntilCompleted()
+        } else {
+            ciContext.render(red, to: probe, commandBuffer: nil,
+                             bounds: bounds, colorSpace: linearSRGBColorSpace)
+        }
         var bytes = [UInt8](repeating: 0, count: 4 * 4 * 4)
         probe.getBytes(&bytes, bytesPerRow: 16, from: MTLRegionMake2D(0, 0, 4, 4), mipmapLevel: 0)
         let works = bytes.contains { $0 != 0 }
@@ -1491,15 +1500,23 @@ public final class CanvasRenderer {
     func extractSelection(canvasPath: CGPath, bounds: CGRect, canvasScale: CGFloat) {
         guard let canvas = activeLayerTexture, let maskedPSO = maskedCopyPSO else { return }
 
-        // Convert bounds from view-points to canvas-pixels.
-        let pxBounds = CGRect(
+        // Convert bounds from view-points to canvas-pixels, snapped OUTWARD to the
+        // texel grid: the selection texture is `selW × selH` texels and the crop
+        // texcoords below sample this exact rect, so an integer rect makes the copy
+        // (and a Move → Place with no motion) a lossless texel copy instead of a
+        // half-texel bilinear resample that softened the content every cycle.
+        let raw = CGRect(
             x: bounds.origin.x * canvasScale,
             y: bounds.origin.y * canvasScale,
             width: bounds.width * canvasScale,
             height: bounds.height * canvasScale
         )
-        let selW = max(1, Int(pxBounds.width.rounded()))
-        let selH = max(1, Int(pxBounds.height.rounded()))
+        let x0 = max(0, raw.minX.rounded(.down)), y0 = max(0, raw.minY.rounded(.down))
+        let x1 = min(CGFloat(canvasWidth), raw.maxX.rounded(.up))
+        let y1 = min(CGFloat(canvasHeight), raw.maxY.rounded(.up))
+        let pxBounds = CGRect(x: x0, y: y0, width: max(1, x1 - x0), height: max(1, y1 - y0))
+        let selW = max(1, Int(pxBounds.width))
+        let selH = max(1, Int(pxBounds.height))
 
         // 1. Rasterize the lasso path into an R8 mask (canvas-pixel resolution).
         //    CGContext is fine here — it's a single-channel mask, no color issues.

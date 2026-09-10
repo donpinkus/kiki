@@ -29,6 +29,17 @@ extension UIImage {
     /// This avoids depending on the source image's byte order (RGBA vs BGRA).
     private static func samplePixel(from cgImage: CGImage, x: Int, y: Int) -> UIColor? {
         var pixel: [UInt8] = [0, 0, 0, 0] // R, G, B, A
+        return pixel.withUnsafeMutableBytes { buffer -> UIColor? in
+            samplePixel(into: buffer, from: cgImage, x: x, y: y)
+        }
+    }
+
+    /// The pointer handed to `CGContext(data:)` must stay valid while the context
+    /// draws — the old `&pixel` inout form only guaranteed it for the init call.
+    private static func samplePixel(into buffer: UnsafeMutableRawBufferPointer,
+                                    from cgImage: CGImage, x: Int, y: Int) -> UIColor? {
+        guard let base = buffer.baseAddress else { return nil }
+        let pixel = base.assumingMemoryBound(to: UInt8.self)
         // Explicit sRGB, stating intent. (DeviceRGB would behave identically —
         // iOS bitmap contexts treat CGColorSpaceCreateDeviceRGB() as an sRGB
         // pass-through, verified 2026-07-13. The earlier comment here blaming
@@ -37,7 +48,7 @@ extension UIImage {
         // CALayer.render, and the Y-flip below.)
         let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
         guard let context = CGContext(
-            data: &pixel,
+            data: base,
             width: 1,
             height: 1,
             bitsPerComponent: 8,

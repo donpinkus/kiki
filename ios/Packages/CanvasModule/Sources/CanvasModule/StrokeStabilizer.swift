@@ -74,6 +74,10 @@ struct StrokeStabilizer {
     private var lastRaw: StrokePoint?
     /// Last point actually emitted (catch-up start + spacing bookkeeping).
     private var lastEmitted: StrokePoint?
+    /// Pencil speed over the last raw sample (points/s) — paces the catch-up tail's
+    /// timestamps so the Speed sensor reads the real final speed, not the old
+    /// 2 pt / 0.5 ms = 4000 pt/s spike that thinned every Speed-driven tip.
+    private var lastRawSpeed: Double = 300
 
     /// σ in canvas/view points for the Gaussian stage at stabilization == 1.
     /// Tuned in the harness (dry-07): 30pt left visible micro-wobble on ±6px tremor at
@@ -95,6 +99,11 @@ struct StrokeStabilizer {
     /// Process one raw input point → one output point (same cadence as the input, like the
     /// old inline smoothing — stamp generation interpolates between points by arc length).
     mutating func feed(_ raw: StrokePoint) -> StrokePoint {
+        if let prev = lastRaw {
+            let d = hypot(raw.position.x - prev.position.x, raw.position.y - prev.position.y)
+            let dt = raw.timestamp - prev.timestamp
+            if dt > 0, d > 0 { lastRawSpeed = Double(d) / dt }
+        }
         lastRaw = raw
         var point = raw
 
@@ -147,14 +156,16 @@ struct StrokeStabilizer {
         // ~2pt spacing keeps the tail as dense as normal 120Hz input; cap the count so a
         // pathological gap can't emit thousands of points.
         let steps = min(256, max(1, Int(ceil(dist / 2))))
+        // Timestamps advance as if the tail were drawn at the pencil's final speed
+        // (monotonic; the caller appends these after the lift point).
+        let stepSeconds = TimeInterval(dist / CGFloat(steps)) / max(lastRawSpeed, 50)
         var out: [StrokePoint] = []
         out.reserveCapacity(steps)
         for i in 1...steps {
             let t = CGFloat(i) / CGFloat(steps)
             var p = raw // final force/altitude/azimuth carried through the tail
             p.position = CGPoint(x: from.position.x + dx * t, y: from.position.y + dy * t)
-            // Nudge timestamps forward so downstream dt math stays monotonic.
-            p.timestamp = raw.timestamp + TimeInterval(i) * 0.0005
+            p.timestamp = raw.timestamp + TimeInterval(i) * stepSeconds
             out.append(p)
         }
         return out

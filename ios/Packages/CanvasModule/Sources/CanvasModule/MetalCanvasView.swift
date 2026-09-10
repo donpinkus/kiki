@@ -195,6 +195,10 @@ public final class MetalCanvasView: UIView {
     }
     private var undoSnapshots: [UndoEntry] = []
     private var redoSnapshots: [UndoEntry] = []
+    /// Redo stack as it was before a direct-to-layer stroke (eraser / wet smudge)
+    /// pushed its touch-down snapshot — restored if that stroke is cancelled, so a
+    /// cancelled stroke doesn't cost the user their redo history.
+    private var redoBeforeDirectStroke: [UndoEntry]?
     private static let maxUndoDepth = 30
     /// Resident-byte ceiling across undo + redo (LZ4 footprints; raw until compression
     /// lands). Oldest undo entries go first, then redo. 256 MB ≈ 16 raw entries, or
@@ -700,6 +704,7 @@ public final class MetalCanvasView: UIView {
                 if renderer.isWetRenderingAvailable {
                     wetWalker = WetStrokeWalker(startPosition: touch.location(in: self), brush: config,
                                                 scale: canvasScale)
+                    redoBeforeDirectStroke = redoSnapshots
                     pushUndoSnapshot()
                     applyNewWetStamps()
                 }
@@ -742,6 +747,7 @@ public final class MetalCanvasView: UIView {
             activeStrokeStamps = []
             eraserWalker = EraserStrokeWalker(brush: brush, scale: canvasScale)
             // Snapshot canvas BEFORE any erasing so undo restores the pre-erase state.
+            redoBeforeDirectStroke = redoSnapshots
             pushUndoSnapshot()
             // The first dab lands at touch-down (a tap erases a dot).
             applyNewEraserStamps()
@@ -1067,10 +1073,13 @@ public final class MetalCanvasView: UIView {
             // Eraser stamps were applied directly to canvas — revert by restoring
             // the undo snapshot that was pushed at touchesBegan.
             restorePoppedUndoEntry()
+            redoSnapshots = redoBeforeDirectStroke ?? []
         } else if wetCancel {
             // Wet brush also wrote directly to the layer — same revert path.
             restorePoppedUndoEntry()
+            redoSnapshots = redoBeforeDirectStroke ?? []
         }
+        redoBeforeDirectStroke = nil
 
         cancelSnapPreview()
         recognizer?.reset()
@@ -1182,6 +1191,7 @@ public final class MetalCanvasView: UIView {
             dryWalker = nil
             wetWalker = nil
             stabilizer = nil
+            redoBeforeDirectStroke = nil
             onInteractionEnded?()
         }
 
