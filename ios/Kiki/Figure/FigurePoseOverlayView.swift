@@ -130,6 +130,14 @@ final class FigurePoseOverlayView: UIView, UIGestureRecognizerDelegate {
         poseDidChange()
     }
 
+    /// Live proportions change (slider tick / preset chip).
+    func setProportions(_ p: FigureProportions) {
+        pose.proportions = p
+        figure.applyProportions(p)
+        figure.applyPlacement(pose)   // stature rides on the placement scale
+        poseDidChange()
+    }
+
     /// Flip the whole pose left↔right (see `FigurePose.mirrored`).
     func mirrorPose() {
         pose = pose.mirrored()

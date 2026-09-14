@@ -60,6 +60,7 @@ struct FigurePoseTopBar: View {
 
 struct FigurePosePanel: View {
     @Environment(AppCoordinator.self) private var coordinator
+    @State private var showProportionSliders = false
 
     static let width: CGFloat = 300
     private let columns = [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8),
@@ -72,6 +73,8 @@ struct FigurePosePanel: View {
         let body = coordinator.figure.body
         let selected = coordinator.figure.selectedPresetID
         let currentView = coordinator.figure.currentView
+        let proportions = coordinator.figure.proportions
+        let proportionPreset = proportions.matchingPreset
 
         VStack(alignment: .leading, spacing: 0) {
             // Body + view: the two whole-figure choices, above the poses.
@@ -100,6 +103,65 @@ struct FigurePosePanel: View {
                         }
                         .buttonStyle(.plain)
                     }
+                }
+
+                // Proportions: preset chips, sliders on demand.
+                HStack {
+                    sectionLabel("Proportions")
+                    Spacer()
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) { showProportionSliders.toggle() }
+                    } label: {
+                        Label(showProportionSliders ? "Hide sliders" : "Adjust",
+                              systemImage: showProportionSliders ? "chevron.up" : "slider.horizontal.3")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(KikiTheme.icon)
+                    }
+                    .buttonStyle(.plain)
+                }
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(FigureProportions.Preset.allCases) { preset in
+                            Button {
+                                coordinator.figure.applyProportionPreset(preset)
+                            } label: {
+                                Text(preset.label)
+                                    .font(.subheadline.weight(.semibold))
+                                    .padding(.horizontal, 12)
+                                    .frame(height: 30)
+                                    .foregroundStyle(proportionPreset == preset ? Color.white : KikiTheme.icon)
+                                    .background(
+                                        Capsule().fill(proportionPreset == preset ? Color.accentColor : KikiTheme.buttonCircle)
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+                if showProportionSliders {
+                    VStack(spacing: 6) {
+                        ForEach(FigureProportions.Slider.allCases) { slider in
+                            HStack(spacing: 8) {
+                                Text(slider.label)
+                                    .font(.caption)
+                                    .foregroundStyle(KikiTheme.icon)
+                                    .frame(width: 78, alignment: .leading)
+                                Slider(
+                                    value: Binding(
+                                        get: { coordinator.figure.proportions[slider] },
+                                        set: { v in var p = coordinator.figure.proportions; p[slider] = v; coordinator.figure.proportions = p }
+                                    ),
+                                    in: slider.range
+                                )
+                                .tint(KikiTheme.sliderFill)
+                                Text(String(format: "%.2f", proportions[slider]))
+                                    .font(.caption2.monospacedDigit())
+                                    .foregroundStyle(KikiTheme.iconDim)
+                                    .frame(width: 32, alignment: .trailing)
+                            }
+                        }
+                    }
+                    .transition(.opacity.combined(with: .move(edge: .top)))
                 }
             }
             .padding(.horizontal, 14)

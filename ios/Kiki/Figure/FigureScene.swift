@@ -32,6 +32,10 @@ final class FigureScene {
     private(set) var modelHeight: Float = 1.8
     private var joints: [String: SCNNode] = [:]
     private var bindOrientations: [String: simd_quatf] = [:]
+    /// Bone → the compensating nodes inserted above each of its children
+    /// (`installMorphRig`); they carry the inverse of the bone's morph scale.
+    private var compensators: [String: [SCNNode]] = [:]
+    private var stature: Float = 1
 
     /// Parsed GLB per body, shared across sessions. `GLTFSCNSceneSource` builds
     /// fresh SCNNodes from the asset every time, so the asset is safe to share
@@ -117,6 +121,7 @@ final class FigureScene {
         guard joints[FigureRig.pelvis] != nil, joints[FigureRig.hand(.left)] != nil else {
             throw LoadError.noJoints
         }
+        installMorphRig()
 
         // Mannequin look: one neutral matte material everywhere; eyes/brows a
         // shade darker so the face still reads.
@@ -149,6 +154,60 @@ final class FigureScene {
         apply(pose)
     }
 
+    // MARK: - Proportion morphs
+
+    /// Insert one compensating node between each morphable bone and each of
+    /// its children. The child's rest translation moves onto the compensator
+    /// (so a length scale on the parent moves the joint), the child keeps its
+    /// rotation, and the compensator carries the INVERSE scale — so
+    ///   parent · S · T(p) · S⁻¹ · R_child = parent · T(S·p) · R_child
+    /// is rigid: the child's frame sees no scale, limbs bend without shear,
+    /// and `simdWorldOrientation` setters (IK) stay exact. The skinner reads
+    /// bone world transforms, so the inserted nodes are invisible to it.
+    private func installMorphRig() {
+        compensators = [:]
+        for name in FigureRig.compensatedBones {
+            guard let bone = joints[name] else { continue }
+            var comps: [SCNNode] = []
+            for child in Array(bone.childNodes) {
+                let comp = SCNNode()
+                comp.name = "\(name)__comp__\(child.name ?? "")"
+                comp.simdPosition = child.simdPosition
+                child.simdPosition = .zero
+                child.removeFromParentNode()
+                comp.addChildNode(child)
+                bone.addChildNode(comp)
+                comps.append(comp)
+            }
+            compensators[name] = comps
+        }
+    }
+
+    private func setBoneScale(_ name: String, _ s: SIMD3<Float>) {
+        guard let bone = joints[name] else { return }
+        bone.simdScale = s
+        for comp in compensators[name] ?? [] {
+            comp.simdScale = SIMD3<Float>(1 / s.x, 1 / s.y, 1 / s.z)
+        }
+    }
+
+    /// Push a proportions set into the bone scales (+ stature into placement).
+    func applyProportions(_ p: FigureProportions) {
+        let build = Float(p.build)
+        let limbs = Float(p.limbs)
+        let torso = Float(p.torso)
+        // Limbs thicken with build a little less than the torso does.
+        let limbWidth = 1 + (build - 1) * 0.7
+        setBoneScale(FigureRig.pelvis, SIMD3<Float>(build, 1, build))
+        for name in FigureRig.torsoBones { setBoneScale(name, SIMD3<Float>(build, torso, build)) }
+        for name in FigureRig.limbBones { setBoneScale(name, SIMD3<Float>(limbWidth, limbs, limbWidth)) }
+        for name in FigureRig.extremityBones {
+            joints[name]?.simdScale = SIMD3<Float>(repeating: Float(p.hands))
+        }
+        joints[FigureRig.head]?.simdScale = SIMD3<Float>(repeating: Float(p.head))
+        stature = Float(p.stature)
+    }
+
     // MARK: - Pose ⇄ scene
 
     /// Push every part of `pose` into the scene graph. Stored joint values are
@@ -156,6 +215,7 @@ final class FigureScene {
     /// transfers between the male and female rigs, whose bind rotations differ
     /// by several degrees for the same joint names.
     func apply(_ pose: FigurePose) {
+        applyProportions(pose.proportions)
         applyPlacement(pose)
         applyJoints(pose.joints)
     }
@@ -174,7 +234,7 @@ final class FigureScene {
 
     /// Placement only (translate / pinch / roll / orbit) — cheaper than `apply`.
     func applyPlacement(_ pose: FigurePose) {
-        let scale = Float(pose.heightPx) / modelHeight
+        let scale = Float(pose.heightPx) / modelHeight * stature
         placementNode.simdScale = SIMD3<Float>(repeating: scale)
         placementNode.simdPosition = SIMD3<Float>(
             Float(pose.centerX) - Self.documentSide / 2,

@@ -86,6 +86,20 @@ enum FigureRig {
         return h
     }()
 
+    // MARK: Proportion morphs (per-bone scales; bone axis = local +Y on this rig)
+
+    /// Bones whose LENGTH follows the limbs slider.
+    static let limbBones: [String] = Side.allCases.flatMap { [upperArm($0), foreArm($0), thigh($0), calf($0)] }
+    /// Bones whose LENGTH follows the torso slider.
+    static let torsoBones: [String] = [spineLow, "spine_02", chest]
+    /// Bones scaled uniformly by the hands slider (their finger/toe children inherit).
+    static let extremityBones: [String] = Side.allCases.flatMap { [hand($0), foot($0)] }
+    /// Bones whose WIDTH (local X/Z) follows the build slider.
+    static let buildBones: [String] = [pelvis] + torsoBones + limbBones
+    /// Bones that get a compensating node above each child so their scale
+    /// never leaks into the child's frame (everything except uniform leaves).
+    static let compensatedBones: [String] = Array(Set([pelvis] + torsoBones + limbBones))
+
     /// The rig binds in a T-pose; a relaxed standing A-pose is the sensible
     /// starting point. World-space swings applied to the bind pose, in order.
     /// Angles about the figure's +Z (forward) axis: the left arm (on +X) drops

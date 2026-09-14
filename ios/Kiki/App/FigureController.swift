@@ -156,6 +156,17 @@ final class FigureController {
         selectedPresetID = nil
     }
 
+    /// Body proportions of the live figure (panel sliders / preset chips).
+    var proportions: FigureProportions {
+        get { session?.overlay.pose.proportions ?? .adult }
+        set { session?.overlay.setProportions(newValue) }
+    }
+
+    func applyProportionPreset(_ preset: FigureProportions.Preset) {
+        proportions = preset.values
+        Analytics.track(.figureProportionsPreset, properties: ["preset": preset.rawValue])
+    }
+
     /// Mirror the current pose left↔right (presets and hand-posed alike).
     func mirrorPose() {
         session?.overlay.mirrorPose()
@@ -263,7 +274,9 @@ final class FigureController {
         let handles = session?.overlay.figure.handleDocPositions()
             .map { "\($0.handle.id)=(\(Int($0.point.x)),\(Int($0.point.y)))" }
             .joined(separator: " ") ?? ""
-        return "body=\(pose.body.rawValue) center=(\(Int(pose.centerX)),\(Int(pose.centerY))) h=\(Int(pose.heightPx)) yaw=\(pose.yaw) pitch=\(pose.pitch) roll=\(pose.roll) joints=\(pose.joints.count) \(handles)"
+        let p = pose.proportions
+        let props = "props=\(p.matchingPreset?.rawValue ?? "custom")[\(p.stature),\(p.head),\(p.torso),\(p.limbs),\(p.hands),\(p.build)]"
+        return "body=\(pose.body.rawValue) center=(\(Int(pose.centerX)),\(Int(pose.centerY))) h=\(Int(pose.heightPx)) yaw=\(pose.yaw) pitch=\(pose.pitch) roll=\(pose.roll) \(props) joints=\(pose.joints.count) \(handles)"
     }
     #endif
 }

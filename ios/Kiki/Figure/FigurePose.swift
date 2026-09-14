@@ -12,6 +12,101 @@ enum FigureBody: String, Codable, CaseIterable, Identifiable {
     var label: String { self == .male ? "Male" : "Female" }
 }
 
+/// Body proportions as multipliers on the adult rig (1 = as modelled). Applied
+/// as per-bone scales in `FigureScene` (see `applyProportions`), so every pose,
+/// handle and the Mirror button work unchanged on a child or a chibi.
+struct FigureProportions: Codable, Equatable {
+    /// Overall size relative to the adult (child ≈ 0.62) — multiplies the
+    /// on-canvas height so figures of different kinds keep their relative scale.
+    var stature: Double = 1
+    /// Head (skull) size.
+    var head: Double = 1
+    /// Spine length.
+    var torso: Double = 1
+    /// Arm + leg length.
+    var limbs: Double = 1
+    /// Hands + feet size.
+    var hands: Double = 1
+    /// Width of torso and limbs.
+    var build: Double = 1
+
+    static let adult = FigureProportions()
+
+    enum Slider: String, CaseIterable, Identifiable {
+        case stature, head, torso, limbs, hands, build
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .stature: "Height"
+            case .head: "Head"
+            case .torso: "Torso"
+            case .limbs: "Limbs"
+            case .hands: "Hands & feet"
+            case .build: "Build"
+            }
+        }
+        var range: ClosedRange<Double> {
+            switch self {
+            case .stature: 0.35...1.3
+            case .head: 0.7...2.6
+            case .torso: 0.6...1.3
+            case .limbs: 0.45...1.35
+            case .hands: 0.7...1.6
+            case .build: 0.7...1.6
+            }
+        }
+    }
+
+    subscript(slider: Slider) -> Double {
+        get {
+            switch slider {
+            case .stature: stature
+            case .head: head
+            case .torso: torso
+            case .limbs: limbs
+            case .hands: hands
+            case .build: build
+            }
+        }
+        set {
+            switch slider {
+            case .stature: stature = newValue
+            case .head: head = newValue
+            case .torso: torso = newValue
+            case .limbs: limbs = newValue
+            case .hands: hands = newValue
+            case .build: build = newValue
+            }
+        }
+    }
+
+    /// Named starting points (sliders remain free afterwards).
+    enum Preset: String, CaseIterable, Identifiable {
+        case adult, teen, child, toddler, chibi, fashion, heavy, slim
+        var id: String { rawValue }
+        var label: String { rawValue.prefix(1).uppercased() + rawValue.dropFirst() }
+        var values: FigureProportions {
+            switch self {
+            case .adult: FigureProportions()
+            case .teen: FigureProportions(stature: 0.9, head: 1.08, torso: 0.97, limbs: 0.95, hands: 1.0, build: 0.92)
+            case .child: FigureProportions(stature: 0.62, head: 1.45, torso: 0.92, limbs: 0.78, hands: 1.05, build: 0.92)
+            case .toddler: FigureProportions(stature: 0.48, head: 1.8, torso: 0.9, limbs: 0.65, hands: 1.1, build: 1.15)
+            case .chibi: FigureProportions(stature: 0.55, head: 2.3, torso: 0.75, limbs: 0.55, hands: 1.3, build: 1.1)
+            case .fashion: FigureProportions(stature: 1.12, head: 0.9, torso: 1.05, limbs: 1.18, hands: 1.0, build: 0.85)
+            case .heavy: FigureProportions(stature: 1.0, head: 1.0, torso: 1.0, limbs: 1.0, hands: 1.0, build: 1.4)
+            case .slim: FigureProportions(stature: 1.0, head: 1.0, torso: 1.0, limbs: 1.02, hands: 1.0, build: 0.82)
+            }
+        }
+    }
+
+    /// The preset these values match exactly, if any (for the chip highlight).
+    var matchingPreset: Preset? {
+        Preset.allCases.first { p in
+            Slider.allCases.allSatisfy { abs(p.values[$0] - self[$0]) < 0.005 }
+        }
+    }
+}
+
 /// Everything needed to re-create a posed figure on the canvas: which body,
 /// where it sits in the 2048² document, how it's turned, and every joint the
 /// user has moved (local orientation quaternions keyed by rig joint name).
@@ -31,10 +126,12 @@ struct FigurePose: Codable, Equatable {
     /// Joint name → local orientation quaternion `[ix, iy, iz, r]`. Joints
     /// absent here stay at the rig's bind pose.
     var joints: [String: [Float]] = [:]
+    /// Body proportions (child, chibi, …); default = the adult rig as modelled.
+    var proportions: FigureProportions = .adult
 
     static let version = 1
     private enum CodingKeys: String, CodingKey {
-        case version, body, centerX, centerY, heightPx, roll, yaw, pitch, joints
+        case version, body, centerX, centerY, heightPx, roll, yaw, pitch, joints, proportions
     }
 
     init() {}
@@ -49,6 +146,7 @@ struct FigurePose: Codable, Equatable {
         yaw = try c.decodeIfPresent(Double.self, forKey: .yaw) ?? 0
         pitch = try c.decodeIfPresent(Double.self, forKey: .pitch) ?? 0
         joints = try c.decodeIfPresent([String: [Float]].self, forKey: .joints) ?? [:]
+        proportions = try c.decodeIfPresent(FigureProportions.self, forKey: .proportions) ?? .adult
     }
 
     func encode(to encoder: Encoder) throws {
@@ -62,6 +160,7 @@ struct FigurePose: Codable, Equatable {
         try c.encode(yaw, forKey: .yaw)
         try c.encode(pitch, forKey: .pitch)
         try c.encode(joints, forKey: .joints)
+        try c.encode(proportions, forKey: .proportions)
     }
 
     var center: CGPoint {

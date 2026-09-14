@@ -2325,6 +2325,9 @@ final class AppCoordinator {
         #if DEBUG && targetEnvironment(simulator)
         case "gallery":
             if currentScreen == .drawing { navigateToGallery() }
+        case "newDrawing":
+            if currentScreen == .drawing { navigateToGallery() }
+            newDrawing()
         case "undo":
             undo()
         case "redo":
@@ -2339,6 +2342,16 @@ final class AppCoordinator {
             figure.resetPose()
         case "figureMirror":
             figure.mirrorPose()
+        case let cmd where cmd.hasPrefix("figureProportions:"):
+            if let p = FigureProportions.Preset(rawValue: String(cmd.dropFirst("figureProportions:".count))) {
+                figure.applyProportionPreset(p)
+            }
+        case let cmd where cmd.hasPrefix("figureMorph:"):
+            // figureMorph:<slider>,<value>
+            let parts = cmd.dropFirst("figureMorph:".count).split(separator: ",")
+            if parts.count == 2, let s = FigureProportions.Slider(rawValue: String(parts[0])), let v = Double(parts[1]) {
+                var p = figure.proportions; p[s] = v; figure.proportions = p
+            }
         case "figureEdit":
             if canvasViewModel.layers.indices.contains(canvasViewModel.activeLayerIndex) {
                 figure.beginEditing(layer: canvasViewModel.layers[canvasViewModel.activeLayerIndex])
