@@ -353,6 +353,7 @@ class Ltx25VideoPipeline:
             "text_encoder": _resolve_hf_cache_path(config.LTX_MODEL_REPO, config.LTX_TEXT_ENCODER_FILE),
             "video_vae": _resolve_hf_cache_path(config.LTX_MODEL_REPO, config.LTX_VIDEO_VAE_FILE),
             "audio_vae": _resolve_hf_cache_path(config.LTX_MODEL_REPO, config.LTX_AUDIO_VAE_FILE),
+            "video_vae_conv": _resolve_hf_cache_path(config.LTX_MODEL_REPO, config.LTX_VIDEO_VAE_CONV_FILE),
             "spatial_upscaler": _resolve_hf_cache_path(
                 config.LTX_SPATIAL_UPSCALER_REPO, config.LTX_SPATIAL_UPSCALER_FILE
             ),
@@ -388,6 +389,7 @@ class Ltx25VideoPipeline:
         from ltx_core.model.transformer.compiling import CompilationConfig
         from ltx_core.model.video_vae.transformer import DiffVAEMode
         from ltx_core.quantization.fp8_cast import build_policy as build_fp8_cast_policy
+        from ltx_pipelines.utils.blocks import VideoDecoder
         from ltx_pipelines.utils.model_paths import ModelPaths
         from ltx_pipelines.utils.types import OffloadMode
         if self._pipeline_name == "dfr":
@@ -507,14 +509,37 @@ class Ltx25VideoPipeline:
         else:
             self.pipe = PipelineCls(**common)
 
-        if self._pipeline_name == "dfr" and config.LTX_DFR_PLAIN_DECODE:
-            # Experiment knob: DFR normally keyframe-anchors the final decode
-            # (`decode_video(keyframes=)`), which runs the DiffVAE eager and
-            # uncompiled whatever LTX_DIFFVAE_MODE says. Dropping the
-            # keyframes turns it into the plain (compilable, natten-capable)
-            # decode at the cost of the anchoring.
-            self.pipe.video_decoder = _PlainDecodeProxy(self.pipe.video_decoder)
-            logger.info("LTX_DFR_PLAIN_DECODE=1 — DFR final decode runs WITHOUT keyframe anchoring")
+        # Decoder set (2026-09-13). DFR keyframe-anchors its final decode
+        # (`decode_video(keyframes=)`), the highest-quality path, but its
+        # DiffVAE tile budget doesn't fit the 6 s preset at 1024² on 80 GB.
+        # So we keep three decoders and pick per request (see
+        # _decoder_for_frames): the pipeline's own DiffVAE (keyframe), the
+        # same DiffVAE wrapped to drop the keyframes (plain), and the conv
+        # VAE. All share the registry, so the extra residency is the conv
+        # VAE's 1.35 GB. LTX_DFR_PLAIN_DECODE=1 forces plain everywhere
+        # (bench knob).
+        self._decoders = {"keyframe": self.pipe.video_decoder}
+        self._decoders["plain"] = _PlainDecodeProxy(self.pipe.video_decoder)
+        self._decoders["conv"] = (
+            self.pipe.video_decoder
+            if config.LTX_VIDEO_VAE == "conv"
+            else VideoDecoder(
+                paths["video_vae_conv"],
+                self.pipe.dtype,
+                self.pipe.device,
+                registry=self._registry,
+                alloc_trim_strategy=AllocatorTrimStrategy.DEFER,
+            )
+        )
+        logger.info(
+            f"LTX decode policy: keyframe DiffVAE ≤{config.LTX_DIFFVAE_KEYFRAME_MAX_FRAMES} frames, "
+            f"else {config.LTX_FALLBACK_DECODE}"
+            + (" (LTX_DFR_PLAIN_DECODE=1 forces plain)" if config.LTX_DFR_PLAIN_DECODE else ""),
+            extra={
+                "keyframe_max_frames": config.LTX_DIFFVAE_KEYFRAME_MAX_FRAMES,
+                "fallback_decode": config.LTX_FALLBACK_DECODE,
+            },
+        )
 
         if config.LTX_ENABLE_AUDIO:
             logger.info("LTX audio enabled — decoded audio will be muxed into completed MP4s")
@@ -817,6 +842,10 @@ class Ltx25VideoPipeline:
         # ~0.2 s decode run and simply don't convert/mux the track.
         want_audio = config.LTX_ENABLE_AUDIO and enable_audio
 
+        decoder_kind = self._decoder_for_frames(num_frames)
+        saved_decoder = pipe.video_decoder
+        pipe.video_decoder = self._decoders.get(decoder_kind, saved_decoder)
+
         extra_kwargs: dict[str, object] = {}
         if self._pipeline_name == "dfr":
             # Base fps only (no temporal x2 rounds — those reload the
@@ -824,7 +853,8 @@ class Ltx25VideoPipeline:
             # h/2, detailing at h.
             extra_kwargs = {"temporal_upscalings": 0, "spatial_upscalings": 1}
 
-        with profiler_ctx as profiler_obj, torch.inference_mode():
+        try:
+          with profiler_ctx as profiler_obj, torch.inference_mode():
             with self._timed("pipeline_call"):
                 result = pipe(
                     prompt=prompt,
@@ -870,6 +900,8 @@ class Ltx25VideoPipeline:
                         f"LTX audio conversion failed; continuing with silent MP4: {e}",
                         exc_info=True,
                     )
+        finally:
+            pipe.video_decoder = saved_decoder
 
         if torch.cuda.is_available():
             torch.cuda.synchronize()
@@ -914,9 +946,11 @@ class Ltx25VideoPipeline:
         )
         logger.info(
             f"LTX phase timings ms: {timings_summary} "
-            f"(shape={width}x{height}x{num_frames} frames_out={len(frames)} pipeline={self._pipeline_name})",
+            f"(shape={width}x{height}x{num_frames} frames_out={len(frames)} pipeline={self._pipeline_name} "
+            f"decoder={decoder_kind})",
             extra={
                 "phase_timings_ms": timings_summary,
+                "decoder": decoder_kind,
                 "width": width,
                 "height": height,
                 "num_frames": num_frames,
@@ -987,6 +1021,21 @@ class Ltx25VideoPipeline:
         except Exception as e:  # noqa: BLE001
             logger.error(f"Failed to write {base}.txt summary: {e}", extra={"trace_base": base})
 
+    def _decoder_for_frames(self, num_frames: int) -> str:
+        """Pick the decoder for a request: the keyframe-anchored DiffVAE when
+        the frame count is within its tile budget, else the configured
+        fallback. With the conv VAE as the pipeline's own decoder there is
+        nothing to choose (everything is conv)."""
+        if not hasattr(self, "_decoders") or config.LTX_VIDEO_VAE == "conv":
+            return "conv" if config.LTX_VIDEO_VAE == "conv" else "keyframe"
+        if config.LTX_DFR_PLAIN_DECODE:
+            return "plain"
+        if self._pipeline_name != "dfr":
+            return "keyframe"  # distilled never keyframe-decodes; this is the plain path
+        if num_frames <= config.LTX_DIFFVAE_KEYFRAME_MAX_FRAMES:
+            return "keyframe"
+        return config.LTX_FALLBACK_DECODE
+
     def get_info(self) -> dict:
         gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "none"
         vram_free = 0.0
@@ -1011,6 +1060,10 @@ class Ltx25VideoPipeline:
             "torch_compile": config.LTX_TORCH_COMPILE,
             "attention": getattr(self, "_attention_backend", None),
             "dfr_plain_decode": config.LTX_DFR_PLAIN_DECODE,
+            "decode_policy": {
+                "keyframe_max_frames": config.LTX_DIFFVAE_KEYFRAME_MAX_FRAMES,
+                "fallback": config.LTX_FALLBACK_DECODE,
+            },
             "resolution": f"{config.LTX_WIDTH}x{config.LTX_HEIGHT}",
             "num_frames": config.LTX_NUM_FRAMES,
             "fps": config.LTX_FPS,

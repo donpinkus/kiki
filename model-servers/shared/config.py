@@ -86,7 +86,20 @@ LTX_TEXT_ENCODER_FILE = os.getenv(
 # crisper with a touch more edge aliasing. Default is therefore `conv`;
 # `diff` remains a one-env rollback (with `LTX_DFR_PLAIN_DECODE=1` +
 # natten it lands in between: 4.5 s / 8.9 s decode).
-LTX_VIDEO_VAE = os.getenv("LTX_VIDEO_VAE", "conv").lower()
+LTX_VIDEO_VAE = os.getenv("LTX_VIDEO_VAE", "diff").lower()
+# Decode policy (2026-09-13, quality-first at 1024²): the DiffVAE's
+# keyframe-anchored decode is the highest-quality path but its tile budget
+# doesn't fit the 6 s preset at 1024² on 80 GB, so requests above
+# LTX_DIFFVAE_KEYFRAME_MAX_FRAMES use LTX_FALLBACK_DECODE instead:
+#   `plain` = the same DiffVAE without keyframe anchoring (natten path),
+#   `conv`  = the convolutional VAE (fastest, slightly harder edges).
+# Both decoders stay resident (the conv VAE is 1.35 GB) and are swapped per
+# request under the pipeline lock. Only meaningful when LTX_VIDEO_VAE=diff.
+LTX_DIFFVAE_KEYFRAME_MAX_FRAMES = int(os.getenv("LTX_DIFFVAE_KEYFRAME_MAX_FRAMES", "97"))
+LTX_FALLBACK_DECODE = os.getenv("LTX_FALLBACK_DECODE", "plain").lower()
+if LTX_FALLBACK_DECODE not in ("plain", "conv"):
+    raise ValueError(f"LTX_FALLBACK_DECODE must be 'plain' or 'conv' (got {LTX_FALLBACK_DECODE!r})")
+LTX_VIDEO_VAE_CONV_FILE = os.getenv("LTX_VIDEO_VAE_CONV_FILE", "vae/ltx-2.5-video-vae-conv-bf16.safetensors")
 LTX_VIDEO_VAE_FILE = os.getenv(
     "LTX_VIDEO_VAE_FILE",
     "vae/ltx-2.5-video-vae-bf16.safetensors"
@@ -162,8 +175,8 @@ LTX_QUANTIZATION = "fp8"
 # Square output matches FLUX 1:1 output (no pillarboxing in the iPad's square
 # pane). Upscale to display size happens iPad-side via AVPlayerLayer's
 # resizeAspect. The default here is the H100-benchmarked pick (2026-09-10).
-LTX_WIDTH = int(os.getenv("LTX_WIDTH", "768"))
-LTX_HEIGHT = int(os.getenv("LTX_HEIGHT", "768"))
+LTX_WIDTH = int(os.getenv("LTX_WIDTH", "1024"))
+LTX_HEIGHT = int(os.getenv("LTX_HEIGHT", "1024"))
 LTX_NUM_FRAMES = int(os.getenv("LTX_NUM_FRAMES", "145"))
 LTX_FPS = int(os.getenv("LTX_FPS", "24"))
 LTX_OUTPUT_JPEG_QUALITY = int(os.getenv("LTX_OUTPUT_QUALITY", "80"))

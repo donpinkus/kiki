@@ -89,13 +89,14 @@ final class AnimateController {
     var expectedWaitSeconds: Double {
         switch engine {
         case .ltx:
-            // LTX-2.5 DFR at 768², torch.compile + conv VAE on H100
-            // (2026-09-12): ~4 s / 6 s / 8.5 s generation for 2 s / 4 s /
-            // 6 s, plus encode + transfer.
+            // LTX-2.5 DFR at 1024², quality-first decode policy on H100
+            // (2026-09-13, through the real server): ~14 s / 33 s / 50 s
+            // generation for 2 s / 4 s / 6 s (DiffVAE decode is most of it),
+            // plus encode + transfer.
             switch durationSeconds {
-            case 2: return 8
-            case 4: return 10
-            default: return 13
+            case 2: return 18
+            case 4: return 38
+            default: return 55
             }
         case .wan3:
             // Measured 2026-09-10: 130 s for a 4 s clip at 720p (prompt
