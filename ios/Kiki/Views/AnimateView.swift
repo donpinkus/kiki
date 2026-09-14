@@ -125,7 +125,14 @@ struct AnimateView: View {
 
     @ViewBuilder
     private var availabilityChip: some View {
-        if let controller {
+        if let controller, controller.engine.isHosted {
+            Label(controller.engine.label + " · cloud", systemImage: "cloud.fill")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(controller.isConnected ? .green : .secondary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(.ultraThinMaterial, in: Capsule())
+        } else if let controller {
             switch controller.availability {
             case .ready:
                 Label("Ready", systemImage: "bolt.fill")
@@ -290,9 +297,12 @@ struct AnimateView: View {
                     .font(.caption)
                     .lineLimit(2)
             }
-            Text("\(Int(clip.durationSeconds.rounded()))s · \(clip.createdAt.formatted(.relative(presentation: .named)))")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+            Text(
+                "\(AnimateController.Engine(rawValue: clip.engine)?.label ?? clip.engine) · "
+                + "\(Int(clip.durationSeconds.rounded()))s · \(clip.createdAt.formatted(.relative(presentation: .named)))"
+            )
+            .font(.caption2)
+            .foregroundStyle(.secondary)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
@@ -352,6 +362,7 @@ struct AnimateView: View {
                 promptSection(controller)
                 soundSection(controller)
                 durationSection(controller)
+                engineSection(controller)
                 animateButton(controller)
                 warmupInfoBox(controller)
                 if let error = controller.lastError {
@@ -571,6 +582,33 @@ struct AnimateView: View {
         }
     }
 
+    /// Generator picker (2026-09-10): our self-hosted LTX-2.5 pool vs fal's
+    /// hosted frontier models, on the same keyframes/prompt — so quality and
+    /// cost can be compared directly. The detail line spells out the cost
+    /// model because the hosted engines meter per generated second.
+    private func engineSection(_ controller: AnimateController) -> some View {
+        @Bindable var controller = controller
+        return VStack(alignment: .leading, spacing: 8) {
+            Text("Engine")
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Picker("Engine", selection: $controller.engine) {
+                ForEach(AnimateController.Engine.allCases) { engine in
+                    Text(engine.label).tag(engine)
+                }
+            }
+            .pickerStyle(.segmented)
+            Text(controller.engine.detail)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            if controller.engine == .h3max, !controller.audioEnabled {
+                Text("H3 Max always generates sound — the Sound toggle applies to the other engines.")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
+        }
+    }
+
     private func animateButton(_ controller: AnimateController) -> some View {
         Button {
             controller.generate()
@@ -593,6 +631,10 @@ struct AnimateView: View {
 
     private func animateCTA(_ controller: AnimateController) -> String {
         if controller.isGenerating { return "Animating…" }
+        if controller.engine.isHosted {
+            // Hosted engines don't wait on our GPU; only the socket matters.
+            return controller.startKeyframe == nil ? "Add a keyframe" : "Animate"
+        }
         switch controller.availability {
         case .warming, .unknown:
             // Stays "Animate" (disabled) — the warm-up box below the button
@@ -611,7 +653,8 @@ struct AnimateView: View {
     /// promise that the button unlocks by itself.
     @ViewBuilder
     private func warmupInfoBox(_ controller: AnimateController) -> some View {
-        if controller.availability == .warming || controller.availability == .unknown {
+        if !controller.engine.isHosted,
+           controller.availability == .warming || controller.availability == .unknown {
             let _ = elapsedTick // re-render every second while warming
             VStack(alignment: .leading, spacing: 8) {
                 Label("Video AI is warming up", systemImage: "bolt.badge.clock")

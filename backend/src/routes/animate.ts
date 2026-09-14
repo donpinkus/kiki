@@ -6,7 +6,8 @@ import { resolveWsIdentity, extractQueryParam } from '../modules/auth/wsIdentity
 import { checkFalBudget, addMonthlySpendUsd } from '../modules/falBudget/index.js';
 import { FrameCapture } from '../modules/insights/frameCapture.js';
 import { trackVideoGeneration } from '../modules/analytics/index.js';
-import { AnimateSession, type AnimateKeyframe } from '../modules/video/animateSession.js';
+import { AnimateSession, type AnimateKeyframe, DEFAULT_ANIMATION_PROMPT } from '../modules/video/animateSession.js';
+import { falAnimate, hostedEngineSpec, isHostedEngine, parseEngineId } from '../modules/video/falAnimate.js';
 import { getState as poolGetState } from '../modules/lambda/devPool.js';
 import {
   poolEnabled as videoPoolEnabled,
@@ -23,9 +24,15 @@ import {
  * drawing-stream idle auto-animate). The client opens this socket when the
  * user enters the Animate screen and sends explicit generation requests:
  *
- *   client → { type: 'animate_request', requestId, prompt, seed?, numFrames?,
- *              width?, height?,
+ *   client → { type: 'animate_request', requestId, prompt, audioPrompt?,
+ *              enableAudio?, seed?, numFrames?, width?, height?, engine?,
  *              keyframes: [{ data: <b64 image>, position: 0..1, strength? }] }
+ *
+ * `engine` (2026-09-10) picks the generator: `ltx` (default — our Lambda
+ * H100 LTX-2.5 pool via AnimateSession, streamed preview frames + MP4) or a
+ * hosted fal engine (`wan3` / `h3max`, modules/video/falAnimate.ts — queue
+ * job, MP4 only, pass-through cost metered per second). Same reply shapes
+ * either way, so the iPad's parsing is engine-agnostic.
  *   client → { type: 'animate_cancel', requestId }
  *
  *   server → { type: 'system_availability', image, video }   (on open + change)
@@ -56,6 +63,9 @@ export const animateRoute: FastifyPluginAsync = async (fastify) => {
       let availTimer: NodeJS.Timeout | null = null;
       let videoMeteringEnabled = false;
       let frameCapture: FrameCapture | null = null;
+      /** In-flight hosted (fal) generation — one at a time per connection,
+       * same rule as the LTX relay. Aborting cancels the fal queue job. */
+      let hosted: { requestId: string; abort: AbortController } | null = null;
       const connId = randomBytes(4).toString('hex');
       const sessionStartMs = Date.now();
       // The Animate screen sends its own per-visit id so Insights can group
@@ -71,6 +81,8 @@ export const animateRoute: FastifyPluginAsync = async (fastify) => {
         clientDisconnected = true;
         session?.close();
         session = null;
+        hosted?.abort.abort();
+        hosted = null;
         if (availTimer) clearInterval(availTimer);
         availTimer = null;
       };
@@ -115,7 +127,9 @@ export const animateRoute: FastifyPluginAsync = async (fastify) => {
             : `anim-${Date.now()}`;
           const reject = (error: string): void =>
             sendToClient(JSON.stringify({ type: 'video_cancelled', requestId, error }));
-          if (!session) return reject('video_unavailable');
+          const engine = parseEngineId(parsed['engine']);
+          if (engine === 'ltx' && !session) return reject('video_unavailable');
+          if (engine !== 'ltx' && !userId) return reject('video_unavailable');
           const rawKeyframes = parsed['keyframes'];
           if (!Array.isArray(rawKeyframes) || rawKeyframes.length === 0) return reject('no_image');
           if (rawKeyframes.length > MAX_KEYFRAMES) return reject('too_many_keyframes');
@@ -139,6 +153,8 @@ export const animateRoute: FastifyPluginAsync = async (fastify) => {
             prompt: typeof parsed['prompt'] === 'string' ? parsed['prompt'] : '',
             keyframes,
           };
+          if (typeof parsed['audioPrompt'] === 'string') input.audioPrompt = parsed['audioPrompt'];
+          if (typeof parsed['enableAudio'] === 'boolean') input.enableAudio = parsed['enableAudio'];
           const seed = num(parsed['seed']);
           if (seed !== undefined) input.seed = seed;
           const numFrames = num(parsed['numFrames']);
@@ -147,10 +163,26 @@ export const animateRoute: FastifyPluginAsync = async (fastify) => {
           if (width !== undefined) input.width = width;
           const height = num(parsed['height']);
           if (height !== undefined) input.height = height;
+          if (isHostedEngine(engine)) {
+            runHosted(engine, input);
+            return;
+          }
+          if (!session) return reject('video_unavailable');
           touchVideoPool('animate_request'); // active use = strongest interest signal
           session.requestAnimate(input);
         } else if (parsed.type === 'animate_cancel') {
           const requestId = typeof parsed['requestId'] === 'string' ? parsed['requestId'] : null;
+          if (hosted && (requestId === null || requestId === hosted.requestId)) {
+            const cancelled = hosted;
+            hosted = null;
+            cancelled.abort.abort();
+            sendToClient(JSON.stringify({ type: 'video_cancelled', requestId: cancelled.requestId }));
+            request.log.info(
+              { userId, connId, req: cancelled.requestId, event: 'animate_hosted_cancelled' },
+              'animate_hosted_cancelled',
+            );
+            return;
+          }
           session?.cancel(requestId);
         }
       });
@@ -210,11 +242,11 @@ export const animateRoute: FastifyPluginAsync = async (fastify) => {
         }
       }
 
-      const billVideoGeneration = (): void => {
+      const billVideoGeneration = (usd: number = config.VIDEO_USD_PER_GENERATION): void => {
         if (!videoMeteringEnabled) return;
         const uidNow = userId;
         if (!uidNow) return;
-        void addMonthlySpendUsd(uidNow, config.VIDEO_USD_PER_GENERATION)
+        void addMonthlySpendUsd(uidNow, usd)
           .then((total) => {
             sendToClient(
               JSON.stringify({ type: 'usage', spendUsd: total, capUsd: config.FREE_TIER_FAL_USD }),
@@ -224,6 +256,111 @@ export const animateRoute: FastifyPluginAsync = async (fastify) => {
           })
           .catch(() => {
             // Fail-open: a dropped ~$0.05 write is preferable to blocking.
+          });
+      };
+
+      // ── Hosted (fal) engine path ──────────────────────────────────────
+      // Mirrors AnimateSession's contract: video_started immediately, then
+      // exactly one terminal reply (video_complete_data or video_cancelled).
+      // No preview frames — fal returns a finished MP4. The keyframe contract
+      // maps down to first/last frame; mid-video keyframes are dropped.
+      const runHosted = (
+        engine: 'wan3' | 'h3max',
+        input: Parameters<AnimateSession['requestAnimate']>[0],
+      ): void => {
+        const requestId = input.requestId;
+        const fail = (error: string): void => {
+          request.log.info(
+            { userId, connId, req: requestId, engine, reason: error, event: 'animate_request_failed' },
+            'animate_request_failed',
+          );
+          sendToClient(JSON.stringify({ type: 'video_cancelled', requestId, error }));
+        };
+        if (hosted) return fail('busy');
+        if (!config.FAL_KEY) return fail('engine_unavailable');
+        const spec = hostedEngineSpec(engine);
+        const first = input.keyframes[0];
+        if (!first) return fail('no_image');
+        const start = input.keyframes.find((kf) => kf.position <= 0.001) ?? first;
+        const end = input.keyframes.find((kf) => kf.position >= 0.999 && kf !== start);
+        const dropped = input.keyframes.length - (end ? 2 : 1);
+        const enableAudio = input.enableAudio !== false;
+        let prompt = input.prompt.trim().length > 0 ? input.prompt.trim() : DEFAULT_ANIMATION_PROMPT;
+        const audioPrompt = (input.audioPrompt ?? '').trim();
+        if (enableAudio && audioPrompt.length > 0) {
+          if (!/[.!?]$/.test(prompt)) prompt += '.';
+          prompt += ` Sound: ${audioPrompt}`;
+        }
+        const numFrames = input.numFrames ?? 145;
+        const durationSeconds = Math.min(
+          spec.maxSeconds,
+          Math.max(spec.minSeconds, Math.round(numFrames / 24)),
+        );
+        const abort = new AbortController();
+        hosted = { requestId, abort };
+        const firedAt = Date.now();
+        sendToClient(JSON.stringify({ type: 'video_started', requestId }));
+        request.log.info(
+          {
+            userId, connId, req: requestId, engine, model: spec.model, resolution: spec.resolution,
+            durationSeconds, keyframes: input.keyframes.length, droppedKeyframes: dropped,
+            event: 'animate_hosted_fired',
+          },
+          'animate_hosted_fired',
+        );
+        const hostedInput: Parameters<typeof falAnimate>[0] = {
+          engine, prompt, startImageB64: start.imageB64, durationSeconds, enableAudio,
+        };
+        if (end) hostedInput.endImageB64 = end.imageB64;
+        if (typeof input.seed === 'number') hostedInput.seed = input.seed;
+        void falAnimate(hostedInput, { signal: abort.signal })
+          .then((result) => {
+            if (hosted?.requestId !== requestId || abort.signal.aborted) return; // cancelled meanwhile
+            hosted = null;
+            if (clientDisconnected) return;
+            // fps/frames are nominal (24 fps × delivered seconds): the iPad
+            // derives the clip's displayed duration from them, and hosted
+            // engines can round the requested duration (H3 Max's 5 s floor).
+            const meta = {
+              requestId,
+              engine,
+              fps: 24,
+              frames: Math.round(result.durationSeconds * 24),
+              genMs: result.elapsedMs,
+              durationSeconds: result.durationSeconds,
+              costUsd: result.costUsd,
+              actualPrompt: result.actualPrompt,
+            };
+            sendToClient(
+              JSON.stringify({ type: 'video_complete_data', data: result.mp4.toString('base64'), meta }),
+            );
+            billVideoGeneration(result.costUsd);
+            if (!frameCapture && userId) frameCapture = new FrameCapture(captureId, userId, request.log);
+            frameCapture?.captureVideo(result.mp4);
+            if (userId) {
+              trackVideoGeneration({
+                userId, streamId: captureId, source: 'animate_screen', engine,
+                waitMs: Date.now() - firedAt, genMs: result.elapsedMs, bytes: result.mp4.length,
+                costUsd: result.costUsd,
+              });
+            }
+            request.log.info(
+              {
+                userId, connId, req: requestId, engine, bytes: result.mp4.length, genMs: result.elapsedMs,
+                waitMs: Date.now() - firedAt, costUsd: result.costUsd, event: 'video_delivered',
+              },
+              'video_delivered',
+            );
+          })
+          .catch((err: Error) => {
+            const wasCurrent = hosted?.requestId === requestId;
+            if (wasCurrent) hosted = null;
+            if (abort.signal.aborted) return; // cancel already answered
+            request.log.warn(
+              { userId, connId, req: requestId, engine, err: err.message, event: 'animate_hosted_failed' },
+              'animate_hosted_failed',
+            );
+            fail('hosted_failed');
           });
       };
 
@@ -289,9 +426,11 @@ export const animateRoute: FastifyPluginAsync = async (fastify) => {
                 userId,
                 streamId: captureId,
                 source: 'animate_screen',
+                engine: 'ltx',
                 waitMs: info.waitMs,
                 genMs,
                 bytes: mp4.length,
+                costUsd: config.VIDEO_USD_PER_GENERATION,
               });
             }
             request.log.info(

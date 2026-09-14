@@ -20,6 +20,10 @@ final class AnimationClip {
     var audioPrompt: String = ""
     /// Whether the clip was generated with an audio track.
     var audioEnabled: Bool = true
+    /// Which generator made the clip: "ltx" (our self-hosted LTX-2.5 pool)
+    /// or a hosted fal engine id ("wan3", "h3max"). Defaulted so pre-existing
+    /// rows migrate in place (SwiftData lightweight migration).
+    var engine: String = "ltx"
     /// LTX frame count (duration = numFrames / fps).
     var numFrames: Int
     var fps: Int

@@ -52,15 +52,59 @@ final class AnimateController {
     }
     static let durationOptions = [2, 4, 6]
 
-    /// Expected request→delivery wait for the current duration, from live
-    /// measurements (H100: ~9s gen for 49f, ~10s for 145f, plus encode +
-    /// transfer). Drives the determinate "Animating…" progress bar — an
-    /// expectation, not a promise, so the bar caps at 95% until delivery.
+    /// Which generator runs the request (2026-09-10). `ltx` is our
+    /// self-hosted LTX-2.5 pool (needs the video GPU to be ready, streams
+    /// preview frames, ~$0.05/clip). The hosted engines run on fal.ai via the
+    /// backend — no warm-up, but pass-through cost per generated second —
+    /// and exist so the two can be compared on the same keyframes. Persisted.
+    enum Engine: String, CaseIterable, Identifiable {
+        case ltx, wan3, h3max
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .ltx: return "Kiki LTX"
+            case .wan3: return "Wan 3.0"
+            case .h3max: return "H3 Max"
+            }
+        }
+        var detail: String {
+            switch self {
+            case .ltx: return "Self-hosted LTX-2.5 · ~$0.05 per clip · needs the video GPU"
+            case .wan3: return "fal.ai Wan 3.0 · ~$0.10 per second · start + end frame, audio toggle"
+            case .h3max: return "fal.ai MiniMax H3 Max · ~$0.08 per second · start + end frame, always audio, 5 s minimum"
+            }
+        }
+        /// Hosted engines return a finished MP4 without the streamed preview.
+        var isHosted: Bool { self != .ltx }
+    }
+    var engine: Engine = .ltx {
+        didSet { UserDefaults.standard.set(engine.rawValue, forKey: "animateEngine") }
+    }
+
+    /// Expected request→delivery wait for the current engine + duration,
+    /// from live measurements (LTX on H100: ~9s gen for 49f, ~10s for 145f,
+    /// plus encode + transfer; hosted engines measured 2026-09-10 via
+    /// validate-animate). Drives the determinate "Animating…" progress bar —
+    /// an expectation, not a promise, so the bar caps at 95% until delivery.
     var expectedWaitSeconds: Double {
-        switch durationSeconds {
-        case 2: return 12
-        case 4: return 14
-        default: return 16
+        switch engine {
+        case .ltx:
+            // LTX-2.5 DFR at 768², torch.compile + conv VAE on H100
+            // (2026-09-12): ~4 s / 6 s / 8.5 s generation for 2 s / 4 s /
+            // 6 s, plus encode + transfer.
+            switch durationSeconds {
+            case 2: return 8
+            case 4: return 10
+            default: return 13
+            }
+        case .wan3:
+            // Measured 2026-09-10: 130 s for a 4 s clip at 720p (prompt
+            // expansion + queue + render).
+            return 90 + Double(durationSeconds) * 10
+        case .h3max:
+            // Measured 2026-09-10: 6.7 s wall for a 5 s clip (faster than
+            // realtime); the floor covers queue + upload + download.
+            return 12 + Double(durationSeconds) * 2
         }
     }
     /// The drawing the start keyframe came from (nil = Photos import or
@@ -155,6 +199,10 @@ final class AnimateController {
         if Self.durationOptions.contains(savedDuration) {
             durationSeconds = savedDuration
         }
+        if let savedEngine = UserDefaults.standard.string(forKey: "animateEngine"),
+           let restored = Engine(rawValue: savedEngine) {
+            engine = restored
+        }
     }
 
     // MARK: - Screen lifecycle
@@ -182,7 +230,10 @@ final class AnimateController {
     // MARK: - Generation
 
     var canGenerate: Bool {
-        startKeyframe != nil && !isGenerating && availability == .ready
+        // Hosted engines don't depend on our video GPU being warm — only on
+        // the socket being up (the backend runs the fal job).
+        let engineReady = engine.isHosted ? isConnected : availability == .ready
+        return startKeyframe != nil && !isGenerating && engineReady
     }
 
     func generate() {
@@ -213,6 +264,7 @@ final class AnimateController {
             let audioPrompt: String
             let enableAudio: Bool
             let numFrames: Int
+            let engine: String
             let keyframes: [KeyframePayload]
         }
 
@@ -230,18 +282,21 @@ final class AnimateController {
             audioPrompt: audioPrompt.trimmingCharacters(in: .whitespacesAndNewlines),
             enableAudio: audioEnabled,
             numFrames: Self.frames(forSeconds: durationSeconds),
+            engine: engine.rawValue,
             keyframes: keyframes
         )
         Analytics.track(.animateRequested, properties: [
             "keyframes": keyframes.count,
             "duration_s": durationSeconds,
             "prompt_len": prompt.count,
+            "engine": engine.rawValue,
         ])
         Log.info("animate.request", attributes: [
             "event": "animate.request",
             "request_id": requestId,
             "keyframes": keyframes.count,
             "num_frames": Self.frames(forSeconds: durationSeconds),
+            "engine": engine.rawValue,
         ])
         Task { [client] in
             try? await client?.sendConfig(message)
@@ -398,6 +453,7 @@ final class AnimateController {
         prompt = clip.prompt
         audioPrompt = clip.audioPrompt
         audioEnabled = clip.audioEnabled
+        if let restored = Engine(rawValue: clip.engine) { engine = restored }
         if let data = clip.startKeyframeData { startKeyframe = UIImage(data: data) }
         endKeyframe = clip.endKeyframeData.flatMap { UIImage(data: $0) }
         durationSeconds = Self.durationOptions.min(by: {
@@ -581,6 +637,7 @@ final class AnimateController {
         )
         clip.audioPrompt = audioPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         clip.audioEnabled = audioEnabled
+        clip.engine = engine.rawValue
         clip.startKeyframeData = startKeyframe?.jpegData(compressionQuality: 0.85)
         clip.endKeyframeData = endKeyframe?.jpegData(compressionQuality: 0.85)
         clip.videoData = mp4
@@ -601,6 +658,7 @@ final class AnimateController {
             "bytes": mp4.count,
             "frames": frames ?? -1,
             "wait_ms": generationStartedAt.map { Int(Date().timeIntervalSince($0) * 1000) } ?? -1,
+            "engine": engine.rawValue,
         ])
         Log.info("animate.completed", attributes: [
             "event": "animate.completed",
@@ -661,6 +719,8 @@ final class AnimateController {
         case "no_image": return "Add a keyframe first."
         case "invalid_image", "invalid_keyframe": return "That image couldn't be used — try another."
         case "keyframe_too_large": return "That image is too large — try another."
+        case "hosted_failed": return "The cloud engine couldn't animate this — try again or switch engines."
+        case "engine_unavailable": return "That engine isn't configured on the server."
         default: return "Animation failed — try again."
         }
     }

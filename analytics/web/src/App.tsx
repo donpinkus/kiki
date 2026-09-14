@@ -11,6 +11,7 @@ import { Tests } from './pages/Tests';
 import { BrushTargets } from './pages/BrushTargets';
 import { Launch } from './pages/Launch';
 import { Fleet } from './pages/Fleet';
+import { Boots } from './pages/Boots';
 import { Capacity } from './pages/Capacity';
 import { PageNav } from './PageNav';
 
@@ -49,6 +50,7 @@ export function App() {
         <nav style={{ display: 'flex', gap: 16, flex: 1, marginLeft: 24 }}>
           <Link to="/launch">Launch</Link>
           <Link to="/fleet">GPU Fleet</Link>
+          <Link to="/boots">Boots</Link>
           <Link to="/capacity">Capacity</Link>
           <Link to="/">Users</Link>
           <Link to="/gallery">Gallery</Link>
@@ -69,6 +71,7 @@ export function App() {
             <Route path="/" element={<Users />} />
             <Route path="/launch" element={<Launch />} />
             <Route path="/fleet" element={<Fleet />} />
+            <Route path="/boots" element={<Boots />} />
             <Route path="/capacity" element={<Capacity />} />
             <Route path="/users/:id" element={<UserDetail />} />
             <Route path="/gallery" element={<Gallery />} />

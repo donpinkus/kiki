@@ -186,6 +186,37 @@ describe('AnimateSession', { timeout: 30_000 }, () => {
     await until(() => mock.received.some((m) => m['type'] === 'video_request'));
     const req = must(mock.received.find((m) => m['type'] === 'video_request'), 'video_request');
     expect(req['prompt']).toBe(DEFAULT_ANIMATION_PROMPT);
+    expect(req['enableAudio']).toBe(true); // default on
+  });
+
+  it('composes the sound prompt into the model prompt and forwards enableAudio', async () => {
+    const mock = await startMockVideoServer();
+    cleanups.push(mock.close);
+    const { session } = makeSession(mock.url);
+    cleanups.push(() => session.close());
+
+    session.requestAnimate(request('r-audio', {
+      prompt: 'waves roll in',
+      audioPrompt: 'seagulls cry over crashing surf',
+    }));
+    await until(() => mock.received.some((m) => m['type'] === 'video_request'));
+    const req = must(mock.received.find((m) => m['type'] === 'video_request'), 'video_request');
+    expect(req['prompt']).toBe('waves roll in. Sound: seagulls cry over crashing surf');
+    expect(req['enableAudio']).toBe(true);
+
+    // Audio off: sound clause dropped, flag forwarded (server muxes silent).
+    session.requestAnimate(request('r-silent', {
+      prompt: 'waves roll in',
+      audioPrompt: 'seagulls cry',
+      enableAudio: false,
+    }));
+    await until(() => mock.received.filter((m) => m['type'] === 'video_request').length === 2);
+    const silent = must(
+      mock.received.filter((m) => m['type'] === 'video_request').at(-1),
+      'silent request',
+    );
+    expect(silent['prompt']).toBe('waves roll in');
+    expect(silent['enableAudio']).toBe(false);
   });
 
   it('refuses a second request while one is in flight (busy)', async () => {

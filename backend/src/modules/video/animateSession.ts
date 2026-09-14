@@ -44,6 +44,11 @@ export interface AnimateRequestInput {
   requestId: string;
   prompt: string;
   keyframes: AnimateKeyframe[];
+  /** Separate sound description; composed into the model prompt (LTX's
+   * audio latent is driven by the same text prompt as the video). */
+  audioPrompt?: string;
+  /** false = the LTX server skips audio decode and muxes a silent MP4. */
+  enableAudio?: boolean;
   seed?: number;
   numFrames?: number;
   width?: number;
@@ -200,11 +205,23 @@ export class AnimateSession {
   private fire(input: AnimateRequestInput): void {
     const relay = this.relay;
     if (!relay) return;
-    const prompt = input.prompt.trim().length > 0 ? input.prompt : DEFAULT_ANIMATION_PROMPT;
+    const enableAudio = input.enableAudio !== false;
+    // Compose motion + sound into one model prompt: LTX's audio latent is
+    // driven by the same text as the video, so the Sound box rides along as
+    // a trailing "Sound: …" clause. Composition happens HERE (not on the
+    // client) so an empty motion prompt still gets the default-motion
+    // treatment before the sound clause is appended.
+    let prompt = input.prompt.trim().length > 0 ? input.prompt.trim() : DEFAULT_ANIMATION_PROMPT;
+    const audioPrompt = (input.audioPrompt ?? '').trim();
+    if (enableAudio && audioPrompt.length > 0) {
+      if (!/[.!?]$/.test(prompt)) prompt += '.';
+      prompt += ` Sound: ${audioPrompt}`;
+    }
     const payload: Record<string, unknown> = {
       type: 'video_request',
       requestId: input.requestId,
       prompt,
+      enableAudio,
       keyframes: input.keyframes.map((kf) => ({
         image_b64: kf.imageB64,
         position: kf.position,

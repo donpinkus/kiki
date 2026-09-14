@@ -22,6 +22,20 @@ logger = logging.getLogger(__name__)
 # bandwidth-bound; if it's near zero, we're done squeezing this lever.
 _PREFETCH_WORKERS = 8
 
+# Process-start marker for /health's boot decomposition (provision vs OS vs
+# our stack, computed by the backend pool's ready event).
+_STARTED_AT_EPOCH_S = int(time.time())
+
+
+def _booted_at_epoch_s() -> int | None:
+    """Kernel boot time (epoch seconds) from /proc/uptime — the boundary
+    between Lambda's VM provisioning and everything we control."""
+    try:
+        with open("/proc/uptime", "r") as f:
+            return int(time.time() - float(f.read().split()[0]))
+    except (OSError, ValueError, IndexError):
+        return None
+
 
 def _read_meminfo_avail_mb() -> int | None:
     """Return /proc/meminfo's MemAvailable in MB, or None if not Linux/readable.
@@ -65,6 +79,8 @@ class FluxKleinPipeline:
     def __init__(self):
         self.pipe = None
         self._ready = False
+        # 2-ref compile shape warmed (runs in background post-ready).
+        self._ref2_warmed = False
         self._dtype = getattr(torch, config.DTYPE)
         self._quantization = "bf16"  # overwritten to "nvfp4" if that path succeeds
         # Serialize pipeline calls — PyTorch is not thread-safe and
@@ -199,44 +215,25 @@ class FluxKleinPipeline:
                 self.pipe.transformer, mode="max-autotune-no-cudagraphs"
             )
 
-        # Warmup with a dummy txt2img generation
-        logger.info("Warming up...")
+        # Warmup — serving ONLY ever runs reference mode (server.py calls
+        # generate_reference exclusively), so warm exactly the shapes users
+        # hit. The old txt2img warmup compiled a shape family no request ever
+        # used (~25s/boot of pure waste, removed 2026-08-23). Compiled graphs
+        # are shape-specialized: without this warmup the FIRST USER FRAME
+        # would pay the ~25s compile.
+        logger.info("Warming up (1-ref serving shape)...")
         t_phase = time.time()
-        with self._lock:
-            _ = self.pipe(
-                prompt="warmup",
-                height=config.DEFAULT_HEIGHT,
-                width=config.DEFAULT_WIDTH,
-                num_inference_steps=config.STEPS,
-                generator=torch.Generator(device="cuda").manual_seed(0),
-                **({} if config.PIPELINE_VARIANT == "kv" else {"guidance_scale": 1.0}),
-            )
-        # Compiled graphs are shape-specialized: the txt2img warmup above does
-        # NOT cover reference-mode's longer sequence (gen+ref tokens). Without
-        # this second warmup the FIRST USER FRAME would pay the ~80s recompile.
-        if config.USE_COMPILE:
-            _ = self.generate_reference(
-                image=Image.new("RGB", (config.DEFAULT_WIDTH, config.DEFAULT_HEIGHT), "white"),
-                prompt="warmup",
-                steps=config.STEPS,
-                seed=0,
-            )
-            # Third warmup: the 2-reference shape (sketch + one pinned object
-            # from the library). Another distinct compile family — without
-            # this, the first frame after a user pins an object stalls ~80s.
-            if config.PIPELINE_VARIANT == "kv":
-                _ = self.generate_reference(
-                    image=Image.new("RGB", (config.DEFAULT_WIDTH, config.DEFAULT_HEIGHT), "white"),
-                    prompt="warmup",
-                    steps=config.STEPS,
-                    seed=0,
-                    extra_references=[Image.new("RGB", (config.DEFAULT_WIDTH, config.DEFAULT_HEIGHT), "white")],
-                )
-        self._phase_timings["warmup_inference_ms"] = int((time.time() - t_phase) * 1000)
-        warmup_s = self._phase_timings["warmup_inference_ms"] / 1000
+        _ = self.generate_reference(
+            image=Image.new("RGB", (config.DEFAULT_WIDTH, config.DEFAULT_HEIGHT), "white"),
+            prompt="warmup",
+            steps=config.STEPS,
+            seed=0,
+        )
+        self._phase_timings["warmup_ref1_ms"] = int((time.time() - t_phase) * 1000)
+        self._phase_timings["warmup_inference_ms"] = self._phase_timings["warmup_ref1_ms"]
         logger.info(
-            f"Warmup done ({warmup_s:.1f}s)",
-            extra={"warmup_s": round(warmup_s, 1)},
+            f"Warmup done ({self._phase_timings['warmup_ref1_ms'] / 1000:.1f}s)",
+            extra={"warmup_s": round(self._phase_timings["warmup_ref1_ms"] / 1000, 1)},
         )
 
         # Capture memory headroom after load completes — high prefetch worker
@@ -256,6 +253,36 @@ class FluxKleinPipeline:
                 "phases": self._phase_timings,
             },
         )
+
+        # 2-reference shape (sketch + one pinned object) is a distinct compile
+        # family. Warm it in the BACKGROUND after ready — this takes ~25s off
+        # every boot's critical path and is strictly no-worse for users: a
+        # first frame that lands during the background warmup queues on
+        # self._lock exactly as long as it would have waited for the old
+        # blocking warmup, and object-pinning is rare in the first minute.
+        if config.USE_COMPILE and config.PIPELINE_VARIANT == "kv":
+            threading.Thread(target=self._warm_ref2_background, name="ref2-warmup", daemon=True).start()
+
+    def _warm_ref2_background(self) -> None:
+        t0 = time.time()
+        try:
+            _ = self.generate_reference(
+                image=Image.new("RGB", (config.DEFAULT_WIDTH, config.DEFAULT_HEIGHT), "white"),
+                prompt="warmup",
+                steps=config.STEPS,
+                seed=0,
+                extra_references=[Image.new("RGB", (config.DEFAULT_WIDTH, config.DEFAULT_HEIGHT), "white")],
+            )
+            self._phase_timings["warmup_ref2_ms"] = int((time.time() - t0) * 1000)
+            self._ref2_warmed = True
+            logger.info(
+                f"Background 2-ref warmup done ({(time.time() - t0):.1f}s)",
+                extra={"warmup_ref2_ms": self._phase_timings["warmup_ref2_ms"]},
+            )
+        except Exception:  # noqa: BLE001
+            # Never let a warmup failure look like a serving failure — the
+            # first pinned-object frame will just pay the compile instead.
+            logger.exception("Background 2-ref warmup failed (first pinned-ref frame will compile)")
 
     def generate_reference(
         self,
@@ -472,6 +499,10 @@ class FluxKleinPipeline:
             vram_free = torch.cuda.mem_get_info()[0] / (1024**3)
 
         return {
+            # Boot decomposition clocks: the backend pool's ready event uses
+            # these to split provision (Lambda) / OS / our-stack time.
+            "booted_at_epoch_s": _booted_at_epoch_s(),
+            "started_at_epoch_s": _STARTED_AT_EPOCH_S,
             "model": config.MODEL_ID,
             "pipeline": config.PIPELINE_VARIANT,
             "dtype": config.DTYPE,
@@ -481,5 +512,6 @@ class FluxKleinPipeline:
             "gpu": gpu_name,
             "vram_free_gb": round(vram_free, 2),
             "phase_timings_ms": dict(self._phase_timings),
+            "ref2_warmed": self._ref2_warmed,
             "app_version": dict(self._app_version),
         }

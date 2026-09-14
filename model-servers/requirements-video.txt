@@ -1,27 +1,58 @@
-# Video (LTX-2.3) server requirements — self-contained list for the dedicated
+# Video (LTX-2.5) server requirements — self-contained list for the dedicated
 # Lambda video instance's venv (built by backend/scripts/lambda/setup-lambda-video.ts
 # on the kiki-video-<region> filesystem). The video venv is SEPARATE from the
 # image venv: different diffusion stack (ltx-pipelines vs diffusers), different
 # filesystem, dedicated GPU.
 #
-# Torch + torchvision are installed by the setup script (torch==2.9.1 cu128,
-# same pin as the image path so behavior is comparable), not listed here.
+# Torch + torchvision + torchaudio are installed by the setup script
+# (torch==2.9.1 cu128, same pin as the image path so behavior is comparable),
+# not listed here. ltx-core declares `torch~=2.7`, which 2.9.1 satisfies.
 
-# ─── LTX-2.3 via Lightricks' official packages ──────────────────────────────
+# ─── LTX-2.5 via Lightricks' official packages ──────────────────────────────
 # Lightricks doesn't publish to PyPI. Install from the LTX-2 monorepo, pinned
 # to a specific SHA so model loading doesn't break on upstream main churn.
 # Both packages must be present — ltx-pipelines depends on ltx-core.
-# License: LTX-2 Community License Agreement (NOT Apache-2.0). Verify before
+# Pin a95ab856 (2026-08-26) = first main snapshot with the LTX-2.5 split
+# checkpoint layout (ModelPaths.from_split), the Gemma 4 text encoder, the
+# ancestral stage-1 sampler, and the DFR pipeline. Bumping this pin past
+# an ltx-core minor is a model-servers change that needs a re-populate
+# (setup-lambda-video.ts) — the serving venv lives on the NFS filesystem.
+# License: LTX-2.x Community License Agreement (NOT Apache-2.0). Verify before
 # any commercial deployment.
-ltx-core @ git+https://github.com/Lightricks/LTX-2.git@41d924371612b692c0fd1e4d9d94c3dfb3c02cb3#subdirectory=packages/ltx-core
-ltx-pipelines @ git+https://github.com/Lightricks/LTX-2.git@41d924371612b692c0fd1e4d9d94c3dfb3c02cb3#subdirectory=packages/ltx-pipelines
+ltx-core @ git+https://github.com/Lightricks/LTX-2.git@a95ab856bf29407b6b066ede0abe1846050db56c#subdirectory=packages/ltx-core
+ltx-pipelines @ git+https://github.com/Lightricks/LTX-2.git@a95ab856bf29407b6b066ede0abe1846050db56c#subdirectory=packages/ltx-pipelines
 
-# transformers>=4.52 required by ltx-core (Gemma-3 text encoder).
-transformers>=4.52,<5
+# transformers 5.x required by ltx-core for the Gemma 4 unified text encoder
+# (CONFIG_MAPPING['gemma4_unified']). Upper bound mirrors ltx-core's own pin:
+# 5.15 broke Gemma4 config attribute access. 5.14.1 is the newest verified.
+transformers>=5.8.0,<5.15
+tokenizers>=0.21
 accelerate>=0.28.0,<2
 sentencepiece>=0.2.0
 safetensors>=0.4.0
 huggingface-hub>=0.25.0
+einops
+scipy>=1.14
+# ltx-pipelines runtime deps (media_io imports openimageio at module import;
+# manylinux cp312 wheels exist on PyPI).
+openimageio>=3.1
+cloudpickle>=3.1
+tqdm
+av
+
+# ─── Optional kernels (installed into the live venv 2026-09-12) ──────────────
+# FlashAttention 3 for Hopper: ltx-core auto-selects it when importable.
+# Measured ~3% on denoise — kept because it's free. Community wheel built for
+# torch 2.9.1 + cu128 (Lightricks' README: "install the FlashAttention 3
+# wheel" on Hopper, no pin given).
+--find-links https://windreamer.github.io/flash-attention3-wheels/cu128_torch291
+flash_attn_3
+# NATTEN neighborhood attention for the DiffVAE decoder's PLAIN decode path
+# (DFR's keyframe-anchored decode never uses it). Only matters when
+# LTX_VIDEO_VAE=diff + LTX_DFR_PLAIN_DECODE=1. The torch-2.9.0 build loads
+# fine on 2.9.1.
+--find-links https://whl.natten.org
+natten==0.21.1+torch290cu128
 
 # MP4 encoder uses imageio-ffmpeg (bundled static ffmpeg, ~30 MB).
 # ltx-pipelines exposes a PyAV-based encode_video() but its API expects a

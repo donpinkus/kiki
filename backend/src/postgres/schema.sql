@@ -122,8 +122,17 @@ CREATE INDEX IF NOT EXISTS fal_connections_user ON fal_connections (user_id, ope
 -- stage transition, powering the Insights Launch tab's H100 waterfall:
 --   launch_requested  → we asked Lambda for capacity (search begins)
 --   launched          → capacity granted; duration_ms = search time
---   ready             → instance passed OUR /health; duration_ms = boot/warm time
+--   ip_assigned       → Lambda's API first showed an IP; duration_ms = time
+--                       since capacity granted (provisioning progress marker)
+--   ready             → instance passed OUR /health; duration_ms = boot/warm
+--                       time; detail = JSON {provision_s, os_s, stack_s,
+--                       phases_ms} from the server's own /health clocks
 --   launch_failed     → search or boot gave up; detail = reason
+--   hedge_launched    → boot dragged past the hedge threshold with nothing
+--                       ready; one racing instance launched (duration = the
+--                       stuck boot's age)
+--   hedge_loser_terminate → the racing pair resolved; the still-booting
+--                       loser was terminated (detail = who won)
 --   instance_dead     → ready instance failed 3 health checks (terminated)
 --   idle_terminate    → scaled down after 30 min idle
 --   adopted           → existing instance re-registered after backend redeploy

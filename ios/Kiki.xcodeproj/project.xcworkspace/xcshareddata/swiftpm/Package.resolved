@@ -1,6 +1,15 @@
 {
-  "originHash" : "be37e9343e340f977d091f7d2abb91df61385674aeacbce860464492b40bb029",
+  "originHash" : "b8a47c448d268c850fb7d7aee5508b3200efa0e2a17527782dc648a6892bfe65",
   "pins" : [
+    {
+      "identity" : "gltfkit2",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/warrenm/GLTFKit2",
+      "state" : {
+        "revision" : "e69e354c4f31ea07b7816b8cbe2ddb28e897d073",
+        "version" : "0.5.15"
+      }
+    },
     {
       "identity" : "sentry-cocoa",
       "kind" : "remoteSourceControl",

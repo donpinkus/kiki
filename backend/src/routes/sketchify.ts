@@ -22,6 +22,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 import WebSocket from 'ws';
 import { testAccountsOnly } from '../modules/falBudget/index.js';
+import { falKleinEdit } from '../modules/fal/falEdit.js';
 import { touch as touchDevPool, wsUrl as devPoolWsUrl, ensure as ensureDevPool } from '../modules/lambda/devPool.js';
 import { config } from '../config/index.js';
 
@@ -38,6 +39,24 @@ const SKETCH_PROMPTS: Record<string, string> = {
 const SKETCH_SEED = 7;
 const SKETCH_STEPS = 4;
 const TIMEOUT_MS = 30_000;
+
+// fal FALLBACK prompts (klein 9B edit is instruction-following, so these are
+// phrased as conversion commands — NOT the reference-mode style prompts
+// above). Validated side-by-side against the lambda output on 2026-08-23:
+// `lines` matches; `lines_colors` needs the cel-shaded phrasing — softer
+// wordings left the subject half-uncolored. Product constants like the
+// lambda prompts: changing them changes the fallback's sketch look.
+const FAL_SKETCH_PROMPTS: Record<string, string> = {
+  lines:
+    'Convert this image into a simple clean black and white line art drawing ' +
+    'on white paper, uncolored coloring book outline style, no shading, no color. ' +
+    'Remove all color and shading, keep only clean outlines.',
+  lines_colors:
+    'Convert this image to flat cel-shaded cartoon style with bold clean black ' +
+    'outlines: keep every original color as a single flat fill per region, ' +
+    'remove all shading, gradients and texture. The whole image must remain fully colored.',
+};
+const FAL_SKETCH_STEPS = 8;
 
 function runSketchify(url: string, jpeg: Buffer, prompt: string): Promise<Buffer> {
   return new Promise((resolve, reject) => {
@@ -92,39 +111,61 @@ export const sketchifyRoute: FastifyPluginAsync = async (fastify) => {
     async (request, reply) => {
       const { imageBase64, mode } = request.body ?? {};
       const prompt = SKETCH_PROMPTS[mode ?? ''];
-      if (!imageBase64 || !prompt) {
+      const falPrompt = FAL_SKETCH_PROMPTS[mode ?? ''];
+      if (!imageBase64 || !prompt || !falPrompt) {
         return reply.code(400).send({ error: "imageBase64 and mode ('lines'|'lines_colors') required" });
       }
 
+      const jpeg = Buffer.from(imageBase64, 'base64');
       const url = config.LAMBDA_IMAGE_URL || devPoolWsUrl();
+
       if (!url) {
-        // Kick the pool so the instance starts booting if it wasn't already,
-        // and tell the client how long to expect.
+        // No H100 available (drought / still booting) — FALL BACK to fal's
+        // klein 9B edit endpoint instead of bouncing the user (2026-08-23;
+        // previously a 503). Still kick the pool so the H100 keeps coming
+        // for later calls — fal is the fallback, never the replacement.
         const state = ensureDevPool('sketchify');
-        request.log.info(
-          { userId: request.userId, poolStatus: state.status, etaSeconds: state.etaSeconds, event: 'sketchify_not_ready' },
-          'sketchify requested while lambda pool not ready',
-        );
-        return reply.code(503).send({
-          error: 'lambda_not_ready',
-          status: state.status,
-          etaSeconds: state.etaSeconds,
-        });
+        const t0 = Date.now();
+        try {
+          const result = await falKleinEdit({
+            prompt: falPrompt,
+            image: jpeg,
+            imageContentType: 'image/jpeg',
+            steps: FAL_SKETCH_STEPS,
+            seed: SKETCH_SEED,
+          });
+          request.log.info(
+            { userId: request.userId, mode, provider: 'fal', poolStatus: state.status, elapsedMs: Date.now() - t0, bytes: result.image.length, event: 'sketchify_ok' },
+            'sketchify_ok (fal fallback — lambda pool not ready)',
+          );
+          return { imageBase64: result.image.toString('base64') };
+        } catch (err) {
+          request.log.warn(
+            { userId: request.userId, mode, provider: 'fal', poolStatus: state.status, err: (err as Error).message, event: 'sketchify_failed' },
+            'sketchify_failed (fal fallback)',
+          );
+          // Both providers unavailable — keep the old contract so the iPad's
+          // existing "warming up, retry" handling still applies.
+          return reply.code(503).send({
+            error: 'lambda_not_ready',
+            status: state.status,
+            etaSeconds: state.etaSeconds,
+          });
+        }
       }
 
-      const jpeg = Buffer.from(imageBase64, 'base64');
       const t0 = Date.now();
       try {
         const sketch = await runSketchify(url, jpeg, prompt);
         touchDevPool('sketchify');
         request.log.info(
-          { userId: request.userId, mode, elapsedMs: Date.now() - t0, bytes: sketch.length, event: 'sketchify_ok' },
+          { userId: request.userId, mode, provider: 'lambda', elapsedMs: Date.now() - t0, bytes: sketch.length, event: 'sketchify_ok' },
           'sketchify_ok',
         );
         return { imageBase64: sketch.toString('base64') };
       } catch (err) {
         request.log.warn(
-          { userId: request.userId, mode, err: (err as Error).message, event: 'sketchify_failed' },
+          { userId: request.userId, mode, provider: 'lambda', err: (err as Error).message, event: 'sketchify_failed' },
           'sketchify_failed',
         );
         return reply.code(502).send({ error: 'sketchify_failed', message: (err as Error).message });

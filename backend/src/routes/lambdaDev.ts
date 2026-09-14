@@ -13,13 +13,15 @@
 
 import type { FastifyPluginAsync } from 'fastify';
 import { ensure, getState } from '../modules/lambda/devPool.js';
+import { poolEnabled as videoPoolEnabled, touch as touchVideoPool } from '../modules/lambda/videoPool.js';
 import { testAccountsOnly } from '../modules/falBudget/index.js';
 
 export const lambdaDevRoute: FastifyPluginAsync = async (fastify) => {
   fastify.post('/v1/dev/lambda/ensure', { preHandler: testAccountsOnly }, async (request) => {
-    // (App-open is deliberately NOT video-pool interest anymore — narrowed
-    // 2026-07-19 to actual animate intent; the Animate screen's socket-open
-    // prewarms the video pool instead.)
+    // App open warms BOTH pools (owner decision 2026-07-19, reversing the
+    // brief animate-intent-only narrowing): an instance should be ready as
+    // soon as possible once someone is using the app, video included.
+    if (videoPoolEnabled()) touchVideoPool('app_open');
     const state = ensure('app_open');
     request.log.info(
       { userId: request.userId, poolStatus: state.status, instanceId: state.instanceId, event: 'lambda_pool_ensure' },

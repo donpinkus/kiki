@@ -1,20 +1,41 @@
-"""LTX-2.3 image-to-video pipeline (DistilledPipeline, FP8, H100 SXM).
+"""LTX-2.5 image-to-video pipeline (ltx-pipelines Distilled / DFR, FP8-cast, H100 SXM).
 
-Replaces the prior LTXV 0.9.8 (2B distilled FP8) Diffusers pipeline. Uses
-Lightricks' official `ltx-pipelines.DistilledPipeline`:
+Upgraded 2026-09-10 from the LTX-2.3 monolith checkpoint + hand-rolled
+persistent-transformer path. Two things changed upstream that let this file
+get SIMPLER than its predecessor:
 
-- Stage 1: half-resolution video generation (8 sigmas)
-- Stage 2: 2x spatial upsample + refinement (4 sigmas)
+1. **Split checkpoints + bundled Gemma 4.** LTX-2.5 ships one safetensors per
+   component (`ModelPaths.from_split`), and the text encoder file embeds its
+   own config + tokenizer, so nothing here touches the HF hub at runtime.
+2. **Registry-backed residency.** ltx-pipelines blocks build a model per
+   call and dispose it afterwards, but with
+   ``ModelRegistry(cache_weights=True, cache_models=True)`` the loader keeps
+   every (quantized) state dict ON THE GPU and re-attaches it to a cached
+   model shell with ``load_state_dict(assign=True)`` — a zero-copy rebuild.
+   So the official ``pipeline(...)`` call runs at steady-state speed after
+   warmup, with ~48 GiB resident (FP8 transformer 22 GiB + Gemma 4 24 GiB +
+   VAEs/upscaler), and we no longer replicate ``DistilledPipeline.__call__``
+   to hold a transformer open. That also makes the DFR pipeline (generated
+   keyframe slots + IC-LoRA spatial detailing pass) a config switch instead
+   of a second port.
 
-Output (Iterator[Tensor], Audio). Frames-as-tensors get converted to PIL
-Images so video_server.py can stream them as JPEGs over the existing
-WebSocket protocol unchanged. When enabled, decoded audio is carried through
-to the final MP4 mux step.
+Pipelines (``LTX_PIPELINE``):
+- ``distilled`` — 8 sigmas stage 1 (ancestral Euler on 2.5 checkpoints) +
+  3 sigmas stage 2 after a 2x latent upsample. Fastest.
+- ``dfr`` — Diffusion Fidelity Rendering: same distilled transformer, stage 1
+  also generates keyframe slots, stage 2 re-denoises at full res with the
+  detailing IC-LoRA (strength 0.5, fused per call) + the half-res video as
+  IC reference. Production quality per Lightricks; slower, more VRAM.
 
-License note: LTX-2 weights are released under the LTX-2 Community License
-(https://github.com/Lightricks/LTX-2/blob/main/LICENSE), NOT Apache-2.0.
-The license restricts commercial use for entities with >=$10M annual
-revenue. Verify license terms before any commercial deployment.
+Output: ``result.video`` is an iterator of float ``[0,1]`` ``(F,H,W,3)``
+chunks (the VAE decoder runs lazily as it is consumed); we convert to PIL so
+video/server.py can stream JPEGs + mux the MP4 unchanged. ``result.audio``
+is an ``ltx_core.types.Audio`` (waveform + sampling_rate).
+
+License note: LTX-2.x weights are released under the LTX-2.x Community
+License (https://github.com/Lightricks/LTX-2/blob/main/LICENSE), NOT
+Apache-2.0. Free commercial use under $10M annual revenue; verify before any
+App Store rollout.
 """
 from __future__ import annotations
 
@@ -41,24 +62,52 @@ from shared.app_version import load_app_version
 
 logger = logging.getLogger(__name__)
 
+# Process-start marker for /health's boot decomposition (provision vs OS vs
+# our stack, computed by the backend pool's ready event). Module import runs
+# within seconds of exec, so this is "process start" to the precision the
+# waterfall needs.
+_STARTED_AT_EPOCH_S = int(time.time())
+
+# Parallel reads issued against the network volume during weight prefetch.
+# 8 saturates Lambda NFS (~1.3 GB/s measured on the image pod with the same
+# worker count, 2026-08-22); the un-prefetched load path reads the same bytes
+# at mmap speed (~250-460 MB/s observed) — this is a pure boot-time lever.
+_PREFETCH_WORKERS = 8
+
+
+def _booted_at_epoch_s() -> int | None:
+    """Kernel boot time (epoch seconds) from /proc/uptime — the boundary
+    between Lambda's VM provisioning and everything we control."""
+    try:
+        with open("/proc/uptime", "r") as f:
+            return int(time.time() - float(f.read().split()[0]))
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _read_to_devnull(path: str) -> None:
+    """Stream a file through the kernel read path so its pages land in the OS
+    page cache (same pattern as image/pipeline.py's prefetch). 1 MB chunks;
+    unbuffered open avoids double-copying through Python's io buffer."""
+    chunk = 1 << 20
+    try:
+        with open(path, "rb", buffering=0) as f:
+            while f.read(chunk):
+                pass
+    except OSError as e:
+        # Never fail the boot on a prefetch error — the loaders fall back to
+        # their own (slower) reads.
+        logger.warning(f"Prefetch read failed for {path}: {e}", extra={"path": path})
+
 
 def _resolve_hf_cache_path(repo_id: str, filename: str) -> str:
     """Resolve the local path of a single-file HF asset that was pre-cached
     via `hf_hub_download` at populate time. Pod runs offline (HF_HUB_OFFLINE=1)
     so we cannot use `hf_hub_download` again — we read directly from the
-    cache layout written by the populate script.
-    """
+    cache with `local_files_only=True`. `filename` may carry a subdirectory
+    (LTX-2.5's split layout: `vae/…`, `diffusion_models/…`)."""
     from huggingface_hub import hf_hub_download
     return hf_hub_download(repo_id=repo_id, filename=filename, local_files_only=True)
-
-
-def _resolve_hf_snapshot_path(repo_id: str) -> str:
-    """Resolve the local path of a multi-file HF snapshot (e.g., Gemma) that
-    was pre-cached via `snapshot_download` at populate time. Returns the
-    snapshot directory path that DistilledPipeline expects as `gemma_root`.
-    """
-    from huggingface_hub import snapshot_download
-    return snapshot_download(repo_id=repo_id, local_files_only=True)
 
 
 CancelState = Literal["ok", "before_start", "during_inference", "after_complete"]
@@ -94,8 +143,9 @@ class GenerateResult:
     """Outcome of a single ``generate()`` call.
 
     Carries enough to differentiate ``before_start`` (cheap), ``after_complete``
-    (today's dominant wasted-GPU pattern, ~pipe_total_ms wasted per cancel),
-    and ``during_inference`` (added in Step 5 with the forked denoising loop).
+    (the wasted-GPU pattern, ~pipe_total_ms wasted per cancel), and
+    ``during_inference`` (reserved; the official pipelines expose no
+    mid-denoise callback).
     """
 
     frames: list[Image.Image] | None
@@ -116,10 +166,9 @@ def _decoded_audio_to_pcm_s16le(decoded_audio: object, sample_rate: int) -> Gene
         decoded_audio = decoded_audio[0]
     # `pipe.audio_decoder(latent)` returns an `ltx_core.types.Audio` frozen
     # dataclass with `.waveform: torch.Tensor` and `.sampling_rate: int`.
-    # Older ltx-core builds returned a raw tensor; duck-type for `.waveform`
-    # so we work with either shape. The Audio's own sampling_rate is the
-    # vocoder's authoritative output rate — prefer it over the caller's
-    # AUDIO_SAMPLE_RATE constant when present.
+    # Duck-type for `.waveform` so a raw tensor works too. The Audio's own
+    # sampling_rate is the vocoder's authoritative output rate — prefer it
+    # over the caller's default when present.
     waveform_attr = getattr(decoded_audio, "waveform", None)
     if isinstance(waveform_attr, torch.Tensor):
         rate_attr = getattr(decoded_audio, "sampling_rate", None)
@@ -166,18 +215,18 @@ def _decoded_audio_to_pcm_s16le(decoded_audio: object, sample_rate: int) -> Gene
 
 
 class CancelledError(Exception):
-    """Raised when the backend cancels mid-pipeline. NOTE: DistilledPipeline
-    does NOT expose mid-inference cancellation hooks (no step callback like
-    Diffusers had). Cancellation is checked at start-of-generate only; if
-    cancellation arrives during inference, the GPU keeps running to
-    completion and the result is discarded by the caller. Acceptable cost
-    (~10-30s wasted GPU time per cancelled generation) versus rewriting
-    DistilledPipeline internals.
+    """Raised when the backend cancels mid-pipeline. NOTE: the official
+    pipelines expose no mid-inference cancellation hook (no step callback).
+    Cancellation is checked at start-of-generate only; if cancellation
+    arrives during inference, the GPU keeps running to completion and the
+    result is discarded by the caller. Acceptable cost (~10-40s wasted GPU
+    time per cancelled generation) versus forking the denoising loops.
     """
 
 
-class Ltx23VideoPipeline:
-    """Wraps `ltx_pipelines.DistilledPipeline` for the idle-state animation flow.
+class Ltx25VideoPipeline:
+    """Wraps ``ltx_pipelines.DistilledPipeline`` / ``DFRPipeline`` for the
+    Animate screen.
 
     Single-instance, single-GPU. Calls are serialized through `_lock` so the
     WebSocket layer can fire-and-forget without worrying about overlap.
@@ -185,7 +234,7 @@ class Ltx23VideoPipeline:
 
     def __init__(self) -> None:
         self.pipe = None
-        self._tiling_config = None
+        self._registry = None
         self._ready = False
         self._lock = threading.Lock()
         self._load_ms: int = 0
@@ -195,56 +244,14 @@ class Ltx23VideoPipeline:
         # both pod kinds.
         self._phase_timings: dict[str, int] = {}
         # Per-inference phase timings (CUDA-synced ms). Reset at the start of
-        # _run_inference; each phase wrapper appends. Logged at end of run so
-        # we can attribute the 15s steady-state latency to specific stages
-        # before optimizing blind. Lists because some phases (image_conditioner,
-        # transformer stage) are called twice per inference.
+        # _run_inference; each phase wrapper appends.
         self._inference_timings: dict[str, list[int]] = defaultdict(list)
-        # Persistent transformer (Step 2 of the perf plan). Built once at end
-        # of load(), reused across all requests, freed only on graceful
-        # shutdown via shutdown_persistent_models(). Eliminates the ~63s
-        # per-request stage_build cost. None until built; if build fails,
-        # _ready stays False and orchestrator's reaper rerolls the pod —
-        # we explicitly do NOT fall back to per-request rebuild because that
-        # would silently mask the failure and reintroduce 60s+ latency.
-        self._transformer_ctx: object | None = None
-        self._transformer: object | None = None
-        self._persistent_transformer_ready: bool = False
-        self._persistent_transformer_build_ms: int = 0
-        self._vram_after_transformer_gb: float = 0.0
-        # Step P2 (perf plan, post-first-trace) — torch.compile experiment.
-        # When LTX_TORCH_COMPILE=1, wrap self._transformer in
-        # torch.compile(mode="reduce-overhead") AFTER the persistent
-        # transformer is built. The actual lowering + CUDA-graph capture
-        # happens lazily on first call (the warmup inference triggers it).
-        # Pre-trace estimate: 30-50% pipe_total reduction from cutting
-        # ~224k kernel launches (mean 7.7us each) into batched graph
-        # replays. Reviewer flagged this as unproven; this is the
-        # measurement experiment.
-        self._compiled_transformer: bool = False
-        self._compile_ms: int = 0
-        # Persistent Gemma + embeddings_processor (Step 3 of the perf plan).
-        # Built together at warmup as one unit. Same fail-fast +
-        # idempotent-shutdown pattern as Step 2. Gated by
-        # LTX_PERSIST_GEMMA env var (default "1") so we have a fast
-        # rollback path if a host shows unexpected allocator behavior at
-        # ~46 GiB resident. The two are persisted together because
-        # upstream's PromptEncoder.__call__ runs them as one unit, and the
-        # 1.5s embeddings_processor build cost is also per-request load.
-        self._text_encoder_ctx: object | None = None
-        self._text_encoder: object | None = None
-        self._embeddings_processor_ctx: object | None = None
-        self._embeddings_processor: object | None = None
-        self._persistent_gemma_ready: bool = False
-        self._persistent_gemma_build_ms: int = 0
-        self._persistent_embeddings_processor_build_ms: int = 0
-        self._vram_after_gemma_gb: float = 0.0
-        self._vram_after_embeddings_processor_gb: float = 0.0
-        # Per-request resident-vs-peak VRAM accounting. Without this, after
-        # persistence lands, peak_alloc includes the resident transformer
-        # baseline so per-request leaks become invisible. Captured at the
-        # top of each _run_inference call.
+        # Resident VRAM after warmup = everything the registry keeps on the
+        # GPU (the steady-state baseline every request builds on top of).
+        self._resident_vram_gb: float = 0.0
         self._resident_alloc_gb_at_request_start: float = 0.0
+        self._pipeline_name = config.LTX_PIPELINE
+        self._resolved_paths: dict[str, str] = {}
         self._app_version = load_app_version()
 
     @property
@@ -257,15 +264,9 @@ class Ltx23VideoPipeline:
 
         ``torch.cuda.synchronize()`` before AND after is required because
         PyTorch dispatches kernels asynchronously — without sync, the timer
-        captures kernel-launch time rather than completion time, and prior
-        phases' GPU work bleeds into the next phase's measured time. Appends
-        to a list so callers can run the same phase twice (e.g. stage 1 vs
-        stage 2 image conditioning) and see both samples.
-
-        Also emits a ``torch.profiler.record_function(name)`` annotation so
-        per-phase ranges are visible in Perfetto when the profiler is
-        active. ``record_function`` is a no-op when no profiler is running,
-        so this costs nothing on the hot path.
+        captures kernel-launch time rather than completion time. Also emits a
+        ``torch.profiler.record_function(name)`` annotation (no-op without an
+        active profiler).
         """
         if torch.cuda.is_available():
             torch.cuda.synchronize()
@@ -278,279 +279,267 @@ class Ltx23VideoPipeline:
                 torch.cuda.synchronize()
             self._inference_timings[name].append(int((time.perf_counter() - t0) * 1000))
 
+    def _spawn_weight_prefetch(self, files: list[str]) -> threading.Thread | None:
+        """Warm the OS page cache for the given weight files with
+        _PREFETCH_WORKERS parallel readers. Records prefetch_total_ms /
+        prefetch_bytes_mb into phase timings. Returns the joinable
+        coordinator thread, or None if nothing to read."""
+        sized = []
+        for p in files:
+            try:
+                real = os.path.realpath(p)
+                if os.path.isfile(real):
+                    sized.append((os.path.getsize(real), real))
+            except OSError:
+                continue
+        if not sized:
+            logger.warning("Weight prefetch found no readable files; skipping")
+            return None
+        # Largest first so the big transformer starts streaming immediately.
+        sized.sort(reverse=True)
+        total_bytes = sum(s for s, _ in sized)
+        self._phase_timings["prefetch_workers"] = _PREFETCH_WORKERS
+        self._phase_timings["prefetch_bytes_mb"] = total_bytes >> 20
+        logger.info(
+            f"Prefetching {len(sized)} files ({total_bytes / (1 << 30):.1f} GB) "
+            f"into page cache ({_PREFETCH_WORKERS} workers)...",
+            extra={"prefetch_files": len(sized), "prefetch_bytes_mb": total_bytes >> 20},
+        )
+        phase_timings = self._phase_timings
+
+        def worker() -> None:
+            from concurrent.futures import ThreadPoolExecutor
+
+            t0 = time.time()
+            with ThreadPoolExecutor(max_workers=_PREFETCH_WORKERS) as pool:
+                list(pool.map(_read_to_devnull, [p for _, p in sized]))
+            elapsed_ms = int((time.time() - t0) * 1000)
+            phase_timings["prefetch_total_ms"] = elapsed_ms
+            logger.info(
+                f"Prefetch complete in {elapsed_ms / 1000:.1f}s",
+                extra={"prefetch_total_ms": elapsed_ms},
+            )
+
+        thread = threading.Thread(target=worker, name="weight-prefetch", daemon=True)
+        thread.start()
+        return thread
+
     def load(self) -> None:
         logger.info(
-            f"Loading {config.LTX_MODEL_FAMILY}: "
-            f"model={config.LTX_MODEL_REPO}/{config.LTX_MODEL_FILE} "
-            f"gemma={config.LTX_TEXT_ENCODER_REPO} "
-            f"upscaler={config.LTX_SPATIAL_UPSCALER_REPO}/{config.LTX_SPATIAL_UPSCALER_FILE} "
+            f"Loading {config.LTX_MODEL_FAMILY} ({self._pipeline_name}): "
+            f"transformer={config.LTX_MODEL_REPO}/{config.LTX_MODEL_FILE} "
+            f"text_encoder={config.LTX_TEXT_ENCODER_FILE} "
+            f"video_vae={config.LTX_VIDEO_VAE_FILE} "
             f"quantization={config.LTX_QUANTIZATION}",
             extra={
                 "model_family": config.LTX_MODEL_FAMILY,
+                "pipeline": self._pipeline_name,
                 "model_repo": config.LTX_MODEL_REPO,
                 "model_file": config.LTX_MODEL_FILE,
-                "gemma_repo": config.LTX_TEXT_ENCODER_REPO,
-                "upscaler_repo": config.LTX_SPATIAL_UPSCALER_REPO,
-                "upscaler_file": config.LTX_SPATIAL_UPSCALER_FILE,
+                "text_encoder_file": config.LTX_TEXT_ENCODER_FILE,
+                "video_vae_file": config.LTX_VIDEO_VAE_FILE,
                 "quantization": config.LTX_QUANTIZATION,
             },
         )
         t0 = time.time()
 
-        # Imports gated to load() so that startup failures (missing weights,
-        # ImportError on ltx_core/ltx_pipelines) surface in the loader log
-        # rather than at module import time. These read the ltx_*/torch
-        # packages off the network-volume venv, so on a cold volume this block
-        # can block on NFS for minutes (observed ~167 s on pod cynw8gxpytk7d0,
-        # 2026-06-07, with flat host RSS — i.e. blocked on I/O, not computing).
-        # Timed + logged so a recurrence pinpoints imports-vs-path-resolve
-        # instead of leaving the silent gap to inference.
-        t_imports = time.time()
-        from ltx_core.model.video_vae import TilingConfig
-        from ltx_core.quantization import QuantizationPolicy
-        from ltx_pipelines.distilled import DistilledPipeline
-        from ltx_pipelines.utils.types import OffloadMode
-        imports_ms = int((time.time() - t_imports) * 1000)
-        self._phase_timings["imports_ms"] = imports_ms
-        logger.info(
-            f"LTX-2.3 gated imports loaded in {imports_ms / 1000:.1f}s",
-            extra={"imports_ms": imports_ms},
-        )
-
-        # Resolve pre-populated paths from the offline HF cache. Pod is
+        # Resolve pre-populated paths from the offline HF cache FIRST (needs
+        # only huggingface_hub, not the slow ltx imports) so the weight
+        # prefetch below can overlap everything that follows. Pod is
         # HF_HUB_OFFLINE=1; populate script ran these as online downloads.
         t_phase = time.time()
-        checkpoint_path = _resolve_hf_cache_path(config.LTX_MODEL_REPO, config.LTX_MODEL_FILE)
-        upscaler_path = _resolve_hf_cache_path(
-            config.LTX_SPATIAL_UPSCALER_REPO, config.LTX_SPATIAL_UPSCALER_FILE
-        )
-        gemma_root = _resolve_hf_snapshot_path(config.LTX_TEXT_ENCODER_REPO)
+        paths = {
+            "transformer": _resolve_hf_cache_path(config.LTX_MODEL_REPO, config.LTX_MODEL_FILE),
+            "text_encoder": _resolve_hf_cache_path(config.LTX_MODEL_REPO, config.LTX_TEXT_ENCODER_FILE),
+            "video_vae": _resolve_hf_cache_path(config.LTX_MODEL_REPO, config.LTX_VIDEO_VAE_FILE),
+            "audio_vae": _resolve_hf_cache_path(config.LTX_MODEL_REPO, config.LTX_AUDIO_VAE_FILE),
+            "spatial_upscaler": _resolve_hf_cache_path(
+                config.LTX_SPATIAL_UPSCALER_REPO, config.LTX_SPATIAL_UPSCALER_FILE
+            ),
+        }
+        if self._pipeline_name == "dfr":
+            paths["detailing_lora"] = _resolve_hf_cache_path(
+                config.LTX_DETAILING_LORA_REPO, config.LTX_DETAILING_LORA_FILE
+            )
+        self._resolved_paths = paths
         resolve_paths_ms = int((time.time() - t_phase) * 1000)
         self._phase_timings["resolve_paths_ms"] = resolve_paths_ms
         logger.info(
             f"Resolved offline paths in {resolve_paths_ms / 1000:.1f}s: "
-            f"checkpoint={checkpoint_path} "
-            f"upscaler={upscaler_path} gemma={gemma_root}",
+            + " ".join(f"{k}={v}" for k, v in paths.items()),
+            extra={"resolve_paths_ms": resolve_paths_ms, **{f"path_{k}": v for k, v in paths.items()}},
+        )
+
+        # Page-cache prefetch of ALL weights (~66 GB: 39 GB BF16 transformer +
+        # 24 GB Gemma 4 + VAEs/upscaler/LoRA) with parallel readers,
+        # overlapping the ltx imports below. Without it the builds read the
+        # same bytes single-file at mmap speed.
+        prefetch_thread = self._spawn_weight_prefetch(list(paths.values()))
+
+        # Imports gated to load() so that startup failures (missing weights,
+        # ImportError on ltx_core/ltx_pipelines) surface in the loader log
+        # rather than at module import time. These read the ltx_*/torch
+        # packages off the network-volume venv, so on a cold volume this block
+        # can block on NFS for minutes.
+        t_imports = time.time()
+        from ltx_core.allocator_trim_strategy import AllocatorTrimStrategy
+        from ltx_core.loader import LTXV_LORA_COMFY_RENAMING_MAP, LoraPathStrengthAndSDOps
+        from ltx_core.loader.registry import ModelRegistry
+        from ltx_core.model.transformer.compiling import CompilationConfig
+        from ltx_core.model.video_vae.transformer import DiffVAEMode
+        from ltx_core.quantization.fp8_cast import build_policy as build_fp8_cast_policy
+        from ltx_pipelines.utils.model_paths import ModelPaths
+        from ltx_pipelines.utils.types import OffloadMode
+        if self._pipeline_name == "dfr":
+            from ltx_pipelines.dfr_pipeline import DFRPipeline as PipelineCls
+        else:
+            from ltx_pipelines.distilled import DistilledPipeline as PipelineCls
+        imports_ms = int((time.time() - t_imports) * 1000)
+        self._phase_timings["imports_ms"] = imports_ms
+        logger.info(
+            f"{config.LTX_MODEL_FAMILY} gated imports loaded in {imports_ms / 1000:.1f}s",
+            extra={"imports_ms": imports_ms},
+        )
+
+        # Join the prefetch before the builds so they hit page cache instead
+        # of racing it for NFS bandwidth. Large wait here = prefetch is the
+        # bandwidth-bound critical path; near-zero = imports covered it.
+        if prefetch_thread is not None:
+            t_wait = time.time()
+            prefetch_thread.join()
+            self._phase_timings["prefetch_wait_ms"] = int((time.time() - t_wait) * 1000)
+
+        # FP8 modes:
+        #   cast       — Lightricks' universal-no-deps default. Stores Linear
+        #                weights in FP8; upcasts to BF16 per matmul. The only
+        #                mode usable with the BF16 checkpoint 2.5 ships.
+        #   scaled_mm  — native FP8 matmul, but it expects an FP8 checkpoint
+        #                with per-tensor scales (none published for 2.5), so
+        #                requesting it here falls back to cast with a warning.
+        fp8_mode = os.getenv("LTX_FP8_MODE", "cast").lower()
+        if fp8_mode == "scaled_mm":
+            logger.warning(
+                "LTX_FP8_MODE=scaled_mm requested but LTX-2.5 ships no FP8 checkpoint — using fp8_cast"
+            )
+        quantization = build_fp8_cast_policy(paths["transformer"])
+        offload_mode = OffloadMode(os.getenv("LTX_OFFLOAD_MODE", "none").lower())
+        if offload_mode != OffloadMode.NONE:
+            # Block streaming would defeat the registry residency below; the
+            # H100 fits everything resident, so this is a debugging knob only.
+            logger.warning(
+                f"LTX_OFFLOAD_MODE={offload_mode.value}: weights streamed per call (slow); "
+                f"registry residency disabled"
+            )
+        try:
+            diffvae_mode = DiffVAEMode(config.LTX_DIFFVAE_MODE)
+        except ValueError:
+            logger.warning(
+                f"Unknown LTX_DIFFVAE_MODE={config.LTX_DIFFVAE_MODE!r}; using chunked_eager"
+            )
+            diffvae_mode = DiffVAEMode.CHUNKED_EAGER
+
+        # The registry is what makes serving fast: it retains every loaded
+        # (quantized) state dict on the GPU and the structural model shells,
+        # so each block's per-call "build" becomes assign-only and "dispose"
+        # only metas the shell's params (the cached tensors stay). DEFER skips
+        # the sync + empty_cache trim between blocks — no reason to return
+        # cached allocator blocks to the driver between requests on a
+        # dedicated card.
+        self._registry = ModelRegistry(
+            cache_weights=offload_mode == OffloadMode.NONE, cache_models=True
+        )
+        model_paths = ModelPaths.from_split(
+            transformer_path=paths["transformer"],
+            text_encoder_path=paths["text_encoder"],
+            video_vae_path=paths["video_vae"],
+            audio_vae_path=paths["audio_vae"],
+            # No duration head: every request carries an explicit frame count.
+            duration_head_path=None,
+        )
+        logger.info(
+            f"LTX quantization=fp8_cast offload_mode={offload_mode.value} "
+            f"diffvae={diffvae_mode.value} pipeline={self._pipeline_name}",
             extra={
-                "resolve_paths_ms": resolve_paths_ms,
-                "checkpoint_path": str(checkpoint_path),
-                "upscaler_path": str(upscaler_path),
-                "gemma_root": str(gemma_root),
+                "quantization": "fp8_cast",
+                "offload_mode": offload_mode.value,
+                "diffvae_mode": diffvae_mode.value,
+                "pipeline": self._pipeline_name,
             },
         )
 
-        # Quantization + offload mode are env-controlled so we can flip without
-        # redeploying. ltx-pipelines rejects quantization combined with layer
-        # streaming, so when LTX_OFFLOAD_MODE != "none" we drop quantization.
-        #
-        # FP8 modes:
-        #   cast       — Lightricks' universal-no-deps default. Stores Linear
-        #                weights in FP8; upcasts to BF16 per matmul. Works on
-        #                any CUDA GPU. Default.
-        #   scaled_mm  — native FP8 matmul via TensorRT-LLM. Hopper-only,
-        #                ~10-30% faster on H100. Currently blocked on upstream
-        #                issue #181 (shape mismatch); flip when fixed.
-        offload_mode_name = os.getenv("LTX_OFFLOAD_MODE", "none").lower()
-        offload_mode = OffloadMode(offload_mode_name)
-        if offload_mode == OffloadMode.NONE:
-            fp8_mode = os.getenv("LTX_FP8_MODE", "cast").lower()
-            quantization = (
-                QuantizationPolicy.fp8_scaled_mm()
-                if fp8_mode == "scaled_mm"
-                else QuantizationPolicy.fp8_cast()
-            )
-            logger.info(
-                f"LTX quantization=fp8_{fp8_mode} offload_mode=none",
-                extra={"quantization": f"fp8_{fp8_mode}", "offload_mode": "none"},
-            )
-        else:
-            quantization = None
-            logger.info(
-                f"LTX quantization=disabled offload_mode={offload_mode_name}",
-                extra={"quantization": "disabled", "offload_mode": offload_mode_name},
-            )
+        # torch.compile on the transformer blocks (inductor, no CUDA graphs —
+        # the cudagraph modes need block streaming on a single GPU). One
+        # shape-polymorphic artifact serves every token count, so the compile
+        # is paid once at warmup. Speed-up measured 2026-09-11 (see
+        # decisions.md); LTX_TORCH_COMPILE=0 falls back to eager.
+        compilation_config = CompilationConfig() if config.LTX_TORCH_COMPILE else None
+        # Attention backend: ltx-core's AUTOMATIC picks FlashAttention 3 on
+        # Hopper when the `flash_attn_3` wheel is importable, else torch SDPA.
+        try:
+            import flash_attn_interface  # noqa: F401
+            self._attention_backend = "flash_attn_3"
+        except Exception:  # noqa: BLE001
+            self._attention_backend = "sdpa"
+        logger.info(
+            f"LTX attention={self._attention_backend} torch_compile={bool(compilation_config)}",
+            extra={"attention": self._attention_backend, "torch_compile": bool(compilation_config)},
+        )
 
         t_phase = time.time()
-        self.pipe = DistilledPipeline(
-            distilled_checkpoint_path=checkpoint_path,
-            gemma_root=gemma_root,
-            spatial_upsampler_path=upscaler_path,
+        common = dict(
+            model_paths=model_paths,
+            spatial_upsampler_path=paths["spatial_upscaler"],
             loras=[],
             quantization=quantization,
+            registry=self._registry,
+            compilation_config=compilation_config,
             offload_mode=offload_mode,
+            alloc_trim_strategy=AllocatorTrimStrategy.DEFER,
+            diffvae_optimization=diffvae_mode,
         )
+        if self._pipeline_name == "dfr":
+            # Strength is overridden to 0.5 inside DFRPipeline (hardcoded
+            # upstream); the value here is ignored but must be present.
+            detailing = [
+                LoraPathStrengthAndSDOps(paths["detailing_lora"], 1.0, LTXV_LORA_COMFY_RENAMING_MAP)
+            ]
+            self.pipe = PipelineCls(detailing_lora=detailing, temporal_upsampler_path=None, **common)
+        else:
+            self.pipe = PipelineCls(**common)
+
+        if self._pipeline_name == "dfr" and config.LTX_DFR_PLAIN_DECODE:
+            # Experiment knob: DFR normally keyframe-anchors the final decode
+            # (`decode_video(keyframes=)`), which runs the DiffVAE eager and
+            # uncompiled whatever LTX_DIFFVAE_MODE says. Dropping the
+            # keyframes turns it into the plain (compilable, natten-capable)
+            # decode at the cost of the anchoring.
+            self.pipe.video_decoder = _PlainDecodeProxy(self.pipe.video_decoder)
+            logger.info("LTX_DFR_PLAIN_DECODE=1 — DFR final decode runs WITHOUT keyframe anchoring")
 
         if config.LTX_ENABLE_AUDIO:
             logger.info("LTX audio enabled — decoded audio will be muxed into completed MP4s")
         else:
-            # Fast rollback path: keep serving silent MP4s and avoid spinning
-            # up the audio decoder if anything falls back to upstream __call__.
-            self.pipe.audio_decoder = lambda *_args, **_kwargs: None  # type: ignore[assignment]
             logger.info("LTX_ENABLE_AUDIO=0 — video MP4s will be silent")
 
-        self._tiling_config = TilingConfig.default()
         self._phase_timings["pipeline_init_ms"] = int((time.time() - t_phase) * 1000)
-        loaded_s = time.time() - t_phase
         logger.info(
-            f"LTX-2.3 pipeline loaded in {loaded_s:.1f}s",
-            extra={"loaded_s": round(loaded_s, 1)},
+            f"{config.LTX_MODEL_FAMILY} pipeline object built in {time.time() - t_phase:.1f}s "
+            f"(weights load lazily on the warmup call)",
         )
 
-        # Step 2 — Build persistent transformer BEFORE warmup so that warmup
-        # validates the persistent path, not the legacy per-request build path.
-        # Otherwise warmup metrics would still reflect the old behavior and
-        # be misleading. Fail-fast: if the build raises, _ready stays False
-        # and the orchestrator's /health-based reaper rerolls the pod. Do
-        # NOT silently fall back to per-request rebuild — that would hide
-        # the failure and reintroduce 60s+ latency per request.
-        logger.info("LTX-2.3 building persistent transformer (Step 2)...")
-        t_persist = time.time()
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-        self._transformer_ctx = self.pipe.stage.model_context()
-        self._transformer = self._transformer_ctx.__enter__()
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-        self._persistent_transformer_build_ms = int((time.time() - t_persist) * 1000)
-        if torch.cuda.is_available():
-            self._vram_after_transformer_gb = torch.cuda.memory_allocated() / (1024**3)
-        self._persistent_transformer_ready = True
+        # Warmup — the first call reads every weight file into the registry
+        # (the ~66 GB the prefetch just paged in), builds the model shells,
+        # and pays the lazy CUDA kernel / Triton compiles. After it, every
+        # request runs the steady-state path, so the user-visible first video
+        # latency is clean.
+        # Warm every duration preset the iPad sends (LTX_WARMUP_FRAMES), so
+        # per-shape Triton autotune / inductor guards are paid at boot, not
+        # on a user's first 2 s or 4 s clip. Largest first: it also loads
+        # the weights into the registry.
+        warm_frames = config.LTX_WARMUP_FRAMES
         logger.info(
-            f"LTX-2.3 persistent transformer ready "
-            f"({self._persistent_transformer_build_ms}ms, "
-            f"vram_after={self._vram_after_transformer_gb:.2f} GiB)",
-            extra={
-                "build_ms": self._persistent_transformer_build_ms,
-                "vram_after_gb": round(self._vram_after_transformer_gb, 2),
-            },
+            f"{config.LTX_MODEL_FAMILY} warmup ({config.LTX_WIDTH}x{config.LTX_HEIGHT} x frames={warm_frames})..."
         )
-
-        # Step P2 — experimental torch.compile pass over the persistent
-        # transformer. Off by default (LTX_TORCH_COMPILE unset). When on,
-        # wrap with mode="reduce-overhead" which uses CUDA graphs to batch
-        # kernel launches — the launch-overhead win the first-trace data
-        # predicted. Lowering is lazy: the real compile happens on the
-        # first transformer(...) call inside warmup, so warmup's
-        # `warmup_inference_ms` will absorb it.
-        #
-        # Reviewer guidance built in:
-        #  - Compile only the transformer denoise path (this), not the
-        #    whole pipeline.
-        #  - dynamic=False — fixed shapes only. iPad sending a different
-        #    (W,H,F) than warmup will trigger a recompile on first use,
-        #    which we accept as part of the experiment. Pre-shipping we
-        #    would whitelist a small preset set; for now the env-flag is
-        #    the gate.
-        #  - Failure falls back to eager: leave the un-compiled transformer
-        #    in self._transformer if compile raises. Surfaces in
-        #    /health.compiled_transformer=False so we know.
-        if os.getenv("LTX_TORCH_COMPILE", "0") == "1":
-            logger.info(
-                "LTX-2.3 torch.compile transformer (mode=reduce-overhead, "
-                "lowering deferred to first call)...",
-                extra={"compile_mode": "reduce-overhead"},
-            )
-            t_compile_call = time.time()
-            try:
-                self._transformer = torch.compile(
-                    self._transformer,
-                    mode="reduce-overhead",
-                    fullgraph=False,
-                    dynamic=False,
-                )
-                self._compiled_transformer = True
-                self._compile_ms = int((time.time() - t_compile_call) * 1000)
-                logger.info(
-                    f"LTX-2.3 torch.compile wrap call returned in {self._compile_ms}ms "
-                    f"(actual lowering happens at warmup)",
-                    extra={"compile_ms": self._compile_ms},
-                )
-            except Exception as e:  # noqa: BLE001
-                logger.error(
-                    f"torch.compile wrap failed, falling back to eager "
-                    f"transformer: {e}",
-                    exc_info=True,
-                )
-                # self._transformer remains the eager nn.Module.
-                self._compiled_transformer = False
-
-        # Step 3 — Build persistent Gemma + embeddings_processor as one unit,
-        # also BEFORE warmup. Same fail-fast + idempotent-shutdown pattern
-        # as Step 2. Gated by LTX_PERSIST_GEMMA so we have an env-flag
-        # rollback path if a host shows unexpected allocator behavior at
-        # ~46 GiB resident.
-        #
-        # Reuses upstream's _underscore-prefixed builders (`_text_encoder_ctx`
-        # and `_embeddings_processor_builder`). Not strictly public API; if
-        # Lightricks changes the signatures the failure surface is exactly
-        # this block plus the prompt-encoding section in `_run_inference`.
-        if os.getenv("LTX_PERSIST_GEMMA", "1") == "1":
-            from ltx_pipelines.utils.gpu_model import gpu_model
-
-            logger.info("LTX-2.3 building persistent Gemma + embeddings_processor (Step 3)...")
-            prompt_enc = self.pipe.prompt_encoder
-
-            # Persistent Gemma text encoder.
-            t_gemma = time.time()
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-            self._text_encoder_ctx = prompt_enc._text_encoder_ctx()
-            self._text_encoder = self._text_encoder_ctx.__enter__()
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-            self._persistent_gemma_build_ms = int((time.time() - t_gemma) * 1000)
-            if torch.cuda.is_available():
-                self._vram_after_gemma_gb = torch.cuda.memory_allocated() / (1024**3)
-            logger.info(
-                f"LTX-2.3 persistent Gemma ready "
-                f"({self._persistent_gemma_build_ms}ms, "
-                f"vram_after={self._vram_after_gemma_gb:.2f} GiB)",
-                extra={
-                    "build_ms": self._persistent_gemma_build_ms,
-                    "vram_after_gb": round(self._vram_after_gemma_gb, 2),
-                },
-            )
-
-            # Persistent embeddings processor. Build same way upstream's
-            # PromptEncoder.__call__ does it, then keep it on GPU via
-            # gpu_model() — but never exit the context until shutdown.
-            t_ep = time.time()
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-            ep_model = (
-                prompt_enc._embeddings_processor_builder.build(
-                    device=prompt_enc._device, dtype=prompt_enc._dtype
-                )
-                .to(prompt_enc._device)
-                .eval()
-            )
-            self._embeddings_processor_ctx = gpu_model(ep_model)
-            self._embeddings_processor = self._embeddings_processor_ctx.__enter__()
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-            self._persistent_embeddings_processor_build_ms = int((time.time() - t_ep) * 1000)
-            if torch.cuda.is_available():
-                self._vram_after_embeddings_processor_gb = (
-                    torch.cuda.memory_allocated() / (1024**3)
-                )
-            self._persistent_gemma_ready = True
-            logger.info(
-                f"LTX-2.3 persistent embeddings_processor ready "
-                f"({self._persistent_embeddings_processor_build_ms}ms, "
-                f"vram_after={self._vram_after_embeddings_processor_gb:.2f} GiB)",
-                extra={
-                    "build_ms": self._persistent_embeddings_processor_build_ms,
-                    "vram_after_gb": round(self._vram_after_embeddings_processor_gb, 2),
-                },
-            )
-        else:
-            logger.info("LTX_PERSIST_GEMMA=0 — skipping Step 3 (Gemma rebuilds per request)")
-
-        # Warmup — first call has lazy CUDA kernel compilation. Doing it
-        # here keeps the user-visible first video latency clean. With the
-        # persistent transformer + Gemma above, warmup now exercises the
-        # full persistent serving path so metrics match steady-state.
-        logger.info("LTX-2.3 warmup...")
         t1 = time.time()
         warmup_image = Image.new("RGB", (config.LTX_WIDTH, config.LTX_HEIGHT), (128, 128, 128))
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
@@ -558,25 +547,34 @@ class Ltx23VideoPipeline:
             warmup_image.save(warmup_path, format="PNG")
         try:
             with self._lock:
-                # _run_inference already wraps in torch.inference_mode().
-                _ = self._run_inference(
-                    conditioning_paths=[(warmup_path, 0, 1.0)],
-                    prompt="warmup",
-                    seed=0,
-                    width=config.LTX_WIDTH,
-                    height=config.LTX_HEIGHT,
-                    num_frames=config.LTX_NUM_FRAMES,
-                )
+                for i, frames in enumerate(warm_frames):
+                    t_shape = time.time()
+                    _ = self._run_inference(
+                        conditioning_paths=[(warmup_path, 0, 1.0)],
+                        prompt="warmup",
+                        seed=0,
+                        width=config.LTX_WIDTH,
+                        height=config.LTX_HEIGHT,
+                        num_frames=frames,
+                    )
+                    self._phase_timings[f"warmup_{frames}f_ms"] = int((time.time() - t_shape) * 1000)
+                    if i == 0 and torch.cuda.is_available():
+                        self._resident_vram_gb = torch.cuda.memory_allocated() / (1024**3)
         finally:
             try:
                 os.unlink(warmup_path)
             except OSError:
                 pass
         self._phase_timings["warmup_inference_ms"] = int((time.time() - t1) * 1000)
-        warmup_s = time.time() - t1
+        if torch.cuda.is_available():
+            self._resident_vram_gb = torch.cuda.memory_allocated() / (1024**3)
         logger.info(
-            f"LTX-2.3 warmup done ({warmup_s:.1f}s)",
-            extra={"warmup_s": round(warmup_s, 1)},
+            f"{config.LTX_MODEL_FAMILY} warmup done ({time.time() - t1:.1f}s, "
+            f"resident_vram={self._resident_vram_gb:.2f} GiB)",
+            extra={
+                "warmup_s": round(time.time() - t1, 1),
+                "resident_vram_gb": round(self._resident_vram_gb, 2),
+            },
         )
 
         self._load_ms = int((time.time() - t0) * 1000)
@@ -595,49 +593,38 @@ class Ltx23VideoPipeline:
         num_frames: int | None = None,
         profile: bool = False,
         prompt_suffix: str | None = None,
+        enable_audio: bool = True,
     ) -> "GenerateResult":
         """Generate a video from `image`+`prompt`. Returns a ``GenerateResult``
         with `frames` (or None if cancelled), optional decoded `audio`,
         `cancel_state`, `lock_wait_ms`, `pipe_total_ms`, and
         `cancelled_but_ran_ms`.
 
-        Per-call overrides for `width`, `height`, `num_frames` (Step 3.5
-        benchmark): when None (the default — what the WebSocket path does),
-        falls back to ``config.LTX_WIDTH`` / ``LTX_HEIGHT`` / ``LTX_NUM_FRAMES``.
-        The persistent transformer + Gemma are shape-flexible (transformer
-        weights aren't shape-specific; resolution is a call-time arg), so
-        these can vary per request without a model rebuild.
+        Per-call overrides for `width`, `height`, `num_frames`: when None (the
+        default — what the WebSocket path does), falls back to
+        ``config.LTX_WIDTH`` / ``LTX_HEIGHT`` / ``LTX_NUM_FRAMES``. Resolution
+        is a call-time arg on the official pipelines, so these vary per
+        request without a model rebuild.
 
-        Cancellation states (Step 1 of the perf plan):
+        Cancellation states:
         - ``ok``: full inference, frames returned.
         - ``before_start``: cancel arrived before lock acquired or before
           inference body started; ~0ms wasted.
         - ``after_complete``: full inference ran, frames produced, cancel
           arrived during the post-inference re-check; ~pipe_total_ms wasted.
-        - ``during_inference`` (future, after Step 5 lands): cancel landed
-          while denoising; ≤1 sigma wasted.
 
-        NOTE on cancellation: today's DistilledPipeline still doesn't expose
-        mid-inference callbacks, so `during_inference` won't appear yet.
-        Step 5 forks `euler_denoising_loop` to add it.
-
-        Keyframes (Animate screen, 2026-07-19): pass `keyframes` to condition
-        the video on multiple images pinned at fractional positions (0.0 =
-        first frame, 1.0 = last). `image` remains as the legacy single-image
-        path (equivalent to one keyframe at position 0.0). Exactly one of
+        Keyframes (Animate screen): pass `keyframes` to condition the video
+        on multiple images pinned at fractional positions (0.0 = first frame,
+        1.0 = last). `image` remains as the legacy single-image path
+        (equivalent to one keyframe at position 0.0). Exactly one of
         `image` / `keyframes` must be provided.
         """
-        # Resolve per-call shape parameters. Defaults to config so existing
-        # WebSocket callers (which don't pass shape args) keep working.
         if width is None:
             width = config.LTX_WIDTH
         if height is None:
             height = config.LTX_HEIGHT
         if num_frames is None:
             num_frames = config.LTX_NUM_FRAMES
-        # Validate same constraints as config.py does at module load. Fail
-        # fast with a clear error rather than letting upstream's
-        # assert_resolution catch it deeper in the call stack.
         if width % 64 != 0:
             raise ValueError(f"width must be divisible by 64 (got {width})")
         if height % 64 != 0:
@@ -668,59 +655,42 @@ class Ltx23VideoPipeline:
         resolved = sorted(by_idx.items())
 
         if is_cancelled():
-            logger.info("LTX-2.3 generate skipped — cancelled before start")
+            logger.info("LTX generate skipped — cancelled before start")
             return GenerateResult(
-                frames=None,
-                audio=None,
-                cancel_state="before_start",
-                lock_wait_ms=0,
-                pipe_total_ms=0,
-                cancelled_but_ran_ms=0,
+                frames=None, audio=None, cancel_state="before_start",
+                lock_wait_ms=0, pipe_total_ms=0, cancelled_but_ran_ms=0,
             )
 
         # Resolve seed: if caller didn't specify, generate a fresh random one.
-        # DistilledPipeline.__call__ requires `seed: int`, not Optional.
+        # The pipelines require `seed: int`, not Optional.
         if seed is None:
             seed = int.from_bytes(os.urandom(4), byteorder="little") & 0x7FFFFFFF
 
         # Image conditioning is path-based in ltx-pipelines. Write each
         # keyframe image to a tempfile, pass (path, frame_idx, strength),
-        # clean up after. PNG (lossless) instead of JPEG: upstream's
-        # preprocessing pass re-encodes the image at crf=33 unless the caller
-        # explicitly passes crf=0 (see _run_inference). For sparse line
-        # drawings from the iPad, JPEG-then-crf=33 cumulative loss visibly
-        # damages thin strokes.
+        # clean up after. PNG (lossless): upstream's preprocessing pass
+        # re-encodes the image at the model's training CRF unless the caller
+        # passes crf=0 (see _run_inference). For sparse line drawings from
+        # the iPad, a lossy round-trip visibly damages thin strokes.
         conditioning_paths: list[tuple[str, int, float]] = []
         for idx, (kf_image, strength) in resolved:
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
                 kf_image.save(f.name, format="PNG")
                 conditioning_paths.append((f.name, idx, strength))
-        # `lock_wait_ms` separates queue/lock-contention time from
-        # `pipe_total`. Important once Step 5 lands and short-cancelled jobs
-        # release the lock fast — without it, queue effects look like
-        # spurious perf wins or losses on the next request.
         t_lock_request = time.perf_counter()
         try:
             with self._lock:
                 lock_wait_ms = int((time.perf_counter() - t_lock_request) * 1000)
-                # Re-check cancellation immediately after acquiring the lock.
-                # The earlier check at the top of generate() can be stale by
-                # ~lock_wait_ms; if the request was cancelled while queued,
-                # we'd otherwise still run a full ~127s inference. This
-                # closes that window before Step 5's mid-denoise hook lands.
+                # Re-check cancellation immediately after acquiring the lock:
+                # the check at the top can be stale by ~lock_wait_ms.
                 if is_cancelled():
                     logger.info(
-                        f"LTX-2.3 generate cancelled after acquiring lock "
-                        f"(lock_wait_ms={lock_wait_ms})",
+                        f"LTX generate cancelled after acquiring lock (lock_wait_ms={lock_wait_ms})",
                         extra={"lock_wait_ms": lock_wait_ms},
                     )
                     return GenerateResult(
-                        frames=None,
-                        audio=None,
-                        cancel_state="before_start",
-                        lock_wait_ms=lock_wait_ms,
-                        pipe_total_ms=0,
-                        cancelled_but_ran_ms=0,
+                        frames=None, audio=None, cancel_state="before_start",
+                        lock_wait_ms=lock_wait_ms, pipe_total_ms=0, cancelled_but_ran_ms=0,
                     )
                 base = (prompt or "").strip()
                 suffix = (prompt_suffix or "").strip()
@@ -730,16 +700,12 @@ class Ltx23VideoPipeline:
                     final_prompt = f"{base} {suffix}"
                 else:
                     final_prompt = base or suffix
-                user_preview = base[:80]
-                suffix_preview = suffix[:80]
-                final_preview = final_prompt[:200]
                 logger.info(
-                    f"LTX-2.3 prompt: user='{user_preview}' "
-                    f"suffix='{suffix_preview}' final='{final_preview}'",
+                    f"LTX prompt: user='{base[:80]}' suffix='{suffix[:80]}' final='{final_prompt[:200]}'",
                     extra={
-                        "user_prompt": user_preview,
-                        "suffix": suffix_preview,
-                        "final_prompt": final_preview,
+                        "user_prompt": base[:80],
+                        "suffix": suffix[:80],
+                        "final_prompt": final_prompt[:200],
                     },
                 )
                 frames, audio = self._run_inference(
@@ -751,6 +717,7 @@ class Ltx23VideoPipeline:
                     num_frames=num_frames,
                     profile=profile,
                     is_cancelled=is_cancelled,
+                    enable_audio=enable_audio,
                 )
                 pipe_total_ms = self._inference_timings["pipe_total"][-1]
         finally:
@@ -761,30 +728,22 @@ class Ltx23VideoPipeline:
                     pass
 
         # Late cancel check: caller may have set the flag while inference was
-        # running. Today this is the dominant wasted-GPU pattern (~21s per
-        # cancel) and Step 1's classification makes it visible in metrics.
+        # running. This is the dominant wasted-GPU pattern; the classification
+        # makes it visible in metrics.
         if is_cancelled():
             logger.info(
-                f"LTX-2.3 generate completed but cancellation arrived; discarding "
-                f"(wasted_ms={pipe_total_ms})",
+                f"LTX generate completed but cancellation arrived; discarding (wasted_ms={pipe_total_ms})",
                 extra={"wasted_ms": pipe_total_ms},
             )
             return GenerateResult(
-                frames=None,
-                audio=None,
-                cancel_state="after_complete",
-                lock_wait_ms=lock_wait_ms,
-                pipe_total_ms=pipe_total_ms,
+                frames=None, audio=None, cancel_state="after_complete",
+                lock_wait_ms=lock_wait_ms, pipe_total_ms=pipe_total_ms,
                 cancelled_but_ran_ms=pipe_total_ms,
             )
 
         return GenerateResult(
-            frames=frames,
-            audio=audio,
-            cancel_state="ok",
-            lock_wait_ms=lock_wait_ms,
-            pipe_total_ms=pipe_total_ms,
-            cancelled_but_ran_ms=0,
+            frames=frames, audio=audio, cancel_state="ok",
+            lock_wait_ms=lock_wait_ms, pipe_total_ms=pipe_total_ms, cancelled_but_ran_ms=0,
         )
 
     def _run_inference(
@@ -798,109 +757,50 @@ class Ltx23VideoPipeline:
         num_frames: int,
         profile: bool = False,
         is_cancelled: Callable[[], bool] | None = None,
+        enable_audio: bool = True,
     ) -> tuple[list[Image.Image], GeneratedAudio | None]:
-        """Run one inference, materialize frames/audio. Caller holds `self._lock`.
+        """Run one inference through the official pipeline, materialize
+        frames/audio. Caller holds `self._lock`.
 
-        Replicates ``DistilledPipeline.__call__``'s flow but builds the
-        transformer ONCE per request via ``stage.model_context()`` and runs
-        both stages with ``stage.run(transformer, ...)`` — upstream's
-        ``stage(...)`` builds and tears down the transformer on each call,
-        which empirically dominates latency (~7-8s of the 25s steady-state
-        spent on per-stage build/teardown, vs ~1.5s on actual denoising math).
-        Reusing the transformer across stage 1 + stage 2 cuts that overhead
-        in half within a single request.
-
-        Also wraps everything in ``torch.inference_mode()`` — required to
-        prevent autograd from retaining fp8_cast's per-matmul BF16 upcast
-        tensors and OOMing on H100 80GB.
+        Wraps everything in ``torch.inference_mode()`` — required to prevent
+        autograd from retaining fp8_cast's per-matmul BF16 upcast tensors and
+        OOMing on H100 80GB.
         """
-        from ltx_core.components.noisers import GaussianNoiser
+        from ltx_core.model.video_vae import AUTO_TILING
         from ltx_pipelines.utils.args import ImageConditioningInput
-        from ltx_pipelines.utils.constants import (
-            DISTILLED_SIGMAS,
-            STAGE_2_DISTILLED_SIGMAS,
-        )
-        # AUDIO_SAMPLE_RATE was added to ltx_pipelines.utils.constants
-        # upstream after the version we pin (LTX-2 commit 41d92437). On the
-        # pinned version this symbol doesn't exist and a tuple-import would
-        # crash pod boot during warmup, even when LTX_ENABLE_AUDIO=False.
-        # Fall back to LTX's audio_vae default (16 kHz, packages/ltx-core/...
-        # /audio_vae.py at 41d92437). When the pin is bumped past upstream
-        # adding this constant, the try-import wins and we track it again.
-        try:
-            from ltx_pipelines.utils.constants import AUDIO_SAMPLE_RATE
-        except ImportError:
-            AUDIO_SAMPLE_RATE = 16000
-        from ltx_pipelines.utils.denoisers import SimpleDenoiser
-        from ltx_pipelines.utils.gpu_model import gpu_model
-        from ltx_pipelines.utils.helpers import assert_resolution, combined_image_conditionings
-        from ltx_pipelines.utils.types import ModalitySpec
 
         # crf=0 disables upstream's preprocessing re-encode of the conditioning
-        # image (default crf=33 introduces visible compression artifacts on
+        # image (the model-matched default introduces compression artifacts on
         # sparse drawn linework, weakening conditioning). One entry per
         # keyframe; frame_idx is pre-snapped to the latent grid by generate().
         images = [
-            ImageConditioningInput(
-                path=path,
-                frame_idx=frame_idx,
-                strength=strength,
-                crf=0,
-            )
+            ImageConditioningInput(path=path, frame_idx=frame_idx, strength=strength, crf=0)
             for path, frame_idx, strength in conditioning_paths
         ]
-        # Step 2 fail-fast: if the persistent transformer wasn't built (load
-        # failed, or shutdown was called), don't silently fall back to a
-        # per-request rebuild. Either we serve from a healthy persistent
-        # transformer or we surface the failure to the orchestrator.
-        if self._transformer is None or not self._persistent_transformer_ready:
-            raise RuntimeError(
-                "persistent transformer not initialized — pod should not have reached _ready=True"
-            )
+        pipe = self.pipe
+        if pipe is None:
+            raise RuntimeError("pipeline not loaded")
 
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
-            # Capture resident baseline at request start so request_peak_delta_gb
-            # measures only this request's incremental allocation. After Step 2
-            # the resident baseline is ~22 GiB (transformer); after Step 3 it
-            # will be ~46 GiB (transformer + Gemma + processor). Without the
-            # delta, peak_alloc would always look "huge" and we couldn't tell
-            # whether a request leaked extra memory on top of the baseline.
-            self._resident_alloc_gb_at_request_start = (
-                torch.cuda.memory_allocated() / (1024**3)
-            )
+            # Resident baseline at request start so request_peak_delta_gb
+            # measures only this request's incremental allocation on top of
+            # the registry-cached weights.
+            self._resident_alloc_gb_at_request_start = torch.cuda.memory_allocated() / (1024**3)
         self._inference_timings.clear()
 
-        # `width`, `height`, `num_frames` are kwargs from generate(), with
-        # config defaults applied at the entry point. Step 3.5 added
-        # per-request override; do NOT re-read from config here or the
-        # kwargs become silently dead.
-        pipe = self.pipe
         frame_rate = float(config.LTX_FPS)
-        assert_resolution(height=height, width=width, is_two_stage=True)
-
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         t_pipe = time.perf_counter()
         frames: list[Image.Image] = []
         audio_track: GeneratedAudio | None = None
 
-        # Optional torch.profiler capture (per-request kwarg, see plan
-        # crystalline-squishing-rivest). When `profile=True`, wrap the
-        # inference in profile() so per-op CUDA + CPU timings are captured.
-        # nullcontext() makes this a true zero-overhead no-op when off
-        # (record_function calls inside _timed are also no-ops absent an
-        # active profiler). Per-request artifacts written to /tmp/ at the
-        # bottom of this method, after pipe_total_ms is finalized.
+        # Optional torch.profiler capture (per-request kwarg). nullcontext()
+        # makes this a true zero-overhead no-op when off. Per-request
+        # artifacts written to /tmp/ at the bottom of this method.
         if profile:
             from torch.profiler import ProfilerActivity, profile as _torch_profile
-            # `profile_memory=True` was tried in v1 and produced 1+ GB
-            # traces (every alloc/free is a record over a multi-second
-            # inference). Per-request VRAM is already in the `LTX VRAM
-            # GiB:` log line, so dropping it cuts trace size ~5–10x with
-            # no information loss for the questions we're asking
-            # (kernel-launch overhead, op-level timing, FP8-path check).
-            # `record_shapes=True` is cheap and useful — keep.
             profiler_ctx = _torch_profile(
                 activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
                 record_shapes=True,
@@ -910,174 +810,46 @@ class Ltx23VideoPipeline:
         else:
             profiler_ctx = contextlib.nullcontext()
 
+        # Per-request audio opt-out: the official __call__ always decodes the
+        # audio latent and downstream code dereferences the returned Audio
+        # (stubbing the decoder to None crashed with "'NoneType' object has
+        # no attribute 'waveform'" — hit live 2026-09-10), so we let the
+        # ~0.2 s decode run and simply don't convert/mux the track.
+        want_audio = config.LTX_ENABLE_AUDIO and enable_audio
+
+        extra_kwargs: dict[str, object] = {}
+        if self._pipeline_name == "dfr":
+            # Base fps only (no temporal x2 rounds — those reload the
+            # transformer per tile and need the temporal upscaler); stage 1 at
+            # h/2, detailing at h.
+            extra_kwargs = {"temporal_upscalings": 0, "spatial_upscalings": 1}
+
         with profiler_ctx as profiler_obj, torch.inference_mode():
-            # Step 3 — Use persistent Gemma + embeddings_processor when
-            # available. Falls back to per-request build if
-            # LTX_PERSIST_GEMMA=0 (env kill switch for fast rollback).
-            #
-            # Field naming (parallel to Step 2's stage_build_runtime):
-            #   prompt_encoder_build_runtime      ≈ 0ms post-Step-3
-            #   embeddings_processor_build_runtime ≈ 0ms post-Step-3
-            # The one-time build costs are exposed via
-            # persistent_gemma_build_ms / persistent_embeddings_processor_build_ms
-            # on /health.
-            prompt_enc = pipe.prompt_encoder
-            if self._persistent_gemma_ready and self._text_encoder is not None:
-                # Persistent path — no rebuild, no teardown.
-                with self._timed("prompt_encoder_build_runtime"):
-                    text_encoder = self._text_encoder
-                with self._timed("prompt_encoder_encode"):
-                    raw_outputs = [text_encoder.encode(prompt)]
-                with self._timed("embeddings_processor_build_runtime"):
-                    embeddings_processor = self._embeddings_processor
-                with self._timed("embeddings_processor_run"):
-                    proc_outputs = [
-                        embeddings_processor.process_hidden_states(hs, mask)
-                        for hs, mask in raw_outputs
-                    ]
-            else:
-                # Legacy per-request path (kill-switch off, or build failed).
-                # Same pattern as pre-Step-3 — kept so disabling persistence
-                # via env doesn't break the pod.
-                with self._timed("prompt_encoder_build"):
-                    text_encoder_ctx = prompt_enc._text_encoder_ctx()
-                    text_encoder = text_encoder_ctx.__enter__()
-                try:
-                    with self._timed("prompt_encoder_encode"):
-                        raw_outputs = [text_encoder.encode(prompt)]
-                finally:
-                    text_encoder_ctx.__exit__(None, None, None)
-                with self._timed("embeddings_processor"):
-                    ep_builder = prompt_enc._embeddings_processor_builder
-                    ep_model = ep_builder.build(
-                        device=prompt_enc._device, dtype=prompt_enc._dtype
-                    ).to(prompt_enc._device).eval()
-                    with gpu_model(ep_model) as embeddings_processor:
-                        proc_outputs = [
-                            embeddings_processor.process_hidden_states(hs, mask)
-                            for hs, mask in raw_outputs
-                        ]
-            (ctx_p,) = proc_outputs
-            video_context, audio_context = ctx_p.video_encoding, ctx_p.audio_encoding
-
-            generator = torch.Generator(device=pipe.device).manual_seed(seed)
-            noiser = GaussianNoiser(generator=generator)
-            stage_1_sigmas = DISTILLED_SIGMAS.to(dtype=torch.float32, device=pipe.device)
-            stage_2_sigmas = STAGE_2_DISTILLED_SIGMAS.to(dtype=torch.float32, device=pipe.device)
-            stage_1_w, stage_1_h = width // 2, height // 2
-
-            with self._timed("image_conditioner"):
-                stage_1_conditionings = pipe.image_conditioner(
-                    lambda enc: combined_image_conditionings(
-                        images=images,
-                        height=stage_1_h,
-                        width=stage_1_w,
-                        video_encoder=enc,
-                        dtype=torch.bfloat16,
-                        device=pipe.device,
-                    )
+            with self._timed("pipeline_call"):
+                result = pipe(
+                    prompt=prompt,
+                    seed=seed,
+                    height=height,
+                    width=width,
+                    frame_rate=frame_rate,
+                    images=images,
+                    num_frames=num_frames,
+                    tiling_config=AUTO_TILING,
+                    **extra_kwargs,
                 )
 
-            # Step 2 — Reuse the persistent transformer built once at load().
-            # `stage_build_runtime` should be ~0ms after Step 2 lands; the
-            # one-time build cost is exposed separately as
-            # `persistent_transformer_build_ms` on /health.
-            #
-            # Pre-Step-2 (Round 1): `stage_build` here was the per-request
-            # build cost (~63s on cold-cache hosts). Now it just measures
-            # the cost of reusing — should be near-zero.
-            #
-            # Renamed from `stage_build` to `stage_build_runtime` so a value
-            # of 0ms unambiguously means "no rebuild this request" rather
-            # than "no transformer exists" (which is what Round-1's
-            # untimed-model-context bug looked like).
-            with self._timed("stage_build_runtime"):
-                transformer = self._transformer
-            try:
-                with self._timed("stage_1_denoise"):
-                    video_state, audio_state = pipe.stage.run(
-                        transformer,
-                        denoiser=SimpleDenoiser(video_context, audio_context),
-                        sigmas=stage_1_sigmas,
-                        noiser=noiser,
-                        width=stage_1_w,
-                        height=stage_1_h,
-                        frames=num_frames,
-                        fps=frame_rate,
-                        video=ModalitySpec(
-                            context=video_context,
-                            conditionings=stage_1_conditionings,
-                        ),
-                        audio=ModalitySpec(context=audio_context),
-                    )
-
-                with self._timed("upsampler"):
-                    upscaled_video_latent = pipe.upsampler(video_state.latent[:1])
-
-                with self._timed("image_conditioner"):
-                    stage_2_conditionings = pipe.image_conditioner(
-                        lambda enc: combined_image_conditionings(
-                            images=images,
-                            height=height,
-                            width=width,
-                            video_encoder=enc,
-                            dtype=torch.bfloat16,
-                            device=pipe.device,
-                        )
-                    )
-
-                with self._timed("stage_2_denoise"):
-                    video_state, audio_state = pipe.stage.run(
-                        transformer,
-                        denoiser=SimpleDenoiser(video_context, audio_context),
-                        sigmas=stage_2_sigmas,
-                        noiser=noiser,
-                        width=width,
-                        height=height,
-                        frames=num_frames,
-                        fps=frame_rate,
-                        video=ModalitySpec(
-                            context=video_context,
-                            conditionings=stage_2_conditionings,
-                            noise_scale=stage_2_sigmas[0].item(),
-                            initial_latent=upscaled_video_latent,
-                        ),
-                        audio=ModalitySpec(
-                            context=audio_context,
-                            noise_scale=stage_2_sigmas[0].item(),
-                            initial_latent=audio_state.latent,
-                        ),
-                    )
-            finally:
-                # No teardown — transformer is persistent. `stage_teardown`
-                # remains in the schema (timed at ~0) so log structure is
-                # unchanged for downstream parsers.
-                with self._timed("stage_teardown"):
-                    pass
-
-            with self._timed("video_decoder_call"):
-                decoded_video = pipe.video_decoder(
-                    video_state.latent, self._tiling_config, generator
-                )
-
-            # Tensor iterator → PIL list. The iterator drives the video VAE
-            # decoder, which is also part of inference and must run inside
-            # the inference_mode context. Each chunk is (F, H, W, 3) uint8
-            # RGB (per ltx_pipelines.utils.media_io.encode_video which feeds
-            # the same tensor straight into PyAV with format="rgb24").
+            # Tensor iterator → PIL list. The iterator drives the video
+            # VAE decoder lazily, so it must be consumed inside the
+            # inference_mode context. Chunks are float [0,1] (F, H, W, 3)
+            # on the 2.5 decoders; uint8 is tolerated for older builds.
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             t_decode = time.perf_counter()
             t_pil = 0.0
-            for chunk in decoded_video:
-                chunk_cpu = chunk.to("cpu")
-                if chunk_cpu.dtype != torch.uint8:
-                    # Defensive: float tensors get clamped + scaled.
-                    # Shouldn't happen for the ltx-pipelines decoder, but
-                    # guards against a silent regression if upstream changes
-                    # the output dtype.
-                    chunk_cpu = (chunk_cpu.clamp(0, 1) * 255).to(torch.uint8)
-                arr = chunk_cpu.numpy()
+            for chunk in result.video:
+                if chunk.dtype != torch.uint8:
+                    chunk = (chunk.float().clamp(0, 1) * 255).round().to(torch.uint8)
+                arr = chunk.to("cpu").numpy()
                 t_pil_start = time.perf_counter()
                 for frame_arr in arr:
                     frames.append(Image.fromarray(frame_arr, mode="RGB"))
@@ -1089,18 +861,13 @@ class Ltx23VideoPipeline:
             )
             self._inference_timings["pil_conversion"].append(int(t_pil * 1000))
 
-            if config.LTX_ENABLE_AUDIO and not (is_cancelled is not None and is_cancelled()):
+            if want_audio and not (is_cancelled is not None and is_cancelled()):
                 try:
-                    with self._timed("audio_decoder"):
-                        decoded_audio = pipe.audio_decoder(audio_state.latent)
                     with self._timed("audio_pcm_conversion"):
-                        audio_track = _decoded_audio_to_pcm_s16le(
-                            decoded_audio,
-                            int(AUDIO_SAMPLE_RATE),
-                        )
+                        audio_track = _decoded_audio_to_pcm_s16le(result.audio, 16000)
                 except Exception as e:  # noqa: BLE001
                     logger.warning(
-                        f"LTX audio decode failed; continuing with silent MP4: {e}",
+                        f"LTX audio conversion failed; continuing with silent MP4: {e}",
                         exc_info=True,
                     )
 
@@ -1109,28 +876,13 @@ class Ltx23VideoPipeline:
         pipe_total_ms = int((time.perf_counter() - t_pipe) * 1000)
         self._inference_timings["pipe_total"].append(pipe_total_ms)
 
-        # Compute unattributed time: pipe_total minus the sum of every named
-        # phase. Catches measurement gaps like Round 1's `model_context()`
-        # call site that lived between two timer blocks. Acceptance target:
-        # under ~300ms or explicitly explained.
+        # Unattributed = pipe_total minus the sum of every named phase.
         named_total = sum(
             sum(vs) for name, vs in self._inference_timings.items() if name != "pipe_total"
         )
-        unattributed_ms = pipe_total_ms - named_total
-        self._inference_timings["unattributed"].append(unattributed_ms)
+        self._inference_timings["unattributed"].append(pipe_total_ms - named_total)
 
         if torch.cuda.is_available():
-            # Peak allocated alone hides allocator fragmentation. Reserved
-            # (cached but not in use) and free (whatever the driver still
-            # has unallocated) are independent signals — needed once we
-            # hold the transformer (and later Gemma) resident across calls.
-            #
-            # `resident_alloc` = baseline at start of request (typically the
-            # persistent transformer's ~22 GiB after Step 2, and ~46 GiB
-            # after Step 3). `request_peak_delta` = peak - resident, the
-            # actual incremental memory this request needed on top of the
-            # persistent baseline. Without the delta, a per-request leak
-            # would be invisible against the resident baseline.
             free_b, _ = torch.cuda.mem_get_info()
             peak_alloc_gb = torch.cuda.max_memory_allocated() / (1024**3)
             request_peak_delta_gb = peak_alloc_gb - self._resident_alloc_gb_at_request_start
@@ -1156,23 +908,26 @@ class Ltx23VideoPipeline:
                 },
             )
 
-        # Phase breakdown — single line, easy to scan in pod logs. Lists for
-        # phases called twice per inference (image_conditioner stage 1+2,
-        # transformer stage 1+2). `unattributed` should be small if the
-        # named phases are accounted for; large value ⇒ measurement gap.
         timings_summary = " ".join(
             f"{name}={vs[0] if len(vs) == 1 else vs}"
             for name, vs in sorted(self._inference_timings.items())
         )
         logger.info(
-            f"LTX phase timings ms: {timings_summary}",
-            extra={"phase_timings_ms": timings_summary},
+            f"LTX phase timings ms: {timings_summary} "
+            f"(shape={width}x{height}x{num_frames} frames_out={len(frames)} pipeline={self._pipeline_name})",
+            extra={
+                "phase_timings_ms": timings_summary,
+                "width": width,
+                "height": height,
+                "num_frames": num_frames,
+                "frames_out": len(frames),
+                "pipeline": self._pipeline_name,
+            },
         )
 
         # Diagnostic: dump the first decoded frame to disk so that if the iPad
         # video looks wrong, we can SSH in and check whether the bug is in
-        # inference (frame 0 itself is bad) or in MP4/streaming (frame 0 is
-        # clean but the encoded MP4 is corrupted). Overwrite each call.
+        # inference (frame 0 itself is bad) or in MP4/streaming.
         if frames:
             try:
                 frames[0].save("/tmp/ltx-first-frame.jpg", format="JPEG", quality=90)
@@ -1182,12 +937,8 @@ class Ltx23VideoPipeline:
         if profiler_obj is not None:
             self._save_profile_trace(
                 profiler_obj,
-                width=width,
-                height=height,
-                num_frames=num_frames,
-                prompt=prompt,
-                seed=seed,
-                pipe_total_ms=pipe_total_ms,
+                width=width, height=height, num_frames=num_frames,
+                prompt=prompt, seed=seed, pipe_total_ms=pipe_total_ms,
             )
         return frames, audio_track
 
@@ -1202,32 +953,16 @@ class Ltx23VideoPipeline:
         seed: int,
         pipe_total_ms: int,
     ) -> None:
-        """Write torch.profiler trace artifacts to /tmp/ for this request.
-
-        Three files per capture:
-          - .json (Chrome trace, opens in Perfetto / chrome://tracing)
-          - .txt (key_averages summary, sorted by cuda_time_total)
-          - .meta.json (request metadata for correlation)
-        """
+        """Write torch.profiler trace artifacts to /tmp/ for this request:
+        .json (Chrome trace), .txt (key_averages), .meta.json (request
+        metadata). Each write is independently guarded."""
         timestamp = time.strftime("%H%M%S")
-        setting = f"{width}x{height}x{num_frames}"
-        base = f"/tmp/ltx-profile-{timestamp}-{setting}"
-        # Each artifact write is independently guarded — v1 had the .txt
-        # `key_averages().table()` call throw on a 1+ GB trace and that
-        # exception aborted the .meta.json write too, leaving a useless
-        # 0-byte .txt and no metadata. Now any one artifact failure is
-        # logged and the others still land.
+        base = f"/tmp/ltx-profile-{timestamp}-{width}x{height}x{num_frames}"
         try:
             prof.export_chrome_trace(f"{base}.json")
-            logger.info(
-                f"LTX profile chrome trace written: {base}.json",
-                extra={"trace_base": str(base)},
-            )
+            logger.info(f"LTX profile chrome trace written: {base}.json", extra={"trace_base": base})
         except Exception as e:  # noqa: BLE001
-            logger.error(
-                f"Failed to export Chrome trace {base}.json: {e}",
-                extra={"trace_base": str(base)},
-            )
+            logger.error(f"Failed to export Chrome trace {base}.json: {e}", extra={"trace_base": base})
         try:
             with open(f"{base}.meta.json", "w") as f:
                 json.dump(
@@ -1238,29 +973,19 @@ class Ltx23VideoPipeline:
                         "height": height,
                         "num_frames": num_frames,
                         "pipe_total_ms": pipe_total_ms,
-                        "captured_at_iso": time.strftime(
-                            "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
-                        ),
+                        "pipeline": self._pipeline_name,
+                        "captured_at_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                     },
                     f,
                     indent=2,
                 )
         except Exception as e:  # noqa: BLE001
-            logger.error(
-                f"Failed to write {base}.meta.json: {e}",
-                extra={"trace_base": str(base)},
-            )
+            logger.error(f"Failed to write {base}.meta.json: {e}", extra={"trace_base": base})
         try:
             with open(f"{base}.txt", "w") as f:
-                f.write(prof.key_averages().table(
-                    sort_by="cuda_time_total", row_limit=30,
-                ))
+                f.write(prof.key_averages().table(sort_by="cuda_time_total", row_limit=30))
         except Exception as e:  # noqa: BLE001
-            logger.error(
-                f"Failed to write {base}.txt summary (Chrome trace JSON still "
-                f"has the data): {e}",
-                extra={"trace_base": str(base)},
-            )
+            logger.error(f"Failed to write {base}.txt summary: {e}", extra={"trace_base": base})
 
     def get_info(self) -> dict:
         gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "none"
@@ -1269,86 +994,73 @@ class Ltx23VideoPipeline:
             vram_free = torch.cuda.mem_get_info()[0] / (1024**3)
         return {
             "video_ready": self._ready,
+            # Boot decomposition clocks: the backend pool's ready event uses
+            # these to split provision (Lambda) / OS / our-stack time.
+            "booted_at_epoch_s": _booted_at_epoch_s(),
+            "started_at_epoch_s": _STARTED_AT_EPOCH_S,
             "model_family": config.LTX_MODEL_FAMILY,
             "model_repo": config.LTX_MODEL_REPO,
             "model_file": config.LTX_MODEL_FILE,
-            "text_encoder": config.LTX_TEXT_ENCODER_REPO,
+            "text_encoder": config.LTX_TEXT_ENCODER_FILE,
+            "video_vae": config.LTX_VIDEO_VAE_FILE,
             "spatial_upscaler": config.LTX_SPATIAL_UPSCALER_FILE,
+            "detailing_lora": config.LTX_DETAILING_LORA_FILE if self._pipeline_name == "dfr" else None,
             "quantization": config.LTX_QUANTIZATION,
-            "pipeline": "DistilledPipeline",
+            "pipeline": "DFRPipeline" if self._pipeline_name == "dfr" else "DistilledPipeline",
+            "diffvae_mode": config.LTX_DIFFVAE_MODE,
+            "torch_compile": config.LTX_TORCH_COMPILE,
+            "attention": getattr(self, "_attention_backend", None),
+            "dfr_plain_decode": config.LTX_DFR_PLAIN_DECODE,
             "resolution": f"{config.LTX_WIDTH}x{config.LTX_HEIGHT}",
             "num_frames": config.LTX_NUM_FRAMES,
             "fps": config.LTX_FPS,
             "audio_enabled": config.LTX_ENABLE_AUDIO,
             "gpu": gpu_name,
             "vram_free_gb": round(vram_free, 2),
+            "resident_vram_gb": round(self._resident_vram_gb, 2),
             "load_ms": self._load_ms,
             "phase_timings_ms": dict(self._phase_timings),
             "app_version": dict(self._app_version),
-            # Step 2 — persistent transformer health.
-            "persistent_transformer_ready": self._persistent_transformer_ready,
-            "persistent_transformer_build_ms": self._persistent_transformer_build_ms,
-            "vram_after_transformer_gb": round(self._vram_after_transformer_gb, 2),
-            # Step P2 — torch.compile experiment status.
-            "compiled_transformer": self._compiled_transformer,
-            "compile_ms": self._compile_ms,
-            # Step 3 — persistent Gemma + embeddings_processor health.
-            "persistent_gemma_ready": self._persistent_gemma_ready,
-            "persistent_gemma_build_ms": self._persistent_gemma_build_ms,
-            "persistent_embeddings_processor_build_ms": self._persistent_embeddings_processor_build_ms,
-            "vram_after_gemma_gb": round(self._vram_after_gemma_gb, 2),
-            "vram_after_embeddings_processor_gb": round(self._vram_after_embeddings_processor_gb, 2),
         }
 
     def shutdown_persistent_models(self) -> None:
-        """Release persistent models on graceful shutdown. Idempotent — safe to
-        call zero, one, or multiple times.
-
-        Hooked into FastAPI's lifespan exit in ``video_server.py``. Covers
-        ``railway up`` redeploys and orchestrator-initiated ``podTerminate``
-        within the docker grace window. Ungraceful kills (SIGKILL after
-        grace timeout) skip this entirely; that's fine because the GPU is
-        torn down with the container.
-
-        Releases in reverse build order: embeddings_processor → Gemma →
-        transformer. Each block tolerates being already-None so partial
-        builds (e.g., transformer succeeded but Gemma failed) shut down
-        cleanly. After each successful exit the corresponding refs are
-        cleared so a subsequent call is a no-op.
-        """
-        # Step 3 — release embeddings_processor first.
-        if self._embeddings_processor_ctx is not None:
+        """Release the registry-resident weights on graceful shutdown.
+        Idempotent — safe to call zero, one, or multiple times. Ungraceful
+        kills skip this entirely; the GPU is torn down with the process."""
+        if self._registry is not None:
             try:
-                logger.info("LTX-2.3 releasing persistent embeddings_processor...")
-                self._embeddings_processor_ctx.__exit__(None, None, None)
+                logger.info(f"{config.LTX_MODEL_FAMILY} releasing registry-resident weights...")
+                self._registry.clear()
             except Exception as e:  # noqa: BLE001
-                logger.warning(
-                    f"Error during persistent embeddings_processor shutdown: {e}"
-                )
+                logger.warning(f"Error during registry shutdown: {e}")
             finally:
-                self._embeddings_processor_ctx = None
-                self._embeddings_processor = None
-
-        # Step 3 — release Gemma text encoder.
-        if self._text_encoder_ctx is not None:
+                self._registry = None
+        self.pipe = None
+        self._ready = False
+        if torch.cuda.is_available():
             try:
-                logger.info("LTX-2.3 releasing persistent Gemma text encoder...")
-                self._text_encoder_ctx.__exit__(None, None, None)
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"Error during persistent Gemma shutdown: {e}")
-            finally:
-                self._text_encoder_ctx = None
-                self._text_encoder = None
-                self._persistent_gemma_ready = False
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+            except Exception:  # noqa: BLE001
+                pass
 
-        # Step 2 — release transformer.
-        if self._transformer_ctx is not None:
-            try:
-                logger.info("LTX-2.3 releasing persistent transformer...")
-                self._transformer_ctx.__exit__(None, None, None)
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"Error during persistent transformer shutdown: {e}")
-            finally:
-                self._transformer_ctx = None
-                self._transformer = None
-                self._persistent_transformer_ready = False
+
+class _PlainDecodeProxy:
+    """Wraps a ``VideoDecoder`` block so ``decode_video(keyframes=)`` calls
+    become plain decodes (the keyframe kwarg is dropped). Every other
+    attribute delegates, so pipeline code reading ``checkpoint_path`` /
+    ``diffvae_optimization`` / ``decode_single_frames`` keeps working."""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def __call__(self, latent, tiling_config=None, generator=None, **kwargs):
+        kwargs.pop("keyframes", None)
+        return self._inner(latent, tiling_config, generator, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+# Back-compat alias for callers that still import the 2.3 name.
+Ltx23VideoPipeline = Ltx25VideoPipeline
