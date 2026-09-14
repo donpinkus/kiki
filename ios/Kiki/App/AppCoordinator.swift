@@ -2345,8 +2345,8 @@ final class AppCoordinator {
             streamLog.warning("[dev] figure: \(self.figure.devPoseSummary)")
         case "figureDumpPose":
             streamLog.warning("[dev] figurePoseJSON: \(self.figure.devPoseJSON)")
-        case "figurePoses":
-            figure.showPosePicker.toggle()
+        case let cmd where cmd.hasPrefix("figureView:"):
+            if let v = FigureController.View(rawValue: String(cmd.dropFirst("figureView:".count))) { figure.setView(v) }
         case let cmd where cmd.hasPrefix("figurePose:"):
             if let preset = FigurePoseLibrary.preset(id: String(cmd.dropFirst("figurePose:".count))) {
                 figure.applyPreset(preset)

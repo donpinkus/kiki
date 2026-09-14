@@ -18,6 +18,9 @@ final class FigurePoseOverlayView: UIView, UIGestureRecognizerDelegate {
     private(set) var pose: FigurePose
     /// Fires after every pose change (the bar's Reset/Done state, dev logging).
     var onPoseChanged: (() -> Void)?
+    /// Fires when a JOINT was moved by hand (not a preset / orbit / placement
+    /// change) — the panel drops its "current preset" highlight.
+    var onJointsEdited: (() -> Void)?
 
     private let scnView = SCNView()
     private var handleShapes: [String: CAShapeLayer] = [:]
@@ -127,6 +130,14 @@ final class FigurePoseOverlayView: UIView, UIGestureRecognizerDelegate {
         poseDidChange()
     }
 
+    /// Turn the figure to a canonical view (yaw), levelling any tilt.
+    func setView(yaw: Double) {
+        pose.yaw = yaw
+        pose.pitch = 0
+        figure.applyPlacement(pose)
+        poseDidChange()
+    }
+
     func resetPose() {
         figure.applyDefaultPose(into: &pose)
         pose.yaw = 0
@@ -151,6 +162,7 @@ final class FigurePoseOverlayView: UIView, UIGestureRecognizerDelegate {
             figure.applyPlacement(pose)
         } else if figure.drag(handle, toDoc: target) {
             figure.readJoints(into: &pose)
+            onJointsEdited?()
         }
         poseDidChange()
     }

@@ -12,8 +12,17 @@ struct DrawingView: View {
     var body: some View {
         @Bindable var coordinator = coordinator
 
+        let isPosing = coordinator.figure.isPosing
+
         VStack(spacing: 0) {
-            DrawingTopBar()
+            // Pose mode replaces the drawing chrome wholesale (owner direction
+            // 2026-09-13): its own bar on top, the pose panel on the left, and
+            // none of the drawing controls until the figure is placed or cancelled.
+            if isPosing {
+                FigurePoseTopBar()
+            } else {
+                DrawingTopBar()
+            }
 
             if let error = coordinator.generationError {
                 HStack(spacing: 8) {
@@ -51,12 +60,19 @@ struct DrawingView: View {
                 // rotate aren't clipped by the drawing surface's square footprint.
                 // The drawing surface itself stays a centered `canvasSide` square
                 // inside the container (see RotatableCanvasContainer).
-                let canvasPaneWidth = geometry.size.width
+                // Pose mode docks its panel on the left; the canvas keeps the rest.
+                let panelWidth: CGFloat = isPosing ? FigurePosePanel.width : 0
+                let canvasPaneWidth = geometry.size.width - panelWidth
                 // Largest square that fits the pane width and the height below the
                 // top toolbar — so the canvas fills the space instead of sitting as
                 // a small centered square.
                 let canvasSide = min(canvasPaneWidth, geometry.size.height)
 
+                HStack(spacing: 0) {
+                if isPosing {
+                    FigurePosePanel()
+                        .transition(.move(edge: .leading))
+                }
                 ZStack(alignment: .topLeading) {
                     CanvasView(
                         viewModel: coordinator.canvasViewModel,
@@ -114,7 +130,7 @@ struct DrawingView: View {
                         .zIndex(0)
 
                     // DEV: live brush-input HUD (top-right), visual-only.
-                    if coordinator.showInputHUD {
+                    if coordinator.showInputHUD, !isPosing {
                         BrushInputHUD(sample: coordinator.liveBrushInput, note: coordinator.activeTestNote)
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
                             .padding(.top, 16).padding(.trailing, 16)
@@ -122,14 +138,17 @@ struct DrawingView: View {
                             .zIndex(5)
                     }
 
-                    CanvasSidebar()
-                        .frame(maxHeight: .infinity, alignment: .leading)
-                        .zIndex(3)
+                    if !isPosing {
+                        CanvasSidebar()
+                            .frame(maxHeight: .infinity, alignment: .leading)
+                            .zIndex(3)
+                            .transition(.move(edge: .leading).combined(with: .opacity))
+                    }
 
                     // QuickShape NUX tooltip — appears once per device, on the
                     // user's first successful snap. Auto-dismisses after 5s
                     // or on tap. AppStorage flag suppresses subsequent showings.
-                    if coordinator.shouldShowQuickShapeTooltip && !hasSeenQuickShapeTooltip {
+                    if coordinator.shouldShowQuickShapeTooltip && !hasSeenQuickShapeTooltip && !isPosing {
                         quickShapeTooltip
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                             .padding(.bottom, 24)
@@ -149,7 +168,7 @@ struct DrawingView: View {
                             }
                     }
 
-                    if let image = coordinator.resultState.displayImage {
+                    if let image = coordinator.resultState.displayImage, !isPosing {
                         // Image-only floating preview, sized to the
                         // image's aspect ratio. Visual-only (allowsHitTesting
                         // false) — a single finger / pencil draws straight through
@@ -196,16 +215,6 @@ struct DrawingView: View {
                             .frame(width: canvasPaneWidth, height: geometry.size.height)
                             .zIndex(8)
                         aiEditPreviewBar
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-                            .padding(.bottom, 28)
-                            .zIndex(12)
-                            .transition(.opacity.combined(with: .move(edge: .bottom)))
-                    }
-
-                    // Pose mode: the figure overlay owns the canvas; this bar
-                    // picks the body, resets, cancels or bakes the figure.
-                    if coordinator.figure.isPosing {
-                        figurePoseBar
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                             .padding(.bottom, 28)
                             .zIndex(12)
@@ -274,8 +283,11 @@ struct DrawingView: View {
                             .zIndex(10)
                     }
                 }
+                .frame(width: canvasPaneWidth, height: geometry.size.height)
                 .animation(.easeInOut(duration: 0.35), value: coordinator.transientBanner)
                 .background(KikiTheme.canvasBacking)
+                }
+                .animation(.easeInOut(duration: 0.25), value: isPosing)
             }
             // Fill the bottom home-indicator safe-area inset so the (black) Metal
             // canvas reaches the physical bottom edge like it already does on the
@@ -545,56 +557,6 @@ struct DrawingView: View {
 
     /// Floating Accept / Retry / Discard controls while an AI Edit preview is
     /// locked over the canvas. Nothing touches the layer stack until Accept.
-    /// Pose-mode bar (bottom-centre, same chrome as the paste bar).
-    private var figurePoseBar: some View {
-        @Bindable var figure = coordinator.figure
-        return HStack(spacing: 10) {
-            Text("Drag joints · drag space to turn · two fingers move/scale/rotate")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Picker("Body", selection: $figure.body) {
-                ForEach(FigureBody.allCases) { Text($0.label).tag($0) }
-            }
-            .pickerStyle(.segmented)
-            .frame(width: 150)
-            Button {
-                coordinator.figure.showPosePicker.toggle()
-            } label: {
-                Label("Poses", systemImage: "figure.walk")
-                    .font(.subheadline.weight(.semibold))
-            }
-            .buttonStyle(.bordered)
-            .popover(isPresented: $figure.showPosePicker) {
-                FigurePosePickerView()
-            }
-            Button {
-                coordinator.figure.resetPose()
-            } label: {
-                Label("Reset", systemImage: "arrow.counterclockwise")
-                    .font(.subheadline.weight(.semibold))
-            }
-            .buttonStyle(.bordered)
-            Button(role: .destructive) {
-                coordinator.figure.cancel()
-            } label: {
-                Label("Cancel", systemImage: "xmark")
-                    .font(.subheadline.weight(.semibold))
-            }
-            .buttonStyle(.bordered)
-            Button {
-                coordinator.figure.commit()
-            } label: {
-                Label("Done", systemImage: "checkmark")
-                    .font(.subheadline.weight(.semibold))
-                    .padding(.horizontal, 6)
-            }
-            .buttonStyle(.borderedProminent)
-        }
-        .padding(10)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
-        .shadow(color: .black.opacity(0.25), radius: 10, y: 3)
-    }
-
     private var aiEditPreviewBar: some View {
         HStack(spacing: 10) {
             Button(role: .destructive) {

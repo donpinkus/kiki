@@ -26,6 +26,8 @@ final class FigureController {
 
     private(set) var session: Session?
     var isPosing: Bool { session != nil }
+    /// Incremented on every live pose change (observable trigger for the panel).
+    private(set) var poseRevision: Int = 0
     var isEditingExisting: Bool { session?.editingLayerID != nil }
 
     /// Body used for new figures + the live picker. Persisted only when the
@@ -151,16 +153,50 @@ final class FigureController {
 
     func resetPose() {
         session?.overlay.resetPose()
+        selectedPresetID = nil
     }
 
-    /// Poses picker: load a bundled preset into the live figure.
+    /// The preset the figure currently shows, until a joint is dragged by hand.
+    private(set) var selectedPresetID: String?
+
+    /// Pose panel: load a bundled preset into the live figure.
     func applyPreset(_ preset: FigurePosePreset) {
         session?.overlay.applyPreset(preset)
+        selectedPresetID = preset.id
         Analytics.track(.figurePresetApplied, properties: ["preset": preset.id])
     }
 
-    /// Poses popover visibility (pose bar button).
-    var showPosePicker = false
+    /// Canonical views for the panel's View row (turntable yaw, radians).
+    enum View: String, CaseIterable, Identifiable {
+        case front, threeQuarter, side, back
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .front: "Front"
+            case .threeQuarter: "¾"
+            case .side: "Side"
+            case .back: "Back"
+            }
+        }
+        var yaw: Double {
+            switch self {
+            case .front: 0
+            case .threeQuarter: 0.7
+            case .side: .pi / 2
+            case .back: .pi
+            }
+        }
+    }
+
+    /// The view whose yaw the figure is currently at (nil after a free orbit).
+    var currentView: View? {
+        guard let yaw = session?.overlay.pose.yaw else { return nil }
+        return View.allCases.first { abs($0.yaw - yaw) < 0.01 }
+    }
+
+    func setView(_ view: View) {
+        session?.overlay.setView(yaw: view.yaw)
+    }
 
     // MARK: - Internals
 
@@ -177,6 +213,11 @@ final class FigureController {
     private func install(scene: FigureScene, pose: FigurePose, editing: UUID?) {
         guard let canvasViewModel else { return }
         let overlay = FigurePoseOverlayView(figure: scene, pose: pose)
+        overlay.onJointsEdited = { [weak self] in self?.selectedPresetID = nil }
+        // The panel's View row and preset highlight read the overlay's pose;
+        // bump an observable counter so SwiftUI re-reads after every change.
+        overlay.onPoseChanged = { [weak self] in self?.poseRevision &+= 1 }
+        selectedPresetID = nil
         canvasViewModel.setLayerDisplaySuppressed(id: editing)
         canvasViewModel.setInteractiveOverlay(overlay)
         session = Session(overlay: overlay, editingLayerID: editing)
@@ -185,7 +226,7 @@ final class FigureController {
     private func teardown() {
         canvasViewModel?.setInteractiveOverlay(nil)
         canvasViewModel?.setLayerDisplaySuppressed(id: nil)
-        showPosePicker = false
+        selectedPresetID = nil
         session = nil
     }
 

@@ -120,7 +120,7 @@ Last updated: 2026-07-18 (rewritten for the fal + Lambda H100 provider architect
 
 ## Posable 3D figure (reference layer, 2026-09-13)
 
-48. **Add a figure.** In a drawing, tap the person (`figure.stand`) button in the top bar — a gray mannequin in a relaxed standing pose appears centred on the canvas with white joint handles and a bottom bar (Male/Female · Reset · Cancel · Done). The canvas cannot be drawn on while posing.
+48. **Add a figure.** In a drawing, tap the person (`figure.stand`) button in the top bar — the drawing chrome is replaced by pose mode: a top bar (Cancel · "Pose figure" · Place), a dark left panel (Body, View, scrollable poses, Reset pose) and the canvas to its right showing a gray mannequin in a relaxed standing pose with white joint handles. No drawing controls are visible; the canvas cannot be drawn on while posing.
 
 49. **Pose it.** Dragging a hand or foot bends the limb naturally (elbow/knee follow); dragging an elbow or knee swings the upper limb with the lower limb following rigidly; dragging the chest bends the torso, the head handle tilts the head, the larger pelvis handle moves the whole figure. Dragging empty space turns the figure in 3D (left/right = turntable, up/down = tilt). Two fingers move, pinch-scale and twist-rotate the whole figure.
 
@@ -132,7 +132,7 @@ Last updated: 2026-07-18 (rewritten for the fal + Lambda H100 provider architect
 
 53. **Edit Pose.** Layers → tap the figure row → Edit Pose reopens the exact pose (the bake is hidden underneath, no doubled figure); Done re-bakes into the same layer; Cancel restores the previous bake. Switching Male/Female keeps the pose. The pose survives closing and reopening the drawing and an app relaunch.
 
-54. **Poses picker.** In pose mode, tapping Poses opens a categorized grid of pose thumbnails (Standing, Moving, Jumping, Low, Sitting, Action); tapping one snaps the figure into that pose without moving it or changing the body, and the joints remain draggable afterwards. Lying and swimming poses open turned side-on. Switching body keeps the preset pose.
+54. **Pose panel.** The left panel's pose grid (Standing, Moving, Jumping, Low, Sitting, Action) scrolls; tapping a pose snaps the figure into it without moving it or changing the body, rings the tile, and the joints remain draggable afterwards (dragging one un-rings the tile). The View row turns the figure to Front / ¾ / Side / Back and highlights the current view; free orbiting clears the highlight. Lying and swimming poses open side-on. Switching body keeps the pose. Place bakes and restores the drawing chrome; Cancel restores it untouched.
 
 ## Speed-paint replay (share page)
 
