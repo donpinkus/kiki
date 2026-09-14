@@ -170,6 +170,12 @@ export class LambdaClient {
     return this.req('POST', '/filesystems', { name, region: regionName });
   }
 
+  /** Delete a filesystem that no instance has attached (verified 2026-09-12:
+   * `DELETE /filesystems/{id}` → 200 `{deleted_ids}`). */
+  deleteFilesystem(id: string): Promise<{ deleted_ids: string[] }> {
+    return this.req('DELETE', `/filesystems/${id}`);
+  }
+
   listFirewallRules(): Promise<FirewallRule[]> {
     return this.req('GET', '/firewall-rules');
   }
@@ -288,6 +294,98 @@ export async function launchWithRetry(
               ? `[launch] launch API rate-limited (429) — retrying in 15s`
               : `[launch] transient network error (${(e as Error).message}) — retrying in 15s`,
         );
+        await lambdaSleep(15_000);
+        continue;
+      }
+      throw e;
+    }
+  }
+}
+
+/** Launch a SETUP instance with the pool filesystem attached, without ever
+ * leaving an EMPTY filesystem sitting unattached. The pool sweep
+ * (instancePool.regionsWithFilesystem) treats "filesystem exists and no
+ * foreign instance is attached" as populated — so a filesystem created up
+ * front and then parked for an hour of capacity retries is a trap: the pool
+ * wins that cell first, boots into nothing and stalls 25 min (nearly
+ * happened 2026-09-12 in us-south-3). Here the filesystem is created only
+ * once the cell advertises capacity, immediately before the launch, and is
+ * deleted again if the launch still misses. A filesystem that already
+ * exists (re-run) is used as-is. */
+export async function launchSetupWithFilesystem(
+  client: LambdaClient,
+  opts: {
+    region: string;
+    type: string;
+    fsName: string;
+    name: string;
+    keyName: string;
+    imageFamily: string;
+    retryMins: number;
+    log?: (msg: string) => void;
+  },
+): Promise<string[]> {
+  const log = opts.log ?? console.log;
+  const startedMs = Date.now();
+  const deadline = startedMs + opts.retryMins * 60_000;
+  log(`[launch] ${opts.type}@${opts.region}: will hunt until ${new Date(deadline).toISOString()} (retryMins=${opts.retryMins})`);
+  for (;;) {
+    // Poll phase: an API blip here must not kill an hour-long wait.
+    let existing: Filesystem | undefined;
+    let advertised = true;
+    try {
+      existing = (await client.listFilesystems()).find(
+        (f) => f.name === opts.fsName && f.region.name === opts.region,
+      );
+      if (!existing) {
+        const types = await client.listInstanceTypes();
+        advertised = (types[opts.type]?.regions_with_capacity_available ?? []).some((r) => r.name === opts.region);
+      }
+    } catch (e) {
+      if (!isTransientNetworkError(e) && !(e instanceof LambdaApiError && e.status === 429)) throw e;
+      log(`[launch] API poll failed transiently (${(e as Error).message.split('\n')[0]}) — retrying in 15s`);
+      await lambdaSleep(15_000);
+      continue;
+    }
+    if (!existing && !advertised) {
+      if (Date.now() > deadline) {
+        throw new Error(
+          `no advertised ${opts.type} capacity in ${opts.region} within ${opts.retryMins} min (hunted ${Math.round((Date.now() - startedMs) / 60_000)} min)`,
+        );
+      }
+      log(`[launch] ${opts.type} not advertised in ${opts.region} — filesystem not created yet; polling in 15s`);
+      await lambdaSleep(15_000);
+      continue;
+    }
+    let createdId: string | undefined;
+    if (!existing) {
+      const created = await client.createFilesystem(opts.fsName, opts.region);
+      createdId = created.id;
+      log(`[launch] created filesystem ${opts.fsName} in ${opts.region} (capacity advertised — launching now)`);
+    }
+    try {
+      await spacedLaunchSlot(MIN_LAUNCH_SPACING_MS);
+      return await client.launch({
+        region_name: opts.region,
+        instance_type_name: opts.type,
+        ssh_key_names: [opts.keyName],
+        file_system_names: [opts.fsName],
+        name: opts.name,
+        image: { family: opts.imageFamily },
+      } as LaunchRequest);
+    } catch (e) {
+      if (createdId) {
+        try {
+          await client.deleteFilesystem(createdId);
+          log(`[launch] launch missed — deleted the empty ${opts.fsName} again so the pool never sweeps into it`);
+        } catch (delErr) {
+          log(`[launch] WARNING: could not delete empty ${opts.fsName}: ${(delErr as Error).message} — delete it by hand`);
+        }
+      }
+      const capacityMiss = e instanceof LambdaApiError && /insufficient-capacity/.test(e.code);
+      const rateLimited = e instanceof LambdaApiError && e.status === 429;
+      if ((capacityMiss || rateLimited || isTransientNetworkError(e)) && Date.now() < deadline) {
+        log(`[launch] ${capacityMiss ? 'insufficient capacity' : rateLimited ? 'rate-limited (429)' : 'transient error'} for ${opts.type} in ${opts.region} — retrying in 15s`);
         await lambdaSleep(15_000);
         continue;
       }

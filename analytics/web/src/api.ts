@@ -350,6 +350,33 @@ export interface CapacityData {
 export const getCapacity = (days: number) =>
   api<CapacityData>(`/admin/api/capacity?days=${days}`);
 
+// ─── Capacity grid views: joint availability / droughts / dry alternatives ──
+
+export interface CapacityGridRow {
+  key: string; label: string;
+  types: string[]; regions: string[] | null; // null = any region
+  available_ticks: number; pct: number | null;
+}
+export interface CapacityDrought {
+  started_at: string; ended_at: string | null; ticks: number; ongoing: boolean; minutes: number;
+}
+export interface CapacityDryAlt { instance_type: string; region: string; ticks: number; pct: number; }
+export interface CapacityGridData {
+  schemaReady: boolean;
+  days: number;
+  regions: string[];
+  ticks: number;
+  grids: CapacityGridRow[];
+  droughts: {
+    count: number; over_30m: number; p50_minutes: number | null; max_minutes: number | null;
+    dry_ticks: number; top: CapacityDrought[];
+  };
+  dry_alternatives: CapacityDryAlt[];
+}
+
+export const getCapacityGrid = (days: number, regions: string) =>
+  api<CapacityGridData>(`/admin/api/capacity/grid?days=${days}&regions=${encodeURIComponent(regions)}`);
+
 export interface LivePodInstance {
   name: string; status: string; ip?: string; region: string;
   activeStreams: number; ageMs: number; holdReason: string;
@@ -370,6 +397,80 @@ export const getLivePods = () => api<LivePodsData>('/admin/api/pods');
 
 export const getFleet = (excludeTest: boolean) =>
   api<FleetData>(`/admin/api/fleet${excludeTest ? '?excludeTest=1' : ''}`);
+
+// ─── Boots: per-boot success + timing decomposition ─────────────────────────
+
+export interface BootRow {
+  requested_at: string;
+  instance_name: string;
+  region: string | null;
+  gpu_type: string | null;
+  outcome: string;
+  search_ms: number | null;
+  ip_ms: number | null;
+  boot_ms: number | null;
+  provision_s: number | null;
+  os_s: number | null;
+  stack_s: number | null;
+  phases_ms: Record<string, number> | null;
+  is_hedge: boolean;
+  hedge_won: boolean;
+  hedged: boolean;
+  end_event: string | null;
+  fail_detail: string | null;
+}
+
+export interface BootsData {
+  pool: string;
+  summary: {
+    hunts: number;
+    granted: number;
+    ready: number;
+    stalled: number;
+    failed: number;
+    abandoned: number;
+    booting_now: number;
+    hedges_fired: number;
+    hedge_wins: number;
+    hedge_losses: number;
+    search_p50_ms: number | null;
+    search_max_ms: number | null;
+    boot_p50_ms: number | null;
+    boot_p90_ms: number | null;
+    boot_max_ms: number | null;
+    provision_p50_s: number | null;
+    provision_max_s: number | null;
+    stack_p50_s: number | null;
+    stack_max_s: number | null;
+    decomposed: number;
+  };
+  boots: BootRow[];
+  phase_medians: { phase: string; p50_ms: number | null; n: number }[];
+  daily: {
+    day: string;
+    boots: number;
+    boot_p50_ms: number | null;
+    provision_p50_s: number | null;
+    stack_p50_s: number | null;
+  }[];
+}
+
+export const getBoots = (pool: 'image' | 'video') => api<BootsData>(`/admin/api/boots?pool=${pool}`);
+
+// ─── Boots: per-cell boot time + hedge outcomes (both pools) ────────────────
+
+export interface BootCellRow {
+  pool: string; instance_type: string; region: string;
+  boots: number; p50_min: number | null; p90_min: number | null; max_min: number | null;
+}
+export interface HedgeOutcomeRow {
+  pool: string; launched: number; resolved: number;
+  hedge_wins: number; original_wins: number; legacy_loser_terminates: number;
+  win_rate_pct: number | null;
+}
+export interface BootCellsData { days: number; cells: BootCellRow[]; hedges: HedgeOutcomeRow[]; }
+
+export const getBootCells = (days = 30) => api<BootCellsData>(`/admin/api/boots/cells?days=${days}`);
 
 export const getVideoFlag = () => api<VideoFlagStatus>('/admin/api/ops/video');
 

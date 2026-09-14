@@ -15,6 +15,7 @@ export {
   LambdaApiError,
   LambdaClient,
   launchWithRetry,
+  launchSetupWithFilesystem,
   isTransientNetworkError,
   lambdaSleep as sleep,
   type InstanceTypeEntry,

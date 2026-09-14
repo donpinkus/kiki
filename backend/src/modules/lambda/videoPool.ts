@@ -55,6 +55,7 @@ const pool = createInstancePool({
    * (LTX runs eager — no compile cache to pay). 6 min adds margin for cold
    * NFS page cache. */
   bootEstimateMs: 6 * 60_000,
+  hedgeAfterMs: config.LAMBDA_VIDEO_POOL_HEDGE_AFTER_MS,
 });
 
 // The factory returns plain closures, so destructuring is safe.

@@ -43,6 +43,19 @@ function trackedTypes(): string[] {
 
 let timer: NodeJS.Timeout | null = null;
 
+/** The most recent poll, kept in memory for the pool sweep: `cells` holds
+ * every 'type@region' that advertised capacity at `atMs`. Lambda's flag has
+ * no depth and can be stale by seconds, so the sweep uses it to ORDER cells
+ * (advertised first), never to skip the launch call. */
+export interface CapacitySnapshot {
+  atMs: number;
+  cells: Set<string>;
+}
+let lastSnapshot: CapacitySnapshot | null = null;
+export function latest(): CapacitySnapshot | null {
+  return lastSnapshot;
+}
+
 async function tick(logger: FastifyBaseLogger): Promise<void> {
   if (!config.LAMBDA_API_KEY) return;
   const wanted = new Set(trackedTypes());
@@ -65,6 +78,7 @@ async function tick(logger: FastifyBaseLogger): Promise<void> {
       rows.push([typeName, region.name]);
     }
   }
+  lastSnapshot = { atMs: tickAt.getTime(), cells: new Set(rows.map(([t, r]) => `${t}@${r}`)) };
 
   try {
     await query(

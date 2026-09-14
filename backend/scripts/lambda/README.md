@@ -24,6 +24,18 @@ tsx scripts/lambda/coldstart-bench.ts --region us-east-1 --type gpu_1x_h100_pcie
 
 # 3. When done comparing — make sure nothing keeps billing ($3.29/hr!)
 tsx scripts/lambda/instances.ts --terminate-all
+
+# Provisioning-time probe: launch N bare instances, measure launch-accept →
+# status-active / IP / SSH / kernel-boot, terminate. Quantifies Lambda's VM
+# provisioning lottery (2.5-14 min observed same region/hour, 2026-08-22) —
+# the dominant boot-time variance the hedged launch exists for.
+tsx scripts/lambda/boot-probe.mts --n 3 --region us-south-2
+
+# Cold-boot validation: launch ONE serving instance the way the pool does
+# (cloud-init → boot.sh off the region filesystem), wait for /health ok,
+# print the boot decomposition (provision/os/stack + phase timings), terminate.
+# Run after any model-servers boot-path change + filesystem rsync.
+tsx scripts/lambda/validate-boot.mts --server video   # or --server image
 ```
 
 Generated frames from the bench land in `scripts/lambda/out/` for eyeballing
@@ -40,7 +52,9 @@ tsx scripts/lambda/smoke-ensure.ts
 # autoscale, and downgrade-to-fal (see lambda-image-provider.md "Production soak")
 tsx scripts/lambda/soak.mts
 
-## Video (LTX-2.3 idle-state animation, dedicated H100)
+> **Adding a region (both pools):** run `setup-lambda.ts --region <r>` and `setup-lambda-video.ts --region <r>`, then add `<r>` to `LAMBDA_REGIONS` on Railway. Order doesn't matter — the pool sweep skips a region until its filesystem exists and no setup box is attached. The setup scripts create the filesystem only at the moment they win capacity (and delete it on a miss), so never pre-create `kiki-image-*` / `kiki-video-*` filesystems by hand: an empty unattached one is exactly what the sweep can't distinguish from a populated one.
+
+## Video (LTX-2.5 Animate screen, dedicated H100)
 
 The video path runs on its own filesystem (`kiki-video-<region>`) and its own
 `kiki-video-*` instances — never shared with the image pool (models don't fit
@@ -48,12 +62,29 @@ on one 80 GB card together, and image latency must never contend with video).
 Architecture + full runbook: `documents/plans/lambda-video-provider.md`.
 
 ```bash
-# One-time per region: filesystem + video venv + LTX/Gemma weights + boot.sh
-# (requires HF_TOKEN in .env.local — Gemma is license-gated)
+# One-time per region: filesystem + video venv + LTX-2.5 split weights (bundled
+# Gemma 4) + DFR IC-LoRA + boot.sh. Requires HF_TOKEN in .env.local whose
+# account has accepted the LTX-2.x Community License on huggingface.co
+# (Lightricks/LTX-2.5 + Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler
+# are auto-gated: a 403 on the .safetensors = not accepted yet). Re-run after
+# bumping the ltx-pipelines pin in model-servers/requirements-video.txt.
+# --skip-smoke + a non-H100 --type (e.g. gpu_4x_a6000) works for the
+# populate alone when no H100 has capacity; the smoke needs an 80 GB card.
 tsx scripts/lambda/setup-lambda-video.ts --region us-south-2 --retry-mins 30
 
 # Launch the serving instance; prints LAMBDA_VIDEO_URL for the backend
 tsx scripts/lambda/launch-video.ts --region us-south-2 --retry-mins 30
+
+# Quality/latency bench of the serving class on a running instance (per
+# pipeline — LTX_PIPELINE is a load-time choice): ssh in, then
+#   cd $FS/kiki/app && source $FS/kiki/venv/bin/activate && \
+#   HF_HOME=$FS/kiki/huggingface HF_HUB_OFFLINE=1 LTX_PIPELINE=dfr \
+#   python3 -m dev.bench_ltx25 --image start.jpg --end-image end.jpg --sizes 512,768,1024 --frames 97
+# writes MP4s + summary-<pipeline>.json to /tmp/bench for scp + eyeballing.
+
+# E2E through the DEPLOYED backend, incl. the hosted fal engines (HOSTED=1
+# runs wan3 + h3max, ~$1; SKIP_LTX=1 skips the pool phases):
+HOSTED=1 JWT_ACCESS_SECRET=... USER_ID=... npx tsx scripts/lambda/validate-animate.mts
 
 # List / stop ($4.29/hr while up!)
 tsx scripts/lambda/launch-video.ts --list

@@ -55,6 +55,7 @@ import { config } from '../../config/index.js';
 import { query } from '../../postgres/client.js';
 import { inBackgroundScope } from '../observability/scope.js';
 import { LambdaClient, isRetryableLaunchError, lambdaSleep, spacedLaunch } from './client.js';
+import { latest as latestCapacity, type CapacitySnapshot } from './capacityMonitor.js';
 
 const PORT = 8766;
 const OS_IMAGE_FAMILY = 'lambda-stack-24-04';
@@ -62,6 +63,18 @@ const HEALTH_TIMEOUT_MS = 5_000;
 const HEALTH_FAILS_TO_KILL = 3;
 
 export type PoolStatusKind = 'disabled' | 'none' | 'launching' | 'booting' | 'ready' | 'error';
+
+/** /health payload. Servers additionally report kernel + process start
+ * epochs and per-phase init timings (model-servers image/video get_info),
+ * which the ready event folds into its detail column so every boot's time
+ * is decomposed (provision vs OS vs our stack) without SSHing anywhere. */
+export interface HealthInfo {
+  status?: string;
+  booted_at_epoch_s?: number;
+  started_at_epoch_s?: number;
+  phase_timings_ms?: Record<string, number>;
+  [key: string]: unknown;
+}
 
 export interface PoolInstanceSummary {
   name: string;
@@ -133,9 +146,18 @@ export interface InstancePoolSpec {
   targetStreams: () => number;
   /** Boot estimate for the ETA surface. */
   bootEstimateMs: number;
+  /** Hedged launch: when the pool has NO ready instance and its oldest
+   * booting instance exceeds this age, launch ONE extra instance and keep
+   * whichever passes /health first (the still-booting loser is terminated).
+   * Rationale: VM provisioning (launch accepted → kernel boot) dominates
+   * slow boots and is per-VM luck — 2.5 min vs 14 min observed in the same
+   * region/hour (2026-08-22) — so a fresh draw usually beats a stuck one.
+   * Bounded to one hedge pair at a time; may transiently exceed poolMax by
+   * one. 0/undefined disables. */
+  hedgeAfterMs?: number;
   // ── test seams (production omits — real implementations used) ──────────
   createClient?: () => LambdaClient;
-  probeHealth?: (ip: string, timeoutMs: number) => Promise<{ status?: string }>;
+  probeHealth?: (ip: string, timeoutMs: number) => Promise<HealthInfo>;
   tickMs?: number;
   idleTerminateMs?: number;
   bootTimeoutMs?: number;
@@ -147,6 +169,21 @@ export interface InstancePoolSpec {
   /** How recently touch()/acquire must have happened to count as "user
    * interest" (keeps one instance warm on a floor-0 pool). */
   interestWindowMs?: number;
+  /** Latest advertised-capacity snapshot (defaults to capacityMonitor's
+   * in-memory poll). The sweep tries advertised cells FIRST — a 12-cell pass
+   * at the 13 s launch spacing is ~2.6 min, and the data (2026-09-12) showed
+   * hunts spending p90 3.8 min walking dry cells while an open one sat
+   * further down the list. Test seam. */
+  capacitySnapshot?: () => CapacitySnapshot | null;
+  /** Measured launch→ready p50 per 'type@region' cell (ms), from
+   * lambda_pool_events over 30 days. Orders advertised cells fastest-boot
+   * first within a type tier (us-southeast-1 H100 boots in 2.5 min p50,
+   * us-south-2 in 15.8 — same SKU) and scales the hedge trigger. Test seam. */
+  cellBootStats?: () => Promise<Map<string, number>>;
+  /** How long a cell that produced a dead-on-arrival VM (boot_load_error /
+   * boot_stalled) is demoted to the back of the sweep. Default 45 min.
+   * Demoted, not removed: if nothing else has capacity it is still tried. */
+  cellPenaltyMs?: number;
 }
 
 export interface InstancePool {
@@ -181,17 +218,26 @@ interface PoolInstance {
   adopted?: boolean;
   /** Last computed hold verdict (see holdReasonFor); logged on change. */
   holdReason?: string;
+  /** Lambda SKU (e.g. gpu_1x_h100_sxm5) — with `region` identifies the
+   * sweep cell this VM came from, for per-cell boot stats + penalties. */
+  instanceType?: string;
+}
+
+/** 'type@region' — the unit the sweep, capacity samples, boot stats and
+ * penalties all key on (matches the `launched` event's detail column). */
+function cellKey(type: string, region: string): string {
+  return `${type}@${region}`;
 }
 
 /** Default /health probe: https with the pinned fleet cert when TLS is
  * configured (hostname check skipped — instances are bare IPs), plain http
  * otherwise. */
-function defaultProbeHealth(ip: string, timeoutMs: number): Promise<{ status?: string }> {
+function defaultProbeHealth(ip: string, timeoutMs: number): Promise<HealthInfo> {
   if (!config.LAMBDA_TLS_CA) {
     return fetch(`http://${ip}:${PORT}/health`, { signal: AbortSignal.timeout(timeoutMs) }).then(
       (res) => {
         if (!res.ok) throw new Error(`health ${res.status}`);
-        return res.json() as Promise<{ status?: string }>;
+        return res.json() as Promise<HealthInfo>;
       },
     );
   }
@@ -215,7 +261,7 @@ function defaultProbeHealth(ip: string, timeoutMs: number): Promise<{ status?: s
         res.on('data', (c: Buffer) => (body += c));
         res.on('end', () => {
           try {
-            resolve(JSON.parse(body) as { status?: string });
+            resolve(JSON.parse(body) as HealthInfo);
           } catch (err) {
             reject(err as Error);
           }
@@ -255,8 +301,105 @@ export function createInstancePool(spec: InstancePoolSpec): InstancePool {
   }
 
   const instances = new Map<string, PoolInstance>();
+  /** Hedge bookkeeping: maps EACH member of an in-flight hedge pair to its
+   * partner (bidirectional; two entries per pair). At most one pair exists
+   * at a time (tick guards on hedgePairs.size). Resolved — entries removed —
+   * when either member goes ready (loser terminated if still booting) or
+   * dies during boot. */
+  const hedgePairs = new Map<string, string>();
+  /** Instances that already got a hedge launched for them — never hedge the
+   * same stuck boot twice. */
+  const hedged = new Set<string>();
+  /** Names of instances launched AS hedges (the racing partner), so a
+   * resolved pair can say which side won. */
+  const hedgeInstances = new Set<string>();
+  /** Circuit breaker: cell → epoch ms until which it sorts last in sweeps. */
+  const cellPenaltyUntil = new Map<string, number>();
+  const CELL_PENALTY_MS = spec.cellPenaltyMs ?? 45 * 60_000;
+  const CAPACITY_SNAPSHOT_MAX_AGE_MS = 10 * 60_000;
+  const CELL_STATS_TTL_MS = 10 * 60_000;
+  let cellStatsCache: { atMs: number; map: Map<string, number> } = { atMs: 0, map: new Map() };
+  let cellStatsRefresh: Promise<Map<string, number>> | null = null;
+
+  /** Per-cell launch→ready p50 (ms) over 30 days, cached 10 min. A failed
+   * or unconfigured DB yields an empty map (static order + flat hedge). */
+  function cellBootStats(): Promise<Map<string, number>> {
+    if (Date.now() - cellStatsCache.atMs < CELL_STATS_TTL_MS) return Promise.resolve(cellStatsCache.map);
+    if (cellStatsRefresh) return cellStatsRefresh;
+    const source = spec.cellBootStats ?? defaultCellBootStats;
+    cellStatsRefresh = source()
+      .catch(() => new Map<string, number>())
+      .then((map) => {
+        cellStatsCache = { atMs: Date.now(), map };
+        cellStatsRefresh = null;
+        return map;
+      });
+    return cellStatsRefresh;
+  }
+  async function defaultCellBootStats(): Promise<Map<string, number>> {
+    const r = await query<{ cell: string; p50: string }>(
+      `SELECT l.detail AS cell, percentile_cont(0.5) WITHIN GROUP (ORDER BY r.duration_ms) AS p50
+         FROM lambda_pool_events l
+         JOIN lambda_pool_events r ON r.instance_name = l.instance_name AND r.event = 'ready'
+        WHERE l.event = 'launched' AND l.pool = $1 AND l.ts > now() - interval '30 days'
+        GROUP BY 1`,
+      [spec.kind],
+    );
+    return new Map(r.rows.map((row) => [row.cell, Number(row.p50)]));
+  }
+
+  function penalizeCell(inst: PoolInstance, reason: string): void {
+    if (!inst.instanceType) return;
+    const cell = cellKey(inst.instanceType, inst.region);
+    cellPenaltyUntil.set(cell, Date.now() + CELL_PENALTY_MS);
+    log.warn(
+      { pool: spec.kind, cell, name: inst.name, penaltyMs: CELL_PENALTY_MS, reason, event: 'lambda_pool_cell_penalized' },
+      `[sweep] ${cell} demoted for ${Math.round(CELL_PENALTY_MS / 60_000)}m after ${reason}`,
+    );
+    recordPoolEvent('cell_penalized', inst.name, inst.region, CELL_PENALTY_MS, `${cell}: ${reason}`);
+  }
+
+  /** Order the (type × region) grid for one sweep pass. Buckets, in order:
+   *  0 advertised right now (capacity snapshot < 10 min old) — within the
+   *    bucket keep the TYPE preference (an H100 still beats an A100), then
+   *    fastest measured boot;
+   *  1 not advertised (or no fresh snapshot) — static type-major order;
+   *  2 penalized cells (dead-on-arrival VM within the last 45 min);
+   *  3 the cell a hedge is racing against — a hedge wants a DIFFERENT draw.
+   * Nothing is ever skipped: the launch call stays the authority. */
+  async function planSweep(
+    types: readonly string[],
+    regions: readonly string[],
+    avoidCell?: string,
+  ): Promise<Array<{ type: string; region: string; cell: string; bucket: number }>> {
+    const snap = (spec.capacitySnapshot ?? latestCapacity)();
+    const advertised = snap && Date.now() - snap.atMs < CAPACITY_SNAPSHOT_MAX_AGE_MS ? snap.cells : new Set<string>();
+    const stats = await cellBootStats();
+    const now = Date.now();
+    const cells = types.flatMap((type, ti) =>
+      regions.map((region, ri) => {
+        const cell = cellKey(type, region);
+        let bucket = advertised.has(cell) ? 0 : 1;
+        if ((cellPenaltyUntil.get(cell) ?? 0) > now) bucket = 2;
+        if (cell === avoidCell) bucket = 3;
+        return { type, region, cell, bucket, ti, ri, p50: stats.get(cell) ?? spec.bootEstimateMs };
+      }),
+    );
+    cells.sort((a, b) =>
+      a.bucket - b.bucket ||
+      a.ti - b.ti ||
+      (a.bucket === 0 ? a.p50 - b.p50 : 0) ||
+      a.ri - b.ri,
+    );
+    return cells.map(({ type, region, cell, bucket }) => ({ type, region, cell, bucket }));
+  }
   let lastError: string | undefined;
   let launchesInFlight = 0;
+  /** Launches still in their CAPACITY SWEEP (not yet a registered booting
+   * instance). launchesInFlight stays up through the whole boot watch, so
+   * the hedge guard needs this narrower counter — a booting instance must
+   * not block its own hedge. */
+  let sweepsInFlight = 0;
   /** Start of the oldest in-flight capacity search (0 = none). */
   let searchStartedAtMs = 0;
   let tickTimer: NodeJS.Timeout | null = null;
@@ -472,16 +615,85 @@ runcmd:
 
   // ── launch / boot ───────────────────────────────────────────────────────
 
-  async function launchOne(): Promise<void> {
+  /** The subset of `wanted` whose `spec.fsName(region)` filesystem exists
+   * AND is not currently attached to a foreign instance. setup-lambda*.ts /
+   * sync-fs.mts create the filesystem EMPTY at the start of a 20-40 min
+   * populate and hold their `kiki-*setup-` / `kiki-fssync-` instance on it
+   * until done; a pool instance launched into it meanwhile boots a server
+   * whose model load fails and sits until the boot timeout (2026-09-12:
+   * happened within 60 s of us-southeast-1 joining the video sweep). Any
+   * non-pool instance attached = someone is writing; skip the region until
+   * they detach. (Lambda's filesystem `bytes_used` is NOT usable for this —
+   * it reported 0 GB with 68 GB on disk.) A listing failure sweeps every
+   * configured region (the launch call is the authority; this is a
+   * pre-filter). */
+  async function regionsWithFilesystem(c: LambdaClient, wanted: readonly string[]): Promise<string[]> {
+    let present: Set<string>;
+    const busyLogged = new Set<string>();
+    try {
+      const [filesystems, attached] = await Promise.all([c.listFilesystems(), c.listInstances()]);
+      present = new Set(filesystems.filter((f) => f.name === spec.fsName(f.region.name)).map((f) => f.region.name));
+      for (const inst of attached) {
+        const name = inst.name ?? '';
+        if (name.startsWith(spec.namePrefix)) continue;
+        const region = inst.region.name;
+        if (present.has(region) && (inst.file_system_names ?? []).includes(spec.fsName(region))) {
+          present.delete(region);
+          busyLogged.add(region);
+          log.warn(
+            { pool: spec.kind, region, writer: name, event: 'lambda_pool_region_fs_busy' },
+            `[launch] skipping ${region} — ${name} is attached to ${spec.fsName(region)} (populating?)`,
+          );
+        }
+      }
+    } catch (err) {
+      log.warn(
+        { err, pool: spec.kind, event: 'lambda_pool_fs_list_failed' },
+        '[launch] filesystem listing failed — sweeping every configured region',
+      );
+      return [...wanted];
+    }
+    const kept = wanted.filter((r) => present.has(r));
+    const missing = wanted.filter((r) => !present.has(r) && !busyLogged.has(r));
+    if (missing.length > 0) {
+      log.warn(
+        { pool: spec.kind, regions: missing, event: 'lambda_pool_region_no_fs' },
+        `[launch] skipping ${missing.join(', ')} — no usable ${spec.fsName('<region>')} filesystem there`,
+      );
+    }
+    if (kept.length === 0) {
+      throw new Error(`no configured region [${wanted.join(', ')}] has a usable ${spec.fsName('<region>')} filesystem`);
+    }
+    return kept;
+  }
+
+  async function launchOne(hedgeFor?: string): Promise<void> {
     if (!enabled()) return;
-    if (upOrComing() >= spec.poolMax()) return;
+    // A hedge deliberately exceeds poolMax by one — the pair resolves back to
+    // one instance within minutes (loser terminated at first ready).
+    if (!hedgeFor && upOrComing() >= spec.poolMax()) return;
     launchesInFlight += 1;
+    sweepsInFlight += 1;
+    let sweeping = true;
     if (launchesInFlight === 1) searchStartedAtMs = Date.now();
     const name = `${spec.namePrefix}${Date.now()}`;
+    if (hedgeFor) {
+      hedgePairs.set(name, hedgeFor);
+      hedgePairs.set(hedgeFor, name);
+      hedgeInstances.add(name);
+    }
     const searchStartMs = Date.now();
     const types = spec.instanceTypes();
-    const regions = spec.regions();
-    recordPoolEvent('launch_requested', name, regions[0], undefined, `${types.length} types × ${regions.length} regions`);
+    let regions = spec.regions();
+    recordPoolEvent(
+      'launch_requested',
+      name,
+      regions[0],
+      undefined,
+      // The hedge marker lets the Insights Boots page tell racing launches
+      // from organic ones without reconstructing pairs from loser events.
+      `${hedgeFor ? `hedge for ${hedgeFor}; ` : ''}${types.length} types × ${regions.length} regions`,
+    );
     // Hoisted out of the try so the launch_failed catch can report how many
     // (type × region) cells were tried before the sweep died.
     let attempts = 0;
@@ -490,53 +702,97 @@ runcmd:
       const keys = await c.listSshKeys();
       const firstKey = keys[0];
       if (!firstKey) throw new Error('no SSH key registered on the Lambda account');
+      // A region without this pool's filesystem can't serve (cloud-init
+      // mounts the weights from it) and Lambda refuses the launch with a
+      // non-retryable error that would end the whole sweep. Drop those
+      // regions up front, loudly — so a region list shared between pools
+      // (the video pool defaults to the image pool's) needs only its
+      // filesystem populated to join the hunt.
+      regions = await regionsWithFilesystem(c, regions);
 
-      // TYPE-MAJOR capacity sweep: circle the (type × region) grid until a
-      // cell grants capacity or the retry window expires. Attempt pacing
-      // comes from the account-wide launch spacing gate (client.ts), so
-      // multiple pools sweeping concurrently still respect Lambda's launch
-      // rate limit.
-      const deadline = Date.now() + LAUNCH_RETRY_MINS * 60_000;
+      // Capacity sweep: circle the (type × region) grid, re-planned every
+      // pass (advertised cells first, then static type-major order, penalized
+      // cells last — see planSweep), until a cell grants capacity or demand
+      // goes away. There is deliberately NO time cliff: the old 15-min
+      // window ended 7 video hunts in 30 days while users were still
+      // waiting, and the interest window already bounds a hunt nobody
+      // wants. Attempt pacing comes from the account-wide launch spacing
+      // gate (client.ts), so multiple pools sweeping concurrently still
+      // respect Lambda's launch rate limit.
+      const longHuntAtMs = Date.now() + LAUNCH_RETRY_MINS * 60_000;
+      let longHuntLogged = false;
+      const hedgeOrigin = hedgeFor ? instances.get(hedgeFor) : undefined;
+      const avoidCell = hedgeOrigin?.instanceType ? cellKey(hedgeOrigin.instanceType, hedgeOrigin.region) : undefined;
       let launched: { id: string; region: string; type: string } | null = null;
       let lastErr: unknown = null;
       let abandonReason = '';
+      let pass = 0;
       sweep: for (;;) {
-        for (const type of types) {
-          for (const region of regions) {
-            if (!enabled() || !instancesWanted()) {
-              abandonReason = !enabled() ? 'pool disabled' : 'demand gone';
-              break sweep;
-            }
-            try {
-              attempts += 1;
-              const [id] = await spacedLaunch(
-                c,
-                {
-                  region_name: region,
-                  instance_type_name: type,
-                  ssh_key_names: [firstKey.name],
-                  file_system_names: [spec.fsName(region)],
-                  name,
-                  image: { family: OS_IMAGE_FAMILY },
-                  user_data: userData(name, region),
-                },
-                spec.launchSpacingMs,
-              );
-              if (!id) throw new Error('Lambda launch returned no instance id');
-              launched = { id, region, type };
-              break sweep;
-            } catch (err) {
-              lastErr = err;
-              if (!isRetryableLaunchError(err)) throw err;
-              log.info(
-                { pool: spec.kind, type, region, err: (err as Error).message, event: 'lambda_pool_launch_retry' },
-                `[launch] no ${type} in ${region} — sweeping on`,
-              );
-            }
+        const plan = await planSweep(types, regions, avoidCell);
+        if (pass === 0) {
+          log.info(
+            {
+              pool: spec.kind,
+              advertised: plan.filter((p) => p.bucket === 0).map((p) => p.cell),
+              penalized: plan.filter((p) => p.bucket === 2).map((p) => p.cell),
+              order: plan.map((p) => p.cell),
+              event: 'lambda_pool_sweep_plan',
+            },
+            `[launch] sweep plan: ${plan.filter((p) => p.bucket === 0).length} advertised of ${plan.length} cells`,
+          );
+        }
+        pass += 1;
+        for (const { type, region } of plan) {
+          if (!enabled() || !instancesWanted()) {
+            abandonReason = !enabled() ? 'pool disabled' : 'demand gone';
+            break sweep;
+          }
+          // A hedge whose partner already resolved (original went ready, or
+          // died taking the pair down) has nothing left to race for.
+          if (hedgeFor && !hedgePairs.has(name)) {
+            abandonReason = 'hedge resolved mid-sweep';
+            break sweep;
+          }
+          try {
+            attempts += 1;
+            const [id] = await spacedLaunch(
+              c,
+              {
+                region_name: region,
+                instance_type_name: type,
+                ssh_key_names: [firstKey.name],
+                file_system_names: [spec.fsName(region)],
+                name,
+                image: { family: OS_IMAGE_FAMILY },
+                user_data: userData(name, region),
+              },
+              spec.launchSpacingMs,
+            );
+            if (!id) throw new Error('Lambda launch returned no instance id');
+            launched = { id, region, type };
+            break sweep;
+          } catch (err) {
+            lastErr = err;
+            if (!isRetryableLaunchError(err)) throw err;
+            log.info(
+              { pool: spec.kind, type, region, err: (err as Error).message, event: 'lambda_pool_launch_retry' },
+              `[launch] no ${type} in ${region} — sweeping on`,
+            );
           }
         }
-        if (Date.now() > deadline) {
-          throw (lastErr as Error) ?? new Error('capacity sweep window expired');
+        // Pass boundary: yield to the event loop before re-planning. Launch
+        // spacing normally paces attempts; with none (tests, or a future
+        // zero-spacing config) a dry grid would otherwise spin on
+        // microtasks alone and starve timers — including the interest
+        // window that is supposed to end this hunt.
+        await lambdaSleep(POLL_MS);
+        if (!longHuntLogged && Date.now() > longHuntAtMs) {
+          longHuntLogged = true;
+          log.warn(
+            { pool: spec.kind, attempts, minutes: LAUNCH_RETRY_MINS, event: 'lambda_pool_hunt_long' },
+            `[launch] still hunting after ${LAUNCH_RETRY_MINS}m / ${attempts} attempts — continuing while demand persists`,
+          );
+          recordPoolEvent('hunt_long', name, regions[0], Date.now() - searchStartMs, `${attempts} attempts; last: ${(lastErr as Error | null)?.message ?? '-'}`);
         }
       }
       if (!launched) {
@@ -553,12 +809,14 @@ runcmd:
           `${abandonReason} after ${attempts} attempts` +
             (lastErr ? `; last: ${(lastErr as Error).message}` : ''),
         );
+        clearHedgePair(name);
         return;
       }
       instances.set(name, {
         id: launched.id,
         name,
         region: launched.region,
+        instanceType: launched.type,
         status: 'booting',
         launchedAtMs: Date.now(),
         activeStreams: 0,
@@ -571,6 +829,8 @@ runcmd:
       );
       // duration = capacity-search time; detail = which (type, region) won.
       recordPoolEvent('launched', name, launched.region, Date.now() - searchStartMs, `${launched.type}@${launched.region}`);
+      sweepsInFlight -= 1;
+      sweeping = false;
       await watchBoot(name);
     } catch (err) {
       lastError = (err as Error).message;
@@ -582,10 +842,22 @@ runcmd:
         Date.now() - searchStartMs,
         `after ${attempts} attempts: ${(err as Error).message}`,
       );
+      clearHedgePair(name);
     } finally {
+      if (sweeping) sweepsInFlight -= 1;
       launchesInFlight -= 1;
       if (launchesInFlight === 0) searchStartedAtMs = 0;
     }
+  }
+
+  /** Drop hedge bookkeeping for an instance (both directions). Called when a
+   * pair resolves (winner ready) or a member dies during launch/boot. */
+  function clearHedgePair(name: string): void {
+    const partner = hedgePairs.get(name);
+    hedgePairs.delete(name);
+    if (partner) hedgePairs.delete(partner);
+    hedged.delete(name);
+    if (partner) hedged.delete(partner);
   }
 
   /** Mid-sweep demand check: keep hunting only while something would still
@@ -636,19 +908,51 @@ runcmd:
       }
       if (!inst.ip) await lambdaSleep(POLL_MS);
     }
+    // The IP-visible moment is the only provisioning progress signal the API
+    // gives us; record it so the waterfall can split hunt/provision/boot even
+    // for instances whose server never comes up. Baseline is launchedAtMs
+    // (capacity granted) to match the ready event — NOT trueLaunchMs, which
+    // is sweep start and would fold hunt time into provisioning.
+    if (!inst.adopted) recordPoolEvent('ip_assigned', name, inst.region, Date.now() - inst.launchedAtMs);
     // …then OUR /health.
+    let readyHealth: HealthInfo | undefined;
     for (;;) {
       if (Date.now() > deadline) {
         instances.delete(name);
         void c.terminate([inst.id]).catch(() => {});
+        penalizeCell(inst, 'boot_stalled');
         recordPoolEvent('boot_stalled', name, inst.region, Date.now() - trueLaunchMs(inst));
         throw new Error(`boot timed out waiting for /health (${name})`);
       }
       if (!instances.has(name)) return;
       try {
         const health = await probeHealth(inst.ip, 3000);
-        if (health.status === 'ok') break;
-      } catch {
+        if (health.status === 'ok') {
+          readyHealth = health;
+          break;
+        }
+        // The server stayed up but its model load threw (video server.py
+        // keeps FastAPI alive and exposes the traceback as
+        // status:'error' + load_error). That is terminal for this VM — it
+        // never retries the load — so waiting out the boot timeout only
+        // delays the replacement. Seen 2026-09-12: a Lambda H100 SXM VM
+        // came up with CUDA error 802 (host fabric never initialized the
+        // GPU), torch fell back to CPU, and warmup died 12 min in; the pool
+        // would have held it 13 more minutes.
+        if (health.status === 'error') {
+          const reason = String(health['load_error'] ?? 'load failed').trim().split('\n').pop() ?? 'load failed';
+          instances.delete(name);
+          void c.terminate([inst.id]).catch(() => {});
+          penalizeCell(inst, `boot_load_error (${reason})`);
+          log.warn(
+            { instanceId: inst.id, name, ip: inst.ip, reason, pool: spec.kind, event: 'lambda_pool_boot_load_error' },
+            `[boot] ${name} reports a terminal load error — terminating: ${reason}`,
+          );
+          recordPoolEvent('boot_load_error', name, inst.region, Date.now() - trueLaunchMs(inst), reason);
+          throw new Error(`server load failed on ${name}: ${reason}`);
+        }
+      } catch (err) {
+        if ((err as Error).message.startsWith('server load failed')) throw err;
         // not up yet
       }
       await lambdaSleep(POLL_MS);
@@ -663,7 +967,83 @@ runcmd:
     // duration = boot/warm time (capacity granted → OUR /health ok). Adopted
     // instances skip this — their launchedAtMs is adoption time, and a ~0s
     // "boot" would corrupt the waterfall's boot p50.
-    if (!inst.adopted) recordPoolEvent('ready', name, inst.region, inst.readyAtMs - inst.launchedAtMs);
+    if (!inst.adopted) {
+      recordPoolEvent(
+        'ready',
+        name,
+        inst.region,
+        inst.readyAtMs - inst.launchedAtMs,
+        bootPhaseDetail(inst, readyHealth),
+      );
+    }
+    resolveHedge(name);
+  }
+
+  /** Decompose a boot into provision / OS / our-stack from the server's own
+   * clocks (kernel + process start epochs on /health), plus the largest init
+   * phases. Returned as compact JSON for the ready event's detail column. */
+  function bootPhaseDetail(inst: PoolInstance, health: HealthInfo | undefined): string | undefined {
+    if (!health) return undefined;
+    // Capacity-granted baseline (matches the ready duration) — trueLaunchMs
+    // is sweep start and would fold hunt time into provision_s.
+    const launchMs = inst.launchedAtMs;
+    const out: Record<string, unknown> = {};
+    if (typeof health.booted_at_epoch_s === 'number') {
+      out['provision_s'] = Math.round(health.booted_at_epoch_s - launchMs / 1000);
+    }
+    if (typeof health.started_at_epoch_s === 'number') {
+      if (typeof health.booted_at_epoch_s === 'number') {
+        out['os_s'] = Math.round(health.started_at_epoch_s - health.booted_at_epoch_s);
+      }
+      out['stack_s'] = Math.round(Date.now() / 1000 - health.started_at_epoch_s);
+    }
+    const phases = health.phase_timings_ms;
+    if (phases && typeof phases === 'object') {
+      out['phases_ms'] = Object.fromEntries(
+        Object.entries(phases)
+          .filter(([, v]) => typeof v === 'number')
+          .sort(([, a], [, b]) => b - a)
+          .slice(0, 6),
+      );
+    }
+    return Object.keys(out).length > 0 ? JSON.stringify(out) : undefined;
+  }
+
+  /** First member of a hedge pair to go ready wins; a partner still booting
+   * is terminated immediately (it has served nobody). A partner that also
+   * reached ready is left to the idle reaper — harmless. */
+  function resolveHedge(winnerName: string): void {
+    const partnerName = hedgePairs.get(winnerName);
+    if (!partnerName) return;
+    clearHedgePair(winnerName);
+    const partner = instances.get(partnerName);
+    if (!partner || partner.status === 'ready') return;
+    const winnerSide = hedgeInstances.has(winnerName) ? 'hedge' : 'original';
+    log.info(
+      { winner: winnerName, loser: partnerName, winnerSide, pool: spec.kind, event: 'lambda_pool_hedge_resolved' },
+      'hedge resolved — terminating still-booting loser',
+    );
+    // Durable row so Insights can show the hedge WIN RATE (2/15 over the 30
+    // days before 2026-09-12 — the flat 8-min trigger fired just before
+    // normal 10-min A100 boots finished; see the boot-relative trigger in
+    // tick()).
+    const winner = instances.get(winnerName);
+    recordPoolEvent(
+      'hedge_resolved',
+      winnerName,
+      winner?.region ?? partner.region,
+      winner ? Date.now() - trueLaunchMs(winner) : undefined,
+      `winner=${winnerSide}; loser=${partnerName}`,
+    );
+    recordPoolEvent(
+      'hedge_loser_terminate',
+      partnerName,
+      partner.region,
+      Date.now() - trueLaunchMs(partner),
+      `lost to ${winnerName}`,
+    );
+    instances.delete(partnerName);
+    void client().terminate([partner.id]).catch(() => {});
   }
 
   /** The decision-table verdict for one instance (module header). `need`
@@ -768,6 +1148,55 @@ runcmd:
       void inBackgroundScope(scopeName, () => launchOne());
     }
 
+    // Hedged launch: nobody is ready, somebody wants an instance, and the
+    // oldest boot has dragged past the threshold (slow VM provisioning is
+    // per-VM luck — a fresh draw usually wins; see hedgeAfterMs). One pair
+    // at a time; never hedge the same boot twice; never launch over an
+    // active capacity sweep (sweepsInFlight — NOT launchesInFlight, which
+    // stays up through the whole boot watch and would block every hedge).
+    const hedgeAfterMs = spec.hedgeAfterMs ?? 0;
+    if (
+      hedgeAfterMs > 0 &&
+      readyInstances().length === 0 &&
+      sweepsInFlight === 0 &&
+      hedgePairs.size === 0 &&
+      instancesWanted()
+    ) {
+      // Threshold is per CELL: the flat 8 min fired on every normal ~10-min
+      // A100 boot (hedge won 2 of 15 in 30 days) — a boot is only "dragging"
+      // once it is well past what its own cell normally takes. Stats refresh
+      // in the background; until they exist the flat threshold applies.
+      void cellBootStats();
+      const stats = cellStatsCache.map;
+      const thresholdFor = (i: PoolInstance): number => {
+        const p50 = i.instanceType ? stats.get(cellKey(i.instanceType, i.region)) : undefined;
+        return Math.max(hedgeAfterMs, p50 ? Math.round(p50 * 1.3) : 0);
+      };
+      const stuck = [...instances.values()]
+        .filter(
+          (i) =>
+            i.status === 'booting' && !i.adopted && !hedged.has(i.name) &&
+            Date.now() - trueLaunchMs(i) > thresholdFor(i),
+        )
+        .sort((a, b) => trueLaunchMs(a) - trueLaunchMs(b))[0];
+      if (stuck) {
+        hedged.add(stuck.name);
+        const thresholdMs = thresholdFor(stuck);
+        log.info(
+          { name: stuck.name, ageMs: Date.now() - trueLaunchMs(stuck), thresholdMs, pool: spec.kind, event: 'lambda_pool_hedge_launched' },
+          'boot dragging with nothing ready — launching hedge instance',
+        );
+        recordPoolEvent(
+          'hedge_launched',
+          stuck.name,
+          stuck.region,
+          Date.now() - trueLaunchMs(stuck),
+          `boot exceeded ${Math.round(thresholdMs / 60_000)}m (cell p50-relative) with no ready instance`,
+        );
+        void inBackgroundScope(scopeName, () => launchOne(stuck.name));
+      }
+    }
+
     // Idle scale-down: one per tick, never below the floor or below need.
     if (instances.size > Math.max(spec.poolMin(), need)) {
       const idle = readyInstances()
@@ -823,6 +1252,7 @@ runcmd:
             status: 'booting',
             launchedAtMs: Date.now(),
             adopted: true,
+            instanceType: remote.instance_type?.name,
             activeStreams: 0,
             lastActivityMs: Date.now(),
             healthFails: 0,

@@ -160,7 +160,10 @@ python3 model-servers/dev/video_client.py --url '<LAMBDA_VIDEO_URL>' \
 #
 # 3c. PRODUCTION path (managed pool): skip launch-video.ts entirely — set on
 #     Railway:  LAMBDA_VIDEO_POOL_ENABLED=true   (leave LAMBDA_VIDEO_URL unset)
-#     optional: LAMBDA_VIDEO_REGION / LAMBDA_VIDEO_POOL_MIN|MAX|TARGET_STREAMS
+#     optional: LAMBDA_VIDEO_POOL_MIN|MAX|TARGET_STREAMS
+#     region/type sweep: inherits LAMBDA_REGIONS / LAMBDA_INSTANCE_TYPES (80 GB SKUs
+#     only); override with LAMBDA_VIDEO_REGIONS / LAMBDA_VIDEO_INSTANCE_TYPES.
+#     Regions without a kiki-video-<region> filesystem are skipped at sweep time.
 #     then `npm run deploy`. Opening the app / starting a stream is pool
 #     interest → an instance launches within ~1 tick (60s) + ~5-10 min boot;
 #     sessions upgrade to video mid-session when it's ready; 30 min idle
@@ -229,3 +232,30 @@ Legacy single `image_b64` still works (= one keyframe at position 0).
 E2E harness: `backend/scripts/lambda/validate-animate.mts` (replaces
 `validate-video.mts`) — single-keyframe, start+end-keyframe, and
 cancel-mid-flight phases against the deployed backend.
+
+
+## 2026-09-10 addendum — LTX-2.5 + hosted fal engines
+
+The serving stack moved to **LTX-2.5** (`documents/decisions.md` 2026-09-10 has the
+full rationale, numbers, and the gated-HF gotcha). What changed operationally:
+
+- `model-servers/video/pipeline.py` is `Ltx25VideoPipeline`: it calls the
+  official `ltx_pipelines.DistilledPipeline` / `DFRPipeline` directly, with
+  `ModelRegistry(cache_weights=True, cache_models=True)` keeping the FP8-cast
+  weights GPU-resident across calls (no more hand-rolled persistent
+  transformer). `LTX_PIPELINE=distilled|dfr`, `LTX_WIDTH/HEIGHT`,
+  `LTX_VIDEO_VAE=diff|conv`, `LTX_DIFFVAE_MODE` are the load-time knobs
+  (defaults in `shared/config.py`: **dfr @ 768²**; boot.sh doesn't override
+  them). Bench table + the 1024²×145-frame decode-budget failure are in the
+  decisions entry.
+- Weights are the split per-component files on `Lightricks/LTX-2.5` (+ the
+  DFR IC-LoRA repo); both are HF **auto-gated** — the populate token's
+  account must have clicked through the LTX-2.x Community License once.
+  `setup-lambda-video.ts` downloads the set; the 2.3 files were left on the
+  filesystem for rollback (`git revert` the model-servers change + boot).
+- Bench harness: `model-servers/dev/bench_ltx25.py` (per pipeline, several
+  sizes, MP4s + summary JSON to /tmp/bench on the instance).
+- `/v1/animate` accepts `engine: ltx|wan3|h3max`; the hosted engines never
+  touch this pool (`backend/src/modules/video/falAnimate.ts`).
+- `validate-animate.mts` gained `HOSTED=1` (fal engine phases) and
+  `SKIP_LTX=1`.

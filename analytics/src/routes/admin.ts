@@ -41,6 +41,12 @@ function groupBy<C>(children: C[], key: (c: C) => string): Map<string, C[]> {
   return map;
 }
 
+/** "Our H100 grid" regions for /admin/api/capacity/grid when the caller
+ * doesn't pass ?regions= — mirrors the backend's LAMBDA_REGIONS (widened
+ * 2026-09-12). Insights can't read the backend's env, so this is a mirror,
+ * not a source of truth: keep it in step with the Railway var. */
+const DEFAULT_GRID_REGIONS = 'us-southeast-1,us-south-2,us-east-1,us-west-3,us-south-3';
+
 export const adminRoute: FastifyPluginAsync = async (app) => {
   // ─── Auth ──────────────────────────────────────────────────────────────────
   app.post('/admin/login', async (request, reply) => {
@@ -949,7 +955,7 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
            LEFT JOIN LATERAL (
              SELECT event, duration_ms FROM lambda_pool_events x
              WHERE x.instance_name = req.instance_name AND x.ts >= req.ts
-               AND x.event IN ('idle_terminate','instance_dead','disabled_terminate')
+               AND x.event IN ('idle_terminate','instance_dead','disabled_terminate','hedge_loser_terminate')
              ORDER BY x.ts LIMIT 1) e ON true
            ORDER BY req.ts DESC LIMIT 40`,
         ).catch((err: { code?: string }) => {
@@ -1012,6 +1018,268 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
         acquisitions: acquisitions.rows,
         h100_misses: h100Misses.rows,
         recent_misses: recentMisses.rows,
+      };
+    });
+
+    // ─── Boots: per-boot success + timing decomposition ────────────────────
+    // The dedicated boot view: every capacity hunt of one pool (30d = the
+    // events table's retention), chained into a per-instance record with the
+    // boot decomposed via the ready event's detail JSON ({provision_s, os_s,
+    // stack_s, phases_ms} — recorded by the backend pool since 2026-08-22
+    // from the server's own /health clocks). Shaped in TS: the table is tiny
+    // (a few events per boot, a few boots per day) and the per-instance
+    // chaining is clearer here than as N lateral joins.
+    gated.get('/admin/api/boots', async (request) => {
+      const q = request.query as { pool?: string };
+      const pool = q.pool === 'video' ? 'video' : 'image';
+      const { rows } = await query(
+        `SELECT ts, event, instance_name, region, duration_ms, detail
+         FROM lambda_pool_events
+         WHERE pool = $1 AND ts > now() - interval '30 days'
+         ORDER BY ts`,
+        [pool],
+      );
+      type Ev = {
+        ts: string;
+        event: string;
+        instance_name: string | null;
+        region: string | null;
+        duration_ms: number | null;
+        detail: string | null;
+      };
+      const events = rows as Ev[];
+
+      // Race winners are named in the loser's detail ("lost to <name>").
+      // NOTE: the winner can be the ORIGINAL (hedge lost) — so this set is
+      // "won a race", not "is a hedge". Hedge identity comes from the
+      // launch_requested "hedge for …" marker (backend, 2026-08-22).
+      const raceWinners = new Set<string>();
+      for (const e of events) {
+        if (e.event === 'hedge_loser_terminate' && e.detail?.startsWith('lost to ')) {
+          raceWinners.add(e.detail.slice('lost to '.length));
+        }
+      }
+
+      interface BootRow {
+        requested_at: string;
+        instance_name: string;
+        region: string | null;
+        gpu_type: string | null;
+        outcome: string; // ready | boot_stalled | launch_failed | sweep_abandoned | hedge_lost | booting | unknown
+        search_ms: number | null;
+        ip_ms: number | null; // capacity granted → IP visible
+        boot_ms: number | null; // capacity granted → /health ok
+        provision_s: number | null; // launch → kernel (Lambda's share)
+        os_s: number | null; // kernel → server process
+        stack_s: number | null; // process → ready (our share)
+        phases_ms: Record<string, number> | null;
+        is_hedge: boolean; // launched as the racing instance
+        hedge_won: boolean;
+        hedged: boolean; // dragged long enough that a hedge was fired FOR it
+        end_event: string | null; // idle_terminate | instance_dead | ...
+        fail_detail: string | null;
+      }
+
+      const boots: BootRow[] = [];
+      for (const [name, evs] of groupBy(events, (e) => e.instance_name ?? '?')) {
+        const by = (ev: string): Ev | undefined => evs.find((e) => e.event === ev);
+        const requested = by('launch_requested');
+        const launched = by('launched');
+        const ready = by('ready');
+        const stalled = by('boot_stalled');
+        const failed = by('launch_failed');
+        const abandoned = by('sweep_abandoned');
+        const hedgeLost = by('hedge_loser_terminate');
+        // Adoption-only groups (instances re-registered on redeploy with no
+        // launch in-window) aren't boots — skip unless a real hunt started.
+        const anchor = requested ?? launched;
+        if (!anchor) continue;
+
+        let decomposition: {
+          provision_s?: number;
+          os_s?: number;
+          stack_s?: number;
+          phases_ms?: Record<string, number>;
+        } = {};
+        if (ready?.detail?.startsWith('{')) {
+          try {
+            decomposition = JSON.parse(ready.detail) as typeof decomposition;
+          } catch {
+            // pre-instrumentation / truncated detail — totals still shown
+          }
+        }
+
+        const ageMs = Date.now() - new Date((launched ?? anchor).ts).getTime();
+        const outcome = ready
+          ? 'ready'
+          : hedgeLost
+            ? 'hedge_lost'
+            : stalled
+              ? 'boot_stalled'
+              : failed
+                ? 'launch_failed'
+                : abandoned
+                  ? 'sweep_abandoned'
+                  : ageMs < 30 * 60_000
+                    ? 'booting'
+                    : 'unknown';
+
+        boots.push({
+          // pg hands timestamptz back as a Date — normalize to ISO so the
+          // sort/day-grouping below and the client all see strings.
+          requested_at: new Date(anchor.ts).toISOString(),
+          instance_name: name,
+          region: launched?.region ?? requested?.region ?? null,
+          gpu_type: launched?.detail?.split('@')[0] ?? null,
+          outcome,
+          search_ms: launched?.duration_ms ?? null,
+          ip_ms: by('ip_assigned')?.duration_ms ?? null,
+          boot_ms: ready?.duration_ms ?? stalled?.duration_ms ?? null,
+          provision_s: decomposition.provision_s ?? null,
+          os_s: decomposition.os_s ?? null,
+          stack_s: decomposition.stack_s ?? null,
+          phases_ms: decomposition.phases_ms ?? null,
+          is_hedge: Boolean(requested?.detail?.startsWith('hedge for ')),
+          hedge_won: raceWinners.has(name),
+          hedged: Boolean(by('hedge_launched')),
+          end_event: by('idle_terminate')?.event ?? by('instance_dead')?.event ?? by('disabled_terminate')?.event ?? null,
+          fail_detail: failed?.detail ?? abandoned?.detail ?? hedgeLost?.detail ?? null,
+        });
+      }
+      boots.sort((a, b) => b.requested_at.localeCompare(a.requested_at));
+
+      const p = (vals: number[], q: number): number | null => {
+        if (vals.length === 0) return null;
+        const s = [...vals].sort((a, b) => a - b);
+        return s[Math.min(s.length - 1, Math.floor(q * s.length))] ?? null;
+      };
+      const readyBoots = boots.filter((b) => b.outcome === 'ready');
+      const bootTimes = readyBoots.map((b) => b.boot_ms).filter((v): v is number => v != null);
+      const searches = boots.map((b) => b.search_ms).filter((v): v is number => v != null);
+      const provisions = readyBoots.map((b) => b.provision_s).filter((v): v is number => v != null);
+      const stacks = readyBoots.map((b) => b.stack_s).filter((v): v is number => v != null);
+
+      // Phase medians across instrumented boots (which init phase is the
+      // stack's critical path — warmup vs load vs prefetch).
+      const phaseVals = new Map<string, number[]>();
+      for (const b of readyBoots) {
+        for (const [k, v] of Object.entries(b.phases_ms ?? {})) {
+          // phase_timings_ms also carries non-duration gauges (prefetch_bytes_mb,
+          // cpu_mem_avail_mb_at_ready, worker counts) — durations only here.
+          if (k.endsWith('_ms') && typeof v === 'number' && v > 500) {
+            const list = phaseVals.get(k) ?? [];
+            list.push(v);
+            phaseVals.set(k, list);
+          }
+        }
+      }
+      const phase_medians = [...phaseVals.entries()]
+        .map(([phase, vals]) => ({ phase, p50_ms: p(vals, 0.5), n: vals.length }))
+        .sort((a, b) => (b.p50_ms ?? 0) - (a.p50_ms ?? 0));
+
+      // Daily trend (UTC days, newest first).
+      const byDay = groupBy(readyBoots, (b) => b.requested_at.slice(0, 10));
+      const daily = [...byDay.entries()]
+        .map(([day, list]) => ({
+          day,
+          boots: list.length,
+          boot_p50_ms: p(list.map((b) => b.boot_ms).filter((v): v is number => v != null), 0.5),
+          provision_p50_s: p(list.map((b) => b.provision_s).filter((v): v is number => v != null), 0.5),
+          stack_p50_s: p(list.map((b) => b.stack_s).filter((v): v is number => v != null), 0.5),
+        }))
+        .sort((a, b) => b.day.localeCompare(a.day));
+
+      return {
+        pool,
+        summary: {
+          hunts: boots.length,
+          granted: boots.filter((b) => b.search_ms != null).length,
+          ready: readyBoots.length,
+          stalled: boots.filter((b) => b.outcome === 'boot_stalled').length,
+          failed: boots.filter((b) => b.outcome === 'launch_failed').length,
+          abandoned: boots.filter((b) => b.outcome === 'sweep_abandoned').length,
+          booting_now: boots.filter((b) => b.outcome === 'booting').length,
+          hedges_fired: boots.filter((b) => b.hedged).length,
+          hedge_wins: boots.filter((b) => b.is_hedge && b.hedge_won).length,
+          hedge_losses: boots.filter((b) => b.outcome === 'hedge_lost').length,
+          search_p50_ms: p(searches, 0.5),
+          search_max_ms: searches.length ? Math.max(...searches) : null,
+          boot_p50_ms: p(bootTimes, 0.5),
+          boot_p90_ms: p(bootTimes, 0.9),
+          boot_max_ms: bootTimes.length ? Math.max(...bootTimes) : null,
+          provision_p50_s: p(provisions, 0.5),
+          provision_max_s: provisions.length ? Math.max(...provisions) : null,
+          stack_p50_s: p(stacks, 0.5),
+          stack_max_s: stacks.length ? Math.max(...stacks) : null,
+          decomposed: provisions.length,
+        },
+        boots: boots.slice(0, 60),
+        phase_medians,
+        daily,
+      };
+    });
+
+    // ─── Boots — per-cell boot time + hedge outcomes (both pools) ─────────
+    // cells: `launched` (detail = 'type@region', duration = search) joined to
+    // the instance's first `ready` (duration = capacity granted → /health
+    // ok) by instance_name → boot-time percentiles per pool × cell. Answers
+    // "is the slow-provisioning lottery a per-cell thing".
+    // hedges: `hedge_launched` (stamped on the ORIGINAL, dragging instance)
+    // vs `hedge_resolved` (backend, 2026-09-12: detail 'winner=original' |
+    // 'winner=hedge'). Pre-instrumentation races only left the legacy
+    // `hedge_loser_terminate` on the loser, reported separately so an empty
+    // resolved column reads as "not yet recorded", not "never resolved".
+    gated.get('/admin/api/boots/cells', async (request) => {
+      const days = Math.min(90, Math.max(1, Number((request.query as { days?: string }).days) || 30));
+      const iv = `${days} days`;
+      const [cells, hedges] = await Promise.all([
+        query(
+          `SELECT l.pool,
+                  split_part(l.detail, '@', 1)                     AS instance_type,
+                  coalesce(NULLIF(split_part(l.detail, '@', 2), ''), l.region) AS region,
+                  count(*)::int                                     AS boots,
+                  round((percentile_cont(0.5) WITHIN GROUP (ORDER BY r.duration_ms) / 60000.0)::numeric, 1)::float AS p50_min,
+                  round((percentile_cont(0.9) WITHIN GROUP (ORDER BY r.duration_ms) / 60000.0)::numeric, 1)::float AS p90_min,
+                  round((max(r.duration_ms) / 60000.0)::numeric, 1)::float AS max_min
+           FROM lambda_pool_events l
+           JOIN LATERAL (
+             SELECT r.duration_ms FROM lambda_pool_events r
+             WHERE r.instance_name = l.instance_name AND r.pool = l.pool
+               AND r.event = 'ready' AND r.duration_ms IS NOT NULL AND r.ts >= l.ts
+             ORDER BY r.ts LIMIT 1
+           ) r ON true
+           WHERE l.event = 'launched' AND l.detail LIKE '%@%'
+             AND l.ts > now() - interval '${iv}'
+           GROUP BY 1, 2, 3
+           ORDER BY 1, boots DESC, 2, 3`,
+        ),
+        query(
+          `SELECT pool,
+                  count(*) FILTER (WHERE event = 'hedge_launched')::int                                   AS launched,
+                  count(*) FILTER (WHERE event = 'hedge_resolved')::int                                   AS resolved,
+                  count(*) FILTER (WHERE event = 'hedge_resolved' AND detail LIKE 'winner=hedge%')::int    AS hedge_wins,
+                  count(*) FILTER (WHERE event = 'hedge_resolved' AND detail LIKE 'winner=original%')::int AS original_wins,
+                  count(*) FILTER (WHERE event = 'hedge_loser_terminate')::int                            AS legacy_loser_terminates
+           FROM lambda_pool_events
+           WHERE event IN ('hedge_launched', 'hedge_resolved', 'hedge_loser_terminate')
+             AND ts > now() - interval '${iv}'
+           GROUP BY pool`,
+        ),
+      ]);
+      type HedgeRow = {
+        pool: string; launched: number; resolved: number;
+        hedge_wins: number; original_wins: number; legacy_loser_terminates: number;
+      };
+      const byPool = new Map((hedges.rows as HedgeRow[]).map((h) => [h.pool, h]));
+      return {
+        days,
+        cells: cells.rows,
+        hedges: ['image', 'video'].map((pool) => {
+          const h = byPool.get(pool) ?? {
+            pool, launched: 0, resolved: 0, hedge_wins: 0, original_wins: 0, legacy_loser_terminates: 0,
+          };
+          return { ...h, win_rate_pct: h.resolved > 0 ? Math.round((100 * h.hedge_wins) / h.resolved) : null };
+        }),
       };
     });
 
@@ -1367,6 +1635,137 @@ export const adminRoute: FastifyPluginAsync = async (app) => {
       } catch (err) {
         if ((err as { code?: string }).code === '42P01') {
           return { schemaReady: false, days, ticks: { ticks: 0 }, cells: [], timeline: [], heatmap: [] };
+        }
+        throw err;
+      }
+    });
+
+    // ─── GPU Capacity — grid views: the questions the operator used to
+    // compute ad hoc. Everything is keyed off "our H100 grid" = the 1x H100
+    // cells (sxm5/pcie) in the CONFIGURED regions (?regions=csv, defaulting
+    // to the backend's widened LAMBDA_REGIONS list — Insights can't read the
+    // backend's env, so the caller names the grid). Per tick, "grid has
+    // capacity" = EXISTS(sample in the set); the same predicate feeds all
+    // three views so they can never disagree:
+    //   joint      — % of ticks with ≥1 advertised cell, per named grid
+    //   droughts   — runs of consecutive dry ticks (gaps-and-islands: the
+    //                running sum of ok-flags is constant across a dry run)
+    //   dry_alternatives — on the grid's dry ticks, which other H100/A100
+    //                cells (any region) WERE advertised — the fallback menu
+    gated.get('/admin/api/capacity/grid', async (request) => {
+      const q = request.query as { days?: string; regions?: string };
+      const days = Math.min(14, Math.max(1, Number(q.days) || 14));
+      const iv = `${days} days`;
+      const regions = (q.regions ?? DEFAULT_GRID_REGIONS)
+        .split(',')
+        .map((r) => r.trim())
+        .filter((r) => /^[a-z0-9-]+$/.test(r));
+      const grid = regions.length ? regions : DEFAULT_GRID_REGIONS.split(',');
+      const h100 = ['gpu_1x_h100_sxm5', 'gpu_1x_h100_pcie'];
+      const a100 = ['gpu_1x_a100_sxm4', 'gpu_1x_a100'];
+      const image = [...h100, ...a100];
+      // $1 = h100 types, $2 = grid regions, $3 = image types (h100 + a100).
+      // Postgres can't type a parameter a statement never references, so
+      // each query passes exactly the prefix of `params` it uses.
+      const params = [h100, grid, image];
+      const ex = (types: string, regionClause: string): string =>
+        `EXISTS (SELECT 1 FROM lambda_capacity_samples s
+                 WHERE s.tick_at = k.tick_at AND s.instance_type = ANY(${types}::text[])${regionClause})`;
+      const OUR_GRID = ex('$1', ' AND s.region = ANY($2::text[])');
+      try {
+        const [joint, droughts, dryAlt] = await Promise.all([
+          query(
+            `SELECT count(*)::int AS ticks,
+                    count(*) FILTER (WHERE ${OUR_GRID})::int                                  AS our_h100_grid,
+                    count(*) FILTER (WHERE ${ex('$1', '')})::int                              AS any_h100,
+                    count(*) FILTER (WHERE ${ex('$3', ' AND s.region = ANY($2::text[])')})::int AS image_grid_incl_a100,
+                    count(*) FILTER (WHERE ${ex('$3', '')})::int                              AS any_image_type
+             FROM lambda_capacity_ticks k
+             WHERE k.tick_at > now() - interval '${iv}'`,
+            params,
+          ),
+          query(
+            `WITH t AS (
+               SELECT k.tick_at, ${OUR_GRID} AS ok
+               FROM lambda_capacity_ticks k
+               WHERE k.tick_at > now() - interval '${iv}'
+             ),
+             g AS (
+               SELECT tick_at, ok,
+                      lead(tick_at) OVER (ORDER BY tick_at) AS next_tick,
+                      sum(CASE WHEN ok THEN 1 ELSE 0 END) OVER (ORDER BY tick_at) AS grp
+               FROM t
+             ),
+             runs AS (
+               SELECT min(tick_at) AS started_at,
+                      -- the run ends when capacity returns (the tick after the
+                      -- last dry one); NULL = still dry at the newest tick
+                      max(next_tick) AS ended_at,
+                      count(*)::int AS ticks,
+                      bool_or(next_tick IS NULL) AS ongoing
+               FROM g WHERE NOT ok GROUP BY grp
+             )
+             SELECT started_at, ended_at, ticks, ongoing,
+                    round(extract(epoch FROM (coalesce(ended_at, now()) - started_at)) / 60)::int AS minutes
+             FROM runs
+             ORDER BY minutes DESC, started_at DESC`,
+            params.slice(0, 2),
+          ),
+          query(
+            `WITH dry AS (
+               SELECT k.tick_at FROM lambda_capacity_ticks k
+               WHERE k.tick_at > now() - interval '${iv}' AND NOT ${OUR_GRID}
+             )
+             SELECT s.instance_type, s.region,
+                    count(DISTINCT s.tick_at)::int AS ticks,
+                    round(100.0 * count(DISTINCT s.tick_at) / NULLIF((SELECT count(*) FROM dry), 0))::int AS pct
+             FROM lambda_capacity_samples s
+             JOIN dry ON dry.tick_at = s.tick_at
+             WHERE s.instance_type = ANY($3::text[])
+             GROUP BY 1, 2
+             ORDER BY ticks DESC, s.instance_type, s.region
+             LIMIT 12`,
+            params,
+          ),
+        ]);
+        const j = (joint.rows[0] ?? {}) as Record<string, number>;
+        const ticks = j['ticks'] ?? 0;
+        const pct = (n: number | undefined): number | null =>
+          ticks > 0 ? Math.round((100 * (n ?? 0)) / ticks) : null;
+        const grids = [
+          { key: 'our_h100_grid', label: 'Our H100 grid', types: h100, regions: grid },
+          { key: 'any_h100', label: 'Any 1x H100, any region', types: h100, regions: null },
+          { key: 'image_grid_incl_a100', label: 'Image grid incl. A100', types: image, regions: grid },
+          { key: 'any_image_type', label: 'Any image type, any region', types: image, regions: null },
+        ].map((g) => ({ ...g, available_ticks: j[g.key] ?? 0, pct: pct(j[g.key]) }));
+
+        type Run = { started_at: string; ended_at: string | null; ticks: number; ongoing: boolean; minutes: number };
+        const runs = droughts.rows as Run[];
+        const mins = runs.map((r) => r.minutes).sort((a, b) => a - b);
+        const p50 = mins.length ? mins[Math.floor(mins.length / 2)] ?? null : null;
+        return {
+          schemaReady: true,
+          days,
+          regions: grid,
+          ticks,
+          grids,
+          droughts: {
+            count: runs.length,
+            over_30m: runs.filter((r) => r.minutes > 30).length,
+            p50_minutes: p50,
+            max_minutes: mins.length ? mins[mins.length - 1] : null,
+            dry_ticks: runs.reduce((a, r) => a + r.ticks, 0),
+            top: runs.slice(0, 15),
+          },
+          dry_alternatives: dryAlt.rows,
+        };
+      } catch (err) {
+        if ((err as { code?: string }).code === '42P01') {
+          return {
+            schemaReady: false, days, regions: grid, ticks: 0, grids: [],
+            droughts: { count: 0, over_30m: 0, p50_minutes: null, max_minutes: null, dry_ticks: 0, top: [] },
+            dry_alternatives: [],
+          };
         }
         throw err;
       }

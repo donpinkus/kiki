@@ -26,11 +26,86 @@ Record implementation decisions here as they are made. Newest first. This preven
 
 ---
 
+### 2026-09-12 — Mid-session fal → H100 upgrade
+
+**Context:** Under `IMAGE_PROVIDER=auto` a drawing session resolves its provider once, at WS open: H100 pool if it has an assignable instance, else fal. The downgrade direction existed (an auto lambda session whose instance dies swaps to fal in place), but not the reverse — a session that opened during a pool boot stayed on fal for its whole life. 30-day `stream.provider_session` readback: 10 of 35 fal-served auto sessions closed with `pool_status_at_close='ready'` and never switched, i.e. users sat on the fallback while a paid-for H100 idled.
+
+**Decision:** `routes/stream.ts` `maybeUpgradeToLambda`, run on the existing 15 s availability tick (the same tick that samples `h100_ready_after_ms`). Eligibility mirrors the downgrade exactly: only `providerResolvedFromAuto` sessions currently on fal; explicit `?imageProvider=fal|lambda` overrides never switch (A/B purity). Sequence: acquire a pool slot → open a lambda `StreamRelay` while the fal relay keeps serving every canvas JPEG (no `connecting` state, nothing blanked) → once connected, flush the fal open-span into `monthly_usage`, hand the metering flag to the lambda per-frame path, adopt the lambda relay (lastConfig resent first), then close the fal relay. A failed wire marks the instance suspect, releases the slot, stays on fal silently and retries no sooner than 60 s later. To make this safe the wiring was split into `openRelay(provider, url)` (build + connect, provider explicit) and `adoptRelay`, the relay message handler is bound to its own provider and drops events from any non-adopted relay, and fal metering is bound to the relay instance it was set up on. Telemetry: `relay_upgrade_start` / `relay_upgraded` / `relay_upgrade_failed` Pino events; `stream.provider_session` gains `lambda_upgraded` + `upgraded_after_ms`, and `provider` is the final provider.
+
+**Alternatives considered:** Rewiring through the existing `wireRelay` (rejected — it closes the live relay before connecting, which is a visible gap and a blank-pane risk); a dedicated poll timer (rejected — the 15 s tick already exists and its granularity is fine); upgrading on the next stroke instead of a timer (rejected — the connect would sit in the stroke's critical path).
+
+**Consequences:** An auto session lands on the H100 within ~15 s + connect time of the pool reporting ready, so `pool_status_at_close='ready'` on a fal session now means the wire failed / was backing off / the client left inside the tick, not "auto never upgrades" (the `poolStatusAtClose` doc comment says so). Sessions can bounce fal→lambda→fal→lambda if the pool flaps; `upgraded_after_ms` records the first swap. Insights dashboards (`analytics/src/routes/admin.ts`) do not yet read `lambda_upgraded` — follow-up. Route test: `backend/src/routes/stream.test.ts` (mock lambda image server, fake fal relay, fake pool; `streamTuning` is the exported test seam for the two cadences).
+
+---
+
+### 2026-09-12 — GPU hunt v2: capacity-aware sweep, cell circuit breaker, boot-relative hedges, no hunt cliff, two more regions
+
+**Context (measured, Insights data — 14 d of 2-min advertised-capacity samples, 30 d of `lambda_pool_events`):** our 3-region H100 grid had capacity in only 68% of ticks vs 90% for "any 1x H100 in any Lambda region"; the H100 PCIe cell in us-west-3 was the single most available H100 anywhere (77%) and PCIe never once appeared in our own regions; us-south-3 SXM added 37%. Droughts in our grid ran to 5.5 h. Hunts walked dry cells at the 13 s launch spacing (image search p90 3.8 min) while an open cell sat further down the static type-major list. Boot p50 for the same H100 SKU: 2.5 min in us-southeast-1 vs 15.8 min in us-south-2; A100 in us-east-1 10.4 min. The flat 8-min hedge trigger fired just before normal ~10-min boots finished: hedges won 2 of 15 races. The 15-min hunt window ended 7 video hunts while users still waited. And two consecutive dead-on-arrival VMs came from the same cell within 40 min.
+
+**Decision:**
+- **Regions:** `LAMBDA_REGIONS` = us-southeast-1, us-south-2, us-east-1, **us-west-3, us-south-3** (both pools; `kiki-image-*` + `kiki-video-*` filesystems populated 2026-09-12). `gpu_1x_a100` (PCIe A100) dropped from `LAMBDA_INSTANCE_TYPES` — never advertised anywhere in 14 d.
+- **Capacity-aware sweep (`planSweep`)**: every pass re-orders the grid — cells the capacity monitor saw advertised in the last 10 min first (type preference kept: an advertised A100 still ranks below an advertised H100; within a type, fastest measured boot p50 first), then non-advertised cells in static order, then penalized cells, then (for a hedge) the cell it is racing. Nothing is skipped — Lambda's flag is shallow, the launch call stays the authority. `capacityMonitor.latest()` exposes the in-memory snapshot; per-cell boot p50 comes from a 30-day join of `launched`/`ready` events, cached 10 min. `lambda_pool_sweep_plan` logs the order once per hunt.
+- **Cell circuit breaker:** a `boot_load_error` or `boot_stalled` demotes that cell for 45 min (`cell_penalized` event + log). Demoted, never removed.
+- **Hedge trigger:** per instance, `max(hedgeAfterMs, 1.3 × cell boot p50)`; a hedge sweep avoids the original's cell. `hedge_resolved` is now a durable pool event with `winner=original|hedge` so Insights can show the win rate.
+- **No hunt cliff:** the sweep continues while demand persists (interest window / active streams already bound it); the old window now only emits one `hunt_long` marker. A pass-boundary yield (`POLL_MS`) keeps a dry grid from starving timers.
+
+**Alternatives considered:** skipping non-advertised cells outright (rejected: the flag is stale by seconds and has no depth — ordering gets the win without trusting it); ranking purely by boot time across types (rejected: A100 gen is ~2× slower per frame, quality tier stays first); a size floor for filesystem readiness (rejected earlier today — `bytes_used` lags by ages).
+
+**Not changed (owner call, cost policy):** the 30-min idle reap / a peak-hours pool floor — 43 reaps in 30 d each followed by a 3–16 min re-hunt; a warm H100 8 h/day ≈ $1,030/mo.
+
+**Setup-script fix (same day):** `setup-lambda*.ts` used to create the region filesystem up front and then sit in a capacity-retry loop for up to an hour — an empty, unattached filesystem, which the sweep guard reads as "populated" (the video plan in production listed us-south-3 while its setup was still waiting for an H100). `launchSetupWithFilesystem` (client.ts) now creates the filesystem only when the cell advertises capacity, immediately before the launch, and deletes it again on a miss (`DELETE /filesystems/{id}` verified). Residual: a setup run killed mid-populate leaves its box attached (safe) — terminate the box and the empty filesystem becomes a trap until re-run; delete it or re-run promptly.
+
+**Consequences:** widening `LAMBDA_REGIONS` needs the region's filesystems populated first (the sweep skips missing/busy ones); Insights Capacity/Boots gained joint-availability, drought, per-cell boot and hedge-outcome views; mid-session fal→H100 upgrade landed the same day (separate entry).
+
+---
+
+### 2026-09-12 — Video pool sweeps the image pool's capacity grid
+
+**Context:** App open showed image "Warming up" while video sat in "Finding a GPU…". Sentry `lambda_pool_launch_retry` rows: the image pool swept 3 regions × 4 types (Railway `LAMBDA_REGIONS`/`LAMBDA_INSTANCE_TYPES`) and won an A100 in us-east-1; the video pool had no env override, so `config` collapsed it to the single cell us-south-2 × H100 SXM5 — which Lambda had zero of at the time. Same shared `instancePool.ts` sweep loop, different inputs; the video pool's search was simply never widened when the image pool's was (2026-07-25 multi-region sweep).
+
+**Decision:** One search strategy for both pools. `LAMBDA_VIDEO_REGIONS` defaults to `LAMBDA_REGIONS`; `LAMBDA_VIDEO_INSTANCE_TYPES` defaults to `LAMBDA_INSTANCE_TYPES` filtered to the 80 GB single-GPU SKUs (`gpu_1x_h100_sxm5`, `gpu_1x_h100_pcie`) because LTX-2.5 + Gemma ≈ 48 GiB resident can't fit the image pool's 40 GB A100 fallbacks. Explicit video env vars are still honored verbatim. `instancePool` now pre-filters the region list to regions whose `spec.fsName(region)` filesystem exists AND has no foreign (non-pool-prefix) instance attached (`lambda_pool_region_no_fs` / `lambda_pool_region_fs_busy` warns; listing failure = sweep everything) — a region with no filesystem fails the launch non-retryably and would have ended the whole sweep, and an existing-but-empty one is worse: `setup-lambda-video.ts` creates the filesystem at the start of a 20-40 min populate, and the first deploy of this change (existence-only check) launched a video H100 into the half-filled `kiki-video-us-southeast-1` within 60 s — its server came up with `load_error` (transformer weights not downloaded yet) and would have sat "booting" until the 25-min timeout. The setup/sync scripts hold their own instance on the filesystem for the whole populate, so "someone else is attached" is the exact signal. Tried and rejected: a `bytes_used` floor — Lambda's API reported 0 GB for a filesystem with 68 GB on disk (lag of at least several minutes, likely much longer), which would have blocked a ready region instead. `kiki-video-us-southeast-1` + `kiki-video-us-east-1` populated via `setup-lambda-video.ts` so the video pool actually has three regions to hunt in. `LAMBDA_VIDEO_REGION` (singular) removed — unused.
+
+**Alternatives considered:** Set `LAMBDA_VIDEO_REGIONS`/`_INSTANCE_TYPES` on Railway by hand to mirror the image vars — drifts again the next time the image list changes; the owner's ask was consistency, and the Insights Boots/Fleet analytics compare the two pools' hunts, which only means something if they search the same grid.
+
+**Also shipped (found while verifying):** the pool now fails fast on a terminal server load error. The first launch into the populated `kiki-video-us-southeast-1` landed on a Lambda H100 SXM VM whose GPU the host had never fabric-initialized (`cudaGetDeviceCount` → CUDA error 802 "system not yet initialized"; `nvidia-fabricmanager` can't run in the pass-through guest — "no NVSwitch"; `nvidia-smi` works, `torch.cuda.is_available()` is False). torch fell back to CPU: the 3-shape warmup crawled for 12 min, then died in the audio vocoder (`Input type (float) and bias type (c10::BFloat16)` — the CUDA branch relies on `torch.autocast(cuda, float32)`, which is a no-op on CPU). The video server keeps FastAPI alive and reports `/health {status:'error', load_error}`; `watchBoot` used to ignore that and hold the VM until the 25-min boot timeout. Now `status:'error'` terminates + replaces immediately (`lambda_pool_boot_load_error` log + `boot_load_error` pool event carrying the last traceback line). Per-VM luck, like the provisioning lottery — a fresh draw is the fix. (The setup smoke test in the same region passed on a different VM in 82 s, which is how this was isolated to the VM.)
+
+**CUDA preflight (2026-09-13 — the cheap fix for the dead-VM class):** the same load error recurred four times in a row on `gpu_1x_h100_sxm5@us-southeast-1` (identical message, identical ~11-min CPU-crawl timing) while the same code booted fine in us-south-2 and us-west-3. Both servers now run `shared/cuda_preflight.check_cuda()` BEFORE loading any weights (`torch.cuda.is_available` + context init + a real 1-element kernel, 3 tries 10 s apart — a fresh VM's GPU can lag a few seconds, the broken case persists for 25+ min); failure short-circuits to `/health {status:'error', load_error:'cuda_preflight_failed … | nvidia-smi: …'}` so the pool's fail-fast fires in seconds instead of after the crawl. The image server gained the same `status:'error'` health path (it used to crash out and sit as 'loading' until the boot timeout). Verified: preflight passes on a live us-south-2 H100; the failure sequence is exactly what raised error 802 on 2026-09-12's bad VM. Rolled onto all ten region filesystems with `sync-fs.mts` — running instances keep the old code until reaped. Owner declined periodic spin-up probes for now (≈$160/mo at 4-hourly light probes); the escalating persistent cell penalty is still open.
+
+**Consequences:** Adding a region to `LAMBDA_REGIONS` now widens BOTH pools; the video pool only benefits once `setup-lambda-video.ts --region <r>` has run (until then the region is skipped with a log, not an error). Video-capable SKU list lives in `config/index.ts` (`VIDEO_CAPABLE_INSTANCE_TYPES`).
+
+---
+
 ### 2026-09-10 — One drawing layout; drawing-engine review fixes
 **Context:** A two-round review of the Metal drawing engine (4 + 3 reviewer passes) found the three-layout switch (split-screen / fullscreen / overlay) multiplying code paths for modes nobody used, plus a set of correctness and memory defects (undo-to-blank never persisted; paste-only drawings deleted on exit; leaving mid-Move persisting a cut-out layer; selection state leaking across drawings; O(n²) per-stroke stamp regen; ~1 GB worst-case undo; autosave/capture stalls on the main thread; walk constants in view points).
 **Decision:** Kiki has exactly ONE drawing layout: the canvas fills the pane and the generated image floats as `FloatingResultPanel`. Split-screen and overlay are deleted (not flagged). Stroke walks are stateful/incremental (`DryStrokeWalker`, `EraserStrokeWalker`, `WetStrokeWalker`) with document-pixel constants (`StrokeWalkUnits`, old view-point literals × 2 to preserve the 12.9" reference feel); finalization reuses the same walker so preview == committed (offline-asserted). Undo snapshots are LZ4-compressed off-main under a 256 MB budget with memory-warning eviction, and record the stroke count per entry. Saves settle floating content first; autosave encodes only changed layers, off-main; the app saves on background.
 **Alternatives considered:** Keeping overlay behind a flag (rejected — "doesn't work well enough yet" and it's the branch that multiplied every canvas path); keeping view-point walk constants (rejected — feel differed per iPad size and the harness could not reproduce device strokes); bbox-cropped undo snapshots (deferred — LZ4 + budget covers the sketch case; dense photo layers fall back to the budget).
 **Consequences:** `AppCoordinator.drawingLayout`, Settings → Display, `ResultView`/`PromptTitleBar`/"Send to Canvas", the overlay stroke surface and `setLassoPreviewHost` are gone; SAM always segments the sketch; `ResultState.provisioning/.error/.idleTimeout` have no dedicated visual (they only rendered inside the split pane) — status dot + banners remain. Two test mains (`OfflineTests/main.swift`, `OfflineTests/walkers/main.swift`) plus the harness are the regression net. On-device feel of Fall Off / Charge / Speed-driven brushes shifts by ≈ 2.16/2 (≈8%) on the 12.9" iPad and by more on other sizes (now consistent across sizes). Shaped-tip vertical mirroring and linear-light blend modes are documented conventions, not changed.
+
+---
+
+### 2026-09-12 — Video speed pass: torch.compile + conv VAE decoder (DFR 768² clips 2.2–2.6× faster)
+
+**Context:** After the LTX-2.5 upgrade, a 4 s / 6 s Animate clip took 12.8 s / 21.5 s of H100 time at DFR 768². Owner ask: make our own-H100 generation faster, $20 budget. Public numbers (decisions 2026-09-10 discussion) put us at eager-baseline speed; Lightricks' own docs list four levers: FlashAttention 3, `torch.compile`, natten for the DiffVAE decoder, and the DiffVAE decode preset.
+
+**Measured (2× H100 SXM bench box `kiki-vidbench-*`, DFR 768², FP8-cast, steady state, same seed/prompt/keyframe; `model-servers/dev/bench_ltx25.py`):**
+
+| Config | 4 s (97 f) total | denoise / decode | 6 s (145 f) total | denoise / decode | Peak GiB |
+|---|---|---|---|---|---|
+| baseline (eager, SDPA, DiffVAE keyframe decode) | 12.8 | 6.4 / 6.4 | 21.5 | 9.2 / 12.4 | 68.7 |
+| + FlashAttention 3 | 12.7 | 6.2 / 6.4 | 20.9 | 8.7 / 12.2 | 68.7 |
+| + torch.compile (transformer) | 11.2 | 4.8 / 6.4 | 20.7 | 6.9 / 13.7 | 68.0 |
+| + compile, DiffVAE **plain** decode + natten (chunked_eager) | 9.3 | 4.8 / 4.5 | 15.9 | 7.0 / 8.9 | 68.0 |
+| + compile, DiffVAE plain decode, `combined_compile` + natten | crash | dynamo ConstraintViolation in the compiled DiffVAE | — | — | — |
+| **+ compile, conv VAE decoder** | **5.8** | 4.8 / 1.0 | **8.4** | 6.9 / 1.5 | 68.0 |
+| + compile, conv VAE, **1024²** | 9.4 | 7.7 / 1.7 | 15.2 | 12.3 / 2.9 | 70.5 |
+
+Stage timeline (compile, 145 f): stage 1 (8 steps, 384²) 1.9 s → upsampler 0.35 s → stage 2 LoRA fuse + 3 steps at 768² 4.0 s → **keyframe DiffVAE decode 13.5 s (4 tiles × 3.4 s)**. Under DFR the final decode is keyframe-anchored, which upstream runs eager and uncompiled regardless of `LTX_DIFFVAE_MODE`, and natten does not apply to that path (their docs' mode×keyframes grid) — measured: natten + keyframe decode = no change.
+
+**Decision:** Defaults are now `LTX_TORCH_COMPILE=1` and `LTX_VIDEO_VAE=conv` at DFR 768² → **5.8 s / 8.4 s** for the 4 s / 6 s presets (2 s preset ≈ 4 s). Warmup runs every Animate preset (`LTX_WARMUP_FRAMES=145,97,49`) so the compile and per-shape guards are paid at boot (+~100 s), never on a user's first clip. FA3 stays installed (free 3%). Quality check on the same latent: conv-decoded frames measure slightly sharper (gradient 1.32 vs 1.16) with ~12% more frame-to-frame change and visibly harder edge aliasing on panel seams; DiffVAE keyframe decode is smoother. Judged an acceptable trade for a 2.2–2.6× wait reduction; `LTX_VIDEO_VAE=diff` is the one-env rollback, and `diff` + `LTX_DFR_PLAIN_DECODE=1` (natten) is the middle option at 9.3 s / 15.9 s. 1024² conv (9.4 s / 15.2 s, 70.5 GiB peak) now fits the 6 s preset and is the knob if sharper output is wanted at roughly the old wait.
+
+**Alternatives considered:** fp8_scaled_mm (needs an FP8 checkpoint with scales — none shipped); CUDA-graph compile modes (single-GPU needs block streaming = slower); caching the LoRA-fused detailing transformer in the registry (fuse is only ~0.25 s/call — not worth +VRAM); fewer sigmas (quality).
+
+**Consequences:** `requirements-video.txt` now lists `flash_attn_3` and `natten` with their wheel indexes (installed into the live NFS venv 2026-09-12). Boot is ~100 s longer (compile at warmup). iOS `expectedWaitSeconds` for LTX drops to 8 / 10 / 13 s. The DiffVAE `combined_compile` + natten crash is upstream (dynamo dynamic-shape guard) — don't retry without a newer ltx pin. Bench-box lesson: a bash variable holding `ssh` options with spaces silently failed under zsh (`$SSH` treated as one word) — the first kickoff died and billed an idle hour; use `${=VAR}` or spell the command out.
 
 ---
 
@@ -57,7 +132,24 @@ Record implementation decisions here as they are made. Newest first. This preven
 - Free tier: ~$10 buys ~25 six-second Wan clips vs ~200 LTX clips; the toggle exists to compare, not as the default.
 - Measurements (H100 SXM, 2026-09-10 bench via `model-servers/dev/bench_ltx25.py`): see the "Measurements" addendum at the end of this entry.
 
-**Measurements:** _(pending — filled in below once the H100 bench completes)_
+**Measurements (H100 SXM, us-south-2, FP8-cast, DiffVAE decoder, real Kiki keyframes, steady state after warmup — `model-servers/dev/bench_ltx25.py`):**
+
+| Pipeline | Size | Frames | Gen (s) | Peak VRAM (GiB) |
+|---|---|---|---|---|
+| distilled | 512² | 97 | 6.1 | 56.3 |
+| distilled | 768² | 97 | 9.4 | 60.4 |
+| distilled | 1024² | 97 | 16.0 | 61.2 |
+| dfr | 512² | 97 | 7.1 | 65.9 |
+| dfr | 768² | 97 | 12.9 | 67.3 |
+| dfr | 1024² | 97 | 29.5 | 69.3 |
+| dfr | 768² | 145 | 29.6 | 68.9 |
+| dfr | 1024² | 145 | **fails** — DiffVAE keyframe-decode can't fit a tile under the memory budget | — |
+| dfr | 1024², start+end | 49 | 17.0 | 67.5 |
+
+- Serving-path steady state (through `video.server`, distilled 512² × 145 frames): **7.6 s** gen (vs 9.5 s on 2.3). Boot on a warm NFS: 252 s load (prefetch 84 s of 66 GB, warmup 163 s incl. first-time weight loads + Triton compiles), 52.7 GiB resident.
+- **Pick: `LTX_PIPELINE=dfr` at 768²** — the production-quality path, 1.5× the old output size, and every duration preset fits with ~11 GiB headroom (2 s ≈ 7 s, 4 s ≈ 13 s, 6 s ≈ 30 s generation). 1024² DFR is visibly the sharpest but only safe for ≤97 frames; distilled 1024² (16 s) is the fallback if 6-second waits prove too long — flip via env on the serving instance's boot.sh, no code change.
+- Per-request audio off (`enableAudio:false`): the official `__call__` always decodes the audio latent and downstream dereferences it — stubbing `pipe.audio_decoder` to `None` crashed (`'NoneType' object has no attribute 'waveform'`, caught by validate-animate phase 5 on 2026-09-10). The ~0.2 s decode now always runs; the track is just not muxed.
+- Hosted engines, same spaceship keyframe, 720p/768P: **Wan 3.0 = 130 s** wall for a 4 s clip ($0.40, 960×960 @30 fps, audio, prompt expansion on); **MiniMax H3 Max = 6.7 s** wall for a 5 s clip ($0.40 list, 768×768 @24 fps, audio; fal rejects durations < 5 s). Both produced coherent, high-detail motion; H3 Max drifted the design more (added blue accents), Wan stayed truest to the keyframe.
 
 ---
 

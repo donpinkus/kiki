@@ -43,7 +43,7 @@ import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from PIL import Image
 
-from shared import config
+from shared import config, cuda_preflight
 from shared import preparing_heartbeat
 from shared import sentry_init
 from image.pipeline import FluxKleinPipeline
@@ -59,9 +59,15 @@ sentry_init.init(pod_kind="image")
 pipeline = FluxKleinPipeline()
 
 
+# Set when startup fails (CUDA preflight or model load): /health then reports
+# status:'error' with this text instead of 'loading' forever.
+_load_error_traceback: str | None = None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Load the model on startup."""
+    global _load_error_traceback
     with sentry_init.phase("preparing"):
         logger.info("Starting FLUX.2-klein server...")
         # Threaded heartbeat — pipeline.load() blocks the asyncio event loop
@@ -69,7 +75,20 @@ async def lifespan(app: FastAPI):
         # See preparing_heartbeat.py header for context.
         stop_heartbeat = preparing_heartbeat.start_heartbeat()
         try:
+            # Prove the GPU works before loading weights (Lambda error-802
+            # VMs: nvidia-smi fine, CUDA dead — see shared/cuda_preflight.py).
+            cuda_preflight.check_cuda()
             pipeline.load()
+        except cuda_preflight.CudaUnavailableError as e:
+            _load_error_traceback = str(e)
+            logger.error("CUDA unusable on this VM — not loading the model; /health reports error")
+        except Exception:
+            import traceback
+            # Keep the app alive so /health can carry the traceback and the
+            # pool's boot watcher fails fast on status:'error' instead of
+            # waiting out the boot timeout on a dead process.
+            _load_error_traceback = traceback.format_exc()
+            logger.exception("FLUX.2-klein pipeline load failed — exposing traceback via /health")
         finally:
             stop_heartbeat.set()
         # ASGI lifespan completed — pipeline ready, app about to accept
@@ -98,6 +117,10 @@ app = FastAPI(lifespan=lifespan)
 
 @app.get("/health")
 async def health():
+    if _load_error_traceback is not None:
+        # status "error" = terminal for this VM: the pool terminates +
+        # replaces it immediately (instancePool watchBoot).
+        return {"status": "error", "load_error": _load_error_traceback}
     info = pipeline.get_info()
     return {
         "status": "ok" if pipeline.ready else "loading",

@@ -29,7 +29,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
-import { launchWithRetry, requireClient, sleep, REPO_ROOT, type Instance } from './lambdaApi.js';
+import { launchSetupWithFilesystem, requireClient, sleep, REPO_ROOT, type Instance } from './lambdaApi.js';
 
 const SSH_KEY_PATH = resolve(homedir(), '.ssh', 'id_ed25519');
 const SSH_KEY_NAME = 'kiki-donald';
@@ -295,30 +295,21 @@ const keyName = (await client.listSshKeys()).find(
 await client.ensureInboundTcpPort(KIKI_PORT, 'kiki image server WS');
 console.log(`[setup] firewall: inbound tcp/${KIKI_PORT} open account-wide`);
 
-// 3. Filesystem
-const filesystems = await client.listFilesystems();
-if (!filesystems.some((f) => f.name === FS_NAME && f.region.name === REGION)) {
-  await client.createFilesystem(FS_NAME, REGION);
-  console.log(`[setup] created filesystem ${FS_NAME} in ${REGION}`);
-} else {
-  console.log(`[setup] filesystem ${FS_NAME} already exists`);
-}
-
-// 4. Setup instance
+// 3 + 4. Filesystem + setup instance, together: the filesystem is created
+// only when the cell advertises capacity and deleted again on a miss, so an
+// empty kiki-image-<region> never sits unattached where the pool sweep would
+// boot into it (see launchSetupWithFilesystem).
 console.log('[setup] launching setup instance (billing starts when it passes health checks)...');
 const t0 = Date.now();
-const [instanceId] = await launchWithRetry(
-  client,
-  {
-    region_name: REGION,
-    instance_type_name: TYPE,
-    ssh_key_names: [keyName],
-    file_system_names: [FS_NAME],
-    name: `kiki-setup-${Date.now()}`,
-    image: { family: OS_IMAGE_FAMILY },
-  },
-  RETRY_MINS,
-);
+const [instanceId] = await launchSetupWithFilesystem(client, {
+  region: REGION,
+  type: TYPE,
+  fsName: FS_NAME,
+  name: `kiki-setup-${Date.now()}`,
+  keyName,
+  imageFamily: OS_IMAGE_FAMILY,
+  retryMins: RETRY_MINS,
+});
 console.log(`[setup] instance ${instanceId} launched; waiting for active...`);
 const inst = await waitForStatus(instanceId!, 'active', 30 * 60 * 1000);
 console.log(`[setup] active after ${((Date.now() - t0) / 1000).toFixed(0)}s — ip=${inst.ip}`);

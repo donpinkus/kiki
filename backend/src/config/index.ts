@@ -59,6 +59,14 @@ export interface AppConfig {
    * grows. Measured: ~5 fully-served active drawers/instance at 4-step;
    * overload degrades gracefully, so this is a UX knob. */
   readonly LAMBDA_POOL_TARGET_STREAMS: number;
+  /** Hedged launch: when the pool has NO ready instance and its oldest
+   * booting instance has been booting longer than this, launch one extra
+   * instance and keep whichever gets healthy first (loser terminated).
+   * Lambda's VM provisioning (launch accepted → kernel boot) is the
+   * dominant boot-time variance — 2.5 min vs 14 min observed side-by-side
+   * in the same region/hour (2026-08-22) — and slowness is per-VM luck, so
+   * a fresh draw usually wins. 0 disables. */
+  readonly LAMBDA_POOL_HEDGE_AFTER_MS: number;
   /** Base64 PEM of the fleet's self-signed TLS cert. When set, relays and
    * sketchify connect wss:// and PIN this exact cert (hostname check skipped
    * — instances are bare IPs). Empty = plain ws:// (pre-TLS dev). Decoded
@@ -80,10 +88,6 @@ export interface AppConfig {
    * open the app, idle-reaped, redeploy-adopted, same machinery as the image
    * pool. Default false. */
   readonly LAMBDA_VIDEO_POOL_ENABLED: boolean;
-  /** Region for video-pool instances (its `kiki-video-<region>` filesystem
-   * must be populated via scripts/lambda/setup-lambda-video.ts). Defaults to
-   * LAMBDA_REGION. */
-  readonly LAMBDA_VIDEO_REGION: string;
   /** Ordered capacity-search REGION list for the image pool (csv env
    * LAMBDA_REGIONS; falls back to [LAMBDA_REGION]). Every region listed must
    * have a populated kiki-image-<region> filesystem. */
@@ -93,8 +97,19 @@ export interface AppConfig {
    * The pool sweeps TYPE-MAJOR across regions. Only add types benchmarked
    * for acceptable gen time + VRAM fit (see lambda-image-provider.md). */
   readonly LAMBDA_INSTANCE_TYPES: readonly string[];
+  /** Video-pool region sweep. Defaults to LAMBDA_REGIONS so both pools hunt
+   * the same grid (2026-09-12: the video pool was hardcoded to one region
+   * and sat in "Finding a GPU" while the image pool found an A100 two
+   * regions over). The pool skips any listed region whose
+   * kiki-video-<region> filesystem doesn't exist or still has a setup /
+   * sync instance attached (`lambda_pool_region_no_fs` /
+   * `lambda_pool_region_fs_busy`), so populating a new region is the only
+   * step to widen the sweep — see scripts/lambda/setup-lambda-video.ts. */
   readonly LAMBDA_VIDEO_REGIONS: readonly string[];
-  /** Video needs ≥80 GB VRAM (LTX 22B FP8 + Gemma ≈ 46 GiB resident). */
+  /** Video-pool instance types. Defaults to LAMBDA_INSTANCE_TYPES filtered
+   * to VIDEO_CAPABLE_INSTANCE_TYPES: LTX 22B FP8 + Gemma ≈ 48 GiB resident
+   * needs the 80 GB card, so the image pool's 40 GB A100 fallbacks are
+   * dropped. An explicit csv env is taken verbatim. */
   readonly LAMBDA_VIDEO_INSTANCE_TYPES: readonly string[];
   /** Video pool floor (default 0 — scale to zero when nobody is around). */
   readonly LAMBDA_VIDEO_POOL_MIN: number;
@@ -107,6 +122,10 @@ export interface AppConfig {
    * (default 8 — a video "stream" generates only during idle pauses, so one
    * GPU serves far more sessions than the image pool's target of 4). */
   readonly LAMBDA_VIDEO_POOL_TARGET_STREAMS: number;
+  /** Video-pool hedged launch threshold (see LAMBDA_POOL_HEDGE_AFTER_MS).
+   * The hedge may transiently exceed LAMBDA_VIDEO_POOL_MAX by one — that is
+   * by design (the pair resolves to one instance within minutes). */
+  readonly LAMBDA_VIDEO_POOL_HEDGE_AFTER_MS: number;
   /** Flat charge per DELIVERED video into monthly_usage (the unified free
    * tier). Raw cost ≈ $0.024/video (~20s H100 @ $4.29/hr); charged higher to
    * absorb video-pool idle overhead. Exempt users (test accounts, active
@@ -248,6 +267,14 @@ function csvList(raw: string | undefined, fallback: string[]): string[] {
   return items.length > 0 ? items : fallback;
 }
 
+/** Single-GPU Lambda SKUs with 80 GB VRAM — the only ones the video stack
+ * fits on. Keep in sync with the benchmarked list in lambda-video-provider.md. */
+const VIDEO_CAPABLE_INSTANCE_TYPES = new Set(['gpu_1x_h100_sxm5', 'gpu_1x_h100_pcie']);
+const lambdaRegions = csvList(process.env['LAMBDA_REGIONS'], [process.env['LAMBDA_REGION'] ?? 'us-south-2']);
+const lambdaInstanceTypes = csvList(
+  process.env['LAMBDA_INSTANCE_TYPES'],
+  [process.env['LAMBDA_INSTANCE_TYPE'] ?? 'gpu_1x_h100_sxm5'],
+);
 const lambdaVideoUrl = process.env['LAMBDA_VIDEO_URL'] ?? '';
   if (lambdaVideoUrl && !/^wss?:\/\//.test(lambdaVideoUrl)) {
     throw new Error(`Invalid LAMBDA_VIDEO_URL: ${lambdaVideoUrl} (expected ws:// or wss:// URL)`);
@@ -279,25 +306,25 @@ const lambdaVideoUrl = process.env['LAMBDA_VIDEO_URL'] ?? '';
     LAMBDA_POOL_MIN: Number(process.env['LAMBDA_POOL_MIN'] ?? 0),
     LAMBDA_POOL_MAX: Number(process.env['LAMBDA_POOL_MAX'] ?? 3),
     LAMBDA_POOL_TARGET_STREAMS: Number(process.env['LAMBDA_POOL_TARGET_STREAMS'] ?? 4),
+    LAMBDA_POOL_HEDGE_AFTER_MS: Number(process.env['LAMBDA_POOL_HEDGE_AFTER_MS'] ?? 8 * 60_000),
     LAMBDA_TLS_CA: process.env['LAMBDA_TLS_CA_B64']
       ? Buffer.from(process.env['LAMBDA_TLS_CA_B64'], 'base64').toString('utf-8')
       : '',
     LAMBDA_VIDEO_URL: lambdaVideoUrl,
     LAMBDA_VIDEO_POOL_ENABLED: process.env['LAMBDA_VIDEO_POOL_ENABLED'] === 'true',
-    LAMBDA_VIDEO_REGION: process.env['LAMBDA_VIDEO_REGION'] ?? process.env['LAMBDA_REGION'] ?? 'us-south-2',
-    LAMBDA_REGIONS: csvList(process.env['LAMBDA_REGIONS'], [process.env['LAMBDA_REGION'] ?? 'us-south-2']),
-    LAMBDA_INSTANCE_TYPES: csvList(process.env['LAMBDA_INSTANCE_TYPES'], [process.env['LAMBDA_INSTANCE_TYPE'] ?? 'gpu_1x_h100_sxm5']),
-    LAMBDA_VIDEO_REGIONS: csvList(
-      process.env['LAMBDA_VIDEO_REGIONS'],
-      [process.env['LAMBDA_VIDEO_REGION'] ?? process.env['LAMBDA_REGION'] ?? 'us-south-2'],
-    ),
+    LAMBDA_REGIONS: lambdaRegions,
+    LAMBDA_INSTANCE_TYPES: lambdaInstanceTypes,
+    LAMBDA_VIDEO_REGIONS: csvList(process.env['LAMBDA_VIDEO_REGIONS'], lambdaRegions),
     LAMBDA_VIDEO_INSTANCE_TYPES: csvList(
       process.env['LAMBDA_VIDEO_INSTANCE_TYPES'],
-      [process.env['LAMBDA_INSTANCE_TYPE'] ?? 'gpu_1x_h100_sxm5'],
+      lambdaInstanceTypes.filter((t) => VIDEO_CAPABLE_INSTANCE_TYPES.has(t)),
     ),
     LAMBDA_VIDEO_POOL_MIN: Number(process.env['LAMBDA_VIDEO_POOL_MIN'] ?? 0),
     LAMBDA_VIDEO_POOL_MAX: Number(process.env['LAMBDA_VIDEO_POOL_MAX'] ?? 1),
     LAMBDA_VIDEO_POOL_TARGET_STREAMS: Number(process.env['LAMBDA_VIDEO_POOL_TARGET_STREAMS'] ?? 8),
+    LAMBDA_VIDEO_POOL_HEDGE_AFTER_MS: Number(
+      process.env['LAMBDA_VIDEO_POOL_HEDGE_AFTER_MS'] ?? 8 * 60_000,
+    ),
     VIDEO_USD_PER_GENERATION: Number(process.env['VIDEO_USD_PER_GENERATION'] ?? 0.05),
     EDIT_USD_PER_GENERATION: Number(process.env['EDIT_USD_PER_GENERATION'] ?? 0.04),
     LIFT3D_USD_PER_GENERATION: Number(process.env['LIFT3D_USD_PER_GENERATION'] ?? 0.25),

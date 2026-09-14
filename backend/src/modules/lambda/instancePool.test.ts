@@ -33,8 +33,14 @@ interface FakeCloud {
   attempts: string[];
   /** Mark a (type@region) cell as having no capacity. */
   setDry: (cell: string, dry: boolean) => void;
+  /** Regions the API reports NO `kiki-test-<region>` filesystem for
+   * (default: every region has one). */
+  setNoFilesystem: (region: string, missing: boolean) => void;
   /** Health probe behavior per instance ip; default healthy. */
   setHealth: (ip: string, healthy: boolean) => void;
+  /** Make an ip answer /health with status:'error' + load_error (server up,
+   * model load failed). */
+  setLoadError: (ip: string, traceback: string | null) => void;
   probe: (ip: string, timeoutMs: number) => Promise<{ status?: string }>;
 }
 
@@ -43,15 +49,29 @@ function makeFakeCloud(): FakeCloud {
   const launched: string[] = [];
   const terminated: string[] = [];
   const unhealthy = new Set<string>();
+  const loadErrors = new Map<string, string>();
   let nextIp = 1;
 
   // (type@region) cells that reject with insufficient-capacity; the sweep
   // should move on and win the first open cell.
   const dryCells = new Set<string>();
   const attempts: string[] = [];
+  // Every region the tests use has a filesystem unless marked missing; the
+  // fake lists only the names the pool spec would ask for.
+  const KNOWN_REGIONS = ['test-region', 'region-a', 'region-b'];
+  const noFilesystem = new Set<string>();
 
   const client = {
     listSshKeys: async () => [{ id: 'k1', name: 'test-key', public_key: 'ssh-ed25519 AAA test' }],
+    listFilesystems: async () =>
+      KNOWN_REGIONS.filter((r) => !noFilesystem.has(r)).map((r) => ({
+        id: `fs-${r}`,
+        name: `kiki-test-${r}`,
+        mount_point: `/lambda/nfs/kiki-test-${r}`,
+        created: '',
+        region: { name: r, description: '' },
+        is_in_use: false,
+      })),
     launch: async (req: { name?: string; region_name: string; instance_type_name?: string }) => {
       const cell = `${req.instance_type_name ?? '?'}@${req.region_name}`;
       attempts.push(cell);
@@ -91,6 +111,7 @@ function makeFakeCloud(): FakeCloud {
     terminated,
     attempts,
     setDry: (cell: string, dry: boolean) => { if (dry) dryCells.add(cell); else dryCells.delete(cell); },
+    setNoFilesystem: (region, missing) => { if (missing) noFilesystem.add(region); else noFilesystem.delete(region); },
     seed: (inst) => {
       instances.set(inst.id, {
         status: 'active',
@@ -102,8 +123,11 @@ function makeFakeCloud(): FakeCloud {
       if (healthy) unhealthy.delete(ip);
       else unhealthy.add(ip);
     },
+    setLoadError: (ip, traceback) => { if (traceback) loadErrors.set(ip, traceback); else loadErrors.delete(ip); },
     probe: async (ip: string) => {
       if (unhealthy.has(ip)) throw new Error('probe failed');
+      const tb = loadErrors.get(ip);
+      if (tb) return { status: 'error', load_error: tb };
       return { status: 'ok' };
     },
   };
@@ -133,6 +157,10 @@ function makePool(
     pollMs: 20,
     launchRetryMins: 0,
     launchSpacingMs: 0,
+    // No capacity snapshot / boot stats unless a test injects them: static
+    // type-major order, flat hedge threshold.
+    capacitySnapshot: () => null,
+    cellBootStats: async () => new Map(),
     interestWindowMs: 250,
     ...overrides,
   });
@@ -293,6 +321,157 @@ describe('instancePool', { timeout: 30_000 }, () => {
     }
   });
 
+  it('skips a configured region that has no pool filesystem (never launches there)', async () => {
+    const cloud = makeFakeCloud();
+    const pool = makePool(cloud, {
+      regions: () => ['region-a', 'region-b'],
+      instanceTypes: () => ['gpu_best'],
+      launchRetryMins: 1,
+    });
+    // region-a would win on capacity, but its filesystem was never populated
+    // (a shared region list where only some regions have been set up).
+    cloud.setNoFilesystem('region-a', true);
+    try {
+      pool.start(testLog);
+      pool.ensure();
+      await until(() => pool.hasReady());
+      expect(cloud.attempts).toEqual(['gpu_best@region-b']);
+      expect(pool.getState().instances[0]?.region).toBe('region-b');
+    } finally {
+      pool.stop();
+    }
+  });
+
+  it('skips a region whose filesystem is attached to a setup instance (still being populated)', async () => {
+    const cloud = makeFakeCloud();
+    const pool = makePool(cloud, {
+      regions: () => ['region-a', 'region-b'],
+      instanceTypes: () => ['gpu_best'],
+      launchRetryMins: 1,
+    });
+    // setup-lambda-*.ts creates the filesystem empty and keeps its own
+    // instance attached for the 20-40 min populate; a pool launch into it
+    // during that window boots a server that can never load weights.
+    cloud.seed({
+      id: 'setup-1',
+      name: 'kiki-vidsetup-1',
+      region: { name: 'region-a', description: '' },
+      file_system_names: ['kiki-test-region-a'],
+    } as Partial<LambdaInstance> & { id: string; name: string });
+    try {
+      pool.start(testLog);
+      pool.ensure();
+      await until(() => pool.hasReady());
+      expect(cloud.attempts).toEqual(['gpu_best@region-b']);
+    } finally {
+      pool.stop();
+    }
+  });
+
+  it('terminates + replaces an instance whose server reports a terminal load error (no boot-timeout wait)', async () => {
+    const cloud = makeFakeCloud();
+    // Long boot timeout: if the pool waited it out, this test would hang.
+    const pool = makePool(cloud, { bootTimeoutMs: 60_000, launchRetryMins: 1 });
+    // The first VM's server comes up but its model load died (the fake hands
+    // out 10.0.0.1 first).
+    cloud.setLoadError('10.0.0.1', 'Traceback (most recent call last):\n  ...\nRuntimeError: Error 802: system not yet initialized');
+    try {
+      pool.start(testLog);
+      pool.ensure();
+      await until(() => cloud.terminated.includes('inst-1'), 5000);
+      await until(() => pool.hasReady(), 5000);
+      expect(cloud.launched).toHaveLength(2);
+      expect(pool.getState().instances.map((i) => i.ip)).toEqual(['10.0.0.2']);
+    } finally {
+      pool.stop();
+    }
+  });
+
+  it('capacity-aware: tries the cell advertising capacity first, before the static order', async () => {
+    const cloud = makeFakeCloud();
+    const pool = makePool(cloud, {
+      regions: () => ['region-a', 'region-b'],
+      instanceTypes: () => ['gpu_best', 'gpu_worse'],
+      launchRetryMins: 1,
+      // The 2-min capacity poll says only gpu_best@region-b is open.
+      capacitySnapshot: () => ({ atMs: Date.now(), cells: new Set(['gpu_best@region-b']) }),
+    });
+    try {
+      pool.start(testLog);
+      pool.ensure();
+      await until(() => pool.hasReady());
+      expect(cloud.attempts).toEqual(['gpu_best@region-b']);
+    } finally {
+      pool.stop();
+    }
+  });
+
+  it('capacity-aware: within a type, advertised cells go fastest measured boot first; type preference still wins', async () => {
+    const cloud = makeFakeCloud();
+    const pool = makePool(cloud, {
+      regions: () => ['region-a', 'region-b'],
+      instanceTypes: () => ['gpu_best', 'gpu_worse'],
+      launchRetryMins: 1,
+      capacitySnapshot: () => ({
+        atMs: Date.now(),
+        cells: new Set(['gpu_best@region-a', 'gpu_best@region-b', 'gpu_worse@region-b']),
+      }),
+      // region-a boots slowly for gpu_best; region-b is quick.
+      cellBootStats: async () => new Map([['gpu_best@region-a', 900_000], ['gpu_best@region-b', 150_000]]),
+    });
+    cloud.setDry('gpu_best@region-b', true);
+    cloud.setDry('gpu_best@region-a', true);
+    try {
+      pool.start(testLog);
+      pool.ensure();
+      await until(() => pool.hasReady());
+      // Fast H100 region first, slow H100 region second, only then the worse type.
+      expect(cloud.attempts).toEqual(['gpu_best@region-b', 'gpu_best@region-a', 'gpu_worse@region-b']);
+    } finally {
+      pool.stop();
+    }
+  });
+
+  it('circuit breaker: a cell that produced a dead-on-arrival VM sorts last on the replacement sweep', async () => {
+    const cloud = makeFakeCloud();
+    const pool = makePool(cloud, {
+      regions: () => ['region-a', 'region-b'],
+      instanceTypes: () => ['gpu_best'],
+      bootTimeoutMs: 60_000,
+      launchRetryMins: 1,
+    });
+    // First VM (10.0.0.1, from region-a) comes up with a broken model load.
+    cloud.setLoadError('10.0.0.1', 'RuntimeError: Error 802: system not yet initialized');
+    try {
+      pool.start(testLog);
+      pool.ensure();
+      await until(() => pool.hasReady(), 5000);
+      expect(cloud.attempts).toEqual(['gpu_best@region-a', 'gpu_best@region-b']);
+      expect(pool.getState().instances[0]?.region).toBe('region-b');
+    } finally {
+      pool.stop();
+    }
+  });
+
+  it('no hunt cliff: keeps sweeping past the retry window while demand persists, wins when capacity appears', async () => {
+    const cloud = makeFakeCloud();
+    const pool = makePool(cloud, { launchRetryMins: 0, launchSpacingMs: 5 });
+    cloud.setDry('gpu_1x_test@test-region', true);
+    try {
+      pool.start(testLog);
+      pool.ensure();
+      // Several full passes past the (zero-minute) window, still hunting…
+      await until(() => cloud.attempts.length >= 4);
+      expect(pool.getState().status).toBe('launching');
+      // …then capacity appears and the same hunt wins it.
+      cloud.setDry('gpu_1x_test@test-region', false);
+      await until(() => pool.hasReady());
+      expect(cloud.launched).toHaveLength(1);
+    } finally {
+      pool.stop();
+    }
+  });
+
   it('exposes WHY: interest attribution + per-instance hold verdicts in getState', async () => {
     const cloud = makeFakeCloud();
     const pool = makePool(cloud, { interestWindowMs: 60_000 });
@@ -311,6 +490,51 @@ describe('instancePool', { timeout: 30_000 }, () => {
       pool.acquireStream('stream client=device:test');
       await until(() => pool.getState().instances[0]?.holdReason?.includes('active') ?? false);
       expect(state.interest.recent.length).toBeGreaterThan(0);
+    } finally {
+      pool.stop();
+    }
+  });
+
+  it('hedges a dragging boot: one racing launch, first-healthy wins, still-booting loser terminated', async () => {
+    const cloud = makeFakeCloud();
+    const pool = makePool(cloud, { interestWindowMs: 60_000, hedgeAfterMs: 200, bootTimeoutMs: 60_000 });
+    try {
+      // The first instance's server never comes up (slow provisioning stand-in).
+      cloud.setHealth('10.0.0.1', false);
+      pool.start(testLog);
+      pool.ensure();
+      await until(() => cloud.launched.length === 1);
+      // Past hedgeAfterMs with nothing ready → exactly one hedge launches.
+      await until(() => cloud.launched.length === 2);
+      const [stuck, hedge] = cloud.launched;
+      // Hedge (10.0.0.2, healthy) wins; the stuck original is terminated.
+      await until(() => pool.hasReady());
+      expect(pool.acquireStream()?.name).toBe(hedge);
+      await until(() => cloud.terminated.length === 1);
+      expect(pool.getState().instances.map((i) => i.name)).toEqual([hedge]);
+      expect(stuck).not.toBe(hedge);
+    } finally {
+      pool.stop();
+    }
+  });
+
+  it('never stacks hedges: one pair at a time, no third launch while the pair is unresolved', async () => {
+    const cloud = makeFakeCloud();
+    const pool = makePool(cloud, { interestWindowMs: 60_000, hedgeAfterMs: 200, bootTimeoutMs: 60_000 });
+    try {
+      // Both the original AND the hedge stay unhealthy → the pair never resolves.
+      cloud.setHealth('10.0.0.1', false);
+      cloud.setHealth('10.0.0.2', false);
+      pool.start(testLog);
+      pool.ensure();
+      await until(() => cloud.launched.length === 2);
+      // Many ticks later: still just the pair.
+      await sleep(500);
+      expect(cloud.launched).toHaveLength(2);
+      // Hedge recovers → wins → loser reaped, pool serves.
+      cloud.setHealth('10.0.0.2', true);
+      await until(() => pool.hasReady());
+      await until(() => cloud.terminated.length === 1);
     } finally {
       pool.stop();
     }

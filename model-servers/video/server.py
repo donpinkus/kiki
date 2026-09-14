@@ -1,7 +1,7 @@
-"""LTX-2.3 video WebSocket server (Lambda Cloud H100).
+"""LTX-2.5 video WebSocket server (Lambda Cloud H100).
 
 Runs on a DEDICATED Lambda H100 instance (`kiki-video-*`), separate from the
-image-serving pool — LTX-2.3 22B FP8 + Gemma hold ~46 GiB resident, which
+image-serving pool — LTX-2.5 22B FP8 + Gemma 4 hold ~48 GiB resident, which
 cannot share an 80 GB H100 with the 9B-KV image server (~37 GB). Keeping the
 GPUs separate also guarantees video generation never contends with the
 latency-sensitive image path.
@@ -60,10 +60,10 @@ import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from PIL import Image
 
-from shared import config
+from shared import config, cuda_preflight
 from shared import preparing_heartbeat
 from shared import sentry_init
-from video.pipeline import GeneratedAudio, Keyframe, Ltx23VideoPipeline
+from video.pipeline import GeneratedAudio, Keyframe, Ltx25VideoPipeline
 
 logging.basicConfig(
     level=logging.INFO,
@@ -73,7 +73,7 @@ logger = logging.getLogger(__name__)
 
 sentry_init.init(pod_kind="video")
 
-video_pipeline = Ltx23VideoPipeline()
+video_pipeline = Ltx25VideoPipeline()
 # Captures any load() failure so /health can surface it to whoever's polling
 # (orchestrator, manual curl). Without this, a load() exception kills the
 # FastAPI app before /health responds, the pod crashloops, and the only
@@ -90,7 +90,7 @@ async def lifespan(app: FastAPI):
         logger.info(
             f"Starting {config.LTX_MODEL_FAMILY} video server: "
             f"model={config.LTX_MODEL_REPO}/{config.LTX_MODEL_FILE} "
-            f"pipeline=DistilledPipeline "
+            f"pipeline={config.LTX_PIPELINE} "
             f"quantization={config.LTX_QUANTIZATION} "
             f"resolution={config.LTX_WIDTH}x{config.LTX_HEIGHT} "
             f"num_frames={config.LTX_NUM_FRAMES} fps={config.LTX_FPS}",
@@ -98,6 +98,7 @@ async def lifespan(app: FastAPI):
                 "model_family": config.LTX_MODEL_FAMILY,
                 "model_repo": config.LTX_MODEL_REPO,
                 "model_file": config.LTX_MODEL_FILE,
+                "pipeline": config.LTX_PIPELINE,
                 "quantization": config.LTX_QUANTIZATION,
                 "width": config.LTX_WIDTH,
                 "height": config.LTX_HEIGHT,
@@ -106,16 +107,23 @@ async def lifespan(app: FastAPI):
             },
         )
         # Threaded heartbeat — video_pipeline.load() blocks the asyncio event
-        # loop for ~3 minutes (LTX-2.3 22B FP8 transformer + Gemma encoder
+        # loop for ~3 minutes (LTX-2.5 22B FP8 transformer + Gemma 4 encoder
         # load), so an asyncio task wouldn't fire during the load. See
         # preparing_heartbeat.py header for context.
         stop_heartbeat = preparing_heartbeat.start_heartbeat()
         try:
+            # Prove the GPU works before touching 66 GB of weights: a VM whose
+            # CUDA never initializes (Lambda error 802) must fail /health in
+            # seconds, not after an 11-minute CPU crawl. See cuda_preflight.py.
+            cuda_preflight.check_cuda()
             video_pipeline.load()
+        except cuda_preflight.CudaUnavailableError as e:
+            _load_error_traceback = str(e)
+            logger.error("CUDA unusable on this VM — not loading the model; /health reports error")
         except Exception:
             import traceback
             _load_error_traceback = traceback.format_exc()
-            logger.exception("LTX-2.3 pipeline load failed — exposing traceback via /health")
+            logger.exception("LTX-2.5 pipeline load failed — exposing traceback via /health")
             # Don't re-raise — keep the FastAPI app alive so /health can return
             # the traceback. The pipeline is unusable but observable.
         finally:
@@ -253,7 +261,8 @@ async def websocket_video(ws: WebSocket):
                         req_height: int | None = None,
                         req_frames: int | None = None,
                         req_profile: bool = False,
-                        prompt_suffix: str | None = None) -> None:
+                        prompt_suffix: str | None = None,
+                        enable_audio: bool = True) -> None:
         """Generate video, stream frames, encode MP4. Updates outer counters."""
         nonlocal videos_total, videos_cancelled, videos_failed
         t0 = time.time()
@@ -273,11 +282,12 @@ async def websocket_video(ws: WebSocket):
                 keyframes=keyframes,
                 width=req_width, height=req_height, num_frames=req_frames,
                 profile=req_profile, prompt_suffix=prompt_suffix,
+                enable_audio=enable_audio,
             )
         except Exception as e:  # noqa: BLE001
             videos_failed += 1
             logger.error(
-                f"LTX-2.3 generate error: req={request_id} err={e}",
+                f"LTX-2.5 generate error: req={request_id} err={e}",
                 exc_info=True,
                 extra={"req": request_id},
             )
@@ -478,6 +488,12 @@ async def websocket_video(ws: WebSocket):
                 # so a missing/non-bool field defaults to False.
                 req_profile = bool(data.get("enableProfiling") or False)
 
+                # Per-request audio opt-out (Animate screen toggle). Default
+                # on; when off the audio latent is never decoded and the MP4
+                # muxes silent — so exports are silent, not just playback.
+                req_enable_audio = data.get("enableAudio")
+                req_enable_audio = True if req_enable_audio is None else bool(req_enable_audio)
+
                 req_prompt_suffix = data.get("videoPromptSuffix")
                 if req_prompt_suffix is not None and not isinstance(req_prompt_suffix, str):
                     req_prompt_suffix = None
@@ -559,6 +575,7 @@ async def websocket_video(ws: WebSocket):
                             request_id, keyframes, prompt, seed, cancel,
                             req_width=req_width, req_height=req_height, req_frames=req_frames,
                             req_profile=req_profile, prompt_suffix=req_prompt_suffix,
+                            enable_audio=req_enable_audio,
                         )
                     )
 

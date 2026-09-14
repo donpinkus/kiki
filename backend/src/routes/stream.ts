@@ -23,6 +23,7 @@ import { trackSessionClosed, trackProviderSession } from '../modules/analytics/i
 import {
   poolEnabled as videoPoolEnabled,
   getState as videoPoolGetState,
+  touch as touchVideoPool,
 } from '../modules/lambda/videoPool.js';
 
 /**
@@ -47,6 +48,20 @@ function percentile(samples: number[], p: number): number | null {
   const sorted = [...samples].sort((a, b) => a - b);
   return sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))] ?? null;
 }
+
+/**
+ * Timing dials for the per-session pool sampler. Module-level (not config)
+ * because they are protocol constants, not deploy knobs — exported only so
+ * the route test can shrink them (a 15 s/60 s cadence would make the
+ * upgrade tests wall-clock-bound). Production never changes these.
+ */
+export const streamTuning = {
+  /** Cadence of the availability push + h100_ready sampler + upgrade check. */
+  availabilityPollMs: 15_000,
+  /** Minimum gap between mid-session fal→lambda upgrade attempts (backoff
+   * after a failed lambda wire — never hammer a flapping instance). */
+  upgradeRetryMs: 60_000,
+};
 
 export const streamRoute: FastifyPluginAsync = async (fastify) => {
   // `config.public` opts out of the global JWT gate (the WS handshake does its
@@ -188,9 +203,23 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
        * sample; fal emits no timing). Reported as p50/p90 at close. */
       const imageGenMsSamples: number[] = [];
       let lambdaDowngraded = false;
+      // Mirror of lambdaDowngraded: an auto session that STARTED on fal (pool
+      // had nothing assignable) and was moved onto an H100 mid-session by
+      // maybeUpgradeToLambda. upgradedAtMs is the FIRST upgrade moment (a
+      // session can downgrade and upgrade again if the pool flaps).
+      let lambdaUpgraded = false;
+      let upgradedAtMs: number | null = null;
+      // Upgrade attempt gating: one in flight at a time, and at most one
+      // attempt per streamTuning.upgradeRetryMs (backoff after a failed wire).
+      let upgradeInFlight = false;
+      let lastUpgradeAttemptMs: number | null = null;
       // Wired → first H100 frame (ms) — the connected→first-frame transition
       // in the waterfall timing widget. Null until the first lambda frame.
+      // Measured from lambdaWiredAtMs (the LAMBDA relay's open), not
+      // wiredAtMs (the session's first relay, which is fal's on an upgraded
+      // session).
       let lambdaFirstFrameMs: number | null = null;
+      let lambdaWiredAtMs: number | null = null;
       // First moment during THIS session the image pool reported a ready
       // instance (sampled at auto-resolve + every 15s by the availability
       // timer). Stays null when the pool never got there — with
@@ -298,24 +327,29 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       // session analytics on every error-first teardown).
       let didCleanup = false;
       let didFinalize = false;
-      const cleanupOnDisconnect = (): void => {
-        if (didCleanup) return;
-        didCleanup = true;
-        clientDisconnected = true;
-        // Final fal spend flush: persist the last partial open span BEFORE
-        // closing the relay (close() would finalize it out of reach). Read the
-        // delta synchronously; fire-and-forget the DB write (low-stakes ~cents).
-        // Skip when a meterFalUsage write is still in flight: it hasn't
-        // advanced lastBilledMs yet, so flushing here would re-bill its span.
-        // Forfeits at most the ≤10s throttle tail (undercount) instead of
-        // risking a double charge.
-        if (falMeteringEnabled && userId && relay?.cumulativeOpenMs && !meterInFlight) {
-          const deltaMs = relay.cumulativeOpenMs() - lastBilledMs;
+      // Final fal spend flush for a fal relay that is about to be closed BY
+      // US: persist the last partial open span BEFORE close() (the relay's
+      // closedByUs path deliberately does not fire onUsage — this is the
+      // flush it defers to). Read the delta synchronously; fire-and-forget
+      // the DB write (low-stakes ~cents). Skip when a meterFalUsage write is
+      // still in flight: it hasn't advanced lastBilledMs yet, so flushing
+      // here would re-bill its span. Forfeits at most the ≤10s throttle tail
+      // (undercount) instead of risking a double charge. Shared by session
+      // teardown and the mid-session fal→lambda upgrade swap.
+      const flushFalSpendBeforeClose = (falRelay: ImageRelay | null): void => {
+        if (falMeteringEnabled && userId && falRelay?.cumulativeOpenMs && !meterInFlight) {
+          const deltaMs = falRelay.cumulativeOpenMs() - lastBilledMs;
           if (deltaMs > 0) {
             lastBilledMs += deltaMs; // relay is being torn down — no retry path needs the old value
             void addMonthlySpendUsd(userId, (deltaMs / 1000) * RATE_USD_PER_SEC).catch(() => {});
           }
         }
+      };
+      const cleanupOnDisconnect = (): void => {
+        if (didCleanup) return;
+        didCleanup = true;
+        clientDisconnected = true;
+        flushFalSpendBeforeClose(relay);
         relay?.close();
         relay = null;
         if (videoAvailTimer) clearInterval(videoAvailTimer);
@@ -375,6 +409,8 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             lambdaFrames,
             lambdaFirstFrameMs,
             lambdaDowngraded,
+            lambdaUpgraded,
+            upgradedAfterMs: upgradedAtMs !== null ? upgradedAtMs - sessionStartMs : null,
             everReachedReady,
             poolStatusAtClose: poolGetState().status,
             h100ReadyAfterMs:
@@ -599,42 +635,47 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         lastAvailabilityJson = payload;
         socket.send(payload);
       };
-      videoAvailTimer = setInterval(pushVideoAvailability, 15_000);
+      videoAvailTimer = setInterval(() => {
+        pushVideoAvailability();
+        // Same tick: an auto session parked on fal moves onto the H100 pool
+        // once it has something assignable (defined below; the interval
+        // can't fire before this synchronous slow path reaches it).
+        void withPhase('drawing', maybeUpgradeToLambda);
+      }, streamTuning.availabilityPollMs);
       videoAvailTimer.unref?.();
 
-      // Video pool warm-up interest: generation itself moved to the Animate
-      // screen's own /v1/animate socket (routes/animate.ts). Deliberately NOT
-      // touched here (narrowed 2026-07-19): drawing sessions kept a $4.29/hr
-      // video H100 warm for hours of simulator/dev traffic with zero
-      // animations. Video interest now means video INTENT — the Animate
-      // screen's socket-open touch prewarms it, and that screen shows
-      // warming progress for the cold-pool case.
+      // Video pool warm-up interest: generation itself lives on the Animate
+      // screen's own /v1/animate socket (routes/animate.ts), but a drawing
+      // session still registers interest so the video H100 races to ready
+      // alongside the image pool — owner decision 2026-07-19 ("an instance
+      // should be available as soon as possible when a user starts using the
+      // app"), reversing the brief animate-intent-only narrowing.
+      if (!config.LAMBDA_VIDEO_URL && videoPoolEnabled()) {
+        touchVideoPool(`stream_open ${clientTag}`);
+      }
 
-      // Wire a fresh relay to the upstream: install message/close/error
-      // handlers, connect, resend lastConfig. On success, `relay` and
-      // `currentUpstreamUrl` are updated. Used for the initial connect and
-      // same-URL reconnects after a transient upstream drop.
-      const wireRelay = async (upstreamUrl: string): Promise<void> => {
+      // Build a relay to the upstream and connect it: install message/close/
+      // error handlers, connect, log wire_relay_start/open/failed. Does NOT
+      // touch `relay` — the caller adopts it (adoptRelay) once it decides the
+      // new relay is the live one. `provider` is passed explicitly rather
+      // than read from `imageProvider` because the mid-session fal→lambda
+      // upgrade opens a LAMBDA relay while `imageProvider` is still 'fal'
+      // and fal keeps serving frames until the swap.
+      const openRelay = async (
+        provider: 'fal' | 'lambda',
+        upstreamUrl: string,
+      ): Promise<ImageRelay> => {
         const wireStart = Date.now();
         // Attempt index threaded into per-attempt logs; matches the
         // accumulator entry's `attempt` field so log lines and array
         // entries cross-reference cleanly when triaging.
         const attemptIndex = wireRelayAttempts.length + 1;
         request.log.info(
-          { userId, connId, streamId, upstreamUrl, attempt: attemptIndex, event: 'wire_relay_start' },
+          { userId, connId, streamId, upstreamUrl, provider, attempt: attemptIndex, event: 'wire_relay_start' },
           'wire_relay_start',
         );
-        relay?.close();
-        relay = null;
-        // A fresh FalImageRelay restarts cumulativeOpenMs at 0; lastBilledMs
-        // tracks the CURRENT relay's cumulative total, so it must reset with
-        // it — carrying an old relay's total across a rewire would make every
-        // delta negative and silently stop billing. (Latent today: the only
-        // mid-session fal-relay creation is the lambda→fal downgrade, where
-        // lastBilledMs is still 0 — this guards the invariant structurally.)
-        if (imageProvider === 'fal') lastBilledMs = 0;
         const newRelay: ImageRelay =
-          imageProvider === 'fal'
+          provider === 'fal'
             ? new FalImageRelay(config.FAL_KEY, {
                 logger: request.log,
                 ctx: { userId, connId, streamId, role: 'image' },
@@ -650,8 +691,16 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         newRelay.setLogContext({ userId, connId, streamId, role: 'image' });
         newRelay.onMessage((data, isBinary) => {
           if (socket.readyState !== socket.OPEN) return;
+          // Only the ADOPTED relay feeds the iPad. A lambda relay opened for
+          // an upgrade is not live until the swap (its connect-time status
+          // line must not reach the client), and a relay superseded by a
+          // rewire must not attribute late frames/metering to the wrong
+          // provider. Normal wiring is unaffected: StreamRelay delivers
+          // nothing pre-open, and the await continuation that adopts the
+          // relay runs before any post-open message event.
+          if (relay !== newRelay) return;
           // Keep the Lambda dev-pool idle reaper honest while frames flow.
-          if (imageProvider === 'lambda') {
+          if (provider === 'lambda') {
             if (poolInstanceName) poolTouchInstance(poolInstanceName);
             else touchDevPool('frames_static_url');
           }
@@ -660,10 +709,10 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             const base64 = buf.toString('base64');
             socket.send(JSON.stringify({ type: 'frame', data: base64 }));
             framesDelivered += 1;
-            if (imageProvider === 'lambda') {
+            if (provider === 'lambda') {
               lambdaFrames += 1;
               if (lambdaFrames === 1) {
-                lambdaFirstFrameMs = Date.now() - (wiredAtMs ?? sessionStartMs);
+                lambdaFirstFrameMs = Date.now() - (lambdaWiredAtMs ?? wiredAtMs ?? sessionStartMs);
               }
               lambdaUnbilledFrames += 1;
               if (lambdaUnbilledFrames >= 25) billLambdaFrames();
@@ -674,7 +723,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             // unchanged — sampling lambda frame_meta.genMs on the way past
             // for the session's generation-time distribution (tiny parse,
             // ~3/s; fal frame_metas are synthesized without timing).
-            if (imageProvider === 'lambda' && imageGenMsSamples.length < 500) {
+            if (provider === 'lambda' && imageGenMsSamples.length < 500) {
               try {
                 const meta = JSON.parse(String(data)) as Record<string, unknown>;
                 if (meta['type'] === 'frame_meta' && typeof meta['genMs'] === 'number') {
@@ -740,6 +789,7 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             connId,
             streamId,
             upstreamUrl,
+            provider,
             attempt: attemptIndex,
             elapsedMs: Date.now() - wireStart,
             phaseTimings,
@@ -747,11 +797,44 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
           },
           'wire_relay_open',
         );
+        return newRelay;
+      };
+
+      // Make a connected relay the live one: `relay`/`currentUpstreamUrl`
+      // point at it, waterfall stamps are taken, lastConfig is resent so the
+      // provider sees the current prompt before its first frame. The caller
+      // has already set `imageProvider` to `provider`.
+      const adoptRelay = (newRelay: ImageRelay, provider: 'fal' | 'lambda', upstreamUrl: string): void => {
         relay = newRelay;
         wiredAtMs ??= Date.now();
-        if (imageProvider === 'lambda') lambdaWired = true;
+        if (provider === 'lambda') {
+          lambdaWired = true;
+          lambdaWiredAtMs ??= Date.now();
+        }
         currentUpstreamUrl = upstreamUrl;
         if (lastConfig) newRelay.sendConfig(lastConfig);
+      };
+
+      // Wire a fresh relay to the upstream for the CURRENT `imageProvider`,
+      // replacing the live one: close the old relay first, connect, adopt.
+      // Used for the initial connect, same-URL reconnects after a transient
+      // upstream drop, pool failover, and the lambda→fal downgrade. (The
+      // fal→lambda upgrade deliberately does NOT use it — it keeps the fal
+      // relay serving until the lambda relay is connected; see
+      // maybeUpgradeToLambda.)
+      const wireRelay = async (upstreamUrl: string): Promise<void> => {
+        const provider: 'fal' | 'lambda' = imageProvider === 'fal' ? 'fal' : 'lambda';
+        relay?.close();
+        relay = null;
+        // A fresh FalImageRelay restarts cumulativeOpenMs at 0; lastBilledMs
+        // tracks the CURRENT relay's cumulative total, so it must reset with
+        // it — carrying an old relay's total across a rewire would make every
+        // delta negative and silently stop billing (e.g. the lambda→fal
+        // downgrade after an earlier fal→lambda upgrade left lastBilledMs at
+        // the first fal relay's total).
+        if (provider === 'fal') lastBilledMs = 0;
+        const newRelay = await openRelay(provider, upstreamUrl);
+        adoptRelay(newRelay, provider, upstreamUrl);
       };
 
       // Mid-session fal spend metering (non-exempt users only). The relay
@@ -762,6 +845,12 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
       // lives on the relay instance. No-op unless fal metering is on.
       const setupFalMetering = (): void => {
         if (!falMeteringEnabled) return;
+        // Bind to THIS fal relay. After a fal→lambda upgrade the old fal
+        // relay's close still fires onUsage (its ws 'close' lands after our
+        // close()), and by then `relay` is the lambda StreamRelay and the
+        // swap already flushed the final span — a fire against the wrong
+        // relay must be a no-op, not a re-bill.
+        const falRelay = relay;
         const enforceCut = (spendUsd: number): void => {
           if (clientDisconnected || socket.readyState !== socket.OPEN) return;
           request.log.info(
@@ -774,8 +863,8 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
         };
         const meterFalUsage = async (): Promise<void> => {
           if (meterInFlight) return; // overlap would double-bill; next fire covers the delta
-          if (!relay?.cumulativeOpenMs) return;
-          const ms = relay.cumulativeOpenMs();
+          if (!falMeteringEnabled || relay !== falRelay || !falRelay?.cumulativeOpenMs) return;
+          const ms = falRelay.cumulativeOpenMs();
           const deltaMs = ms - lastBilledMs;
           if (deltaMs <= 0) return;
           meterInFlight = true;
@@ -801,7 +890,117 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
             meterInFlight = false;
           }
         };
-        relay?.onUsage?.(() => void meterFalUsage());
+        falRelay?.onUsage?.(() => void meterFalUsage());
+      };
+
+      // ─── Mid-session fal → H100 UPGRADE (mirror of the downgrade) ─────
+      // An auto session that opened while the pool had nothing assignable is
+      // served by fal; without this it stayed there for its whole life even
+      // when an H100 came ready minutes later (30-day readback 2026-09-12: 10
+      // of 35 fal-served auto sessions closed with a ready pool). Runs on the
+      // 15 s availability tick. Sequence:
+      //   1. eligible? auto-resolved AND currently on fal AND a fal relay is
+      //      live AND the pool has an assignable instance AND no attempt in
+      //      flight AND ≥ upgradeRetryMs since the last attempt. Explicit
+      //      `?imageProvider=fal|lambda` overrides never get here
+      //      (providerResolvedFromAuto is false) — A/B purity, same rule as
+      //      the downgrade.
+      //   2. acquire a pool slot, open a LAMBDA relay while fal keeps
+      //      serving every canvas JPEG (no blank, no 'connecting' state).
+      //   3. connected → swap: flush the fal open-span into the ledger, flip
+      //      provider + metering (fal open-seconds stop, lambda per-frame
+      //      starts), adopt the lambda relay (lastConfig resent), then close
+      //      the fal relay (lazy/idle semantics respected: an armed-but-never
+      //      -opened or idle-closed fal socket costs nothing to close).
+      //   4. wire failed → mark the instance suspect, release the slot, stay
+      //      on fal silently; the next tick after upgradeRetryMs retries.
+      // The last image on the iPad is never cleared: fal frames flow until
+      // the instant of the swap and the lambda relay is already connected.
+      const maybeUpgradeToLambda = async (): Promise<void> => {
+        if (
+          !providerResolvedFromAuto ||
+          imageProvider !== 'fal' ||
+          upgradeInFlight ||
+          !relay ||
+          clientDisconnected ||
+          socket.readyState !== socket.OPEN ||
+          !poolHasReady()
+        ) {
+          return;
+        }
+        if (lastUpgradeAttemptMs !== null && Date.now() - lastUpgradeAttemptMs < streamTuning.upgradeRetryMs) {
+          return;
+        }
+        const slot = poolAcquireStream(`upgrade ${clientTag}`);
+        if (!slot) return;
+        upgradeInFlight = true;
+        lastUpgradeAttemptMs = Date.now();
+        const attemptStart = Date.now();
+        request.log.info(
+          { userId, connId, streamId, instance: slot.name, event: 'relay_upgrade_start' },
+          'H100 pool ready mid-session — wiring lambda relay behind the live fal relay',
+        );
+        try {
+          let newRelay: ImageRelay;
+          try {
+            newRelay = await openRelay('lambda', slot.url);
+          } catch (err) {
+            poolReportFailure(slot.name);
+            poolReleaseStream(slot.name);
+            request.log.warn(
+              {
+                userId,
+                connId,
+                streamId,
+                instance: slot.name,
+                elapsedMs: Date.now() - attemptStart,
+                err: (err as Error).message,
+                event: 'relay_upgrade_failed',
+              },
+              'lambda wire failed during upgrade — staying on fal, retry after backoff',
+            );
+            return;
+          }
+          if (clientDisconnected || socket.readyState !== socket.OPEN || imageProvider !== 'fal' || !relay) {
+            // Client left, or the session's provider moved under us (the fal
+            // relay is never rewired mid-session, so this is the disconnect
+            // case in practice). Don't adopt; free the slot.
+            newRelay.close();
+            poolReleaseStream(slot.name);
+            return;
+          }
+          const falRelay = relay;
+          // Fal open-seconds stop HERE: persist the final partial span (the
+          // relay's own closedByUs path skips onUsage — see fal
+          // handleUpstreamClose), then hand the metering flag to the lambda
+          // per-frame path (same exemption carries over, mirror of
+          // downgradeAutoToFal).
+          flushFalSpendBeforeClose(falRelay);
+          lambdaMeteringEnabled = falMeteringEnabled;
+          falMeteringEnabled = false;
+          imageProvider = 'lambda';
+          poolInstanceName = slot.name;
+          lambdaUpgraded = true;
+          upgradedAtMs ??= Date.now();
+          adoptRelay(newRelay, 'lambda', slot.url);
+          // Adopted first, closed second: any straggling fal frame is dropped
+          // by the adopted-relay guard rather than mis-attributed.
+          falRelay.close();
+          request.log.info(
+            {
+              userId,
+              connId,
+              streamId,
+              instance: slot.name,
+              upgradedAfterMs: Date.now() - sessionStartMs,
+              wireMs: Date.now() - attemptStart,
+              event: 'relay_upgraded',
+            },
+            'auto session upgraded fal → lambda mid-session',
+          );
+        } finally {
+          upgradeInFlight = false;
+        }
       };
 
       // Recover from an upstream close. If the iPad WS is still open, attempt
@@ -1014,6 +1213,16 @@ export const streamRoute: FastifyPluginAsync = async (fastify) => {
           }
         }
         if (imageProvider === 'fal') {
+          // An EXPLICITLY fal-pinned session still keeps the H100 pool warm
+          // (owner decision 2026-08-23): the pool powers more than the live
+          // stream (sketchify, reference pinning, adherence slider), so a
+          // user drawing on fal shouldn't come back to a cold pool. This is
+          // interest only — the session itself never switches provider
+          // (A/B purity unchanged). Auto-resolved sessions already touched
+          // the pool during resolution, so this is pinned-only.
+          if (!providerResolvedFromAuto) {
+            ensureDevPool(`stream fal-pinned ${clientTag}`);
+          }
           // fal hosted image path. The relay connects in ~0.5s when the pool
           // is warm (see modules/fal/falWarmer.ts).
           request.log.info(

@@ -1,8 +1,8 @@
 /**
- * One-time Lambda Cloud region setup for the kiki VIDEO server (LTX-2.3).
+ * One-time Lambda Cloud region setup for the kiki VIDEO server (LTX-2.5).
  *
  * The video path runs on its OWN filesystem + instances (`kiki-video-*`),
- * separate from the image pool: LTX-2.3 22B FP8 + Gemma-3-12B hold ~46 GiB
+ * separate from the image pool: LTX-2.5 22B FP8 + Gemma 4 12B hold ~48 GiB
  * resident, which cannot share an 80 GB H100 with the 9B-KV image server
  * (~37 GB) — and a dedicated GPU guarantees video work never contends with
  * the latency-sensitive image path.
@@ -14,8 +14,11 @@
  *   4. Launches a setup instance with the filesystem attached and populates it:
  *        /kiki/app/           — model-servers code (video/, shared/, requirements)
  *        /kiki/venv/          — python venv (torch cu128 + requirements-video.txt)
- *        /kiki/huggingface/   — LTX-2.3 22B distilled (~45 GB) + spatial
- *                               upscaler + Gemma-3-12B text encoder (~24 GB)
+ *        /kiki/huggingface/   — LTX-2.5 split components: 22B distilled
+ *                               transformer (39 GB) + bundled Gemma 4 text
+ *                               encoder (24 GB) + video/audio VAEs + spatial
+ *                               upscaler + DFR detailing IC-LoRA (~66 GB).
+ *                               The 2.3 assets are left in place (rollback).
  *        /kiki/tls/           — fleet TLS cert (copied from ~/.kiki/lambda-tls
  *                               when present locally — same cert as the image
  *                               fleet, so LAMBDA_TLS_CA_B64 pins both)
@@ -30,12 +33,13 @@
  *
  * Requires in .env.local:
  *   LAMBDA_API_KEY — cloud.lambda.ai/api-keys
- *   HF_TOKEN       — HuggingFace token whose account has ACCEPTED Google's
- *                    Gemma license (google/gemma-3-12b-it-qat-q4_0-unquantized
- *                    is gated). LTX weights are ungated but the Gemma text
- *                    encoder is required.
+ *   HF_TOKEN       — HuggingFace token whose account has clicked through the
+ *                    LTX-2.x Community License on BOTH auto-gated repos
+ *                    (Lightricks/LTX-2.5 and the IC-LoRA repo). The Gemma 4
+ *                    text encoder is bundled in the LTX repo — no Google
+ *                    gate any more.
  *
- * License note: LTX-2 weights are under the LTX-2 Community License (NOT
+ * License note: LTX-2.x weights are under the LTX-2.x Community License (NOT
  * Apache-2.0; restricts commercial use >= $10M revenue). Verify before any
  * App Store rollout.
  */
@@ -44,7 +48,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
-import { launchWithRetry, loadEnvLocal, requireClient, sleep, REPO_ROOT, type Instance } from './lambdaApi.js';
+import { launchSetupWithFilesystem, loadEnvLocal, requireClient, sleep, REPO_ROOT, type Instance } from './lambdaApi.js';
 
 const SSH_KEY_PATH = resolve(homedir(), '.ssh', 'id_ed25519');
 const SSH_KEY_NAME = 'kiki-donald';
@@ -59,10 +63,20 @@ const EXPECTED_PY = '3.12';
 // → libcudart.so.13 missing at import (hit live 2026-07-18).
 const TORCH_SPEC = 'torch==2.9.1 torchvision torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cu128';
 // Weight repos/files — must match model-servers/shared/config.py defaults.
-const LTX_MODEL_REPO = 'Lightricks/LTX-2.3';
-const LTX_MODEL_FILE = 'ltx-2.3-22b-distilled-1.1.safetensors';
-const LTX_UPSCALER_FILE = 'ltx-2.3-spatial-upscaler-x2-1.1.safetensors';
-const GEMMA_REPO = 'google/gemma-3-12b-it-qat-q4_0-unquantized';
+// LTX-2.5 is one file per component; download only what the two pipelines
+// (distilled + DFR) need. Both video VAEs are fetched so LTX_VIDEO_VAE can be
+// flipped without a re-populate.
+const LTX_MODEL_REPO = 'Lightricks/LTX-2.5';
+const LTX_FILES = [
+  'diffusion_models/ltx-2.5-22b-distilled-transformer-bf16.safetensors',
+  'text_encoders/gemma4-12b-with-proj-ltx-2.5-bf16.safetensors',
+  'vae/ltx-2.5-video-vae-bf16.safetensors',
+  'vae/ltx-2.5-video-vae-conv-bf16.safetensors',
+  'vae/ltx-2.5-audio-vae-bf16.safetensors',
+  'latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors',
+];
+const LTX_LORA_REPO = 'Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler';
+const LTX_LORA_FILE = 'ltx-2.5-22b-ic-lora-pixel-spatial-upscaler-x2-1.0.safetensors';
 const LOCAL_TLS_DIR = resolve(homedir(), '.kiki', 'lambda-tls');
 
 function getArg(flag: string): string | undefined {
@@ -91,8 +105,8 @@ loadEnvLocal();
 const HF_TOKEN = process.env['HF_TOKEN'] ?? '';
 if (!HF_TOKEN) {
   console.error(
-    'HF_TOKEN is required in .env.local (Gemma-3-12B text encoder is gated behind\n' +
-      "Google's Gemma terms — accept them on huggingface.co with the token's account).",
+    'HF_TOKEN is required in .env.local (Lightricks/LTX-2.5 + the IC-LoRA repo are\n' +
+      "auto-gated — accept the LTX-2.x Community License on huggingface.co with the token's account).",
   );
   process.exit(1);
 }
@@ -176,7 +190,7 @@ async function waitForSsh(ip: string, timeoutMs = 5 * 60 * 1000): Promise<void> 
 // cloud-init (see launch-video.ts). Per-instance secrets (KIKI_WS_TOKEN)
 // arrive via /etc/kiki.env written by cloud-init, not baked here.
 const BOOT_SH = `#!/usr/bin/env bash
-# Kiki VIDEO server boot (LTX-2.3) — invoked by cloud-init on Lambda serving
+# Kiki VIDEO server boot (LTX-2.5) — invoked by cloud-init on Lambda serving
 # instances. Lives on the shared filesystem so it can be iterated without
 # relaunching.
 set -euo pipefail
@@ -186,9 +200,11 @@ export HF_HOME=$FS/kiki/huggingface
 export HF_HUB_OFFLINE=1
 export HF_HUB_DISABLE_TELEMETRY=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-# fp8_cast: universal FP8 (store FP8, upcast per matmul). scaled_mm (native
-# Hopper FP8 matmul) stays off until upstream issue #181 is fixed — see
-# shared/config.py.
+# fp8_cast: universal FP8 (store FP8, upcast per matmul). scaled_mm needs an
+# FP8 checkpoint with per-tensor scales, which Lightricks doesn't ship for
+# 2.5 — see shared/config.py. Pipeline/resolution defaults live in
+# shared/config.py (LTX_PIPELINE / LTX_WIDTH / LTX_HEIGHT); override here
+# only for a one-off experiment.
 export LTX_FP8_MODE=cast
 # TLS: serve wss when the fleet cert is present on the filesystem (backend
 # pins it via LAMBDA_TLS_CA_B64). Absent → plain ws (dev filesystems).
@@ -225,6 +241,12 @@ pip install --upgrade pip -q
 python3 -c "import torch; print('torch already:', torch.__version__)" 2>/dev/null || \\
   pip install --no-cache-dir ${TORCH_SPEC}
 pip install --no-cache-dir -r $FS/kiki/app/requirements-video.txt
+# The ltx packages are direct git URLs; pip treats an already-installed
+# "ltx-core 1.x" as satisfied even when the pinned SHA moved. Force the
+# pinned commit in (no-deps: the resolved deps above already match).
+pip install --no-cache-dir --force-reinstall --no-deps \\
+  $(grep -E '^ltx-(core|pipelines) @' $FS/kiki/app/requirements-video.txt | sed 's/ //g' | tr '\\n' ' ')
+python3 -c "import ltx_pipelines.dfr_pipeline, ltx_pipelines.distilled; import transformers; print('ltx ok, transformers', transformers.__version__)"
 # torchaudio arrives as an ltx-core dependency and the default index serves a
 # cu13-linked wheel next to our cu128 torch (libcudart.so.13 missing at
 # import — hit live 2026-07-18). Verify by IMPORT (a bad wheel can share the
@@ -239,18 +261,19 @@ print('torch', torch.__version__, 'cuda', torch.version.cuda, 'available', torch
 print('device', torch.cuda.get_device_name(0), 'capability', torch.cuda.get_device_capability(0))
 EOF
 
-echo "=== LTX-2.3 weights (~45 GB checkpoint + upscaler) + Gemma-3-12B (~24 GB, gated) ==="
+echo "=== LTX-2.5 split components (~66 GB incl. bundled Gemma 4) + DFR IC-LoRA ==="
+# (the file list is interpolated with single quotes — this python runs inside a
+# double-quoted bash string, so JSON double quotes would be eaten by bash)
 export HF_HOME=$FS/kiki/huggingface
 export HF_HUB_DISABLE_TELEMETRY=1
 export HF_TOKEN='${HF_TOKEN}'
 python3 -c "
-from huggingface_hub import hf_hub_download, snapshot_download
-p = hf_hub_download('${LTX_MODEL_REPO}', '${LTX_MODEL_FILE}')
-print('ltx checkpoint at', p)
-p = hf_hub_download('${LTX_MODEL_REPO}', '${LTX_UPSCALER_FILE}')
-print('spatial upscaler at', p)
-p = snapshot_download('${GEMMA_REPO}')
-print('gemma snapshot at', p)
+from huggingface_hub import hf_hub_download
+for f in ${JSON.stringify(LTX_FILES).replace(/"/g, "'")}:
+    p = hf_hub_download('${LTX_MODEL_REPO}', f)
+    print('ltx component at', p)
+p = hf_hub_download('${LTX_LORA_REPO}', '${LTX_LORA_FILE}')
+print('detailing ic-lora at', p)
 "
 
 echo "=== boot.sh ==="
@@ -267,13 +290,13 @@ const SMOKE_CMD = `set -euo pipefail
 FS=${FS_ROOT}
 source $FS/kiki/venv/bin/activate
 cd $FS/kiki/app
-echo "=== smoke test: LTX-2.3 pipeline load + warmup inference (~5-10 min) ==="
+echo "=== smoke test: LTX-2.5 pipeline load + warmup inference (~5-10 min) ==="
 HF_HOME=$FS/kiki/huggingface HF_HUB_OFFLINE=1 LTX_FP8_MODE=cast \\
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 - <<'EOF'
 import time
 t0 = time.time()
-from video.pipeline import Ltx23VideoPipeline
-p = Ltx23VideoPipeline()
+from video.pipeline import Ltx25VideoPipeline
+p = Ltx25VideoPipeline()
 p.load()
 print('pipeline load+warmup took %.1fs' % (time.time() - t0))
 info = p.get_info()
@@ -302,32 +325,23 @@ const keyName = (await client.listSshKeys()).find(
 await client.ensureInboundTcpPort(KIKI_PORT, 'kiki image/video server WS');
 console.log(`[setup-video] firewall: inbound tcp/${KIKI_PORT} open account-wide`);
 
-// 3. Filesystem
-const filesystems = await client.listFilesystems();
-if (!filesystems.some((f) => f.name === FS_NAME && f.region.name === REGION)) {
-  await client.createFilesystem(FS_NAME, REGION);
-  console.log(`[setup-video] created filesystem ${FS_NAME} in ${REGION}`);
-} else {
-  console.log(`[setup-video] filesystem ${FS_NAME} already exists`);
-}
-
-// 4. Setup instance
+// 3 + 4. Filesystem + setup instance, together: the filesystem is created
+// only when the cell advertises capacity and deleted again on a miss, so an
+// empty kiki-video-<region> never sits unattached where the pool sweep would
+// boot into it (see launchSetupWithFilesystem).
 console.log('[setup-video] launching setup instance (billing starts when it passes health checks)...');
 const t0 = Date.now();
-const [instanceId] = await launchWithRetry(
-  client,
-  {
-    region_name: REGION,
-    instance_type_name: TYPE,
-    ssh_key_names: [keyName],
-    file_system_names: [FS_NAME],
-    // NOT `kiki-video-setup-…`: the video pool adopts by the `kiki-video-`
-    // name prefix on backend deploy, and must never grab a setup instance.
-    name: `kiki-vidsetup-${Date.now()}`,
-    image: { family: OS_IMAGE_FAMILY },
-  },
-  RETRY_MINS,
-);
+const [instanceId] = await launchSetupWithFilesystem(client, {
+  region: REGION,
+  type: TYPE,
+  fsName: FS_NAME,
+  // NOT `kiki-video-setup-…`: the video pool adopts by the `kiki-video-`
+  // name prefix on backend deploy, and must never grab a setup instance.
+  name: `kiki-vidsetup-${Date.now()}`,
+  keyName,
+  imageFamily: OS_IMAGE_FAMILY,
+  retryMins: RETRY_MINS,
+});
 console.log(`[setup-video] instance ${instanceId} launched; waiting for active...`);
 const inst = await waitForStatus(instanceId!, 'active', 30 * 60 * 1000);
 console.log(`[setup-video] active after ${((Date.now() - t0) / 1000).toFixed(0)}s — ip=${inst.ip}`);
@@ -351,7 +365,7 @@ try {
   } else {
     console.log('[setup-video] no ~/.kiki/lambda-tls cert found — instances will serve plain ws:// (dev only)');
   }
-  console.log('[setup-video] populating venv + weights (~20-40 min on first run; ~70 GB of downloads)...');
+  console.log('[setup-video] populating venv + weights (~20-40 min on first run; ~66 GB of downloads)...');
   // 3.5h ceiling: the venv (torch → NFS) + ~70 GB of weights are pure-IO
   // bound on NFS write throughput — the default 1h ceiling killed a real
   // populate mid-torch-install (2026-07-18).

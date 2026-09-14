@@ -94,6 +94,10 @@ own tables — it never touches the backend's.
 | GET | `/admin/api/users?q=` | cookie | User list + counts |
 | GET | `/admin/api/users/:id` | cookie | Full per-user view |
 | GET | `/admin/api/launch` | cookie | Launch tab: provider/pool lifecycle views |
+| GET | `/admin/api/boots?pool=image\|video` | cookie | Boots tab: per-boot success + timing decomposition (provision/os/stack from the ready event's detail JSON; hedge races; init-phase medians; daily trend) |
+| GET | `/admin/api/boots/cells?days=30` | cookie | Boots tab: per pool × cell (`launched` detail `type@region` joined to `ready` by instance name) boot p50/p90/max; hedge outcomes per pool (`hedge_launched` / `hedge_resolved` `winner=hedge\|original`, win rate; legacy `hedge_loser_terminate` count) |
+| GET | `/admin/api/capacity?days=` | cookie | Capacity tab: advertised availability per (type, region), hourly timeline, hour-of-day heatmap (`lambda_capacity_ticks`/`_samples`, ≤14d) |
+| GET | `/admin/api/capacity/grid?days=14&regions=csv` | cookie | Capacity tab: joint availability per named grid ("our H100 grid" = 1x H100 sxm5/pcie in `regions`, default `us-southeast-1,us-south-2,us-east-1,us-west-3,us-south-3`; any-region and incl-A100 variants), droughts (gaps-and-islands runs of dry ticks: top 15, count >30 min, p50/max), and which other H100/A100 cells were advertised on the grid's dry ticks (top 12) |
 | GET | `/admin/api/captures[/:streamId]` | cookie | Gallery replay: captured sessions + frames |
 | GET/PUT | `/admin/api/ops/warmer` | cookie | Ops tab: live fal-warmer config (`admin_config.fal_warmer`) + ping history |
 | GET | `/admin/api/ops/connections` | cookie | Ops tab: `fal_connections` history |
@@ -103,7 +107,7 @@ own tables — it never touches the backend's.
 | GET | `/blobs/*` | cookie | Serve a blob |
 | GET | `/health` | — | DB health |
 
-SPA nav (`web/src/App.tsx`): Users, Launch, Gallery (replay), Tests, Brushes, Ops.
+SPA nav (`web/src/App.tsx`): Launch, GPU Fleet, Boots, Capacity, Users, Gallery (replay), Tests, Brushes, Ops.
 
 ### Event ingest contract
 

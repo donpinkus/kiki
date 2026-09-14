@@ -35,6 +35,7 @@ const pool = createInstancePool({
    * blows through it, and the client caps its progress bar rather than
    * lying. */
   bootEstimateMs: 5 * 60_000,
+  hedgeAfterMs: config.LAMBDA_POOL_HEDGE_AFTER_MS,
 });
 
 // The factory returns plain closures, so destructuring is safe — these are

@@ -57,16 +57,22 @@ export function trackVideoGeneration(props: {
   userId: string;
   streamId: string | null;
   source: string;
+  /** `ltx` (self-hosted pool) or a hosted fal engine id (`wan3`, `h3max`). */
+  engine?: string;
   waitMs: number;
   genMs: number | null;
   bytes: number;
+  /** What was metered into monthly_usage for this generation. */
+  costUsd?: number;
 }): void {
   capture(props.userId, 'stream.video_generation', {
     stream_id: props.streamId,
     source: props.source,
+    engine: props.engine ?? 'ltx',
     wait_ms: props.waitMs,
     gen_ms: props.genMs,
     bytes: props.bytes,
+    cost_usd: props.costUsd ?? null,
   });
 }
 
@@ -134,12 +140,20 @@ export function trackProviderSession(props: {
   lambdaFirstFrameMs: number | null;
   /** Session had the H100 and lost it (finished on fal). */
   lambdaDowngraded: boolean;
+  /** Auto session that STARTED on fal (pool had nothing assignable) and was
+   * moved onto an H100 mid-session once one came ready. `provider` is the
+   * FINAL provider, so an upgraded session that stayed up reads 'lambda'. */
+  lambdaUpgraded: boolean;
+  /** WS-open → the (first) fal→lambda swap (ms); null when never upgraded. */
+  upgradedAfterMs: number | null;
   everReachedReady: boolean;
   /** Image-pool status when the socket closed. For never-wired sessions this
    * is the "why they never got it": 'launching' = still hunting capacity when
    * they left, 'booting' = instance found but still warming, 'none'/'error' =
-   * pool wasn't even trying, 'ready' = it WAS ready but the session started
-   * on fal and auto never upgrades mid-session. */
+   * pool wasn't even trying, 'ready' = it WAS ready at close (since the
+   * 2026-09-12 mid-session upgrade an auto session on fal moves over within
+   * ~15 s of that, so 'ready' + !lambda_upgraded now means the upgrade wire
+   * failed/was still backing off, or the client left within the tick). */
   poolStatusAtClose: string;
   /** WS-open → first moment the pool reported a ready instance during this
    * session (15s sampling). Null = the pool never became ready while the
@@ -183,6 +197,8 @@ export function trackProviderSession(props: {
     lambda_frames: props.lambdaFrames,
     lambda_first_frame_ms: props.lambdaFirstFrameMs,
     lambda_downgraded: props.lambdaDowngraded,
+    lambda_upgraded: props.lambdaUpgraded,
+    upgraded_after_ms: props.upgradedAfterMs,
     ever_reached_ready: props.everReachedReady,
     pool_status_at_close: props.poolStatusAtClose,
     h100_ready_after_ms: props.h100ReadyAfterMs,
