@@ -268,6 +268,403 @@
       "category": "Action",
       "clip": "Pistol_Aim_Up",
       "frame": 0
+    },
+    {
+      "id": "arms_up",
+      "name": "Arms up",
+      "category": "Standing",
+      "clip": "Dance_Loop",
+      "frame": 6
+    },
+    {
+      "id": "dance_2",
+      "name": "Dancing 2",
+      "category": "Standing",
+      "clip": "Dance_Loop",
+      "frame": 24
+    },
+    {
+      "id": "explaining",
+      "name": "Explaining",
+      "category": "Standing",
+      "clip": "Idle_Talking_Loop",
+      "frame": 44
+    },
+    {
+      "id": "recoil_chest",
+      "name": "Recoil (chest)",
+      "category": "Standing",
+      "clip": "Hit_Chest",
+      "frame": 4
+    },
+    {
+      "id": "gesture_out",
+      "name": "Gesturing",
+      "category": "Standing",
+      "clip": "Interact",
+      "frame": 30
+    },
+    {
+      "id": "lean_reach",
+      "name": "Leaning reach",
+      "category": "Standing",
+      "clip": "PickUp_Table",
+      "frame": 12
+    },
+    {
+      "id": "arms_crossed_high",
+      "name": "Checking",
+      "category": "Standing",
+      "clip": "Pistol_Reload",
+      "frame": 25
+    },
+    {
+      "id": "push_forward",
+      "name": "Arms forward",
+      "category": "Standing",
+      "clip": "Pistol_Shoot",
+      "frame": 9
+    },
+    {
+      "id": "presenting",
+      "name": "Presenting",
+      "category": "Standing",
+      "clip": "Spell_Simple_Enter",
+      "frame": 3
+    },
+    {
+      "id": "stagger",
+      "name": "Staggering",
+      "category": "Standing",
+      "clip": "Death01",
+      "frame": 14
+    },
+    {
+      "id": "walk_2",
+      "name": "Walking 2",
+      "category": "Moving",
+      "clip": "Walk_Loop",
+      "frame": 27
+    },
+    {
+      "id": "walk_3",
+      "name": "Walking 3",
+      "category": "Moving",
+      "clip": "Walk_Loop",
+      "frame": 4
+    },
+    {
+      "id": "jog_2",
+      "name": "Jogging 2",
+      "category": "Moving",
+      "clip": "Jog_Fwd_Loop",
+      "frame": 19
+    },
+    {
+      "id": "sprint_2",
+      "name": "Sprinting 2",
+      "category": "Moving",
+      "clip": "Sprint_Loop",
+      "frame": 2
+    },
+    {
+      "id": "sprint_3",
+      "name": "Sprinting 3",
+      "category": "Moving",
+      "clip": "Sprint_Loop",
+      "frame": 16
+    },
+    {
+      "id": "push_2",
+      "name": "Pushing 2",
+      "category": "Moving",
+      "clip": "Push_Loop",
+      "frame": 40
+    },
+    {
+      "id": "tread_water",
+      "name": "Treading water",
+      "category": "Moving",
+      "clip": "Swim_Idle_Loop",
+      "frame": 40
+    },
+    {
+      "id": "swim_2",
+      "name": "Swimming 2",
+      "category": "Moving",
+      "clip": "Swim_Fwd_Loop",
+      "frame": 20,
+      "yaw": 1.5708
+    },
+    {
+      "id": "leap",
+      "name": "Leaping",
+      "category": "Jumping",
+      "clip": "Jump_Start",
+      "frame": 27
+    },
+    {
+      "id": "land_deep",
+      "name": "Deep landing",
+      "category": "Jumping",
+      "clip": "Jump_Land",
+      "frame": 4
+    },
+    {
+      "id": "jump_air_2",
+      "name": "Jump (air) 2",
+      "category": "Jumping",
+      "clip": "Jump_Loop",
+      "frame": 51
+    },
+    {
+      "id": "roll_2",
+      "name": "Tuck roll 2",
+      "category": "Jumping",
+      "clip": "Roll",
+      "frame": 9
+    },
+    {
+      "id": "fall_back",
+      "name": "Falling back",
+      "category": "Jumping",
+      "clip": "Death01",
+      "frame": 29
+    },
+    {
+      "id": "crouch_walk_2",
+      "name": "Crouch walk 2",
+      "category": "Low",
+      "clip": "Crouch_Fwd_Loop",
+      "frame": 30
+    },
+    {
+      "id": "kneel_down",
+      "name": "Kneeling down",
+      "category": "Low",
+      "clip": "Fixing_Kneeling",
+      "frame": 15
+    },
+    {
+      "id": "kneel_work",
+      "name": "Kneeling (working)",
+      "category": "Low",
+      "clip": "Fixing_Kneeling",
+      "frame": 106
+    },
+    {
+      "id": "lying_2",
+      "name": "Lying down 2",
+      "category": "Low",
+      "clip": "Death01",
+      "frame": 58,
+      "yaw": 1.5708
+    },
+    {
+      "id": "sit_down_2",
+      "name": "Sitting down 2",
+      "category": "Sitting",
+      "clip": "Sitting_Enter",
+      "frame": 16
+    },
+    {
+      "id": "stand_up",
+      "name": "Standing up",
+      "category": "Sitting",
+      "clip": "Sitting_Exit",
+      "frame": 25
+    },
+    {
+      "id": "sit_talk_2",
+      "name": "Sitting (talking) 2",
+      "category": "Sitting",
+      "clip": "Sitting_Talking_Loop",
+      "frame": 44
+    },
+    {
+      "id": "cross_2",
+      "name": "Cross punch 2",
+      "category": "Action",
+      "clip": "Punch_Cross",
+      "frame": 20
+    },
+    {
+      "id": "jab_2",
+      "name": "Jab 2",
+      "category": "Action",
+      "clip": "Punch_Jab",
+      "frame": 13
+    },
+    {
+      "id": "sword_overhead",
+      "name": "Sword overhead",
+      "category": "Action",
+      "clip": "Sword_Attack",
+      "frame": 23
+    },
+    {
+      "id": "sword_windup",
+      "name": "Sword wind-up",
+      "category": "Action",
+      "clip": "Sword_Attack",
+      "frame": 4
+    },
+    {
+      "id": "sword_ready_2",
+      "name": "Sword ready 2",
+      "category": "Action",
+      "clip": "Sword_Idle",
+      "frame": 34
+    },
+    {
+      "id": "cast_follow",
+      "name": "Cast follow-through",
+      "category": "Action",
+      "clip": "Spell_Simple_Shoot",
+      "frame": 12
+    },
+    {
+      "id": "cast_lower",
+      "name": "Lowering cast",
+      "category": "Action",
+      "clip": "Spell_Simple_Exit",
+      "frame": 3
+    },
+    {
+      "id": "jab_m",
+      "name": "Jab (L)",
+      "category": "Action",
+      "clip": "Punch_Jab",
+      "frame": 7,
+      "mirror": true
+    },
+    {
+      "id": "cross_m",
+      "name": "Cross punch (L)",
+      "category": "Action",
+      "clip": "Punch_Cross",
+      "frame": 8,
+      "mirror": true
+    },
+    {
+      "id": "sword_idle_m",
+      "name": "Sword ready (L)",
+      "category": "Action",
+      "clip": "Sword_Idle",
+      "frame": 14,
+      "mirror": true
+    },
+    {
+      "id": "sword_attack_m",
+      "name": "Sword swing (L)",
+      "category": "Action",
+      "clip": "Sword_Attack",
+      "frame": 13,
+      "mirror": true
+    },
+    {
+      "id": "sword_overhead_m",
+      "name": "Sword overhead (L)",
+      "category": "Action",
+      "clip": "Sword_Attack",
+      "frame": 23,
+      "mirror": true
+    },
+    {
+      "id": "spell_shoot_m",
+      "name": "Cast forward (L)",
+      "category": "Action",
+      "clip": "Spell_Simple_Shoot",
+      "frame": 4,
+      "mirror": true
+    },
+    {
+      "id": "aim_m",
+      "name": "Aiming (L)",
+      "category": "Action",
+      "clip": "Pistol_Aim_Neutral",
+      "frame": 0,
+      "mirror": true
+    },
+    {
+      "id": "aim_up_m",
+      "name": "Aiming up (L)",
+      "category": "Action",
+      "clip": "Pistol_Aim_Up",
+      "frame": 0,
+      "mirror": true
+    },
+    {
+      "id": "reach_m",
+      "name": "Reaching (L)",
+      "category": "Standing",
+      "clip": "Interact",
+      "frame": 17,
+      "mirror": true
+    },
+    {
+      "id": "torch_m",
+      "name": "Holding up (L)",
+      "category": "Standing",
+      "clip": "Idle_Torch_Loop",
+      "frame": 0,
+      "mirror": true
+    },
+    {
+      "id": "gesture_out_m",
+      "name": "Gesturing (L)",
+      "category": "Standing",
+      "clip": "Interact",
+      "frame": 30,
+      "mirror": true
+    },
+    {
+      "id": "lean_reach_m",
+      "name": "Leaning reach (L)",
+      "category": "Standing",
+      "clip": "PickUp_Table",
+      "frame": 12,
+      "mirror": true
+    },
+    {
+      "id": "sit_down_m",
+      "name": "Sitting down (L)",
+      "category": "Sitting",
+      "clip": "Sitting_Enter",
+      "frame": 22,
+      "mirror": true
+    },
+    {
+      "id": "stand_up_m",
+      "name": "Standing up (L)",
+      "category": "Sitting",
+      "clip": "Sitting_Exit",
+      "frame": 25,
+      "mirror": true
+    },
+    {
+      "id": "kneel_m",
+      "name": "Kneeling (L)",
+      "category": "Low",
+      "clip": "Fixing_Kneeling",
+      "frame": 44,
+      "mirror": true
+    },
+    {
+      "id": "kneel_low_m",
+      "name": "Kneeling low (L)",
+      "category": "Low",
+      "clip": "Fixing_Kneeling",
+      "frame": 87,
+      "mirror": true
+    },
+    {
+      "id": "cast_follow_m",
+      "name": "Cast follow-through (L)",
+      "category": "Action",
+      "clip": "Spell_Simple_Shoot",
+      "frame": 12,
+      "mirror": true
     }
   ]
 }

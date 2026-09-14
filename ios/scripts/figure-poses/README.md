@@ -19,9 +19,10 @@ blender -b --python ios/scripts/figure-poses/extract_poses.py -- \
 ```
 
 `poses.spec.json` maps `id/name/category` → `clip@frame` (+ optional `yaw` in
-radians for poses that read best turned, e.g. lying/swimming, and `mirror` —
-the mirror path is UNVERIFIED: it assumes the `_l`/`_r` bone frames are exact
-reflections; check the result before shipping a mirrored pose).
+radians for poses that read best turned, e.g. lying/swimming, and `mirror`,
+which swaps `_l`/`_r` bones and reflects each quaternion across the sagittal
+plane — verified exact on the sim 2026-09-13: every handle of a mirrored pose
+is the x-reflection of the original to within 1 px).
 Each pose stores per-bone deltas from the rig's own rest orientation
 (`delta = rest⁻¹ · posed`, parent-relative glTF frame), which is what
 `FigureScene.apply` composes back — so the values are exporter-consistent and
