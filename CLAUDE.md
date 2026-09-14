@@ -9,9 +9,13 @@ iPad-native drawing app. User sketches on left pane, AI-generated image appears 
 ### iOS
 ```bash
 # Build
-xcodebuild -scheme Kiki -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M4)' build
+# (destination by simulator UDID — the `name=` form intermittently fails with
+# "Unable to find a device matching the provided destination specifier" even
+# when the simulator exists; this is the same lookup ios/scripts/sim.sh uses)
+SIM=$(xcrun simctl list devices available | grep -F 'iPad Pro 13-inch (M4) (' | head -1 | sed -E 's/.*\(([0-9A-F-]{36})\).*/\1/')
+xcodebuild -scheme Kiki -destination "platform=iOS Simulator,id=$SIM" build
 # Test all
-xcodebuild -scheme Kiki -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M4)' test
+xcodebuild -scheme Kiki -destination "platform=iOS Simulator,id=$SIM" test
 # Test single module
 swift test --package-path ios/Packages/CanvasModule
 # Lint & format
