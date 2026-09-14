@@ -67,6 +67,9 @@ public struct CanvasView: UIViewRepresentable {
         canvasView.onLockedLayerStrokeRefused = { [weak viewModel] in
             viewModel?.onLockedLayerStrokeRefused?()
         }
+        canvasView.onReferenceLayerStrokeRefused = { [weak viewModel] in
+            viewModel?.onReferenceLayerStrokeRefused?()
+        }
         canvasView.onInteractionEnded = { [weak viewModel] in
             viewModel?.handleInteractionEnded()
         }

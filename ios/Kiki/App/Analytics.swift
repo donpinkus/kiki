@@ -76,6 +76,13 @@ enum AnalyticsEvent: String {
     case liftCompleted = "objects.lift_completed"
     case liftFailed = "objects.lift_failed"
 
+    // Posable 3D figure (reference layer)
+    case figureAdded = "figure.added"
+    case figureEditOpened = "figure.edit_opened"
+    case figurePoseCommitted = "figure.pose_committed"
+    case figurePoseCancelled = "figure.pose_cancelled"
+    case figurePresetApplied = "figure.preset_applied"
+
     // AI Edit (inpaint)
     case aiEditRequested = "canvas.ai_edit_requested"
     case aiEditAccepted = "canvas.ai_edit_accepted"

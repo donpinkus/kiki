@@ -67,6 +67,9 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
     /// `.changed` sample, so we don't re-flatten the Metal canvas on each finger move.
     private var eyedropperSnapshot: UIImage?
     private var lassoSelectionView: LassoSelectionView?
+    /// A feature-owned view covering the document rect (pose editor's live 3D
+    /// view). Owns all touches while installed — see `setInteractiveOverlay`.
+    private var interactiveOverlay: UIView?
     private var cursorBaseWidth: CGFloat = 5
     private var cursorPressureGamma: CGFloat = 0.7
     private var cursorTiltSensitivity: CGFloat = 0.0
@@ -411,8 +414,8 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
     }
 
     @objc private func handleLongPress(_ gesture: UILongPressGestureRecognizer) {
-        // No eyedropper during lasso selection
-        guard lassoSelectionView == nil else { return }
+        // No eyedropper during lasso selection or while an overlay owns touches
+        guard lassoSelectionView == nil, interactiveOverlay == nil else { return }
 
         switch gesture.state {
         case .began:
@@ -493,6 +496,10 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
     }
 
     public override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        // An interactive overlay (pose editor) owns every touch: no canvas
+        // transforms, no undo/redo taps, no panel drags, no eyedropper
+        // long-press, no brush-cursor tracking until it is removed.
+        if interactiveOverlay != nil { return false }
         let overPanel = gestureIsOverExternalRegion(gestureRecognizer)
         // Panel recognizers begin only over the panel region.
         if gestureRecognizer === panelPanGesture || gestureRecognizer === panelPinchGesture {
@@ -543,6 +550,28 @@ public final class RotatableCanvasContainer: UIView, UIGestureRecognizerDelegate
         editPreviewImageView.image = image
         editPreviewImageView.isHidden = image == nil
         canvasView.setSelectionChromeSuppressed(image != nil)
+    }
+
+    // MARK: - Interactive overlay
+
+    /// Install `view` covering exactly the canvas document rect (it follows
+    /// pan/zoom/rotate like the edit preview) on top of every canvas-space view,
+    /// and route all touches to it: the canvas stops receiving touches and the
+    /// container's two-finger canvas transforms + undo/redo taps stand down.
+    /// Pass nil to remove it and restore canvas input.
+    public var hasInteractiveOverlay: Bool { interactiveOverlay != nil }
+
+    public func setInteractiveOverlay(_ view: UIView?) {
+        interactiveOverlay?.removeFromSuperview()
+        interactiveOverlay = view
+        if let view {
+            view.frame = transformView.bounds
+            view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            transformView.addSubview(view)
+            canvasView.isUserInteractionEnabled = false
+        } else if lassoSelectionView == nil {
+            canvasView.isUserInteractionEnabled = true
+        }
     }
 
     // MARK: - Public API

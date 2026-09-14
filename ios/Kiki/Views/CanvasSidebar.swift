@@ -91,14 +91,16 @@ struct CanvasSidebar: View {
                 action: coordinator.undo,
                 // Select-active undo steps back through selection edits even
                 // when the canvas itself has no undo history yet.
-                disabled: !coordinator.canvasViewModel.canUndo
-                    && !(coordinator.currentTool == .select
-                         && coordinator.canvasViewModel.selection.canUndoStep)
+                // Pose mode owns the canvas: no canvas history changes until Done/Cancel.
+                disabled: coordinator.figure.isPosing
+                    || (!coordinator.canvasViewModel.canUndo
+                        && !(coordinator.currentTool == .select
+                             && coordinator.canvasViewModel.selection.canUndoStep))
             )
             actionButton(
                 icon: "arrow.uturn.forward",
                 action: coordinator.redo,
-                disabled: !coordinator.canvasViewModel.canRedo
+                disabled: coordinator.figure.isPosing || !coordinator.canvasViewModel.canRedo
             )
 
             // Paste the copied selection (appears once something was copied).
@@ -108,7 +110,7 @@ struct CanvasSidebar: View {
                 actionButton(
                     icon: "doc.on.clipboard",
                     action: coordinator.pasteSelection,
-                    disabled: false
+                    disabled: coordinator.figure.isPosing
                 )
             }
         }

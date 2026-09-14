@@ -95,10 +95,16 @@ public struct LayerInfo: Codable, Sendable, Identifiable {
     public var blendMode: LayerBlendMode
     /// Whole-layer opacity 0…1 (composite-time, never baked into pixels).
     public var opacity: Double
+    /// Reference layer: visible on the canvas, excluded from the AI capture,
+    /// never painted on (e.g. a posable 3D figure re-rendered from `referenceData`).
+    public var isReference: Bool
+    /// Opaque owning-feature payload for reference layers (persisted with the layer).
+    public var referenceData: Data?
 
     public init(id: UUID = UUID(), name: String, isVisible: Bool = true,
                 isLocked: Bool = false, isAlphaLocked: Bool = false,
-                blendMode: LayerBlendMode = .normal, opacity: Double = 1) {
+                blendMode: LayerBlendMode = .normal, opacity: Double = 1,
+                isReference: Bool = false, referenceData: Data? = nil) {
         self.id = id
         self.name = name
         self.isVisible = isVisible
@@ -106,11 +112,18 @@ public struct LayerInfo: Codable, Sendable, Identifiable {
         self.isAlphaLocked = isAlphaLocked
         self.blendMode = blendMode
         self.opacity = opacity
+        self.isReference = isReference
+        self.referenceData = referenceData
     }
+
+    /// Brush/eraser/clear/paste are refused: fully locked OR a reference layer.
+    public var refusesPainting: Bool { isLocked || isReference }
 
     // Backward-compatible decode: layer metadata saved before the lock/blend
     // fields existed loads with flags off, Normal blend, full opacity.
-    enum CodingKeys: String, CodingKey { case id, name, isVisible, isLocked, isAlphaLocked, blendMode, opacity }
+    enum CodingKeys: String, CodingKey {
+        case id, name, isVisible, isLocked, isAlphaLocked, blendMode, opacity, isReference, referenceData
+    }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(UUID.self, forKey: .id)
@@ -121,6 +134,8 @@ public struct LayerInfo: Codable, Sendable, Identifiable {
         blendMode = (try c.decodeIfPresent(String.self, forKey: .blendMode))
             .flatMap(LayerBlendMode.init(rawValue:)) ?? .normal
         opacity = try c.decodeIfPresent(Double.self, forKey: .opacity) ?? 1
+        isReference = try c.decodeIfPresent(Bool.self, forKey: .isReference) ?? false
+        referenceData = try c.decodeIfPresent(Data.self, forKey: .referenceData)
     }
 }
 
@@ -720,6 +735,24 @@ struct LayeredDrawing: Codable {
         let isAlphaLocked: Bool?
         let blendMode: String?
         let opacity: Double?
+        // Reference layers (posable figure): nil → ordinary layer.
+        let isReference: Bool?
+        let referenceData: Data?
+
+        init(id: String, name: String, isVisible: Bool, pngData: Data,
+             isLocked: Bool?, isAlphaLocked: Bool?, blendMode: String?, opacity: Double?,
+             isReference: Bool? = nil, referenceData: Data? = nil) {
+            self.id = id
+            self.name = name
+            self.isVisible = isVisible
+            self.pngData = pngData
+            self.isLocked = isLocked
+            self.isAlphaLocked = isAlphaLocked
+            self.blendMode = blendMode
+            self.opacity = opacity
+            self.isReference = isReference
+            self.referenceData = referenceData
+        }
     }
 }
 

@@ -1,0 +1,273 @@
+{
+  "source": "Quaternius Universal Animation Library [Standard] (CC0) \u2014 Unreal-Godot/UAL1_Standard.glb",
+  "poses": [
+    {
+      "id": "t_pose",
+      "name": "T-pose",
+      "category": "Standing",
+      "clip": "A_TPose",
+      "frame": 0
+    },
+    {
+      "id": "idle",
+      "name": "Idle",
+      "category": "Standing",
+      "clip": "Idle_Loop",
+      "frame": 21
+    },
+    {
+      "id": "talking",
+      "name": "Talking",
+      "category": "Standing",
+      "clip": "Idle_Talking_Loop",
+      "frame": 25
+    },
+    {
+      "id": "arms_folded",
+      "name": "Arms folded",
+      "category": "Standing",
+      "clip": "Pistol_Idle_Loop",
+      "frame": 0
+    },
+    {
+      "id": "torch",
+      "name": "Holding up",
+      "category": "Standing",
+      "clip": "Idle_Torch_Loop",
+      "frame": 0
+    },
+    {
+      "id": "reach",
+      "name": "Reaching",
+      "category": "Standing",
+      "clip": "Interact",
+      "frame": 17
+    },
+    {
+      "id": "dance",
+      "name": "Dancing",
+      "category": "Standing",
+      "clip": "Dance_Loop",
+      "frame": 17
+    },
+    {
+      "id": "hit",
+      "name": "Recoil",
+      "category": "Standing",
+      "clip": "Hit_Head",
+      "frame": 4
+    },
+    {
+      "id": "walk",
+      "name": "Walking",
+      "category": "Moving",
+      "clip": "Walk_Loop",
+      "frame": 11
+    },
+    {
+      "id": "walk_formal",
+      "name": "Walking (formal)",
+      "category": "Moving",
+      "clip": "Walk_Formal_Loop",
+      "frame": 11
+    },
+    {
+      "id": "jog",
+      "name": "Jogging",
+      "category": "Moving",
+      "clip": "Jog_Fwd_Loop",
+      "frame": 8
+    },
+    {
+      "id": "sprint",
+      "name": "Sprinting",
+      "category": "Moving",
+      "clip": "Sprint_Loop",
+      "frame": 11
+    },
+    {
+      "id": "push",
+      "name": "Pushing",
+      "category": "Moving",
+      "clip": "Push_Loop",
+      "frame": 22
+    },
+    {
+      "id": "pick_up",
+      "name": "Bending down",
+      "category": "Moving",
+      "clip": "PickUp_Table",
+      "frame": 7
+    },
+    {
+      "id": "swim",
+      "name": "Swimming",
+      "category": "Moving",
+      "clip": "Swim_Fwd_Loop",
+      "frame": 11,
+      "yaw": 1.5708
+    },
+    {
+      "id": "jump_prep",
+      "name": "Jump (crouch)",
+      "category": "Jumping",
+      "clip": "Jump_Start",
+      "frame": 11
+    },
+    {
+      "id": "jump_air",
+      "name": "Jump (air)",
+      "category": "Jumping",
+      "clip": "Jump_Loop",
+      "frame": 21
+    },
+    {
+      "id": "jump_land",
+      "name": "Landing",
+      "category": "Jumping",
+      "clip": "Jump_Land",
+      "frame": 11
+    },
+    {
+      "id": "roll",
+      "name": "Tuck roll",
+      "category": "Jumping",
+      "clip": "Roll",
+      "frame": 12
+    },
+    {
+      "id": "crouch",
+      "name": "Crouching",
+      "category": "Low",
+      "clip": "Crouch_Idle_Loop",
+      "frame": 25
+    },
+    {
+      "id": "crouch_walk",
+      "name": "Crouch walk",
+      "category": "Low",
+      "clip": "Crouch_Fwd_Loop",
+      "frame": 17
+    },
+    {
+      "id": "kneel",
+      "name": "Kneeling",
+      "category": "Low",
+      "clip": "Fixing_Kneeling",
+      "frame": 44
+    },
+    {
+      "id": "kneel_low",
+      "name": "Kneeling low",
+      "category": "Low",
+      "clip": "Fixing_Kneeling",
+      "frame": 87
+    },
+    {
+      "id": "collapse",
+      "name": "Collapsing",
+      "category": "Low",
+      "clip": "Death01",
+      "frame": 20
+    },
+    {
+      "id": "lying",
+      "name": "Lying down",
+      "category": "Low",
+      "clip": "Death01",
+      "frame": 40,
+      "yaw": 1.5708
+    },
+    {
+      "id": "sit",
+      "name": "Sitting",
+      "category": "Sitting",
+      "clip": "Sitting_Idle_Loop",
+      "frame": 14
+    },
+    {
+      "id": "sit_talk",
+      "name": "Sitting (talking)",
+      "category": "Sitting",
+      "clip": "Sitting_Talking_Loop",
+      "frame": 25
+    },
+    {
+      "id": "sit_down",
+      "name": "Sitting down",
+      "category": "Sitting",
+      "clip": "Sitting_Enter",
+      "frame": 22
+    },
+    {
+      "id": "driving",
+      "name": "Driving",
+      "category": "Sitting",
+      "clip": "Driving_Loop",
+      "frame": 0
+    },
+    {
+      "id": "guard",
+      "name": "Fight stance",
+      "category": "Action",
+      "clip": "Punch_Jab",
+      "frame": 0
+    },
+    {
+      "id": "jab",
+      "name": "Jab",
+      "category": "Action",
+      "clip": "Punch_Jab",
+      "frame": 7
+    },
+    {
+      "id": "cross",
+      "name": "Cross punch",
+      "category": "Action",
+      "clip": "Punch_Cross",
+      "frame": 8
+    },
+    {
+      "id": "sword_idle",
+      "name": "Sword ready",
+      "category": "Action",
+      "clip": "Sword_Idle",
+      "frame": 14
+    },
+    {
+      "id": "sword_attack",
+      "name": "Sword swing",
+      "category": "Action",
+      "clip": "Sword_Attack",
+      "frame": 13
+    },
+    {
+      "id": "spell_idle",
+      "name": "Casting",
+      "category": "Action",
+      "clip": "Spell_Simple_Idle_Loop",
+      "frame": 18
+    },
+    {
+      "id": "spell_shoot",
+      "name": "Cast forward",
+      "category": "Action",
+      "clip": "Spell_Simple_Shoot",
+      "frame": 4
+    },
+    {
+      "id": "aim",
+      "name": "Aiming",
+      "category": "Action",
+      "clip": "Pistol_Aim_Neutral",
+      "frame": 0
+    },
+    {
+      "id": "aim_up",
+      "name": "Aiming up",
+      "category": "Action",
+      "clip": "Pistol_Aim_Up",
+      "frame": 0
+    }
+  ]
+}

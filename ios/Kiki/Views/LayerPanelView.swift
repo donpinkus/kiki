@@ -224,6 +224,11 @@ struct LayerPanelView: View {
                     .font(.subheadline.weight(isActive ? .semibold : .regular))
                     .foregroundStyle(isActive ? .white : (layer.isVisible ? .primary : .secondary))
                     .lineLimit(1)
+                if layer.isReference {
+                    Image(systemName: "figure.stand")
+                        .font(.system(size: 11))
+                        .foregroundStyle(isActive ? .white.opacity(0.85) : .secondary)
+                }
                 if layer.isLocked {
                     Image(systemName: "lock.fill")
                         .font(.system(size: 11))
@@ -291,6 +296,20 @@ struct LayerPanelView: View {
 
             sectionBreak()
 
+            // Reference layer (posable figure): re-pose in place. The figure's
+            // pixels are re-rendered from its pose, so painting on this layer is
+            // refused (see MetalCanvasView.touchesBegan).
+            if layer.isReference {
+                optionRow("Edit Pose", systemImage: "figure.stand") {
+                    optionsLayerId = nil
+                    coordinator.showLayerPanel = false
+                    coordinator.figure.beginEditing(layer: layer)
+                }
+                // Hidden layer: the overlay would show a figure that vanishes on Done.
+                .disabled(!coordinator.figure.canBegin || coordinator.aiEditPhase != .idle || !layer.isVisible)
+                sectionBreak()
+            }
+
             // Section: content operations
             optionRow("Select Contents", systemImage: "circle.dashed") {
                 optionsLayerId = nil
@@ -316,21 +335,24 @@ struct LayerPanelView: View {
                 coordinator.canvasViewModel.clearLayer(at: index)
                 refreshThumbnails()
             }
-            .disabled(layer.isLocked)
+            .disabled(layer.refusesPainting)
 
-            sectionBreak()
+            // Section: protection toggles (meaningless on a figure layer —
+            // it's never painted on).
+            if !layer.isReference {
+                sectionBreak()
 
-            // Section: protection toggles
-            optionRow("Lock", systemImage: layer.isLocked ? "lock.fill" : "lock",
-                      isOn: layer.isLocked) {
-                coordinator.canvasViewModel.setLayerLocked(!layer.isLocked, at: index)
-                optionsLayerId = nil
-            }
-            Divider()
-            optionRow("Alpha Lock", systemImage: "checkerboard.rectangle",
-                      isOn: layer.isAlphaLocked) {
-                coordinator.canvasViewModel.setLayerAlphaLocked(!layer.isAlphaLocked, at: index)
-                optionsLayerId = nil
+                optionRow("Lock", systemImage: layer.isLocked ? "lock.fill" : "lock",
+                          isOn: layer.isLocked) {
+                    coordinator.canvasViewModel.setLayerLocked(!layer.isLocked, at: index)
+                    optionsLayerId = nil
+                }
+                Divider()
+                optionRow("Alpha Lock", systemImage: "checkerboard.rectangle",
+                          isOn: layer.isAlphaLocked) {
+                    coordinator.canvasViewModel.setLayerAlphaLocked(!layer.isAlphaLocked, at: index)
+                    optionsLayerId = nil
+                }
             }
 
             sectionBreak()

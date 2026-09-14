@@ -118,6 +118,22 @@ Last updated: 2026-07-18 (rewritten for the fal + Lambda H100 provider architect
 
 44. **Sound box + toggle.** A separate Sound section holds an optional sound description (composed into the model prompt server-side — pod logs show "… Sound: …") and an on/off toggle; off generates a truly silent MP4 (no AAC track — exports silent too, not just muted playback). The ideas panel's Sound section fills the Sound box; clips remember their audio settings for Reuse setup.
 
+## Posable 3D figure (reference layer, 2026-09-13)
+
+48. **Add a figure.** In a drawing, tap the person (`figure.stand`) button in the top bar — a gray mannequin in a relaxed standing pose appears centred on the canvas with white joint handles and a bottom bar (Male/Female · Reset · Cancel · Done). The canvas cannot be drawn on while posing.
+
+49. **Pose it.** Dragging a hand or foot bends the limb naturally (elbow/knee follow); dragging an elbow or knee swings the upper limb with the lower limb following rigidly; dragging the chest bends the torso, the head handle tilts the head, the larger pelvis handle moves the whole figure. Dragging empty space turns the figure in 3D (left/right = turntable, up/down = tilt). Two fingers move, pinch-scale and twist-rotate the whole figure.
+
+50. **Done bakes a reference layer.** Done adds a "Figure N" layer (person badge in the Layers panel, thumbnail shows the pose) whose pixels match the live view exactly; the figure stays visible on the canvas. Cancel on a new figure leaves the layer stack untouched. Undo after Done removes the figure layer.
+
+51. **Not sent to the AI.** With a figure on the canvas the generated image does not change and does not depict the mannequin; drawing on other layers still generates normally. Exports, gallery thumbnails and the layer panel DO show the figure.
+
+52. **Never painted on.** With the figure layer active, brush/eraser strokes do nothing and a banner explains the layer is a 3D figure; Lock/Alpha Lock rows are absent from its menu, Clear Layer is disabled. Draw on any other layer above or below it as usual.
+
+53. **Edit Pose.** Layers → tap the figure row → Edit Pose reopens the exact pose (the bake is hidden underneath, no doubled figure); Done re-bakes into the same layer; Cancel restores the previous bake. Switching Male/Female keeps the pose. The pose survives closing and reopening the drawing and an app relaunch.
+
+54. **Poses picker.** In pose mode, tapping Poses opens a categorized grid of pose thumbnails (Standing, Moving, Jumping, Low, Sitting, Action); tapping one snaps the figure into that pose without moving it or changing the body, and the joints remain draggable afterwards. Lying and swimming poses open turned side-on. Switching body keeps the preset pose.
+
 ## Speed-paint replay (share page)
 
 45. **Replay page opens with a playing preview.** In a drawing with strokes: Share → "Speed paint replay" opens the full-screen page; the preview starts playing within a few seconds (spinner first is fine) — never a persistent gray/black rectangle. (If gray: check Sentry `event:video.playback_no_display` before debugging — known device-state wedge, reboot clears it.)

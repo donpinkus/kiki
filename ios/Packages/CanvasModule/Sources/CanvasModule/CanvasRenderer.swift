@@ -113,12 +113,28 @@ public final class CanvasRenderer {
         var blendMode: LayerBlendMode = .normal
         /// Composite-time whole-layer opacity 0…1; never baked into the texture.
         var opacity: Float = 1
+        /// Reference layer (e.g. a posable 3D figure): visible on the canvas but
+        /// excluded from the AI generation capture, and never painted on — its
+        /// pixels are re-rendered from `referenceData` by the owning feature.
+        var isReference: Bool = false
+        /// Opaque feature payload for reference layers (the figure's pose JSON).
+        /// Persisted with the layer; the canvas never interprets it.
+        var referenceData: Data? = nil
         let texture: MTLTexture
         /// Monotonic content revision — bumped by every texture write (stroke,
         /// erase, restore, load, clear, selection commit). Keys the PNG export cache
         /// so autosave only re-encodes layers that actually changed.
         var revision: Int = 0
+
+        /// Brush/eraser/clear/paste are refused: fully locked OR a reference layer.
+        var refusesPainting: Bool { isLocked || isReference }
     }
+
+    /// Display-only: a layer id whose pixels are skipped by the on-screen
+    /// compositor (never by snapshots/exports/saves). The figure pose editor
+    /// sets this while its live 3D overlay stands in for the baked layer, so
+    /// the stale bake doesn't show through underneath. Not persisted.
+    var displaySuppressedLayerID: UUID?
 
     /// Document-unique revision counter (never reused, so a restored layer with an
     /// old id can't alias a cached PNG of a different state).
@@ -513,6 +529,13 @@ public final class CanvasRenderer {
         layers[index].isAlphaLocked = locked
     }
 
+    /// Mark a layer as a reference layer (see `Layer.isReference`) and set its payload.
+    func setReference(_ isReference: Bool, data: Data?, at index: Int) {
+        guard index >= 0, index < layers.count else { return }
+        layers[index].isReference = isReference
+        layers[index].referenceData = isReference ? data : nil
+    }
+
     /// Set a layer's composite blend mode.
     func setBlendMode(_ mode: LayerBlendMode, at index: Int) {
         guard index >= 0, index < layers.count else { return }
@@ -546,6 +569,7 @@ public final class CanvasRenderer {
                          isVisible: source.isVisible, isLocked: false,
                          isAlphaLocked: source.isAlphaLocked,
                          blendMode: source.blendMode, opacity: source.opacity,
+                         isReference: source.isReference, referenceData: source.referenceData,
                          texture: texture, revision: nextRevision())
         let newIndex = index + 1
         layers.insert(copy, at: newIndex)
@@ -587,6 +611,8 @@ public final class CanvasRenderer {
         let isAlphaLocked: Bool
         let blendMode: LayerBlendMode
         let opacity: Float
+        let isReference: Bool
+        let referenceData: Data?
         let data: Data
     }
 
@@ -611,6 +637,8 @@ public final class CanvasRenderer {
             snaps.append(LayerStackSnapshot(id: layer.id, name: layer.name, isVisible: layer.isVisible,
                                             isLocked: layer.isLocked, isAlphaLocked: layer.isAlphaLocked,
                                             blendMode: layer.blendMode, opacity: layer.opacity,
+                                            isReference: layer.isReference,
+                                            referenceData: layer.referenceData,
                                             data: data))
         }
         return (snaps, activeLayerIndex)
@@ -627,8 +655,9 @@ public final class CanvasRenderer {
             clearTexture(tex)
             rebuilt.append(Layer(id: snap.id, name: snap.name, isVisible: snap.isVisible,
                                  isLocked: snap.isLocked, isAlphaLocked: snap.isAlphaLocked,
-                                 blendMode: snap.blendMode, opacity: snap.opacity, texture: tex,
-                                 revision: nextRevision()))
+                                 blendMode: snap.blendMode, opacity: snap.opacity,
+                                 isReference: snap.isReference, referenceData: snap.referenceData,
+                                 texture: tex, revision: nextRevision()))
         }
         layers = rebuilt
         activeLayerIndex = min(max(0, activeIndex), layers.count - 1)
@@ -1133,7 +1162,8 @@ public final class CanvasRenderer {
     /// active stroke (scratch texture) so in-progress drawing is captured.
     /// `strokeOpacity` is the per-stroke ceiling applied to the in-progress scratch
     /// (passed explicitly so the snapshot doesn't depend on mutable renderer state).
-    func flattenedCGImage(strokeOpacity: Float = 1.0) -> CGImage? {
+    /// `excludeReference` skips reference layers (the AI capture path only).
+    func flattenedCGImage(strokeOpacity: Float = 1.0, excludeReference: Bool = false) -> CGImage? {
         guard !layers.isEmpty else { return nil }
 
         // Render all visible layers into a temporary texture, interleaving
@@ -1155,7 +1185,7 @@ public final class CanvasRenderer {
         var opacity: Float = 1.0
 
         for i in 0..<layers.count {
-            guard layers[i].isVisible else { continue }
+            guard layers[i].isVisible, !(excludeReference && layers[i].isReference) else { continue }
             drawLayerComposite(enc, layers[i])
 
             // Include in-progress stroke on the active layer (capped at stroke opacity).
@@ -1210,8 +1240,9 @@ public final class CanvasRenderer {
     /// Read the flattened canvas composited over an opaque background. This is
     /// used for gallery thumbnails and stream snapshots, where matching the
     /// Metal canvas' linear source-over blend matters more than preserving alpha.
+    /// `excludeReference` skips reference layers (the AI capture path only).
     func flattenedOpaqueCGImage(backgroundImage: CGImage?, maxPixelDimension: Int? = nil,
-                                strokeOpacity: Float = 1.0) -> CGImage? {
+                                strokeOpacity: Float = 1.0, excludeReference: Bool = false) -> CGImage? {
         guard !layers.isEmpty, canvasWidth > 0, canvasHeight > 0 else { return nil }
         // Always composite at DOCUMENT resolution, then downsample with Lanczos for
         // capped requests (thumbnails). Rendering the 2048² layers straight into a
@@ -1248,7 +1279,7 @@ public final class CanvasRenderer {
         }
 
         for i in 0..<layers.count {
-            guard layers[i].isVisible else { continue }
+            guard layers[i].isVisible, !(excludeReference && layers[i].isReference) else { continue }
             drawLayerComposite(enc, layers[i])
 
             if i == activeLayerIndex, stampCount > 0, let scratch = scratchTexture {
@@ -1814,7 +1845,7 @@ public final class CanvasRenderer {
         // at the active layer's z-position so the active stroke preview appears
         // at the correct depth.
         for i in 0..<layers.count {
-            guard layers[i].isVisible else { continue }
+            guard layers[i].isVisible, layers[i].id != displaySuppressedLayerID else { continue }
 
             drawLayerComposite(enc, layers[i])
 

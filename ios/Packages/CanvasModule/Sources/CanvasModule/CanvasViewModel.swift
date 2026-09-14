@@ -96,6 +96,9 @@ public final class CanvasViewModel {
     /// A brush/eraser stroke was refused because the active layer is locked
     /// (Procreate-style swipe Lock) — the app can surface a hint.
     public var onLockedLayerStrokeRefused: (() -> Void)?
+    /// A brush/eraser stroke was refused because the active layer is a reference
+    /// layer (posable figure) — the app explains how to edit it instead.
+    public var onReferenceLayerStrokeRefused: (() -> Void)?
 
     func handleStrokeCompleted(_ stroke: Stroke) {
         onStrokeCompleted?(stroke)
@@ -167,9 +170,9 @@ public final class CanvasViewModel {
             guard let self, let canvasView = self.canvasView, let container = self.container else { return false }
             // One float at a time (the paste float and the move float share the
             // renderer's single selection texture), and never cut a locked layer.
-            guard !self.isPasting else { return false }
+            guard !self.isPasting, !container.hasInteractiveOverlay else { return false }
             if self.activeLayerIsLocked {
-                self.onLockedLayerStrokeRefused?()
+                self.refuseActiveLayerWrite()
                 return false
             }
             guard let rect = canvasView.beginMoveExtraction(path: path) else { return false }
@@ -342,6 +345,39 @@ public final class CanvasViewModel {
         canvasView?.layerCGImage(at: index)
     }
 
+    // MARK: - Reference layers (posable figure)
+
+    /// Add a reference layer (visible, excluded from AI capture, non-paintable)
+    /// holding `image` + the owning feature's opaque `data`. Returns the new
+    /// layer's index, or nil at the layer cap.
+    @discardableResult
+    public func addReferenceLayer(image: CGImage?, name: String, data: Data?) -> Int? {
+        guard let canvasView else { return nil }
+        let index = canvasView.addReferenceLayer(image: image, name: name, data: data)
+        if index != nil { updateState(); handleDrawingChanged() }
+        return index
+    }
+
+    /// Replace a layer's pixels (+ reference payload) — the pose editor's Done.
+    public func setLayerImage(_ image: CGImage, data: Data?, at index: Int) {
+        canvasView?.setLayerImage(image, data: data, at: index)
+        updateState()
+        handleDrawingChanged()
+    }
+
+    /// Hide one layer's baked pixels on screen only (nil restores). Used while a
+    /// live overlay stands in for the layer; snapshots/saves are unaffected.
+    public func setLayerDisplaySuppressed(id: UUID?) {
+        canvasView?.setLayerDisplaySuppressed(id: id)
+    }
+
+    /// Install (or remove, with nil) a UIView that covers the canvas document rect
+    /// and follows pan/zoom/rotate. While installed, the canvas receives no touches
+    /// (the overlay owns them) — the pose editor's live 3D view lives here.
+    public func setInteractiveOverlay(_ view: UIView?) {
+        container?.setInteractiveOverlay(view)
+    }
+
     /// Procreate "Select": replace the selection with this layer's painted
     /// pixels (alpha > ~10%). Switches to the Select tool's mask pathway —
     /// the caller should also make the Select tool current so the chrome and
@@ -427,13 +463,15 @@ public final class CanvasViewModel {
         canvasView?.selectionMarkerOverlayImage(side: side)
     }
 
-    /// Flattened "what you see" composite for the AI Edit source image: all
-    /// visible layers over the background image, on white, capped at `side`.
+    /// Flattened composite for the AI Edit source image: all visible layers over
+    /// the background image, on white, capped at `side`. Model-bound, so
+    /// reference layers (posable figures) are left out like the stream capture.
     public func editSourceSnapshot(side: Int) -> CGImage? {
         guard let canvasView else { return nil }
         return canvasView.opaqueImageSnapshot(
             backgroundImage: container?.backgroundImage,
-            maxPixelDimension: side
+            maxPixelDimension: side,
+            excludeReferenceLayers: true
         )?.cgImage
     }
 
@@ -460,19 +498,25 @@ public final class CanvasViewModel {
 
     /// Flattened visible-layer composite with transparency preserved (no white
     /// backing, no background image) — the copy source, so pasted content
-    /// carries only actual strokes.
+    /// carries only actual strokes. Reference layers (posable figures) are left
+    /// out: a cutout can be saved as an object and pinned as a generation
+    /// reference, which would smuggle the mannequin to the model.
     public func transparentSnapshot() -> CGImage? {
-        canvasView?.persistentImageSnapshot
+        canvasView?.persistentImageSnapshot(excludeReferenceLayers: true)
     }
+
+    /// True while a feature overlay (pose editor) owns the canvas.
+    public var hasInteractiveOverlay: Bool { container?.hasInteractiveOverlay ?? false }
 
     /// Float `image` (with alpha) over the canvas at `rectInDocPixels`
     /// (document space, 2048²), hooked into the existing selection-move
     /// gestures. Nothing touches layers until `commitPaste`.
     @discardableResult
     public func beginPaste(image: CGImage, rectInDocPixels: CGRect) -> Bool {
-        guard !isPasting, !selection.isMoving, let canvasView, let container else { return false }
+        guard !isPasting, !selection.isMoving, let canvasView, let container,
+              !container.hasInteractiveOverlay else { return false }
         if activeLayerIsLocked {
-            onLockedLayerStrokeRefused?()
+            refuseActiveLayerWrite()
             return false
         }
         guard let viewRect = canvasView.beginPasteFloat(image: image, rectInDocPixels: rectInDocPixels) else {
@@ -511,8 +555,17 @@ public final class CanvasViewModel {
         if selection.isMoving { selection.commitMove() }
     }
 
+    /// Locked OR reference: the active layer refuses pixel writes.
     private var activeLayerIsLocked: Bool {
-        layers.indices.contains(activeLayerIndex) && layers[activeLayerIndex].isLocked
+        layers.indices.contains(activeLayerIndex) && layers[activeLayerIndex].refusesPainting
+    }
+
+    private func refuseActiveLayerWrite() {
+        if layers.indices.contains(activeLayerIndex), layers[activeLayerIndex].isReference {
+            onReferenceLayerStrokeRefused?()
+        } else {
+            onLockedLayerStrokeRefused?()
+        }
     }
 
     /// Leaving the drawing screen: drop the SAM models + embedding (~100 MB+) so
@@ -541,7 +594,10 @@ public final class CanvasViewModel {
         guard outputSize.width > 0, outputSize.height > 0 else { return nil }
 
         let rect = CGRect(origin: .zero, size: outputSize)
-        guard let image = canvasView.opaqueImageSnapshot(backgroundImage: container?.backgroundImage) else {
+        // Reference layers (posable figures) are drawing aids: on screen, never
+        // in the frame the model sees.
+        guard let image = canvasView.opaqueImageSnapshot(backgroundImage: container?.backgroundImage,
+                                                         excludeReferenceLayers: true) else {
             return nil
         }
 
@@ -585,7 +641,10 @@ public final class CanvasViewModel {
 
     /// Renders a thumbnail of the current canvas at the given max dimension.
     /// Returns nil if the canvas is not attached or is empty.
-    public func generateThumbnail(maxDimension: CGFloat = 256) -> UIImage? {
+    /// `excludeReferenceLayers`: pass true for MODEL-BOUND uses (video keyframes);
+    /// user-facing thumbnails keep reference layers (posable figures) visible.
+    public func generateThumbnail(maxDimension: CGFloat = 256,
+                                  excludeReferenceLayers: Bool = false) -> UIImage? {
         guard let canvasView else { return nil }
         guard !canvasView.isEmpty || hasBackgroundContent else { return nil }
 
@@ -596,9 +655,14 @@ public final class CanvasViewModel {
         let maxPixels = max(1, Int((maxDimension * imageScale).rounded()))
         return canvasView.opaqueImageSnapshot(
             backgroundImage: container?.backgroundImage,
-            maxPixelDimension: maxPixels
+            maxPixelDimension: maxPixels,
+            excludeReferenceLayers: excludeReferenceLayers
         )
     }
+
+    /// True while a paste float or selection Move is in flight — states that
+    /// must settle before a modal overlay (pose editor) may take the canvas.
+    public var hasTransientFloat: Bool { isPasting || selection.isMoving }
 
     // MARK: - Internal
 

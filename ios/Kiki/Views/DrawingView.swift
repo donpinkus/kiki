@@ -202,6 +202,16 @@ struct DrawingView: View {
                             .transition(.opacity.combined(with: .move(edge: .bottom)))
                     }
 
+                    // Pose mode: the figure overlay owns the canvas; this bar
+                    // picks the body, resets, cancels or bakes the figure.
+                    if coordinator.figure.isPosing {
+                        figurePoseBar
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                            .padding(.bottom, 28)
+                            .zIndex(12)
+                            .transition(.opacity.combined(with: .move(edge: .bottom)))
+                    }
+
                     // Paste float: placement bar (drag/pinch handled by the
                     // float's own gestures; this bar commits or cancels).
                     if coordinator.canvasViewModel.isPasting {
@@ -535,6 +545,56 @@ struct DrawingView: View {
 
     /// Floating Accept / Retry / Discard controls while an AI Edit preview is
     /// locked over the canvas. Nothing touches the layer stack until Accept.
+    /// Pose-mode bar (bottom-centre, same chrome as the paste bar).
+    private var figurePoseBar: some View {
+        @Bindable var figure = coordinator.figure
+        return HStack(spacing: 10) {
+            Text("Drag joints · drag space to turn · two fingers move/scale/rotate")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Picker("Body", selection: $figure.body) {
+                ForEach(FigureBody.allCases) { Text($0.label).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 150)
+            Button {
+                coordinator.figure.showPosePicker.toggle()
+            } label: {
+                Label("Poses", systemImage: "figure.walk")
+                    .font(.subheadline.weight(.semibold))
+            }
+            .buttonStyle(.bordered)
+            .popover(isPresented: $figure.showPosePicker) {
+                FigurePosePickerView()
+            }
+            Button {
+                coordinator.figure.resetPose()
+            } label: {
+                Label("Reset", systemImage: "arrow.counterclockwise")
+                    .font(.subheadline.weight(.semibold))
+            }
+            .buttonStyle(.bordered)
+            Button(role: .destructive) {
+                coordinator.figure.cancel()
+            } label: {
+                Label("Cancel", systemImage: "xmark")
+                    .font(.subheadline.weight(.semibold))
+            }
+            .buttonStyle(.bordered)
+            Button {
+                coordinator.figure.commit()
+            } label: {
+                Label("Done", systemImage: "checkmark")
+                    .font(.subheadline.weight(.semibold))
+                    .padding(.horizontal, 6)
+            }
+            .buttonStyle(.borderedProminent)
+        }
+        .padding(10)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+        .shadow(color: .black.opacity(0.25), radius: 10, y: 3)
+    }
+
     private var aiEditPreviewBar: some View {
         HStack(spacing: 10) {
             Button(role: .destructive) {

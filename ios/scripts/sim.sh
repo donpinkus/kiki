@@ -10,6 +10,7 @@
 #   sim.sh deploy               # build + install + (re)launch with auth bypass
 #   sim.sh launch               # (re)launch only
 #   sim.sh replay <fixture.json>  # replay a recorded stroke fixture onto the canvas
+#   sim.sh ui <action>          # fire a dev UI action (see AppCoordinator.devPerformUIAction)
 #   sim.sh screenshot [out.png] # capture the simulator screen
 #   sim.sh logs [seconds]       # stream Kiki process logs (default 15s)
 set -euo pipefail
@@ -80,6 +81,11 @@ case "$cmd" in
     xcrun simctl spawn "$(sim_udid)" notifyutil -p com.don.kiki.dev.replay
     echo "replay triggered: $fixture"
     ;;
+  ui)
+    action="${2:?usage: sim.sh ui <action>   e.g. openDrawing, figureAdd, figureDrag:hand_l,1500,500, figureDone}"
+    echo "$action" > /tmp/kiki-ui-action.txt
+    xcrun simctl spawn "$(sim_udid)" notifyutil -p com.don.kiki.dev.ui
+    ;;
   screenshot)
     out="${2:-/tmp/sim_$(date +%H%M%S).png}"
     xcrun simctl io "$(sim_udid)" screenshot "$out" >/dev/null
@@ -94,7 +100,7 @@ case "$cmd" in
     kill "$pid" 2>/dev/null || true
     ;;
   *)
-    echo "unknown command: $cmd (mint|boot|build|install|launch|deploy|replay|screenshot|logs)" >&2
+    echo "unknown command: $cmd (mint|boot|build|install|launch|deploy|replay|ui|screenshot|logs)" >&2
     exit 1
     ;;
 esac

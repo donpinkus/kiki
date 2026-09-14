@@ -737,6 +737,8 @@ final class AppCoordinator {
 
     let canvasViewModel = CanvasViewModel()
     let stylePreviewController = StylePreviewController()
+    /// Posable 3D figure → reference layer (see FigureController).
+    let figure = FigureController()
     private let backendURL: URL
     private let authService: AuthService
 
@@ -1112,7 +1114,7 @@ final class AppCoordinator {
     /// or wand selection → region edit (masked client-side); none → whole
     /// drawing. Captures the flattened composite + mask, then generates.
     func startAIEdit() {
-        guard aiEditPhase != .generating else { return }
+        guard aiEditPhase != .generating, !figure.isPosing else { return }
         let prompt = aiEditPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else { return }
         guard let source = canvasViewModel.editSourceSnapshot(side: Self.aiEditSide) else {
@@ -1452,6 +1454,11 @@ final class AppCoordinator {
         canvasViewModel.onLockedLayerStrokeRefused = { [weak self] in
             self?.showTransientBanner("This layer is locked — unlock it in Layers to draw.")
         }
+        canvasViewModel.onReferenceLayerStrokeRefused = { [weak self] in
+            self?.showTransientBanner("This is a 3D figure layer — open Layers → Edit Pose to change it, or draw on another layer.")
+        }
+        figure.canvasViewModel = canvasViewModel
+        figure.onMessage = { [weak self] text in self?.showTransientBanner(text) }
         // Supply the current brush color to the canvas ring preview
         canvasViewModel.currentBrushColorProvider = { [weak self] in
             UIColor(self?.currentColor ?? .black)
@@ -1578,6 +1585,7 @@ final class AppCoordinator {
     }
 
     func signOut() {
+        figure.cancel()
         Task {
             // Notify the backend of the sign-out (marker endpoint — nothing
             // server-side to tear down anymore) BEFORE clearing the JWT so
@@ -1890,6 +1898,7 @@ final class AppCoordinator {
     func openExtract() {
         guard let image = resultState.displayImage else { return }
         noteInteraction()
+        figure.cancel()
         // The stream has no business running under the Extract cover (same as
         // the Animate screen) — and SAM inference on top of a live relay was
         // pushing the app into watchdog RAM kills (Sentry KIKI-APP-IOS-1).
@@ -2316,6 +2325,53 @@ final class AppCoordinator {
         #if DEBUG && targetEnvironment(simulator)
         case "gallery":
             if currentScreen == .drawing { navigateToGallery() }
+        case "undo":
+            undo()
+        case "redo":
+            redo()
+        case "figureAdd":
+            figure.beginNewFigure()
+        case "figureDone":
+            figure.commit()
+        case "figureCancel":
+            figure.cancel()
+        case "figureReset":
+            figure.resetPose()
+        case "figureEdit":
+            if canvasViewModel.layers.indices.contains(canvasViewModel.activeLayerIndex) {
+                figure.beginEditing(layer: canvasViewModel.layers[canvasViewModel.activeLayerIndex])
+            }
+        case "figureState":
+            streamLog.warning("[dev] figure: \(self.figure.devPoseSummary)")
+        case "figureDumpPose":
+            streamLog.warning("[dev] figurePoseJSON: \(self.figure.devPoseJSON)")
+        case "figurePoses":
+            figure.showPosePicker.toggle()
+        case let cmd where cmd.hasPrefix("figurePose:"):
+            if let preset = FigurePoseLibrary.preset(id: String(cmd.dropFirst("figurePose:".count))) {
+                figure.applyPreset(preset)
+            } else {
+                streamLog.warning("[dev] unknown pose preset: \(cmd)")
+            }
+        case "dumpCapture":
+            // Write the AI capture (reference layers excluded) and the full
+            // what-you-see snapshot side by side for inspection from the host.
+            let dir = FileManager.default.temporaryDirectory
+            let capture = canvasViewModel.captureSnapshot()?.image
+            let full = canvasViewModel.generateThumbnail(maxDimension: 1024)
+            let capURL = dir.appendingPathComponent("kiki-capture.png")
+            let fullURL = dir.appendingPathComponent("kiki-full.png")
+            try? capture?.pngData()?.write(to: capURL)
+            try? full?.pngData()?.write(to: fullURL)
+            streamLog.warning("[dev] dumpCapture capture=\(capture != nil) full=\(full != nil) dir=\(dir.path)")
+        case let cmd where cmd.hasPrefix("figureBody:"):
+            if let b = FigureBody(rawValue: String(cmd.dropFirst("figureBody:".count))) { figure.body = b }
+        case let cmd where cmd.hasPrefix("figureDrag:"):
+            // figureDrag:<handle>,<docX>,<docY>
+            let parts = cmd.dropFirst("figureDrag:".count).split(separator: ",")
+            if parts.count == 3, let x = Double(parts[1]), let y = Double(parts[2]) {
+                figure.devDrag(handle: String(parts[0]), to: CGPoint(x: x, y: y))
+            }
         case "addLayer":
             canvasViewModel.addLayer()
         case "dupLayer":
@@ -2505,8 +2561,9 @@ final class AppCoordinator {
     }
 
     func navigateToGallery() {
-        // Leaving the drawing abandons any un-accepted AI Edit preview.
+        // Leaving the drawing abandons any un-accepted AI Edit preview / pose edit.
         discardAIEdit()
+        figure.cancel()
         saveCurrentDrawing()
         saveDebounceTask?.cancel()
         canvasViewModel.releaseSelectionResources()
@@ -2601,10 +2658,13 @@ final class AppCoordinator {
     func openAnimateFromDrawing() {
         noteInteraction()
         guard currentScreen == .drawing else { return }
+        figure.cancel()
         saveCurrentDrawing()
         let controller = ensureAnimateController()
         if let pending = controller.pendingFrameEdit, pending.drawingID == currentDrawingId {
-            if let edited = canvasViewModel.generateThumbnail(maxDimension: 1024) ?? lastSuccessfulImage {
+            // Model-bound keyframe: leave reference layers (posable figures) out.
+            if let edited = canvasViewModel.generateThumbnail(maxDimension: 1024, excludeReferenceLayers: true)
+                ?? lastSuccessfulImage {
                 switch pending.slot {
                 case .start: controller.startKeyframe = edited
                 case .end: controller.endKeyframe = edited
@@ -2612,7 +2672,8 @@ final class AppCoordinator {
                 controller.showKeyframePreview()
             }
             controller.pendingFrameEdit = nil
-        } else if let keyframe = lastSuccessfulImage ?? canvasViewModel.generateThumbnail() {
+        } else if let keyframe = lastSuccessfulImage
+            ?? canvasViewModel.generateThumbnail(excludeReferenceLayers: true) {
             controller.startKeyframe = keyframe
             controller.endKeyframe = nil
             controller.sourceDrawingID = currentDrawingId
@@ -2692,6 +2753,7 @@ final class AppCoordinator {
     func openReplayFromDrawing() {
         noteInteraction()
         guard currentScreen == .drawing else { return }
+        figure.cancel()
         saveCurrentDrawing()
         Task { @MainActor in
             await flushRecording()

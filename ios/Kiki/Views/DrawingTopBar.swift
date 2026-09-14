@@ -117,6 +117,15 @@ struct DrawingTopBar: View {
             toolButton(icon: "wand.and.stars", tool: .select)
                 .anchorPreference(key: SelectButtonAnchorKey.self, value: .bounds) { $0 }
 
+            // Posable 3D figure: drops a rigged body onto a reference layer
+            // (visible while drawing, never sent to the AI). Tinted while posing.
+            Button {
+                coordinator.figure.beginNewFigure()
+            } label: {
+                chromeIcon("figure.stand", color: coordinator.figure.isPosing ? Color.accentColor : KikiTheme.icon)
+            }
+            .disabled(!coordinator.figure.canBegin || coordinator.aiEditPhase != .idle)
+
             // Object library: reusable cutouts saved from selections; tap a
             // tile to drop it into this drawing as a movable float.
             Button {
@@ -154,12 +163,16 @@ struct DrawingTopBar: View {
                     color: coordinator.aiEditPhase != .idle ? Color.accentColor : KikiTheme.icon
                 )
             }
+            .disabled(coordinator.figure.isPosing)
 
             Button {
                 coordinator.showLayerPanel.toggle()
             } label: {
                 chromeIcon("square.on.square")
             }
+            // Layer mutations (delete/reorder/undo) under a live pose edit would
+            // pull the edited layer out from under the overlay.
+            .disabled(coordinator.figure.isPosing)
             .popover(isPresented: $coordinator.showLayerPanel) {
                 // LayerPanelView sizes itself: grows with the layer count,
                 // caps near screen height (then its ScrollView scrolls).

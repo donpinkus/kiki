@@ -44,7 +44,8 @@ public final class MetalCanvasView: UIView {
         renderer.layers.map {
             LayerInfo(id: $0.id, name: $0.name, isVisible: $0.isVisible,
                       isLocked: $0.isLocked, isAlphaLocked: $0.isAlphaLocked,
-                      blendMode: $0.blendMode, opacity: Double($0.opacity))
+                      blendMode: $0.blendMode, opacity: Double($0.opacity),
+                      isReference: $0.isReference, referenceData: $0.referenceData)
         }
     }
     /// Which layer is currently active for drawing.
@@ -87,6 +88,9 @@ public final class MetalCanvasView: UIView {
     /// A brush/eraser stroke was refused because the active layer is locked —
     /// the app can surface a "layer is locked" hint.
     public var onLockedLayerStrokeRefused: (() -> Void)?
+    /// Fired when a brush/eraser stroke is refused because the active layer is
+    /// a reference layer (posable figure) — the app explains how to edit it.
+    public var onReferenceLayerStrokeRefused: (() -> Void)?
     public var onInteractionEnded: (() -> Void)?
     /// DEV: fires (throttled, ~per move event) while drawing a dynamic brush, with the live brush
     /// inputs + resulting multipliers, for the on-device input HUD. nil = not observed.
@@ -176,6 +180,8 @@ public final class MetalCanvasView: UIView {
         let isAlphaLocked: Bool
         let blendMode: LayerBlendMode
         let opacity: Float
+        let isReference: Bool
+        let referenceData: Data?
         let blob: LayerSnapshotBlob
     }
     /// Every entry records `strokeCount` as it was BEFORE the mutation it undoes, so
@@ -183,12 +189,14 @@ public final class MetalCanvasView: UIView {
     /// undo — entries pushed by Move/Paste/Clear never incremented it, so a paste-only
     /// drawing read as empty: no stream, no save, deleted on exit).
     private enum UndoEntry {
-        case layer(id: UUID, blob: LayerSnapshotBlob, strokeCount: Int)
+        /// `referenceData` = the reference-layer payload (figure pose) as it was
+        /// before the mutation, so a re-pose undoes pixels AND pose together.
+        case layer(id: UUID, blob: LayerSnapshotBlob, strokeCount: Int, referenceData: Data?)
         case canvas(layers: [StackEntry], activeIndex: Int, strokeCount: Int)
 
         var footprint: Int {
             switch self {
-            case .layer(_, let blob, _): return blob.footprint
+            case .layer(_, let blob, _, _): return blob.footprint
             case .canvas(let layers, _, _): return layers.reduce(0) { $0 + $1.blob.footprint }
             }
         }
@@ -663,17 +671,13 @@ public final class MetalCanvasView: UIView {
             return
         }
 
-        // Locked layer: refuse mutating strokes (brush + eraser) outright.
-        // Selection tools stay usable — they don't write the layer.
-        if renderer.layers.indices.contains(renderer.activeLayerIndex),
-           renderer.layers[renderer.activeLayerIndex].isLocked {
-            switch currentTool {
-            case .brush, .eraser:
-                onLockedLayerStrokeRefused?()
-                return
-            default:
-                break
-            }
+        // Locked or reference layer: refuse mutating strokes (brush + eraser)
+        // outright. Selection tools stay usable — they don't write the layer.
+        switch currentTool {
+        case .brush, .eraser:
+            if refuseActiveLayerWriteIfNeeded() { return }
+        default:
+            break
         }
         drawingTouch = touch
         onInteractionBegan?()
@@ -1350,6 +1354,8 @@ public final class MetalCanvasView: UIView {
     /// routing as the live path, one undo snapshot for the whole batch.
     public func replayStrokes(_ strokes: [Stroke], canvasSide: Int? = nil) {
         guard !strokes.isEmpty else { return }
+        // Same refusal as a live stroke: locked + reference layers never take paint.
+        if refuseActiveLayerWriteIfNeeded() { return }
         pushUndoSnapshot()
         let rescale = CGFloat(Self.documentSide) / CGFloat(canvasSide ?? Self.documentSide)
         for var stroke in strokes {
@@ -2668,7 +2674,15 @@ public final class MetalCanvasView: UIView {
     private func makeLayerEntry(at index: Int) -> UndoEntry? {
         guard let id = renderer.layerID(at: index),
               let data = renderer.snapshotLayer(at: index) else { return nil }
-        return .layer(id: id, blob: LayerSnapshotBlob(raw: data), strokeCount: strokeCount)
+        return .layer(id: id, blob: LayerSnapshotBlob(raw: data), strokeCount: strokeCount,
+                      referenceData: renderer.layers[index].referenceData)
+    }
+
+    /// Put a `.layer` entry's payload back on a reference layer (pixels are
+    /// restored by the caller). Ordinary layers carry nil and are untouched.
+    private func restoreReferenceData(_ data: Data?, at index: Int) {
+        guard renderer.layers.indices.contains(index), renderer.layers[index].isReference else { return }
+        renderer.setReference(true, data: data, at: index)
     }
 
     /// Snapshot the whole layer stack into a compound undo entry.
@@ -2677,6 +2691,7 @@ public final class MetalCanvasView: UIView {
         let entries = current.layers.map { snap in
             StackEntry(id: snap.id, name: snap.name, isVisible: snap.isVisible, isLocked: snap.isLocked,
                        isAlphaLocked: snap.isAlphaLocked, blendMode: snap.blendMode, opacity: snap.opacity,
+                       isReference: snap.isReference, referenceData: snap.referenceData,
                        blob: LayerSnapshotBlob(raw: snap.data))
         }
         return .canvas(layers: entries, activeIndex: current.activeIndex, strokeCount: strokeCount)
@@ -2688,7 +2703,8 @@ public final class MetalCanvasView: UIView {
             guard let data = e.blob.data() else { return } // never restore a partial stack
             snaps.append(CanvasRenderer.LayerStackSnapshot(
                 id: e.id, name: e.name, isVisible: e.isVisible, isLocked: e.isLocked,
-                isAlphaLocked: e.isAlphaLocked, blendMode: e.blendMode, opacity: e.opacity, data: data))
+                isAlphaLocked: e.isAlphaLocked, blendMode: e.blendMode, opacity: e.opacity,
+                isReference: e.isReference, referenceData: e.referenceData, data: data))
         }
         renderer.restoreLayerStack(snaps, activeIndex: activeIndex)
     }
@@ -2729,9 +2745,10 @@ public final class MetalCanvasView: UIView {
     private func restorePoppedUndoEntry() {
         guard let entry = undoSnapshots.popLast() else { return }
         switch entry {
-        case .layer(let id, let blob, let savedStrokeCount):
+        case .layer(let id, let blob, let savedStrokeCount, let referenceData):
             guard let index = renderer.layerIndex(id: id), let data = blob.data() else { return }
             renderer.restoreLayer(at: index, from: data)
+            restoreReferenceData(referenceData, at: index)
             strokeCount = savedStrokeCount
         case .canvas(let entries, let activeIndex, let savedStrokeCount):
             restoreStack(entries, activeIndex: activeIndex)
@@ -2751,7 +2768,7 @@ public final class MetalCanvasView: UIView {
 
         guard let entry = undoSnapshots.popLast() else { return }
         switch entry {
-        case .layer(let id, let blob, let savedStrokeCount):
+        case .layer(let id, let blob, let savedStrokeCount, let referenceData):
             // Resolve the layer's CURRENT index by id — indices go stale when
             // layers are deleted/reordered. Purge-on-delete should prevent a
             // miss; skip defensively if it happens.
@@ -2763,6 +2780,7 @@ public final class MetalCanvasView: UIView {
                 redoSnapshots.append(current)
             }
             renderer.restoreLayer(at: index, from: data)
+            restoreReferenceData(referenceData, at: index)
             strokeCount = savedStrokeCount
         case .canvas(let entries, let activeIndex, let savedStrokeCount):
             if let current = makeCanvasEntry() {
@@ -2797,7 +2815,7 @@ public final class MetalCanvasView: UIView {
     public func performRedo() {
         guard let entry = redoSnapshots.popLast() else { return }
         switch entry {
-        case .layer(let id, let blob, let savedStrokeCount):
+        case .layer(let id, let blob, let savedStrokeCount, let referenceData):
             guard let index = renderer.layerIndex(id: id), let data = blob.data() else {
                 onStateChanged?()
                 return
@@ -2806,6 +2824,7 @@ public final class MetalCanvasView: UIView {
                 undoSnapshots.append(current)
             }
             renderer.restoreLayer(at: index, from: data)
+            restoreReferenceData(referenceData, at: index)
             strokeCount = savedStrokeCount
         case .canvas(let entries, let activeIndex, let savedStrokeCount):
             if let current = makeCanvasEntry() {
@@ -2857,7 +2876,7 @@ public final class MetalCanvasView: UIView {
         // whole stack and are self-contained.
         if let id = renderer.layerID(at: index) {
             let isForDeleted: (UndoEntry) -> Bool = { entry in
-                if case .layer(let lid, _, _) = entry { return lid == id }
+                if case .layer(let lid, _, _, _) = entry { return lid == id }
                 return false
             }
             undoSnapshots.removeAll(where: isForDeleted)
@@ -2939,10 +2958,10 @@ public final class MetalCanvasView: UIView {
     }
 
     /// Clear one layer to transparent (single-layer `.layer` undo entry).
-    /// Refused for locked layers.
+    /// Refused for locked + reference layers.
     public func clearLayer(at index: Int) {
         guard renderer.layers.indices.contains(index),
-              !renderer.layers[index].isLocked else { return }
+              !renderer.layers[index].refusesPainting else { return }
         if isUndoEnabled, let entry = makeLayerEntry(at: index) {
             undoSnapshots.append(entry)
             trimUndoAndClearRedo()
@@ -3025,6 +3044,78 @@ public final class MetalCanvasView: UIView {
         onDrawingChanged?()
         onStateChanged?()
         return true
+    }
+
+    // MARK: - Reference layers (posable figure)
+
+    /// Locked / reference active layer: fire the matching refusal callback and
+    /// return true so the caller skips the write. One place for the rule that
+    /// live strokes, fixture replays and clears all share.
+    private func refuseActiveLayerWriteIfNeeded() -> Bool {
+        guard renderer.layers.indices.contains(renderer.activeLayerIndex) else { return false }
+        let layer = renderer.layers[renderer.activeLayerIndex]
+        guard layer.refusesPainting else { return false }
+        if layer.isReference {
+            onReferenceLayerStrokeRefused?()
+        } else {
+            onLockedLayerStrokeRefused?()
+        }
+        return true
+    }
+
+    /// Add a reference layer (see `LayerInfo.isReference`) holding `image`
+    /// (stretched to the 2048² document, like every image import) and the owning
+    /// feature's opaque `data`. It is inserted DIRECTLY BELOW the active layer and
+    /// the active layer stays active: the user's next stroke lands on their paint
+    /// layer, drawn over the figure (tracing a mannequin is the point). One
+    /// compound undo step restores the prior stack. Returns the new index, or nil
+    /// at the layer cap.
+    @discardableResult
+    public func addReferenceLayer(image: CGImage?, name: String, data: Data?) -> Int? {
+        guard renderer.layers.count < CanvasRenderer.maxLayerCount else { return nil }
+        if isUndoEnabled, let entry = makeCanvasEntry() {
+            undoSnapshots.append(entry)
+            trimUndoAndClearRedo()
+        }
+        let paintIndex = renderer.activeLayerIndex
+        let appended = renderer.addLayer(name: name)
+        renderer.setReference(true, data: data, at: appended)
+        if let image { renderer.loadImageIntoLayer(at: appended, image) }
+        // Slide the new layer under the paint layer; moveLayer keeps the active
+        // layer (now one index higher) active.
+        renderer.moveLayer(from: appended, to: paintIndex)
+        strokeCount += 1
+        isDirty = true
+        onDrawingChanged?()
+        onStateChanged?()
+        return paintIndex
+    }
+
+    /// Replace one layer's pixels with `image` (stretched to the document) and,
+    /// for reference layers, its payload. Single-layer undo entry carrying the
+    /// previous payload, so undo restores both pixels and pose.
+    public func setLayerImage(_ image: CGImage, data: Data?, at index: Int) {
+        guard renderer.layers.indices.contains(index) else { return }
+        if isUndoEnabled, let entry = makeLayerEntry(at: index) {
+            undoSnapshots.append(entry)
+            trimUndoAndClearRedo()
+        }
+        renderer.loadImageIntoLayer(at: index, image)
+        if renderer.layers[index].isReference {
+            renderer.setReference(true, data: data, at: index)
+        }
+        strokeCount += 1
+        isDirty = true
+        onDrawingChanged?()
+        onStateChanged?()
+    }
+
+    /// Display-only: hide one layer's baked pixels from the on-screen compositor
+    /// (snapshots, exports and saves are unaffected) while a live overlay stands
+    /// in for it. Pass nil to restore.
+    public func setLayerDisplaySuppressed(id: UUID?) {
+        renderer.displaySuppressedLayerID = id
+        isDirty = true
     }
 
     /// Whether a persistent clip selection is active (lasso Phase B or magic
@@ -3126,7 +3217,9 @@ public final class MetalCanvasView: UIView {
                 isLocked: info.isLocked,
                 isAlphaLocked: info.isAlphaLocked,
                 blendMode: info.blendMode.rawValue,
-                opacity: info.opacity
+                opacity: info.opacity,
+                isReference: info.isReference ? true : nil,
+                referenceData: info.referenceData
             ))
         }
         guard !layerEntries.isEmpty else { return nil }
@@ -3186,7 +3279,9 @@ public final class MetalCanvasView: UIView {
                 isLocked: info.isLocked,
                 isAlphaLocked: info.isAlphaLocked,
                 blendMode: info.blendMode.rawValue,
-                opacity: info.opacity
+                opacity: info.opacity,
+                isReference: info.isReference ? true : nil,
+                referenceData: info.referenceData
             ))
         }
         guard !layerEntries.isEmpty else { return nil }
@@ -3314,6 +3409,8 @@ public final class MetalCanvasView: UIView {
                 isAlphaLocked: entry.isAlphaLocked ?? false,
                 blendMode: entry.blendMode.flatMap(LayerBlendMode.init(rawValue:)) ?? .normal,
                 opacity: Float(entry.opacity ?? 1),
+                isReference: entry.isReference ?? false,
+                referenceData: (entry.isReference ?? false) ? entry.referenceData : nil,
                 texture: renderer.layers[i].texture
             )
             if renderer.loadImageDataIntoLayer(at: i, entry.pngData) {
@@ -3359,16 +3456,26 @@ public final class MetalCanvasView: UIView {
     /// Read-only access to the flattened canvas (all visible layers) as a CGImage
     /// for snapshots, thumbnails, and stream capture.
     public var persistentImageSnapshot: CGImage? {
-        renderer.flattenedCGImage(strokeOpacity: currentStrokeOpacity())
+        persistentImageSnapshot(excludeReferenceLayers: false)
+    }
+
+    /// `excludeReferenceLayers`: drop reference layers (posable figures).
+    public func persistentImageSnapshot(excludeReferenceLayers: Bool) -> CGImage? {
+        renderer.flattenedCGImage(strokeOpacity: currentStrokeOpacity(),
+                                  excludeReference: excludeReferenceLayers)
     }
 
     /// Read-only access to the canvas composited over an opaque background using
     /// the same Metal source-over path as on-screen drawing.
-    public func opaqueImageSnapshot(backgroundImage: UIImage?, maxPixelDimension: Int? = nil) -> UIImage? {
+    /// `excludeReferenceLayers` drops reference layers (posable figures) — the AI
+    /// generation capture is the only caller that passes true.
+    public func opaqueImageSnapshot(backgroundImage: UIImage?, maxPixelDimension: Int? = nil,
+                                    excludeReferenceLayers: Bool = false) -> UIImage? {
         let cgImage = renderer.flattenedOpaqueCGImage(
             backgroundImage: backgroundImage?.cgImage,
             maxPixelDimension: maxPixelDimension,
-            strokeOpacity: currentStrokeOpacity()
+            strokeOpacity: currentStrokeOpacity(),
+            excludeReference: excludeReferenceLayers
         )
         guard let cgImage else { return nil }
         return UIImage(cgImage: cgImage, scale: canvasScale, orientation: .up)
