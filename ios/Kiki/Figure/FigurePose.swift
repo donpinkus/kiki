@@ -78,6 +78,31 @@ struct FigurePose: Codable, Equatable {
         joints[joint] = [q.imag.x, q.imag.y, q.imag.z, q.real]
     }
 
+    // MARK: - Mirror
+
+    /// The pose reflected across the figure's sagittal plane: left/right bones
+    /// swap and each bind-relative delta is reflected (x, −y, −z, w) — the rig's
+    /// `_l`/`_r` bone frames are exact mirror images, verified numerically
+    /// 2026-09-13. Turntable yaw and on-screen roll negate so the figure's
+    /// facing mirrors too; pitch, placement and body are unchanged.
+    func mirrored() -> FigurePose {
+        var out = self
+        var joints: [String: [Float]] = [:]
+        for (name, q) in self.joints where q.count == 4 {
+            joints[Self.mirroredJointName(name)] = [q[0], -q[1], -q[2], q[3]]
+        }
+        out.joints = joints
+        out.yaw = -yaw
+        out.roll = -roll
+        return out
+    }
+
+    static func mirroredJointName(_ name: String) -> String {
+        if name.hasSuffix("_l") { return String(name.dropLast(2)) + "_r" }
+        if name.hasSuffix("_r") { return String(name.dropLast(2)) + "_l" }
+        return name
+    }
+
     // MARK: - Payload
 
     static func decode(_ data: Data?) -> FigurePose? {

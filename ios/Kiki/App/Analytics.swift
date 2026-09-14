@@ -82,6 +82,7 @@ enum AnalyticsEvent: String {
     case figurePoseCommitted = "figure.pose_committed"
     case figurePoseCancelled = "figure.pose_cancelled"
     case figurePresetApplied = "figure.preset_applied"
+    case figurePoseMirrored = "figure.pose_mirrored"
 
     // AI Edit (inpaint)
     case aiEditRequested = "canvas.ai_edit_requested"

@@ -156,6 +156,13 @@ final class FigureController {
         selectedPresetID = nil
     }
 
+    /// Mirror the current pose left↔right (presets and hand-posed alike).
+    func mirrorPose() {
+        session?.overlay.mirrorPose()
+        selectedPresetID = nil
+        Analytics.track(.figurePoseMirrored)
+    }
+
     /// The preset the figure currently shows, until a joint is dragged by hand.
     private(set) var selectedPresetID: String?
 

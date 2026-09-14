@@ -132,7 +132,7 @@ Last updated: 2026-07-18 (rewritten for the fal + Lambda H100 provider architect
 
 53. **Edit Pose.** Layers → tap the figure row → Edit Pose reopens the exact pose (the bake is hidden underneath, no doubled figure); Done re-bakes into the same layer; Cancel restores the previous bake. Switching Male/Female keeps the pose. The pose survives closing and reopening the drawing and an app relaunch.
 
-54. **Pose panel.** The left panel's pose grid (Standing, Moving, Jumping, Low, Sitting, Action) scrolls; tapping a pose snaps the figure into it without moving it or changing the body, rings the tile, and the joints remain draggable afterwards (dragging one un-rings the tile). The View row turns the figure to Front / ¾ / Side / Back and highlights the current view; free orbiting clears the highlight. Lying and swimming poses open side-on. Switching body keeps the pose. Place bakes and restores the drawing chrome; Cancel restores it untouched.
+54. **Pose panel.** The left panel's pose grid (Standing, Moving, Jumping, Low, Sitting, Action) scrolls; tapping a pose snaps the figure into it without moving it or changing the body, rings the tile, and the joints remain draggable afterwards (dragging one un-rings the tile). The View row turns the figure to Front / ¾ / Side / Back and highlights the current view; free orbiting clears the highlight. Mirror flips the pose left↔right (and the ¾ view to the other side); tapping it twice restores the pose exactly. Lying and swimming poses open side-on. Switching body keeps the pose. Place bakes and restores the drawing chrome; Cancel restores it untouched.
 
 ## Speed-paint replay (share page)
 

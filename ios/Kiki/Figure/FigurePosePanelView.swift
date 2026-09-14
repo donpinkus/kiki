@@ -139,23 +139,32 @@ struct FigurePosePanel: View {
 
             Divider().overlay(Color.white.opacity(0.08))
 
-            Button {
-                coordinator.figure.resetPose()
-            } label: {
-                Label("Reset pose", systemImage: "arrow.counterclockwise")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(KikiTheme.icon)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 40)
-                    .background(RoundedRectangle(cornerRadius: 10).fill(KikiTheme.buttonCircle))
+            HStack(spacing: 8) {
+                panelButton("Mirror", systemImage: "arrow.left.and.right.righttriangle.left.righttriangle.right") {
+                    coordinator.figure.mirrorPose()
+                }
+                panelButton("Reset", systemImage: "arrow.counterclockwise") {
+                    coordinator.figure.resetPose()
+                }
             }
-            .buttonStyle(.plain)
             .padding(14)
         }
         .frame(width: Self.width)
         .frame(maxHeight: .infinity)
         .background(KikiTheme.sidebarBackground)
         .environment(\.colorScheme, .dark)
+    }
+
+    private func panelButton(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: systemImage)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(KikiTheme.icon)
+                .frame(maxWidth: .infinity)
+                .frame(height: 40)
+                .background(RoundedRectangle(cornerRadius: 10).fill(KikiTheme.buttonCircle))
+        }
+        .buttonStyle(.plain)
     }
 
     private func sectionLabel(_ text: String) -> some View {

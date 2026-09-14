@@ -130,6 +130,13 @@ final class FigurePoseOverlayView: UIView, UIGestureRecognizerDelegate {
         poseDidChange()
     }
 
+    /// Flip the whole pose left↔right (see `FigurePose.mirrored`).
+    func mirrorPose() {
+        pose = pose.mirrored()
+        figure.apply(pose)
+        poseDidChange()
+    }
+
     /// Turn the figure to a canonical view (yaw), levelling any tilt.
     func setView(yaw: Double) {
         pose.yaw = yaw

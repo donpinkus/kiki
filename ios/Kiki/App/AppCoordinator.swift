@@ -2337,6 +2337,8 @@ final class AppCoordinator {
             figure.cancel()
         case "figureReset":
             figure.resetPose()
+        case "figureMirror":
+            figure.mirrorPose()
         case "figureEdit":
             if canvasViewModel.layers.indices.contains(canvasViewModel.activeLayerIndex) {
                 figure.beginEditing(layer: canvasViewModel.layers[canvasViewModel.activeLayerIndex])
