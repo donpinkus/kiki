@@ -148,38 +148,13 @@ async function waitForSsh(ip: string, timeoutMs = 5 * 60 * 1000): Promise<void> 
 // boot.sh — written onto the filesystem; serving instances invoke it via
 // cloud-init (see coldstart-bench.ts). Per-instance secrets (KIKI_WS_TOKEN)
 // arrive via /etc/kiki.env written by cloud-init, not baked here.
+// Legacy entrypoint kept for the manual scripts (launch-video.ts,
+// coldstart-bench.ts, validate-boot.mts) that still invoke $FS/kiki/boot.sh.
+// The real boot script now lives in the repo (model-servers/image/boot.sh)
+// and reaches the filesystem through the backend's fleet bundle; pool
+// instances run the backend-written kiki-bootstrap instead (instancePool.userData).
 const BOOT_SH = `#!/usr/bin/env bash
-# Kiki image server boot — invoked by cloud-init on Lambda serving instances.
-# Lives on the shared filesystem so it can be iterated without relaunching.
-set -euo pipefail
-FS=${FS_ROOT}
-[ -f /etc/kiki.env ] && set -a && source /etc/kiki.env && set +a
-export FLUX_USE_NVFP4=0            # H100 is Hopper (SM 9.0) — no FP4; BF16 path
-export FLUX_COMPILE=1              # torch.compile: 1.2-1.25x, ~85s at boot (hidden in warmup)
-export FLUX_PIPELINE=kv            # 9B-KV: per-call reference K/V caching (adherence-best)
-export FLUX_MODEL=black-forest-labs/FLUX.2-klein-9b-kv
-# Persist compiled-kernel caches on the shared filesystem so only the FIRST
-# boot per (model, torch, GPU) pays full compilation; later boots reuse.
-export TORCHINDUCTOR_CACHE_DIR=$FS/kiki/inductor-cache
-export TRITON_CACHE_DIR=$FS/kiki/triton-cache
-mkdir -p "$TORCHINDUCTOR_CACHE_DIR" "$TRITON_CACHE_DIR"
-export HF_HOME=$FS/kiki/huggingface
-export HF_HUB_OFFLINE=1
-export HF_HUB_DISABLE_TELEMETRY=1
-export FLUX_HOST=0.0.0.0
-export FLUX_PORT=${KIKI_PORT}
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-# TLS: serve wss when the fleet cert is present on the filesystem (backend
-# pins it via LAMBDA_TLS_CA_B64). Absent → plain ws (dev filesystems).
-if [ -f $FS/kiki/tls/cert.pem ]; then
-  export FLUX_SSL_CERT=$FS/kiki/tls/cert.pem
-  export FLUX_SSL_KEY=$FS/kiki/tls/key.pem
-fi
-echo "[kiki-boot] $(date -u +%FT%TZ) sourcing venv"
-source $FS/kiki/venv/bin/activate
-cd $FS/kiki/app
-echo "[kiki-boot] $(date -u +%FT%TZ) starting image.server"
-exec python3 -u -m image.server
+exec bash "$(dirname "${BASH_SOURCE[0]}")/app/image/boot.sh"
 `;
 
 const HF_TOKEN = process.env['HF_TOKEN'] ?? '';

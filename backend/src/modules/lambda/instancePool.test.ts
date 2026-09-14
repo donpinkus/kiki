@@ -31,6 +31,8 @@ interface FakeCloud {
   seed: (inst: Partial<LambdaInstance> & { id: string; name: string }) => void;
   /** Every launch attempt as `type@region`, in order (sweep-order assertions). */
   attempts: string[];
+  /** cloud-init user_data of every launch, in order. */
+  userDatas: string[];
   /** Mark a (type@region) cell as having no capacity. */
   setDry: (cell: string, dry: boolean) => void;
   /** Regions the API reports NO `kiki-test-<region>` filesystem for
@@ -56,6 +58,7 @@ function makeFakeCloud(): FakeCloud {
   // should move on and win the first open cell.
   const dryCells = new Set<string>();
   const attempts: string[] = [];
+  const userDatas: string[] = [];
   // Every region the tests use has a filesystem unless marked missing; the
   // fake lists only the names the pool spec would ask for.
   const KNOWN_REGIONS = ['test-region', 'region-a', 'region-b'];
@@ -72,9 +75,10 @@ function makeFakeCloud(): FakeCloud {
         region: { name: r, description: '' },
         is_in_use: false,
       })),
-    launch: async (req: { name?: string; region_name: string; instance_type_name?: string }) => {
+    launch: async (req: { name?: string; region_name: string; instance_type_name?: string; user_data?: string }) => {
       const cell = `${req.instance_type_name ?? '?'}@${req.region_name}`;
       attempts.push(cell);
+      if (req.user_data) userDatas.push(req.user_data);
       if (dryCells.has(cell)) {
         throw new LambdaApiError(400, 'instance-operations/launch/insufficient-capacity', 'no capacity');
       }
@@ -110,6 +114,7 @@ function makeFakeCloud(): FakeCloud {
     launched,
     terminated,
     attempts,
+    userDatas,
     setDry: (cell: string, dry: boolean) => { if (dry) dryCells.add(cell); else dryCells.delete(cell); },
     setNoFilesystem: (region, missing) => { if (missing) noFilesystem.add(region); else noFilesystem.delete(region); },
     seed: (inst) => {
@@ -161,6 +166,8 @@ function makePool(
     // type-major order, flat hedge threshold.
     capacitySnapshot: () => null,
     cellBootStats: async () => new Map(),
+    serverDir: 'image',
+    requirementsFile: 'requirements.txt',
     interestWindowMs: 250,
     ...overrides,
   });
@@ -467,6 +474,28 @@ describe('instancePool', { timeout: 30_000 }, () => {
       cloud.setDry('gpu_1x_test@test-region', false);
       await until(() => pool.hasReady());
       expect(cloud.launched).toHaveLength(1);
+    } finally {
+      pool.stop();
+    }
+  });
+
+  it('launches with a self-updating bootstrap: fleet manifest check, atomic app swap, then the pool boot.sh', async () => {
+    const cloud = makeFakeCloud();
+    const pool = makePool(cloud, { serverDir: 'video', requirementsFile: 'requirements-video.txt' });
+    try {
+      pool.start(testLog);
+      pool.ensure();
+      await until(() => pool.hasReady());
+      const ud = cloud.userDatas[0] ?? '';
+      expect(ud).toContain('/etc/kiki.env');
+      expect(ud).toContain('/usr/local/bin/kiki-bootstrap');
+      expect(ud).toContain('/v1/fleet/manifest');
+      expect(ud).toContain('/v1/fleet/bundle');
+      expect(ud).toContain('FS=/lambda/nfs/kiki-test-test-region');
+      expect(ud).toContain('POOL=video');
+      expect(ud).toContain('requirements-video.txt');
+      expect(ud).toContain('exec bash $APP/$POOL/boot.sh');
+      expect(ud).toContain('systemd-run, --unit=kiki, --property=Restart=on-failure, bash, /usr/local/bin/kiki-bootstrap');
     } finally {
       pool.stop();
     }

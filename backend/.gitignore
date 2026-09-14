@@ -6,3 +6,4 @@ dist/
 
 # Generated bench outputs (frames from cold-start/loadtest/ladder runs)
 scripts/lambda/out/
+

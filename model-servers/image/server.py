@@ -43,7 +43,7 @@ import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from PIL import Image
 
-from shared import config, cuda_preflight
+from shared import app_version, config, cuda_preflight
 from shared import preparing_heartbeat
 from shared import sentry_init
 from image.pipeline import FluxKleinPipeline
@@ -125,6 +125,7 @@ async def health():
     return {
         "status": "ok" if pipeline.ready else "loading",
         **info,
+        **app_version.load_app_version(),
     }
 
 

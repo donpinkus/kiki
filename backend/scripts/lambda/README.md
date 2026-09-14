@@ -52,6 +52,8 @@ tsx scripts/lambda/smoke-ensure.ts
 # autoscale, and downgrade-to-fal (see lambda-image-provider.md "Production soak")
 tsx scripts/lambda/soak.mts
 
+> **Shipping `model-servers/` changes (2026-09-14):** `cd backend && npm run deploy`. That's it — the deploy packs the code into a fleet bundle the backend serves, and every pool instance's boot bootstrap refreshes its region filesystem from it when stale (see `instancePool.userData` + `modules/lambda/fleet.ts`). Running instances keep old code until reaped. `sync-fs.mts` is only an escape hatch now.
+
 > **Adding a region (both pools):** run `setup-lambda.ts --region <r>` and `setup-lambda-video.ts --region <r>`, then add `<r>` to `LAMBDA_REGIONS` on Railway. Order doesn't matter — the pool sweep skips a region until its filesystem exists and no setup box is attached. The setup scripts create the filesystem only at the moment they win capacity (and delete it on a miss), so never pre-create `kiki-image-*` / `kiki-video-*` filesystems by hand: an empty unattached one is exactly what the sweep can't distinguish from a populated one.
 
 ## Video (LTX-2.5 Animate screen, dedicated H100)

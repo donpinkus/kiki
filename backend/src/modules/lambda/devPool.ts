@@ -34,6 +34,8 @@ const pool = createInstancePool({
    * the observed spread; only a first-ever-boot-per-region compile (~10 min)
    * blows through it, and the client caps its progress bar rather than
    * lying. */
+  serverDir: 'image',
+  requirementsFile: 'requirements.txt',
   bootEstimateMs: 5 * 60_000,
   hedgeAfterMs: config.LAMBDA_POOL_HEDGE_AFTER_MS,
 });

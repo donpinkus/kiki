@@ -14,6 +14,18 @@ Record implementation decisions here as they are made. Newest first. This preven
 
 ---
 
+### 2026-09-14 — Model-server code rolls out through the backend (fleet bundle + boot-time self-refresh)
+
+**Context:** Getting new `model-servers/` code onto the ten region filesystems meant running `sync-fs.mts` from a laptop per (region × pool) — each run launches a throwaway instance, and regions with no capacity of any type can't be synced at all. The CUDA-preflight rollout sat half-done for hours with a retry loop on Donald's Mac that the OS killed twice. Owner: "I'm going to forget to do this. This should not live locally on my laptop but be some process the backend runs."
+
+**Decision:** No sync process at all — every boot self-updates. `npm run deploy` packs `model-servers/` (minus `dev/`, caches) into `backend/fleet/{manifest.json,model-servers.tgz}` with a CONTENT hash (unchanged code = same manifest = no re-downloads); `fleet/` exists only during the upload (built by the deploy script, deleted after; `railway up` applies `.gitignore` even alongside a `.railwayignore`, so a gitignored bundle never ships); the backend serves it at `GET /v1/fleet/{manifest,bundle}` behind a bearer derived from `LAMBDA_API_KEY` (`modules/lambda/fleet.ts`). `instancePool.userData` now writes `/usr/local/bin/kiki-bootstrap` into every pool instance: fetch manifest → compare `$FS/kiki/app/.manifest` → under `flock $FS/kiki/.app.lock`, download + extract beside the old tree and `mv` it into the same `$FS/kiki/app` path (inductor cache keys are path-sensitive) → `pip install` only if the pool's requirements file hash changed → `exec $APP/<pool>/boot.sh`. Fetch/extract failure keeps the existing app; no `BACKEND_PUBLIC_URL` (defaults from `RAILWAY_PUBLIC_DOMAIN`) = boot what's there. `image/boot.sh` and `video/boot.sh` moved INTO the repo (they used to be heredocs in the setup scripts); the setup scripts now write a one-line shim at `$FS/kiki/boot.sh` for the manual launch/bench scripts. `/health` reports `app_manifest`/`app_git_sha` (`shared/app_version.py`, repointed from the RunPod-era path) and the `ready` pool event detail carries `app`, so Insights → Boots shows which code every boot ran.
+
+**Alternatives considered:** a backend cron that launches sync instances per region (same capacity problem, plus a fleet of throwaway VMs); SSH from Railway into running pool instances (needs the private key in Railway env, and doesn't cover regions with nothing running); shipping the code in cloud-init user_data itself (too big — Lambda's user_data is KB-scale; a 170 KiB tarball isn't).
+
+**Consequences:** rollout = deploy; the next boot per region picks it up; already-running instances keep old code until reaped (force by terminating). A bare `railway up` without the deploy script ships no bundle (manifest 404 → instances boot whatever they hold) — use `npm run deploy`. Concurrent boots in one region serialise on the lock (15-min wait cap). `sync-fs.mts` stays as an escape hatch.
+
+---
+
 ### 2026-09-13 — Posable 3D figure as a reference layer
 
 **Context:** Artists pose a mannequin for anatomy/foreshortening reference. Donald asked for a person button that places a posable 3D armature on the canvas, on a layer flagged as *reference* — visible while drawing, never sent to the AI. Owner answers (2026-09-13): realistic rigged body mesh (not a procedural capsule dummy, not a stick figure); IK for end effectors, swing for mid joints, orbit on empty space, two-finger whole-body transform, modal Done/Cancel; excluded from the AI capture ONLY (exports/thumbnails/selection still see it); re-editable and non-paintable.
@@ -80,6 +92,29 @@ Record implementation decisions here as they are made. Newest first. This preven
 **Decision:** Kiki has exactly ONE drawing layout: the canvas fills the pane and the generated image floats as `FloatingResultPanel`. Split-screen and overlay are deleted (not flagged). Stroke walks are stateful/incremental (`DryStrokeWalker`, `EraserStrokeWalker`, `WetStrokeWalker`) with document-pixel constants (`StrokeWalkUnits`, old view-point literals × 2 to preserve the 12.9" reference feel); finalization reuses the same walker so preview == committed (offline-asserted). Undo snapshots are LZ4-compressed off-main under a 256 MB budget with memory-warning eviction, and record the stroke count per entry. Saves settle floating content first; autosave encodes only changed layers, off-main; the app saves on background.
 **Alternatives considered:** Keeping overlay behind a flag (rejected — "doesn't work well enough yet" and it's the branch that multiplied every canvas path); keeping view-point walk constants (rejected — feel differed per iPad size and the harness could not reproduce device strokes); bbox-cropped undo snapshots (deferred — LZ4 + budget covers the sketch case; dense photo layers fall back to the budget).
 **Consequences:** `AppCoordinator.drawingLayout`, Settings → Display, `ResultView`/`PromptTitleBar`/"Send to Canvas", the overlay stroke surface and `setLassoPreviewHost` are gone; SAM always segments the sketch; `ResultState.provisioning/.error/.idleTimeout` have no dedicated visual (they only rendered inside the split pane) — status dot + banners remain. Two test mains (`OfflineTests/main.swift`, `OfflineTests/walkers/main.swift`) plus the harness are the regression net. On-device feel of Fall Off / Charge / Speed-driven brushes shifts by ≈ 2.16/2 (≈8%) on the 12.9" iPad and by more on other sizes (now consistent across sizes). Shaped-tip vertical mirroring and linear-light blend modes are documented conventions, not changed.
+
+---
+
+### 2026-09-13 — Video: 1024² output, quality-first decoder policy (owner: "do whatever gives higher quality")
+
+**Context:** With the speed pass making DFR 768² clips 5.8–8.4 s, the owner asked for the highest single-H100 quality instead: higher resolution, the best decoder that fits, distilled (DFR) stays — no interest in the full "dev" transformer path, no interest in audio.
+
+**Measured (1x H100 SXM, DFR 1024², FP8-cast, torch.compile, FA3, steady state after warming all presets):**
+
+| Preset | Decoder | Total | denoise / decode | Peak GiB |
+|---|---|---|---|---|
+| 2 s (49 f) | DiffVAE keyframe-anchored | 11.9 s | 4.8 / 7.2 | 66.8 |
+| 4 s (97 f) | DiffVAE keyframe-anchored | 29.6 s | 7.7 / 21.9 | 68.5 |
+| 4 s (97 f) | DiffVAE plain (natten) | 21.6 s | 7.7 / 13.9 | 68.5 |
+| 6 s (145 f) | DiffVAE keyframe-anchored | does not fit (decode tile budget) | — | — |
+| 6 s (145 f) | DiffVAE plain (natten) | 43.9 s | 12.2 / 31.7 | 70.5 |
+| 6 s (145 f) | conv VAE | 14.9 s | 12.2 / 2.7 | 71.2 |
+
+**Decision:** Defaults are now `LTX_WIDTH/HEIGHT=1024`, `LTX_VIDEO_VAE=diff`, and a per-request decoder policy in `video/pipeline.py`: the keyframe-anchored DiffVAE up to `LTX_DIFFVAE_KEYFRAME_MAX_FRAMES=97`, and `LTX_FALLBACK_DECODE=plain` (the same DiffVAE without anchoring, natten path) above it. Three decoders stay resident (keyframe, plain proxy, conv — the conv VAE costs 1.35 GB) and are swapped under the pipeline lock per request; warmup runs every preset so both decode paths are compiled/autotuned at boot (boot is now ~6 min on a warm filesystem: 145 f warmup alone ~90–200 s). Through the real server (`video.server`, all presets twice, no recompiles): **14 s / 33 s / 50 s** generation for 2 s / 4 s / 6 s (the 6 s decode ran 37 s in-server vs 32 s in the bench). The fast profile is one env away: `LTX_FALLBACK_DECODE=conv` gives 15 s for 6 s clips; `LTX_VIDEO_VAE=conv` gives the 2026-09-12 speeds at 1024² (≈6 / 9.4 / 15 s).
+
+**Alternatives considered:** Cosmos 3 Super (top open-weight i2v, but 64B BF16-only → 4–8 H100s), MAGI-2 (8 Hopper GPUs), MiniMax H3 (license excludes US deployment), the LTX "dev" transformer with guided sampling (owner declined; arena Pro < Fast anyway).
+
+**Consequences:** iOS `expectedWaitSeconds` for LTX = 18 / 38 / 55. Bench-box gotcha recorded: a Lambda H100 SXM can come up with the NVSwitch fabric stuck "In Progress" (fabric manager fails, CUDA error 802 "system not yet initialized"); torch then silently runs on CPU and the DiffVAE budget reads `usable_bytes=0`. The bench driver now gates on a real CUDA allocation; the pool's health probes would have struck such a box anyway.
 
 ---
 

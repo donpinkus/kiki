@@ -189,34 +189,13 @@ async function waitForSsh(ip: string, timeoutMs = 5 * 60 * 1000): Promise<void> 
 // boot.sh — written onto the filesystem; serving instances invoke it via
 // cloud-init (see launch-video.ts). Per-instance secrets (KIKI_WS_TOKEN)
 // arrive via /etc/kiki.env written by cloud-init, not baked here.
+// Legacy entrypoint kept for the manual scripts (launch-video.ts,
+// coldstart-bench.ts, validate-boot.mts) that still invoke $FS/kiki/boot.sh.
+// The real boot script now lives in the repo (model-servers/video/boot.sh)
+// and reaches the filesystem through the backend's fleet bundle; pool
+// instances run the backend-written kiki-bootstrap instead (instancePool.userData).
 const BOOT_SH = `#!/usr/bin/env bash
-# Kiki VIDEO server boot (LTX-2.5) — invoked by cloud-init on Lambda serving
-# instances. Lives on the shared filesystem so it can be iterated without
-# relaunching.
-set -euo pipefail
-FS=${FS_ROOT}
-[ -f /etc/kiki.env ] && set -a && source /etc/kiki.env && set +a
-export HF_HOME=$FS/kiki/huggingface
-export HF_HUB_OFFLINE=1
-export HF_HUB_DISABLE_TELEMETRY=1
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-# fp8_cast: universal FP8 (store FP8, upcast per matmul). scaled_mm needs an
-# FP8 checkpoint with per-tensor scales, which Lightricks doesn't ship for
-# 2.5 — see shared/config.py. Pipeline/resolution defaults live in
-# shared/config.py (LTX_PIPELINE / LTX_WIDTH / LTX_HEIGHT); override here
-# only for a one-off experiment.
-export LTX_FP8_MODE=cast
-# TLS: serve wss when the fleet cert is present on the filesystem (backend
-# pins it via LAMBDA_TLS_CA_B64). Absent → plain ws (dev filesystems).
-if [ -f $FS/kiki/tls/cert.pem ]; then
-  export LTX_SSL_CERT=$FS/kiki/tls/cert.pem
-  export LTX_SSL_KEY=$FS/kiki/tls/key.pem
-fi
-echo "[kiki-video-boot] $(date -u +%FT%TZ) sourcing venv"
-source $FS/kiki/venv/bin/activate
-cd $FS/kiki/app
-echo "[kiki-video-boot] $(date -u +%FT%TZ) starting video.server"
-exec python3 -u -m video.server
+exec bash "$(dirname "${BASH_SOURCE[0]}")/app/video/boot.sh"
 `;
 
 const POPULATE_CMD = `set -euo pipefail

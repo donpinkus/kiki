@@ -1,3 +1,4 @@
+import { resolve } from 'node:path';
 export interface AppConfig {
   readonly PORT: number;
   readonly HOST: string;
@@ -191,6 +192,14 @@ export interface AppConfig {
    * later, the per-user usage ledger). Required; the backend fails to boot
    * without it. Railway injects this from the Postgres addon. */
   readonly DATABASE_URL: string;
+  /** Public https base URL of THIS backend, handed to Lambda instances so
+   * their boot bootstrap can fetch the fleet bundle (/v1/fleet/*). Defaults
+   * to Railway's RAILWAY_PUBLIC_DOMAIN; empty = instances boot whatever
+   * their filesystem already holds (no self-refresh). */
+  readonly BACKEND_PUBLIC_URL: string;
+  /** Directory holding fleet/manifest.json + model-servers.tgz (written by
+   * scripts/deploy.ts, COPY'd into the image). Default <cwd>/fleet. */
+  readonly FLEET_DIR: string;
 
   // ─── Kiki Insights (internal per-user analytics microsite) ─────────────
   /** Base URL of the Insights service (e.g. https://kiki-insights.up.railway.app).
@@ -338,6 +347,10 @@ const lambdaVideoUrl = process.env['LAMBDA_VIDEO_URL'] ?? '';
     SESSION_CAPTURE_MIN_INTERVAL_MS: Number(process.env['SESSION_CAPTURE_MIN_INTERVAL_MS'] ?? 1000),
     SESSION_CAPTURE_MAX_FRAMES: Number(process.env['SESSION_CAPTURE_MAX_FRAMES'] ?? 600),
     DATABASE_URL: databaseUrl,
+    BACKEND_PUBLIC_URL:
+      process.env['BACKEND_PUBLIC_URL'] ??
+      (process.env['RAILWAY_PUBLIC_DOMAIN'] ? `https://${process.env['RAILWAY_PUBLIC_DOMAIN']}` : ''),
+    FLEET_DIR: process.env['FLEET_DIR'] ?? resolve(process.cwd(), 'fleet'),
     INSIGHTS_URL: process.env['INSIGHTS_URL'] ?? '',
     INSIGHTS_INGEST_KEY: process.env['INSIGHTS_INGEST_KEY'] ?? '',
     NODE_ENV: nodeEnv,

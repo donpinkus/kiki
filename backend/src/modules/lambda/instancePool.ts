@@ -56,6 +56,7 @@ import { query } from '../../postgres/client.js';
 import { inBackgroundScope } from '../observability/scope.js';
 import { LambdaClient, isRetryableLaunchError, lambdaSleep, spacedLaunch } from './client.js';
 import { latest as latestCapacity, type CapacitySnapshot } from './capacityMonitor.js';
+import { fleetBaseUrl, fleetToken } from './fleet.js';
 
 const PORT = 8766;
 const OS_IMAGE_FAMILY = 'lambda-stack-24-04';
@@ -184,6 +185,12 @@ export interface InstancePoolSpec {
    * boot_stalled) is demoted to the back of the sweep. Default 45 min.
    * Demoted, not removed: if nothing else has capacity it is still tried. */
   cellPenaltyMs?: number;
+  /** Which model-servers/ package this pool boots: `image` or `video`. The
+   * bootstrap execs $FS/kiki/app/<serverDir>/boot.sh from the fleet bundle. */
+  serverDir: 'image' | 'video';
+  /** Requirements file (relative to model-servers/) whose change triggers a
+   * `pip install` at boot. */
+  requirementsFile: string;
 }
 
 export interface InstancePool {
@@ -444,15 +451,75 @@ export function createInstancePool(spec: InstancePoolSpec): InstancePool {
     return createHmac('sha256', config.LAMBDA_API_KEY).update(name).digest('hex').slice(0, 32);
   }
 
+  /** cloud-init for a pool instance. Two files + one command:
+   *  - /etc/kiki.env: the per-instance WS token (secrets never in the bundle).
+   *  - /usr/local/bin/kiki-bootstrap: refreshes the region filesystem's
+   *    $FS/kiki/app from the backend's fleet bundle when its manifest differs
+   *    (GET /v1/fleet/manifest + /bundle, bearer = fleetToken()), reinstalls
+   *    requirements if that file changed, then execs the pool's boot.sh FROM
+   *    the refreshed app. This is how model-server code rolls out: a backend
+   *    deploy (which packs the bundle) is the only step; the next boot in
+   *    each region self-updates (owner ask 2026-09-14 — no laptop-side rsync
+   *    to forget). With no BACKEND_PUBLIC_URL the bootstrap boots whatever
+   *    the filesystem already holds.
+   *  Swap safety: an flock on $FS/kiki/.app.lock serialises concurrent
+   *  boots in a region; the new tree is extracted beside the old one and
+   *  moved into place (same $FS/kiki/app path — inductor cache keys are
+   *  path-sensitive); a fetch/extract failure keeps the existing app. */
   function userData(name: string, region: string): string {
+    const fs = `/lambda/nfs/${spec.fsName(region)}`;
+    const bootstrap = [
+      '#!/usr/bin/env bash',
+      '# kiki-bootstrap — written by the backend (instancePool.userData) at launch.',
+      'set -uo pipefail',
+      `FS=${fs}; APP=$FS/kiki/app; POOL=${spec.serverDir}; BASE='${fleetBaseUrl()}'; TOK='${fleetToken()}'`,
+      'log(){ echo "[kiki-bootstrap] $(date -u +%FT%TZ) $*"; }',
+      'mkdir -p $FS/kiki',
+      'if [ -n "$BASE" ]; then',
+      '  REMOTE=$(curl -fsS --max-time 20 -H "Authorization: Bearer $TOK" "$BASE/v1/fleet/manifest" | python3 -c \'import sys,json; print(json.load(sys.stdin)["sha256"])\' 2>/dev/null || true)',
+      '  LOCAL=$(cat $APP/.manifest 2>/dev/null || echo none)',
+      '  if [ -z "$REMOTE" ]; then log "no fleet manifest from $BASE — booting the app already on the filesystem ($LOCAL)"',
+      '  elif [ "$REMOTE" = "$LOCAL" ]; then log "app up to date ($LOCAL)"',
+      '  else',
+      '    exec 9>$FS/kiki/.app.lock',
+      '    if flock -w 900 9; then',
+      '      LOCAL=$(cat $APP/.manifest 2>/dev/null || echo none)',
+      '      if [ "$REMOTE" != "$LOCAL" ]; then',
+      '        T=$(mktemp -d $FS/kiki/app.new.XXXXXX)',
+      '        if curl -fsS --max-time 180 -H "Authorization: Bearer $TOK" "$BASE/v1/fleet/bundle" -o $T/bundle.tgz && tar xzf $T/bundle.tgz -C $T && [ -d $T/model-servers ]; then',
+      '          curl -fsS --max-time 20 -H "Authorization: Bearer $TOK" "$BASE/v1/fleet/manifest" -o $T/model-servers/.manifest.json || true',
+      '          echo "$REMOTE" > $T/model-servers/.manifest',
+      '          rm -rf $APP.prev; { [ -d $APP ] && mv $APP $APP.prev; }; mv $T/model-servers $APP',
+      '          log "app refreshed $LOCAL -> $REMOTE"',
+      '        else log "bundle fetch/extract FAILED — keeping existing app ($LOCAL)"; fi',
+      '        rm -rf $T',
+      '      fi',
+      '      flock -u 9',
+      '    else log "could not take the app lock in 15 min — booting the existing app"; fi',
+      '  fi',
+      `  REQ=$APP/${spec.requirementsFile}; H=$FS/kiki/.req-hash-$POOL`,
+      '  if [ -f $REQ ] && [ -x $FS/kiki/venv/bin/pip ]; then',
+      '    RH=$(sha256sum $REQ | cut -c1-16)',
+      '    if [ ! -f $H ]; then echo $RH > $H',
+      '    elif [ "$(cat $H)" != "$RH" ]; then log "requirements changed — pip install"; $FS/kiki/venv/bin/pip install -q --no-cache-dir -r $REQ && echo $RH > $H || log "pip install FAILED — continuing with the existing venv"; fi',
+      '  fi',
+      'fi',
+      'if [ ! -f $APP/$POOL/boot.sh ]; then log "no $APP/$POOL/boot.sh — falling back to legacy $FS/kiki/boot.sh"; exec bash $FS/kiki/boot.sh; fi',
+      'exec bash $APP/$POOL/boot.sh',
+    ].join('\n');
+    const indent = (text: string) => text.split('\n').map((l) => `      ${l}`).join('\n');
     return `#cloud-config
 write_files:
   - path: /etc/kiki.env
     permissions: '0600'
     content: |
       KIKI_WS_TOKEN=${wsToken(name)}
+  - path: /usr/local/bin/kiki-bootstrap
+    permissions: '0755'
+    content: |
+${indent(bootstrap)}
 runcmd:
-  - [systemd-run, --unit=kiki, --property=Restart=on-failure, bash, /lambda/nfs/${spec.fsName(region)}/kiki/boot.sh]
+  - [systemd-run, --unit=kiki, --property=Restart=on-failure, bash, /usr/local/bin/kiki-bootstrap]
 `;
   }
 
@@ -997,6 +1064,7 @@ runcmd:
       }
       out['stack_s'] = Math.round(Date.now() / 1000 - health.started_at_epoch_s);
     }
+    if (typeof health['app_manifest'] === 'string') out['app'] = String(health['app_manifest']).slice(0, 12);
     const phases = health.phase_timings_ms;
     if (phases && typeof phases === 'object') {
       out['phases_ms'] = Object.fromEntries(

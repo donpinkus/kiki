@@ -60,7 +60,7 @@ import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from PIL import Image
 
-from shared import config, cuda_preflight
+from shared import app_version, config, cuda_preflight
 from shared import preparing_heartbeat
 from shared import sentry_init
 from video.pipeline import GeneratedAudio, Keyframe, Ltx25VideoPipeline
@@ -167,7 +167,7 @@ async def health():
             "load_error": _load_error_traceback,
         }
     info = video_pipeline.get_info()
-    return {"status": "ok" if video_pipeline.ready else "loading", **info}
+    return {"status": "ok" if video_pipeline.ready else "loading", **info, **app_version.load_app_version()}
 
 
 @app.websocket("/ws")

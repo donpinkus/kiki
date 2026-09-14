@@ -54,6 +54,8 @@ const pool = createInstancePool({
   /** Measured 2026-07-18: launch → healthy in 321s with NFS-warm weights
    * (LTX runs eager — no compile cache to pay). 6 min adds margin for cold
    * NFS page cache. */
+  serverDir: 'video',
+  requirementsFile: 'requirements-video.txt',
   bootEstimateMs: 6 * 60_000,
   hedgeAfterMs: config.LAMBDA_VIDEO_POOL_HEDGE_AFTER_MS,
 });
