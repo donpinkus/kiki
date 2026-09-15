@@ -39,6 +39,27 @@ struct AnimateView: View {
 
     private var controller: AnimateController? { coordinator.animate }
 
+    /// Share choices for one clip: the bare video, or the speed-paint replay
+    /// of its source drawing with this clip playing at the end (only when
+    /// that drawing has recorded footage).
+    @ViewBuilder
+    private func shareOptions(for clip: AnimationClip) -> some View {
+        Button {
+            if let url = controller?.exportURL(for: clip) {
+                shareItem = ShareItem(url: url)
+            }
+        } label: {
+            Label("Video", systemImage: "film")
+        }
+        if coordinator.canOpenReplay(for: clip) {
+            Button {
+                coordinator.openReplayFromAnimate(clip: clip)
+            } label: {
+                Label("Speed paint replay + animation", systemImage: "play.rectangle")
+            }
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             topBar
@@ -232,10 +253,8 @@ struct AnimateView: View {
                             .background(.ultraThinMaterial, in: Capsule())
                     }
                     .help("Use this clip's last frame as the next start keyframe")
-                    Button {
-                        if let url = controller.exportURL(for: clip) {
-                            shareItem = ShareItem(url: url)
-                        }
+                    Menu {
+                        shareOptions(for: clip)
                     } label: {
                         Image(systemName: "square.and.arrow.up")
                             .font(.body.weight(.medium))
@@ -768,10 +787,8 @@ struct AnimateView: View {
             } label: {
                 Label("Reuse setup", systemImage: "slider.horizontal.3")
             }
-            Button {
-                if let url = controller.exportURL(for: clip) {
-                    shareItem = ShareItem(url: url)
-                }
+            Menu {
+                shareOptions(for: clip)
             } label: {
                 Label("Share", systemImage: "square.and.arrow.up")
             }

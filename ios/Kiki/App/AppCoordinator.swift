@@ -29,9 +29,10 @@ enum AppScreen: Equatable {
     case gallery
     case drawing
     case animate
-    /// Speed-paint replay share page (from a drawing's Share menu). A full
-    /// screen, NOT a modal: the preview wants all the real estate, and
-    /// fullScreenCover kills video compositing on iPadOS 26 hardware.
+    /// Speed-paint replay share page (from a drawing's Share menu, or from a
+    /// clip on the Animate screen — see `replayContext`). A full screen, NOT
+    /// a modal: the preview wants all the real estate, and fullScreenCover
+    /// kills video compositing on iPadOS 26 hardware.
     case replay
 
     var analyticsName: String {
@@ -623,6 +624,18 @@ final class AppCoordinator {
     var animate: AnimateController?
     /// Where the Animate screen's Back button returns to.
     private var animateReturnScreen: AppScreen = .gallery
+
+    /// What the speed-paint replay page is showing and where Back goes. Set
+    /// by both entry points (`openReplayFromDrawing` / `openReplayFromAnimate`)
+    /// so the page never depends on `currentDrawingId` — from the Animate
+    /// screen (reachable via the gallery) there may be no current drawing.
+    struct ReplayContext: Equatable {
+        let drawingId: UUID
+        let returnTo: AppScreen
+        /// Pre-selected animation to append (the Animate-screen entry point).
+        let initialClipID: UUID?
+    }
+    private(set) var replayContext: ReplayContext?
 
     /// The drawing's animation prompt (motion description for the video
     /// model). Persisted per drawing; prefills the Animate screen when
@@ -2052,7 +2065,7 @@ final class AppCoordinator {
     /// `RecordingStore.consolidate`). Never consolidate while a replay
     /// preview/export may be reading the segment files.
     func flushRecording(consolidate: Bool = false) async {
-        guard let drawingId = currentDrawingId else { return }
+        guard let drawingId = replayDrawingId else { return }
         if let recorder, let urls = await recorder.checkpoint() {
             Self.appendSegmentReporting(canvasTemp: urls.canvas, generatedTemp: urls.generated, for: drawingId)
         }
@@ -2098,8 +2111,48 @@ final class AppCoordinator {
         currentDrawingId.flatMap { RecordingStore.shared.generatedVideoURL(for: $0) }
     }
 
-    func buildReplayComposition(layout: ReplayLayout, speed: ReplaySpeed) async -> SideBySideVideoComposer.BuiltReplay? {
-        guard let drawingId = currentDrawingId else { return nil }
+    /// The drawing whose recording the replay page composes.
+    private var replayDrawingId: UUID? { replayContext?.drawingId ?? currentDrawingId }
+
+    /// Whether `clip` can be shown as a speed-paint replay + animation: its
+    /// source drawing must have recorded footage.
+    func canOpenReplay(for clip: AnimationClip) -> Bool {
+        guard let id = clip.sourceDrawingID else { return false }
+        return RecordingStore.shared.hasRecording(id)
+    }
+
+    /// Stable on-disk copy of a clip's MP4 (SwiftData holds only the bytes).
+    /// Used both to play the clip in the replay page's picker popover and as
+    /// the composer's animation source; written once per clip per launch.
+    func animationClipURL(_ clip: AnimationClip) -> URL? {
+        guard let data = clip.videoData else { return nil }
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kiki-replay-anim-\(clip.id.uuidString).mp4")
+        if FileManager.default.fileExists(atPath: url.path) { return url }
+        do {
+            try data.write(to: url, options: .atomic)
+            return url
+        } catch {
+            return nil
+        }
+    }
+
+    private func animationClipURL(id: UUID?) -> URL? {
+        guard let id else { return nil }
+        var descriptor = FetchDescriptor<AnimationClip>(predicate: #Predicate { $0.id == id })
+        descriptor.fetchLimit = 1
+        guard let clip = try? modelContext.fetch(descriptor).first else { return nil }
+        return animationClipURL(clip)
+    }
+
+    /// `animationClipID`: an `AnimationClip` to play after the drawing in
+    /// place of the freeze-hold ("Include animation" on the replay page).
+    func buildReplayComposition(
+        layout: ReplayLayout,
+        speed: ReplaySpeed,
+        animationClipID: UUID? = nil
+    ) async -> SideBySideVideoComposer.BuiltReplay? {
+        guard let drawingId = replayDrawingId else { return nil }
         let segments = RecordingStore.shared.segmentURLs(for: drawingId)
         guard !segments.canvas.isEmpty else {
             Log.error("replay.no_segments", attributes: [
@@ -2110,9 +2163,11 @@ final class AppCoordinator {
             return nil
         }
         do {
+            let animationURL = animationClipURL(id: animationClipID)
             let built = try await SideBySideVideoComposer.build(
                 canvasSegments: segments.canvas,
                 generatedSegments: segments.generated,
+                animationURL: animationURL,
                 layout: layout,
                 speed: speed
             )
@@ -2120,12 +2175,17 @@ final class AppCoordinator {
                 "event": "replay.built",
                 "segments": segments.canvas.count,
                 "duration_s": built.composition.duration.seconds,
+                "has_animation": animationURL != nil,
             ])
             Analytics.track(.replayBuilt, properties: [
                 "segments": segments.canvas.count,
                 "duration_s": built.composition.duration.seconds,
+                "has_animation": animationURL != nil,
             ])
             return built
+        } catch is CancellationError {
+            // Superseded preview build (settings changed mid-compose) — expected.
+            return nil
         } catch {
             streamLog.error("Replay build failed: \(error.localizedDescription)")
             SentrySDK.capture(error: error) { scope in
@@ -2139,8 +2199,15 @@ final class AppCoordinator {
     /// burned). Writes a fresh file in its own temp dir (so a preview player
     /// never reads a file being overwritten), named "Speed Paint.mp4" for a
     /// clean Save-to-Files name.
-    func composeReplay(layout: ReplayLayout, speed: ReplaySpeed, watermark: Bool) async -> URL? {
-        guard let built = await buildReplayComposition(layout: layout, speed: speed) else { return nil }
+    func composeReplay(
+        layout: ReplayLayout,
+        speed: ReplaySpeed,
+        watermark: Bool,
+        animationClipID: UUID? = nil
+    ) async -> URL? {
+        guard let built = await buildReplayComposition(
+            layout: layout, speed: speed, animationClipID: animationClipID
+        ) else { return nil }
         VideoDiag.noteVideoExport()
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let output = dir.appendingPathComponent("Speed Paint.mp4")
@@ -2288,6 +2355,13 @@ final class AppCoordinator {
         case "replayModal", "replayScreen":
             // Legacy dev-action name kept: opens the replay share page now.
             openReplayFromDrawing()
+        case "replayWithAnimation":
+            // Animate-screen entry point: newest clip that has a recorded
+            // source drawing, opened as replay + animation.
+            if let controller = animate,
+               let clip = controller.fetchClips().first(where: { canOpenReplay(for: $0) }) {
+                openReplayFromAnimate(clip: clip)
+            }
         // Freehand rect through the REAL loop path (Select tool, current
         // add/remove mode applies).
         case "lasso":
@@ -2780,9 +2854,10 @@ final class AppCoordinator {
     /// ago without racing stopStream's detached finalize.
     func openReplayFromDrawing() {
         noteInteraction()
-        guard currentScreen == .drawing else { return }
+        guard currentScreen == .drawing, let drawingId = currentDrawingId else { return }
         figure.cancel()
         saveCurrentDrawing()
+        replayContext = ReplayContext(drawingId: drawingId, returnTo: .drawing, initialClipID: nil)
         Task { @MainActor in
             await flushRecording()
             stopStream()
@@ -2790,9 +2865,27 @@ final class AppCoordinator {
         }
     }
 
-    /// Leave the replay share page back to the drawing (its only entry
-    /// point). Same canvas re-queue + stream restart as closeAnimate().
+    /// Enter the replay page from the Animate screen ("Speed paint replay +
+    /// animation" on a clip): the clip's source drawing is replayed with the
+    /// clip pre-selected as the tail. Back returns to Animate. The drawing
+    /// stream is already stopped on that screen; its recording is on disk.
+    func openReplayFromAnimate(clip: AnimationClip) {
+        noteInteraction()
+        guard currentScreen == .animate, let drawingId = clip.sourceDrawingID,
+              RecordingStore.shared.hasRecording(drawingId) else { return }
+        replayContext = ReplayContext(drawingId: drawingId, returnTo: .animate, initialClipID: clip.id)
+        currentScreen = .replay
+    }
+
+    /// Leave the replay share page back to where it was entered from. Back
+    /// to the drawing = same canvas re-queue + stream restart as closeAnimate().
     func closeReplay() {
+        let context = replayContext
+        replayContext = nil
+        if context?.returnTo == .animate, animate != nil {
+            currentScreen = .animate
+            return
+        }
         guard let drawingId = currentDrawingId else {
             currentScreen = .gallery
             return

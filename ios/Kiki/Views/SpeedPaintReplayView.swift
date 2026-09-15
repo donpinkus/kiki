@@ -1,5 +1,6 @@
 import AVKit
 import Sentry
+import SwiftData
 import SwiftUI
 
 /// The speed-paint replay share PAGE (AppScreen.replay, entered from the
@@ -19,6 +20,9 @@ import SwiftUI
 /// instead.
 struct SpeedPaintReplayView: View {
     @Environment(AppCoordinator.self) private var coordinator
+    /// Every animation clip, newest first; `orderedClips` keeps only this
+    /// drawing's own.
+    @Query(sort: \AnimationClip.createdAt, order: .reverse) private var clips: [AnimationClip]
 
     /// Speed options, in display order — `fit12` leads because it's the
     /// default: it sizes content + the 3s final hold to 12s total, so the
@@ -53,6 +57,14 @@ struct SpeedPaintReplayView: View {
     @State private var layout: ReplayLayout = .vertical
     @State private var speed: SpeedChoice = .fit12
     @State private var watermark = true
+    /// "Include animation": play `selectedClipID` after the drawing instead
+    /// of the 3s freeze-hold. Pre-set by the Animate-screen entry point.
+    @State private var includeAnimation = false
+    @State private var selectedClipID: UUID?
+    /// Clip whose playing popover is open (tap a tile). Dismissing the popover
+    /// leaves the tile selected.
+    @State private var previewClipID: UUID?
+    @State private var consumedContext = false
     /// The flush/consolidate pass runs once per modal open, inside the first
     /// rebuild (behind the spinner) — never again while previews may be
     /// reading segment files.
@@ -93,6 +105,14 @@ struct SpeedPaintReplayView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text(statusMessage ?? "")
+        }
+        .onAppear {
+            guard !consumedContext else { return }
+            consumedContext = true
+            if let clipID = coordinator.replayContext?.initialClipID {
+                selectedClipID = clipID
+                includeAnimation = true
+            }
         }
         .task(id: previewKey) { await rebuildPreview() }
         .task(id: exportKey) {
@@ -138,9 +158,25 @@ struct SpeedPaintReplayView: View {
                     .frame(maxWidth: 340)
 
                     Toggle(isOn: $watermark) {
-                        Label("“Drawn with Kiki” watermark", systemImage: "sparkles")
+                        Label("Watermark", systemImage: "sparkles")
                     }
                     .fixedSize()
+
+                    Toggle(isOn: $includeAnimation) {
+                        Label("Include animation", systemImage: "film")
+                    }
+                    .fixedSize()
+                    .onChange(of: includeAnimation) { _, on in
+                        // Turning it on must change the preview at once:
+                        // default to this drawing's newest clip.
+                        if on, selectedClipID.flatMap({ id in orderedClips.first { $0.id == id } }) == nil {
+                            selectedClipID = orderedClips.first?.id
+                        }
+                    }
+                }
+
+                if includeAnimation {
+                    animationStrip
                 }
 
                 HStack(spacing: 12) {
@@ -259,9 +295,98 @@ struct SpeedPaintReplayView: View {
         .opacity(0.9)
     }
 
+    // MARK: - Animation picker ("Include animation")
+
+    /// Only clips made from this drawing (newest first).
+    private var orderedClips: [AnimationClip] {
+        guard let mine = coordinator.replayContext?.drawingId else { return [] }
+        return clips.filter { $0.sourceDrawingID == mine }
+    }
+
+    private var animationStrip: some View {
+        Group {
+            if orderedClips.isEmpty {
+                Text("No animations of this drawing yet — make one on the Animate screen and it'll show up here.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .frame(height: 96)
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 12) {
+                        ForEach(orderedClips) { clip in
+                            animationTile(clip)
+                        }
+                    }
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 4)
+                }
+                .frame(height: 104)
+            }
+        }
+        .frame(maxWidth: 760)
+    }
+
+    private func animationTile(_ clip: AnimationClip) -> some View {
+        let selected = selectedClipID == clip.id
+        return Button {
+            selectedClipID = clip.id
+            previewClipID = clip.id
+        } label: {
+            ZStack(alignment: .bottomTrailing) {
+                Group {
+                    if let thumb = clip.thumbnail {
+                        Image(uiImage: thumb).resizable().scaledToFill()
+                    } else {
+                        Color.secondary.opacity(0.2)
+                    }
+                }
+                .frame(width: 96, height: 96)
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .strokeBorder(selected ? Color.accentColor : Color.clear, lineWidth: 2.5)
+                )
+                .overlay {
+                    Image(systemName: "play.fill")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(.white)
+                        .padding(7)
+                        .background(.black.opacity(0.45), in: Circle())
+                }
+
+                Text(clip.durationSeconds.formatted(.number.precision(.fractionLength(0))) + "s")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(.black.opacity(0.55), in: Capsule())
+                    .padding(5)
+            }
+        }
+        .buttonStyle(.plain)
+        // One popover per tile (distinct anchor views) — plays the clip at a
+        // readable size. Closing it keeps the tile selected.
+        .popover(isPresented: Binding(
+            get: { previewClipID == clip.id },
+            set: { if !$0, previewClipID == clip.id { previewClipID = nil } }
+        )) {
+            if let url = coordinator.animationClipURL(clip) {
+                AnimationClipPopover(url: url, prompt: clip.prompt)
+            } else {
+                Text("This animation's video is missing.").padding()
+            }
+        }
+    }
+
     // MARK: - Preview composition (instant, no encode)
 
-    private var previewKey: String { "\(layout.rawValue)-\(speed.rawValue)" }
+    /// The clip the composition appends, or nil (freeze-hold).
+    private var activeClipID: UUID? {
+        guard includeAnimation, let id = selectedClipID, orderedClips.contains(where: { $0.id == id }) else { return nil }
+        return id
+    }
+
+    private var previewKey: String { "\(layout.rawValue)-\(speed.rawValue)-\(activeClipID?.uuidString ?? "none")" }
 
     private func rebuildPreview() async {
         isComposing = true
@@ -275,7 +400,9 @@ struct SpeedPaintReplayView: View {
             await coordinator.flushRecording(consolidate: true)
             hasFlushed = true
         }
-        guard let built = await coordinator.buildReplayComposition(layout: layout, speed: speed.composerSpeed) else {
+        guard let built = await coordinator.buildReplayComposition(
+            layout: layout, speed: speed.composerSpeed, animationClipID: activeClipID
+        ) else {
             // Only alert if we never managed to compose anything — a re-compose
             // failure (layout/speed change) keeps showing the previous video.
             if !hasPreview {
@@ -363,7 +490,7 @@ struct SpeedPaintReplayView: View {
 
     // MARK: - Sharing (export on demand — this is where the encode happens)
 
-    private var exportKey: String { "\(layout.rawValue)-\(speed.rawValue)-\(watermark)" }
+    private var exportKey: String { "\(previewKey)-\(watermark)" }
 
     /// Kick off (or keep) a background encode for the current settings.
     /// Cancels a stale in-flight encode first — `export` supports real
@@ -375,7 +502,9 @@ struct SpeedPaintReplayView: View {
         exportTask?.cancel()
         exportTaskKey = key
         exportTask = Task { @MainActor in
-            let url = await coordinator.composeReplay(layout: layout, speed: speed.composerSpeed, watermark: watermark)
+            let url = await coordinator.composeReplay(
+                layout: layout, speed: speed.composerSpeed, watermark: watermark, animationClipID: activeClipID
+            )
             if let url, !Task.isCancelled {
                 exportedURL = url
                 exportedKey = key
@@ -407,7 +536,9 @@ struct SpeedPaintReplayView: View {
                 url = await task.value
             } else {
                 exportTask?.cancel()
-                url = await coordinator.composeReplay(layout: layout, speed: speed.composerSpeed, watermark: watermark)
+                url = await coordinator.composeReplay(
+                    layout: layout, speed: speed.composerSpeed, watermark: watermark, animationClipID: activeClipID
+                )
             }
             guard let url else {
                 statusMessage = "Couldn't export the replay — try again."
@@ -452,6 +583,7 @@ struct SpeedPaintReplayView: View {
             "layout": layout.rawValue,
             "speed": speed.label,
             "target": target,
+            "has_animation": activeClipID != nil,
         ])
     }
 }
@@ -460,6 +592,61 @@ struct SpeedPaintReplayView: View {
 private struct ReplayShareItem: Identifiable {
     let id = UUID()
     let url: URL
+}
+
+/// Looping player for one animation clip, shown from the replay page's
+/// animation strip. Own AVPlayer + end-of-item loop; torn down on dismiss.
+private struct AnimationClipPopover: View {
+    let url: URL
+    let prompt: String
+
+    @State private var player: AVPlayer?
+    @State private var loopObserver: NSObjectProtocol?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Group {
+                if let player {
+                    PlayerLayerView(player: player)
+                } else {
+                    Color.black
+                }
+            }
+            .frame(width: 480, height: 480)
+            .background(Color.black)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+
+            if !prompt.isEmpty {
+                Text(prompt)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .frame(width: 480, alignment: .leading)
+            }
+        }
+        .padding(14)
+        .presentationCompactAdaptation(.popover)
+        .onAppear {
+            let item = AVPlayerItem(url: url)
+            let p = AVPlayer(playerItem: item)
+            p.allowsExternalPlayback = false
+            p.actionAtItemEnd = .none
+            loopObserver = NotificationCenter.default.addObserver(
+                forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main
+            ) { _ in
+                p.seek(to: .zero)
+                p.play()
+            }
+            player = p
+            p.play()
+        }
+        .onDisappear {
+            player?.pause()
+            if let loopObserver { NotificationCenter.default.removeObserver(loopObserver) }
+            loopObserver = nil
+            player = nil
+        }
+    }
 }
 
 /// Bare `AVPlayerLayer` preview. SwiftUI's `VideoPlayer` rendered black in

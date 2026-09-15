@@ -648,8 +648,9 @@ final class AnimateController {
         try? modelContext.save()
 
         // Mirror onto the source drawing's stored animation so the existing
-        // per-drawing share ("Animation (MP4)") and speed-paint replay tail
-        // keep working with Animate-screen outputs.
+        // per-drawing share ("Animation (MP4)") keeps working with
+        // Animate-screen outputs. (The speed-paint replay's animation tail
+        // reads AnimationClip rows directly, not this mirror.)
         if let drawingID = sourceDrawingID {
             try? RecordingStore.shared.saveGeneratedVideo(mp4, for: drawingID)
         }
