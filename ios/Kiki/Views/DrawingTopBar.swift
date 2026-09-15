@@ -8,6 +8,8 @@ struct DrawingTopBar: View {
     @State private var showSettings = false
     @State private var showColorPicker = false
     @State private var shareItem: ShareItem?
+    @State private var showExtraTools = false
+    @State private var pendingExtraTool: ExtraToolsMenu.Tool?
 
     var body: some View {
         @Bindable var coordinator = coordinator
@@ -103,7 +105,7 @@ struct DrawingTopBar: View {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
                 .background(KikiTheme.buttonCircle, in: Capsule())
-                .frame(minWidth: 120, maxWidth: 400)
+                .frame(minWidth: 80, maxWidth: 265)
 
             Spacer()
 
@@ -117,53 +119,62 @@ struct DrawingTopBar: View {
             toolButton(icon: "wand.and.stars", tool: .select)
                 .anchorPreference(key: SelectButtonAnchorKey.self, value: .bounds) { $0 }
 
-            // Posable 3D figure: drops a rigged body onto a reference layer
-            // (visible while drawing, never sent to the AI). Tinted while posing.
+            // "More tools": the less-frequent AI/reference tools (posable
+            // figure, object library, AI Edit) behind one button, each listed
+            // with a name + description. Carries the new-lifts badge and is
+            // tinted while an AI Edit preview is live.
             Button {
-                coordinator.figure.beginNewFigure()
-            } label: {
-                chromeIcon("figure.stand", color: coordinator.figure.isPosing ? Color.accentColor : KikiTheme.icon)
-            }
-            .disabled(!coordinator.figure.canBegin || coordinator.aiEditPhase != .idle)
-
-            // Object library: reusable cutouts saved from selections; tap a
-            // tile to drop it into this drawing as a movable float.
-            Button {
-                coordinator.showObjectsDrawer.toggle()
-            } label: {
-                chromeIcon("shippingbox")
-                    .overlay(alignment: .topTrailing) {
-                        // Background 3D lifts that finished since last open.
-                        if coordinator.objectsDrawerBadge > 0 {
-                            Text("\(coordinator.objectsDrawerBadge)")
-                                .font(.caption2.weight(.bold))
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 5)
-                                .padding(.vertical, 1)
-                                .background(Color.red, in: Capsule())
-                                .offset(x: 8, y: -6)
-                        }
-                    }
-            }
-            .popover(isPresented: $coordinator.showObjectsDrawer) {
-                ObjectsDrawer()
-                    .frame(width: 360, height: 420)
-                    // Clear the new-lifts badge only when the drawer is
-                    // actually SEEN — not on the tap that closes it.
-                    .onAppear { coordinator.objectsDrawerBadge = 0 }
-            }
-
-            // AI Edit (inpaint): edits the active selection if one exists,
-            // else the whole drawing. Highlighted while a preview is live.
-            Button {
-                coordinator.showAIEditSheet = true
+                showExtraTools = true
             } label: {
                 chromeIcon(
-                    "sparkles",
+                    "ellipsis",
                     color: coordinator.aiEditPhase != .idle ? Color.accentColor : KikiTheme.icon
                 )
+                .overlay(alignment: .topTrailing) {
+                    // Background 3D lifts that finished since the drawer was last seen.
+                    if coordinator.objectsDrawerBadge > 0 {
+                        Text("\(coordinator.objectsDrawerBadge)")
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Color.red, in: Capsule())
+                            .offset(x: 8, y: -6)
+                    }
+                }
             }
-            .disabled(coordinator.figure.isPosing)
+            .popover(isPresented: $showExtraTools) {
+                ExtraToolsMenu(
+                    isEnabled: { tool in
+                        switch tool {
+                        case .figure: coordinator.figure.canBegin && coordinator.aiEditPhase == .idle
+                        case .objects: !coordinator.figure.isPosing
+                        case .aiEdit: !coordinator.figure.isPosing
+                        }
+                    },
+                    objectsBadge: coordinator.objectsDrawerBadge
+                ) { tool in
+                    // Close first; the action runs from onDisappear below so a
+                    // follow-on popover/sheet isn't presented mid-dismissal.
+                    pendingExtraTool = tool
+                    showExtraTools = false
+                }
+                .onDisappear { runPendingExtraTool() }
+            }
+            // The objects drawer keeps its own popover (dev action, insert
+            // auto-close and the badge-clear-on-appear all hang off
+            // `showObjectsDrawer`) but on a DISTINCT anchor view: two
+            // `.popover`s chained on one view — only the first ever fires.
+            .background {
+                Color.clear
+                    .popover(isPresented: $coordinator.showObjectsDrawer) {
+                        ObjectsDrawer()
+                            .frame(width: 360, height: 420)
+                            // Clear the new-lifts badge only when the drawer is
+                            // actually SEEN — not on the tap that closes it.
+                            .onAppear { coordinator.objectsDrawerBadge = 0 }
+                    }
+            }
 
             Button {
                 coordinator.showLayerPanel.toggle()
@@ -238,6 +249,17 @@ struct DrawingTopBar: View {
     }
 
     // MARK: - Helpers
+
+    /// Fires the "More tools" row picked before the menu closed.
+    private func runPendingExtraTool() {
+        guard let tool = pendingExtraTool else { return }
+        pendingExtraTool = nil
+        switch tool {
+        case .figure: coordinator.figure.beginNewFigure()
+        case .objects: coordinator.showObjectsDrawer = true
+        case .aiEdit: coordinator.showAIEditSheet = true
+        }
+    }
 
     /// Procreate-style chrome button: gray icon in a dark circle.
     private func chromeIcon(_ icon: String, color: Color = KikiTheme.icon) -> some View {
