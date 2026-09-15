@@ -80,17 +80,18 @@ struct FigureProportions: Codable, Equatable {
         }
     }
 
-    /// Named starting points (sliders remain free afterwards).
+    /// Named starting points (sliders remain free afterwards). Age-based
+    /// presets (teen/child/toddler) were dropped 2026-09-14 — a scaled adult
+    /// doesn't read as a child; stylisation presets do read as intended.
     enum Preset: String, CaseIterable, Identifiable {
-        case adult, teen, child, toddler, chibi, fashion, heavy, slim
+        case standard, chibi, fashion, heavy, slim
         var id: String { rawValue }
-        var label: String { rawValue.prefix(1).uppercased() + rawValue.dropFirst() }
+        var label: String {
+            self == .standard ? "Default" : rawValue.prefix(1).uppercased() + rawValue.dropFirst()
+        }
         var values: FigureProportions {
             switch self {
-            case .adult: FigureProportions()
-            case .teen: FigureProportions(stature: 0.9, head: 1.08, torso: 0.97, limbs: 0.95, hands: 1.0, build: 0.92)
-            case .child: FigureProportions(stature: 0.62, head: 1.45, torso: 0.92, limbs: 0.78, hands: 1.05, build: 0.92)
-            case .toddler: FigureProportions(stature: 0.48, head: 1.8, torso: 0.9, limbs: 0.65, hands: 1.1, build: 1.15)
+            case .standard: FigureProportions()
             case .chibi: FigureProportions(stature: 0.55, head: 2.3, torso: 0.75, limbs: 0.55, hands: 1.3, build: 1.1)
             case .fashion: FigureProportions(stature: 1.12, head: 0.9, torso: 1.05, limbs: 1.18, hands: 1.0, build: 0.85)
             case .heavy: FigureProportions(stature: 1.0, head: 1.0, torso: 1.0, limbs: 1.0, hands: 1.0, build: 1.4)
