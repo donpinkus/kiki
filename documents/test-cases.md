@@ -42,6 +42,7 @@ Last updated: 2026-07-18 (rewritten for the fal + Lambda H100 provider architect
 
 13. **Never blank after first image.** Once the first successful generated image appears, the right pane never shows a blank/empty state — even during errors, reconnections, or provisioning. The last successful image stays visible.
 
+13b. **Smudge tool.** The hand icon between Eraser and Select. It pushes existing paint with no new ink; the sidebar shows Size and Strength (60% default) and remembers them separately from the Brush. Starting on blank canvas deposits nothing; dragging from paint onto blank canvas leaves a fading smear. Undo removes the whole smudge stroke.
 14. **One layout.** There is no layout setting: the canvas fills the pane below the toolbar and the generated image floats as a panel (cases 26–30). Pinching or twisting the canvas keeps the point under the fingers fixed (a corner pinch must not slide the content away).
 
 15. **Error toast.** If generation fails, a non-blocking error toast appears at the bottom of the result pane. It auto-dismisses after 10 seconds. The last successful image remains visible behind it.

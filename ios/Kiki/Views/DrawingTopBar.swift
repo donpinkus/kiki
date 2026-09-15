@@ -112,6 +112,7 @@ struct DrawingTopBar: View {
             // MARK: Right — Pen, Eraser, Lasso, Reset Transform, Layers
             toolButton(icon: "pencil.tip", tool: .brush)
             toolButton(icon: "eraser", tool: .eraser)
+            toolButton(icon: "hand.draw", tool: .smudge)
             // Lasso publishes its on-screen frame so DrawingView can float the
             // "Clear Lasso" button directly beneath it (clearly associated).
             // The unified Select tool (SAM taps + freehand loops). Publishes

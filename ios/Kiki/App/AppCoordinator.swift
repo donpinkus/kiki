@@ -15,6 +15,10 @@ private let streamLog = Logger(subsystem: "com.kiki.app", category: "StreamCoord
 enum DrawingTool: String, CaseIterable, Hashable {
     case brush
     case eraser
+    /// Procreate-style standalone Smudge: pushes the paint already on the canvas
+    /// around (no new ink) with its own remembered Size + Strength. Runs on the
+    /// wet-smudge engine (`BrushConfig.smudge`); device-only (framebuffer fetch).
+    case smudge
     /// The unified Select tool — SAM taps or freehand loops, per
     /// `SelectionController.authorMode` (documents/plans/unified-selection.md).
     case select
@@ -486,31 +490,38 @@ final class AppCoordinator {
     private var storedToolSizes: [DrawingTool: CGFloat] = [
         .brush: 15,
         .eraser: 25,
+        .smudge: 30,
         .select: 5
     ]
+    /// For the Smudge tool "opacity" is its Strength (the wet-smudge Mix rate).
     private var storedToolOpacities: [DrawingTool: CGFloat] = [
         .brush: 1.0,
         .eraser: 1.0,
+        .smudge: 0.6,
         .select: 1.0
     ]
     private var storedToolFlows: [DrawingTool: CGFloat] = [
         .brush: 1.0,
         .eraser: 1.0,
+        .smudge: 1.0,
         .select: 1.0
     ]
     private var storedToolStreamlines: [DrawingTool: CGFloat] = [
         .brush: 0.35,
         .eraser: 0.0,
+        .smudge: 0.0,
         .select: 0.0
     ]
     private var storedToolHardnesses: [DrawingTool: CGFloat] = [
         .brush: 0.5,
         .eraser: 1.0,
+        .smudge: 0.4,
         .select: 1.0
     ]
     private var storedToolSpacings: [DrawingTool: CGFloat] = [
         .brush: 0.3,
         .eraser: 0.3,
+        .smudge: 0.2,
         .select: 0.3
     ]
     /// Per-tool brush shape. Absent = procedural round; only the brush meaningfully uses it.
@@ -2303,6 +2314,8 @@ final class AppCoordinator {
             canvasViewModel.selection.undoStep()
         case "brushTool":
             currentTool = .brush
+        case "smudgeTool":
+            currentTool = .smudge
         // "wandTap:<u>,<v>[,neg]" — inject a selection prompt at normalized
         // canvas coords (simctl taps can't hit exact canvas UVs).
         case let cmd where cmd.hasPrefix("wandTap:"):
@@ -3745,9 +3758,23 @@ final class AppCoordinator {
             canvasViewModel.selectBrush(currentBrushConfig())
         case .eraser:
             canvasViewModel.selectEraser(width: toolSize)
+        case .smudge:
+            canvasViewModel.selectBrush(smudgeToolConfig())
         case .select:
             canvasViewModel.selectSelectionTool()
         }
+    }
+
+    /// The standalone Smudge tool's brush: the canned Procreate-style smudge recipe
+    /// (canvas-seeded load, no ink) with the tool's own Size, Strength (the sidebar's
+    /// second slider), and a soft rim. Independent of the Brush tool's settings and of
+    /// Brush Studio's per-brush "Smudge mode".
+    private func smudgeToolConfig() -> BrushConfig {
+        var config = BrushConfig.smudge(baseWidth: toolSize, strength: toolOpacity)
+        config.hardness = toolHardness
+        config.spacing = toolSpacing
+        config.wetBlur = 0.25
+        return config
     }
 }
 

@@ -203,6 +203,16 @@ composite-time only — never baked into layer textures — and persist via `Lay
 4. All stamps → shared `MTLBuffer` → single instanced draw call into scratch texture (premultiplied source-over; the scratch holds the whole stroke in isolation, saturating toward alpha 1)
 5. On touchesEnded: flatten scratch into active layer, scaling the whole scratch by the brush's **per-stroke `opacity` ceiling** (`compositorFragment` `color * opacity`). This two-stage flow/opacity split ("Glaze") is why a sub-100% stroke that crosses itself stays flat instead of stacking. Live preview (`compositeToDrawable`) and snapshot/export paths apply the same ceiling — the former via `CanvasRenderer.activeStrokeOpacity`, the latter via an explicit `strokeOpacity:` parameter. See `documents/plans/pro-brush-roadmap.md` Phase 0.
 
+### Smudge tool (standalone, 2026-09-14)
+`DrawingTool.smudge` (toolbar hand icon, between Eraser and Select) is a Procreate-style
+standalone Smudge: `AppCoordinator.smudgeToolConfig()` builds `BrushConfig.smudge` with the
+tool's own remembered Size and **Strength** (the sidebar's second slider, = `wetStrength`)
+plus a soft rim (`wetBlur 0.25`), and selects it through the normal `selectBrush` path — so
+the canvas sees it as a wet-smudge brush stroke (touch-begin undo snapshot, direct RMW into
+the layer). Independent of the Brush tool's settings and of Brush Studio's per-brush "Smudge
+mode" (which still exists for custom wet brushes). Device-only (needs framebuffer fetch; the
+Simulator paints nothing and pushes no undo entry). Sim dev action: `smudgeTool`.
+
 ### Eraser flow (different from brush)
 - `EraserStrokeWalker` (arc-carry across batches, width pullback, first dab at touch-down so
   a tap erases a dot) — offline-asserted batch invariance + no starvation on scribbles

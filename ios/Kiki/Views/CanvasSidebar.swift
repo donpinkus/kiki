@@ -57,8 +57,11 @@ struct CanvasSidebar: View {
             .tint(Color.primary)
             .disabled(coordinator.currentTool != .brush)
 
-            // Vertical opacity slider (Procreate-style, below Size). Brush only —
-            // the eraser/select paths don't consume toolOpacity (see applyTool).
+            // Vertical opacity slider (Procreate-style, below Size). Brush + Smudge —
+            // for Smudge it is the tool's Strength; the eraser/select paths don't
+            // consume toolOpacity (see applyTool).
+            let usesOpacity = coordinator.currentTool == .brush || coordinator.currentTool == .smudge
+            let opacityLabel = coordinator.currentTool == .smudge ? "Strength" : "Opacity"
             VerticalToolSlider(value: $coordinator.toolOpacity, range: opacityRange, logScale: false) { editing in
                 isDraggingOpacity = editing
             }
@@ -66,7 +69,7 @@ struct CanvasSidebar: View {
             .overlay(alignment: .trailing) {
                 if isDraggingOpacity {
                     VStack(spacing: 4) {
-                        Text("Opacity \(Int((coordinator.toolOpacity * 100).rounded()))%")
+                        Text("\(opacityLabel) \(Int((coordinator.toolOpacity * 100).rounded()))%")
                             .font(.system(size: 9, weight: .semibold))
                             .foregroundStyle(.secondary)
                             .fixedSize()
@@ -81,8 +84,8 @@ struct CanvasSidebar: View {
                     .offset(x: 16 + 28)
                 }
             }
-            .disabled(coordinator.currentTool != .brush)
-            .opacity(coordinator.currentTool == .brush ? 1 : 0.35)
+            .disabled(!usesOpacity)
+            .opacity(usesOpacity ? 1 : 0.35)
 
             Divider().frame(width: 24)
 
